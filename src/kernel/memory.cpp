@@ -3012,6 +3012,20 @@ int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t len, s
 		return KERNEL_ERROR_EAGAIN;
 	}
 
+	// Hardware hands out zeroed pages for a new allocation. Unmap deliberately keeps the
+	// backing contents so that remapping the same range still sees them, so a range taken
+	// from the free list would otherwise expose the previous owner's bytes. Clear it here,
+	// at allocation, which leaves the unmap/remap contents contract untouched.
+	if (!g_guest_address_space->ZeroBacking(addr, len)) {
+		uint64_t     released_vaddr    = 0;
+		uint64_t     released_map_size = 0;
+		GpuAccessMode released_gpu_mode = GpuAccessMode::NoAccess;
+		(void)g_physical_memory->Release(addr, len, &released_vaddr, &released_map_size,
+		                                 &released_gpu_mode);
+		LOGF_COLOR(Log::Color::Red, "\t[Fail]\n");
+		return KERNEL_ERROR_EAGAIN;
+	}
+
 	*phys_addr_out = static_cast<int64_t>(addr);
 
 	LOGF_COLOR(Log::Color::Green, "\tphys_addr    = %016" PRIx64 "\n\t[Ok]\n", addr);
@@ -4292,6 +4306,14 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 	                              static_cast<uint64_t>(search_end), len, effective_alignment,
 	                              &phys_addr, 0, PhysicalMemory::AllocationKind::Pooled)) {
 		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
+	}
+
+	// Same reasoning as KernelAllocateDirectMemory: an expansion can reuse a range whose
+	// backing still holds the previous owner's bytes, and the pool hands that memory out
+	// before anything writes it.
+	if (!g_guest_address_space->ZeroBacking(phys_addr, len)) {
+		(void)g_physical_memory->ReleasePoolExpansion(phys_addr, len);
+		return KERNEL_ERROR_ENOMEM;
 	}
 
 	g_pooled_memory->Expand(phys_addr, len);
