@@ -788,6 +788,8 @@ if(BUILD_TESTING)
 	add_test(NAME ces COMMAND $<TARGET_FILE:ces_tests>)
 	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
+	add_test(NAME shader_recompiler_bda_fault_readback
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bda-fault-readback-only)
 	add_test(NAME shader_recompiler_bda_fault_bitmap
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bda-fault-bitmap-only)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)

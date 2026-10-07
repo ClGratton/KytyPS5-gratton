@@ -157,7 +157,23 @@ static_assert(!HasPolicyTileImageBacking<TileManager>);
 static_assert(BlitHelper::ColorToMsDepthLayout ==
               vk::ImageLayout::eDepthStencilAttachmentOptimal);
 
+struct FaultManagerTestAccess {
+  static Buffer &Download(FaultManager &manager) {
+    return manager.m_download_buffer;
+  }
+  static auto &Pending(FaultManager &manager) {
+    return manager.m_fault_areas;
+  }
+  static uint32_t CurrentArea(const FaultManager &manager) {
+    return manager.m_current_area;
+  }
+};
+
 struct BufferCacheTestAccess {
+  static FaultManager &Faults(BufferCache &cache) {
+    return cache.m_fault_manager;
+  }
+
   static_assert(std::same_as<decltype(BufferCache::m_slot_buffers),
                              Common::SlotVector<Buffer>>);
 
@@ -2240,6 +2256,150 @@ public:
     RenderExecutorTestAccess::DestroyDescriptorPipelines(
         context.GetRenderExecutor(), std::span {&pipeline, 1u});
     std::printf("[host]    %-32s ok\n", name);
+  }
+
+  void CheckBdaFaultReadback() {
+    constexpr const char *name = "BdaFaultReadback";
+    constexpr uintptr_t base = 0x0000000200800000ull;
+    constexpr uint64_t page_size = BufferCache::CACHING_PAGESIZE;
+    constexpr uint64_t guard_address = base + 4096 * page_size;
+    constexpr uint64_t allocation_size = 4097 * page_size;
+    EnsureRuntimeContext();
+    for (u32 requested : {0u, 512u, 1023u, 2047u}) {
+      RenderContext context(m_runtime_context);
+      auto &scheduler = context.GetCommandScheduler();
+      HW::Context registers{};
+      HW::UserConfig user_config{};
+      HW::Shader shaders{};
+      scheduler.Begin(registers, user_config, shaders);
+      int64_t direct_offset = -1;
+      Require(name, "direct allocation",
+              LibKernel::Memory::KernelAllocateDirectMemory(
+                  0, LibKernel::Memory::KernelGetDirectMemorySize(),
+                  allocation_size, page_size, 0, &direct_offset) == 0,
+              "fault-readback allocation failed");
+      void *mapping = reinterpret_cast<void *>(base);
+      Require(name, "direct mapping",
+              LibKernel::Memory::KernelMapDirectMemory(
+                  &mapping, allocation_size, 0x3, 0x10, direct_offset,
+                  page_size) == 0 && mapping == reinterpret_cast<void *>(base),
+              "fault-readback fixed mapping failed");
+      context.MapMemory(base, allocation_size);
+      auto &cache = context.GetBufferCache();
+      auto &manager = BufferCacheTestAccess::Faults(cache);
+      auto &download = FaultManagerTestAccess::Download(manager);
+      auto &pending = FaultManagerTestAccess::Pending(manager);
+      const auto area_bytes = download.Size() / pending.size();
+      const auto slots = area_bytes / sizeof(uint64_t) - 1;
+      Require(name, "production capacity", slots == 1023,
+              "fault-reader test capacity no longer matches production");
+      // An overread into the next area must not discover this valid remote page.
+      const auto sentinel = guard_address;
+      auto *all_words = reinterpret_cast<uint64_t *>(download.Mapped().data());
+      std::fill_n(all_words, download.Size() / sizeof(uint64_t), sentinel);
+      download.Flush(0, download.Size());
+      auto *bitmap = cache.GetFaultBuffer();
+      const auto bitmap_offset = (BufferCache::PageIndex(base) / 32) * sizeof(u32);
+      for (u32 iteration = 0; iteration < pending.size() + 2; ++iteration) {
+        const u32 reports = iteration == 0 ? requested : 0;
+        std::vector<u32> bits((reports + 31) / 32, UINT32_MAX);
+        if (reports % 32 != 0) {
+          bits.back() = (u32{1} << (reports % 32)) - 1;
+        }
+        auto command = scheduler.Current().Handle();
+        command.fillBuffer(bitmap->Handle(), 0, bitmap->Size(), 0);
+        vk::BufferMemoryBarrier barrier{};
+        barrier.sType = vk::StructureType::eBufferMemoryBarrier;
+        barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+        barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = bitmap->Handle();
+        barrier.size = bitmap->Size();
+        command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                vk::PipelineStageFlagBits::eTransfer, {}, 0,
+                                nullptr, 1, &barrier, 0, nullptr);
+        if (!bits.empty()) {
+          command.updateBuffer(bitmap->Handle(), bitmap_offset,
+                               bits.size() * sizeof(u32), bits.data());
+        }
+        barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead |
+                                vk::AccessFlagBits::eShaderWrite;
+        command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                vk::PipelineStageFlagBits::eComputeShader, {}, 0,
+                                nullptr, 1, &barrier, 0, nullptr);
+        const auto area = FaultManagerTestAccess::CurrentArea(manager);
+        const auto tick = scheduler.CurrentTick();
+        cache.ProcessFaultBuffer();
+        scheduler.FlushAndWait();
+        Require(name, "deferred boundary", pending[area] == tick,
+                "GPU wait ran or retired the host callback early");
+        download.Invalidate(area * area_bytes, area_bytes);
+        const auto *words = reinterpret_cast<const uint64_t *>(
+            download.Mapped().data() + area * area_bytes);
+        const auto raw_count = words[0];
+        Require(name, "parser count",
+                reports <= slots ? raw_count == reports
+                                 : raw_count > slots && raw_count <= reports,
+                "production parser did not exercise the expected capacity case");
+        const auto stored = std::min<uint64_t>(raw_count, slots);
+        std::set<uint64_t> addresses;
+        for (uint64_t index = 1; index <= stored; ++index) {
+          const auto address = BufferCache::GuestAddress(words[index]);
+          Require(name, "stored report bounds",
+                  address >= base && address < base + reports * page_size &&
+                      (address - base) % page_size == 0,
+                  "parser stored an address outside the seeded reports");
+          addresses.insert(address);
+        }
+        Require(name, "unique stored reports", addresses.size() == stored,
+                "parser duplicated a stored report");
+        if (iteration == 0 && reports != 0) {
+          Require(name, "before callback",
+                  !cache.IsRegionRegistered(*addresses.begin(), page_size),
+                  "test report was cached before deferred consumption");
+        }
+        scheduler.PopPendingOperations();
+        Require(name, "area retirement", pending[area] == 0,
+                "callback did not release its readback area");
+        for (const auto address : addresses) {
+          Require(name, "report materialization",
+                  cache.IsRegionRegistered(address, page_size),
+                  "completed callback omitted a stored report");
+        }
+        Require(name, "adjacent-area overread",
+                !cache.IsRegionRegistered(guard_address, page_size),
+                "callback consumed the next area's sentinel as a report");
+        if (iteration == 0) {
+          const auto next = (area + 1) % pending.size();
+          download.Invalidate(next * area_bytes, area_bytes);
+          const auto *neighbor = reinterpret_cast<const uint64_t *>(
+              download.Mapped().data() + next * area_bytes);
+          Require(name, "adjacent area preserved",
+                  std::all_of(neighbor, neighbor + area_bytes / sizeof(uint64_t),
+                              [&](uint64_t value) { return value == sentinel; }),
+                  "parser modified a neighboring readback area");
+          std::printf("[gpu]     BdaFaultReadback requested=%u raw=%llu stored=%llu ok\n",
+                      reports, static_cast<unsigned long long>(raw_count),
+                      static_cast<unsigned long long>(stored));
+        }
+        scheduler.Finish();
+      }
+      Require(name, "ring reuse",
+              FaultManagerTestAccess::CurrentArea(manager) == 2 &&
+                  std::ranges::all_of(pending, [](uint64_t tick) { return tick == 0; }),
+              "readback ring failed to wrap or retained completed areas");
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+      Require(name, "direct unmap",
+              LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+              "fault-readback mapping release failed");
+      Require(name, "direct release",
+              LibKernel::Memory::KernelReleaseDirectMemory(
+                  direct_offset, allocation_size) == 0,
+              "fault-readback allocation release failed");
+    }
+    std::printf("[gpu]     BdaFaultReadback 40 parser/callback cycles ok\n");
   }
 
   void CheckSchedulerTimeline() {
@@ -43783,16 +43943,34 @@ void CheckBdaFaultBitmap(VulkanHarness &vulkan) {
     program.stage = ShaderType::Compute;
     program.info.uses_dma = true;
     program.shader_info_complete = true;
-    IR::AllocateBindings(program);
+    // The descriptors DefineModule would declare for a program that uses DMA: the BDA page table
+    // (64-bit entries) and the fault buffer (32-bit words).
+    for (const auto kind : {IR::DescriptorBindingKind::BdaPagetable,
+                            IR::DescriptorBindingKind::FaultBuffer}) {
+      program.bindings.descriptor_counts[static_cast<size_t>(kind)] = 1;
+      program.bindings.descriptor_mask |= uint64_t{1} << static_cast<size_t>(kind);
+    }
     EmitterState state(program, {});
     auto &b = state.builder;
     b.RequireCapability(spv::CapabilityShader);
     b.RequireCapability(spv::CapabilityInt64);
-    b.AddMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+    b.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
+    b.RequireExtension("SPV_KHR_physical_storage_buffer");
+    b.AddMemoryModel(spv::AddressingModelPhysicalStorageBuffer64, spv::MemoryModelGLSL450);
+    const auto storage_buffer_pointer = [&](BufferDefinition &buffer, uint32_t bits) {
+      buffer.element_type = bits == 64u ? TypeU64(state) : TypeU32(state);
+      const auto array = b.DecoratedType(
+          spv::OpTypeRuntimeArray,
+          {{spv::OpDecorate, {spv::DecorationArrayStride, bits / 8u}}}, buffer.element_type);
+      buffer.type = b.DecoratedType(
+          spv::OpTypeStruct, {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
+                              {spv::OpDecorate, {spv::DecorationBlock}}}, array);
+      return TypePointer(state, spv::StorageClassStorageBuffer, buffer.type);
+    };
     state.bda_pagetable_variable = b.DefineGlobalVariable(
-        TypeStorageBufferPointer(state, 64), spv::StorageClassStorageBuffer);
+        storage_buffer_pointer(state.storage_buffers[3], 64), spv::StorageClassStorageBuffer);
     state.fault_buffer_variable = b.DefineGlobalVariable(
-        TypeStorageBufferPointer(state), spv::StorageClassStorageBuffer);
+        storage_buffer_pointer(state.storage_buffers[2], 32), spv::StorageClassStorageBuffer);
     for (const auto [id, kind] : {
              std::pair{state.bda_pagetable_variable, IR::DescriptorBindingKind::BdaPagetable},
              std::pair{state.fault_buffer_variable, IR::DescriptorBindingKind::FaultBuffer}}) {
@@ -43863,6 +44041,11 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  if (argc == 2 && std::strcmp(argv[1], "--bda-fault-readback-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBdaFaultReadback();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--bda-fault-bitmap-only") == 0) {
     VulkanHarness vulkan;
     CheckBdaFaultBitmap(vulkan);
@@ -44868,6 +45051,7 @@ int main(int argc, char **argv) {
   bool skipped_device_checks = false;
 #endif
   CheckBdaFaultBitmap(vulkan);
+  vulkan.CheckBdaFaultReadback();
   CheckImageSamplerSpecialization();
   CheckResourcePlanHandoff();
   CheckNativeImageDescriptorTypes();
