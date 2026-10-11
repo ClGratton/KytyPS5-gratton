@@ -359,6 +359,10 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		ShaderRecompiler::IR::CompiledShaderInfo     program;
 		ShaderProgram                                handle;
+		// --debug-lookahead-verify only.
+		uint64_t                                     spirv_hash = 0;
+		bool                                         prefetched = false;
+		bool                                         verified   = false;
 	};
 
 	using LinkedPtr = std::shared_ptr<const ShaderRecompiler::ShaderSource::Linked>;
@@ -579,12 +583,15 @@ struct PipelineCache::ProgramCache {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
 		}
+		const uint64_t spirv_hash =
+		    Config::GetLookaheadVerify() ? XXH3_64bits(result.spirv.data(), result.spirv.size() * 4u) : 0u;
 		return {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),
 		    .program        = std::move(result.program).TakeCompiledInfo(),
 		    .handle         = {.id = next_shader_id.fetch_add(1, std::memory_order_relaxed) + 1,
 		                       .module = module},
+		    .spirv_hash     = spirv_hash,
 		};
 	}
 
@@ -661,6 +668,7 @@ struct PipelineCache::ProgramCache {
 			    key.push_data_cursor, {}, timing ? &backend_ns : nullptr,
 			    timing ? &module_ns : nullptr);
 			// Jobs only exist for plain (non call-source) programs: no function code.
+			compiled.prefetched = IsPrefetched();
 			bool dup = false;
 			auto* const published = entry->Publish(compiled, key.push_data_cursor, false, dup);
 			if (dup) {
@@ -805,6 +813,7 @@ struct PipelineCache::ProgramCache {
 		}
 		bool source_changed = false;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		Permutation* verify_target = nullptr;
 		if (entry != nullptr) {
 			Permutation* permutation = nullptr;
 			if (prefetch) {
@@ -837,6 +846,14 @@ struct PipelineCache::ProgramCache {
 				permutation = entry->FindPermutation<false>(runtime, push_data_cursor, &materialize_time,
 				                                            &specialization);
 			}
+			if (permutation != nullptr && !prefetch && Config::GetLookaheadVerify() &&
+			    permutation->prefetched && !permutation->verified) {
+				// --debug-lookahead-verify: recompile it here with the real draw's inputs and
+				// compare below before the first use.
+				verify_target  = permutation;
+				specialization = permutation->specialization;
+				permutation    = nullptr;
+			}
 			if (permutation != nullptr) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
@@ -851,8 +868,8 @@ struct PipelineCache::ProgramCache {
 		// --async-pipelines. `pool` is null in Off mode (and once the pool has been shut down), in
 		// which case everything below is exactly the stock synchronous path.
 		AsyncPipelineCompiler* const pool =
-		    (async != nullptr && async->pool != nullptr && async->pool->Running()) ? async->pool
-		                                                                           : nullptr;
+		    (async != nullptr && async->pool != nullptr && async->pool->Running() &&
+		     verify_target == nullptr) ? async->pool : nullptr;
 		const bool may_skip = pool != nullptr && async->allow_skip && stage != ShaderType::Compute;
 		// Uses a permutation another thread (or an earlier request) published for this draw.
 		const auto use_published = [&](Permutation& permutation, bool miss_report) {
@@ -1135,6 +1152,22 @@ struct PipelineCache::ProgramCache {
 		    stage_name, options, std::move(translated), std::move(specialization), push_data_cursor,
 		    SourceEntry::FunctionCode(translated_linked, base_code_size), timing ? &backend_ns : nullptr,
 		    timing ? &module_ns : nullptr);
+		if (verify_target != nullptr) {
+			verify_target->verified = true;
+			static std::atomic<uint64_t> verified_count {0}, mismatch_count {0};
+			verified_count.fetch_add(1, std::memory_order_relaxed);
+			if (compiled.spirv_hash != verify_target->spirv_hash) {
+				const auto n = mismatch_count.fetch_add(1, std::memory_order_relaxed) + 1;
+				std::fprintf(stderr,
+				             "Lookahead verify: MISMATCH #%llu stage=%s shader_hash=%016llx "
+				             "prefetched_spirv=%016llx real_spirv=%016llx (verified so far %llu)\n",
+				             static_cast<unsigned long long>(n), stage_name,
+				             static_cast<unsigned long long>(params.hash),
+				             static_cast<unsigned long long>(verify_target->spirv_hash),
+				             static_cast<unsigned long long>(compiled.spirv_hash),
+				             static_cast<unsigned long long>(verified_count.load()));
+			}
+		}
 		bool        duplicate = false;
 		auto* const published = entry->Publish(compiled, push_data_cursor, translated_linked != nullptr, duplicate);
 		if (duplicate) {

@@ -113,6 +113,10 @@ struct ConfigOptions {
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches.
 	uint32_t               pipeline_lookahead_kinds    = 3;
+	// --debug-lookahead-verify: the GPU thread recompiles every program a prefetch built before
+	// its first use and compares the SPIR-V; mismatches are logged (finds prefetch inputs that
+	// differ from the real draw's). Slow, debug only.
+	bool                   lookahead_verify            = false;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -157,6 +161,7 @@ AsyncPipelineMode GetAsyncPipelineMode();
 uint32_t          GetPipelineWorkerCount();
 bool              GetPipelineLookahead();
 uint32_t          GetPipelineLookaheadKinds();
+bool              GetLookaheadVerify();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

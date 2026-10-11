@@ -51,6 +51,10 @@ bool GetPipelineLookahead() {
 	return g_config->pipeline_lookahead && g_config->async_pipelines != AsyncPipelineMode::Off;
 }
 
+bool GetLookaheadVerify() {
+	return g_config->lookahead_verify && g_config->pipeline_lookahead;
+}
+
 uint32_t GetPipelineLookaheadKinds() {
 	return g_config->pipeline_lookahead_kinds;
 }
