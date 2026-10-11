@@ -14,7 +14,7 @@
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#elif defined(__linux__)
 #include <linux/close_range.h>
 #include <unistd.h>
 #endif
@@ -45,7 +45,7 @@ int LoadExec(const char* path, const char* const argv[]) {
 	    !Common::File::IsFileExisting(Libs::LibKernel::FileSystem::GetRealFilename(path))) {
 		return SYSTEM_SERVICE_ERROR_PARAMETER;
 	}
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || defined(__linux__)
 	std::vector<std::string> arguments {"--guest-exec", path};
 	size_t                   bytes = 0;
 	for (size_t i = 0; argv != nullptr && argv[i] != nullptr; ++i) {
