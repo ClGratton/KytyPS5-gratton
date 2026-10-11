@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "graphics/guest_gpu/command_processor/shadowTypes.h"
+#include "graphics/guest_gpu/command_processor/submitCoalescer.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -62,6 +63,10 @@ private:
 
 class CommandProcessor;
 
+// The --submit-coalesce bounds from the config and the vblank frequency, in QueryPerformanceCounter
+// units.
+[[nodiscard]] SubmitCoalescerConfig CoalescerConfigFromGlobals();
+
 // --pipeline-lookahead: a "shadow" CommandProcessor decodes a submitted command buffer ahead of
 // the GPU thread, tracking the same register state, but performs no side effects (no guest
 // memory writes, no Vulkan work, no waits). Draws and dispatches are reported to the sink instead
@@ -97,6 +102,12 @@ public:
 
 	void            BufferInit();
 	void            BufferFlush();
+	// Flush for a RELEASE_MEM end-of-pipe event. With --submit-coalesce the submit may be held
+	// back (submitCoalescer.h); every other flush, drain and the end of a submission slice still
+	// submits, so a held event is never stuck behind a wait.
+	void            BufferFlushEvent();
+	// Submits held-back events whose age bound has passed (polled between PM4 packets).
+	void            FlushEventsIfDue();
 	void            BufferWait();
 	HW::Context&    GetCtx() { return m_ctx; }
 	HW::UserConfig& GetUcfg() { return m_ucfg; }
@@ -216,6 +227,7 @@ private:
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
 	ShadowSink* m_shadow_sink               = nullptr;
+	SubmitCoalescer m_coalescer {CoalescerConfigFromGlobals()};
 };
 
 } // namespace Libs::Graphics

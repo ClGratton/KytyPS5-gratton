@@ -63,6 +63,18 @@ bool TextureGcLog() {
 	return g_config->texture_gc_log;
 }
 
+bool SubmitCoalesceEnabled() {
+	return g_config->submit_coalesce;
+}
+
+uint32_t GetSubmitCoalesceMax() {
+	return std::clamp(g_config->submit_coalesce_max, 1u, 256u);
+}
+
+uint32_t GetSubmitCoalesceUs() {
+	return g_config->submit_coalesce_us;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

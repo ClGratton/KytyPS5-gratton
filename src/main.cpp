@@ -156,6 +156,13 @@ static void PrintUsage() {
 	::printf("  --submit-stats <seconds>             Every N seconds print frames, Vulkan submits per frame\n"
 	         "                                       and the --submit-coalesce counters (no timers; safe\n"
 	         "                                       next to fps measurements). Default: 0 (off).\n");
+	::printf("  --submit-coalesce <true|false>       Hold back the Vulkan submit of RELEASE_MEM end-of-pipe\n"
+	         "                                       events: submit after --submit-coalesce-max events or\n"
+	         "                                       when the oldest is older than --submit-coalesce-us,\n"
+	         "                                       and at every drain or end of submission. Default: false.\n");
+	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
+	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
+	         "                                       vblank period (period / 8). Default: 0.\n");
 	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
 	         "                                       its first use and compare the SPIR-V. Default: false.\n");
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
@@ -633,6 +640,25 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.gpu_phase_stats_s = static_cast<uint32_t>(seconds);
+		} else if (arg == "--submit-coalesce") {
+			if (!ParseBool(value, options.config.submit_coalesce)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--submit-coalesce-max") {
+			uint64_t events = 0;
+			if (!ParseUint64(value, events) || events == 0 || events > 256) {
+				::printf("invalid submit coalesce max (expected 1-256): %s\n", value.c_str());
+				return false;
+			}
+			options.config.submit_coalesce_max = static_cast<uint32_t>(events);
+		} else if (arg == "--submit-coalesce-us") {
+			uint64_t us = 0;
+			if (!ParseUint64(value, us) || us > 20000) {
+				::printf("invalid submit coalesce age (expected 0-20000 us): %s\n", value.c_str());
+				return false;
+			}
+			options.config.submit_coalesce_us = static_cast<uint32_t>(us);
 		} else if (arg == "--submit-stats") {
 			uint64_t seconds = 0;
 			if (!ParseUint64(value, seconds) || seconds > 3600) {

@@ -141,6 +141,12 @@ struct ConfigOptions {
 	uint32_t               gpu_phase_stats_s           = 0;
 	// --submit-stats <seconds>: only the frame/submit/coalescing counters, no timers. 0 = off.
 	uint32_t               submit_stats_s              = 0;
+	// --submit-coalesce (K13): hold back the submit of RELEASE_MEM end-of-pipe events (up to
+	// submit_coalesce_max events, or an age derived from the vblank period). Default off.
+	bool                   submit_coalesce             = false;
+	uint32_t               submit_coalesce_max         = 16;
+	// 0 = derive from the vblank frequency (period / 8); otherwise microseconds.
+	uint32_t               submit_coalesce_us          = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -188,6 +194,9 @@ uint32_t          GetPipelineLookaheadKinds();
 bool              GetLookaheadVerify();
 bool              TextureGcEnabled();
 bool              TextureGcLog();
+bool              SubmitCoalesceEnabled();
+uint32_t          GetSubmitCoalesceMax();
+uint32_t          GetSubmitCoalesceUs();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

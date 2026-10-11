@@ -8,6 +8,7 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "common/timer.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -258,17 +259,67 @@ void CommandProcessor::BufferInit() {
 	GetScheduler().Begin(m_ctx, m_ucfg, m_sh_ctx);
 }
 
+SubmitCoalescerConfig CoalescerConfigFromGlobals() {
+	const auto hz = Common::Timer::QueryPerformanceFrequency();
+	SubmitCoalescerConfig config;
+	config.max_events = Config::GetSubmitCoalesceMax();
+	config.max_age    = Config::GetSubmitCoalesceUs() != 0
+	                        ? std::max<uint64_t>(1, Config::GetSubmitCoalesceUs() * hz / 1'000'000)
+	                        : CoalesceMaxAge(Config::GetVblankFrequency(), hz, 8);
+	return config;
+}
+
 void CommandProcessor::BufferFlush() {
 	if (IsShadow()) {
 		return;
 	}
+	// Any other flush also submits what was held back.
+	if (m_coalescer.Flushed() != 0) {
+		Common::GpuPhase::NoteCoalesce(Common::GpuPhase::Coalesce::FlushForced);
+	}
 	GetScheduler().Flush();
+}
+
+void CommandProcessor::BufferFlushEvent() {
+	if (IsShadow()) {
+		return;
+	}
+	if (!Config::SubmitCoalesceEnabled()) {
+		BufferFlush();
+		return;
+	}
+	using Decision = SubmitCoalescer::Decision;
+	switch (m_coalescer.OnEvent(Common::Timer::QueryPerformanceCounter())) {
+		case Decision::Defer:
+			Common::GpuPhase::NoteCoalesce(Common::GpuPhase::Coalesce::Deferred);
+			return;
+		case Decision::FlushBatch:
+			Common::GpuPhase::NoteCoalesce(Common::GpuPhase::Coalesce::FlushBatch);
+			break;
+		case Decision::FlushDeadline:
+			Common::GpuPhase::NoteCoalesce(Common::GpuPhase::Coalesce::FlushDeadline);
+			break;
+	}
+	(void)m_coalescer.Flushed();
+	GetScheduler().Flush();
+}
+
+void CommandProcessor::FlushEventsIfDue() {
+	if (m_coalescer.Pending() == 0 || IsShadow()) {
+		return;
+	}
+	if (m_coalescer.Due(Common::Timer::QueryPerformanceCounter())) {
+		Common::GpuPhase::NoteCoalesce(Common::GpuPhase::Coalesce::FlushDeadline);
+		(void)m_coalescer.Flushed();
+		GetScheduler().Flush();
+	}
 }
 
 void CommandProcessor::BufferWait() {
 	if (IsShadow()) {
 		return;
 	}
+	(void)m_coalescer.Flushed();
 	BufferInit();
 	GetScheduler().Finish();
 }
@@ -831,6 +882,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}
+		FlushEventsIfDue();
 		auto& cursor = execution.m_buffer_stack.back();
 		EXIT_IF(cursor.offset_dw > cursor.commands.size());
 		if (cursor.offset_dw == cursor.commands.size()) {
