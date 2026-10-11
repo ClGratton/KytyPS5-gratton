@@ -63,12 +63,21 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 	}
 }
 
+// Bump when the cache file layout or the meaning of the signature changes. Driver pipeline-cache
+// blobs are content-addressed and validated by the driver itself, so changes to the emulator's
+// pipeline creation do not need a bump: stale entries simply never match.
+constexpr uint32_t kPipelineCacheSchemaVersion = 1;
+
 std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties) {
 	constexpr char hex[] = "0123456789abcdef";
 	std::string    uuid(VK_UUID_SIZE * 2, '0');
 	for (size_t i = 0; i < VK_UUID_SIZE; i++) {
 		uuid[i * 2]     = hex[properties.pipelineCacheUUID[i] >> 4u];
 		uuid[i * 2 + 1] = hex[properties.pipelineCacheUUID[i] & 0xfu];
+	}
+	if (Config::GetPipelineCacheKey() == Config::PipelineCacheKey::Schema) {
+		return fmt::format("KytyPCS:{}:{:08x}:{:08x}:{:08x}:{}\n", kPipelineCacheSchemaVersion,
+		                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
 	}
 	return fmt::format("KytyPC1:{}:{:08x}:{:08x}:{:08x}:{}\n", KYTY_GIT_REVISION,
 	                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
@@ -563,19 +572,25 @@ void PipelineCache::InitializeDriverCache() {
 	if (title_id.empty()) {
 		return;
 	}
-	if (KYTY_BUILD != KYTY_BUILD_RELEASE) {
-		PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
-		return;
-	}
-	const std::string_view git_hash     = KYTY_GIT_HASH;
-	const std::string_view git_revision = KYTY_GIT_REVISION;
-	if (git_hash == "unknown" || git_revision == "unknown") {
-		PipelineCacheLog("Vulkan pipeline cache: disabled (unknown git revision)");
-		return;
-	}
-	if (git_hash.ends_with("-dirty")) {
-		PipelineCacheLog("Vulkan pipeline cache: disabled (dirty build)");
-		return;
+	if (Config::GetPipelineCacheKey() == Config::PipelineCacheKey::Schema) {
+		// The signature does not involve the git revision, so none of the build-identity gates
+		// below apply: dev, dirty and unknown-revision builds may use (and share) the cache.
+		PipelineCacheLog("Vulkan pipeline cache: key=schema (version {})", kPipelineCacheSchemaVersion);
+	} else {
+		if (KYTY_BUILD != KYTY_BUILD_RELEASE) {
+			PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
+			return;
+		}
+		const std::string_view git_hash     = KYTY_GIT_HASH;
+		const std::string_view git_revision = KYTY_GIT_REVISION;
+		if (git_hash == "unknown" || git_revision == "unknown") {
+			PipelineCacheLog("Vulkan pipeline cache: disabled (unknown git revision)");
+			return;
+		}
+		if (git_hash.ends_with("-dirty")) {
+			PipelineCacheLog("Vulkan pipeline cache: disabled (dirty build)");
+			return;
+		}
 	}
 
 	m_driver_cache_path     = std::filesystem::path("_PipelineCache") / (title_id + ".bin");

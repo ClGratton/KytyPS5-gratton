@@ -34,6 +34,10 @@ void Load(const ConfigOptions& cfg) {
 	});
 }
 
+PipelineCacheKey GetPipelineCacheKey() {
+	return g_config->pipeline_cache_key;
+}
+
 uint32_t GetScreenWidth() {
 	return g_config->screen_width;
 }

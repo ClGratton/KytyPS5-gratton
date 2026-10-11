@@ -89,6 +89,10 @@ static void PrintUsage() {
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
+	::printf("  --pipeline-cache-key <value>         revision (default) or schema. schema keys the driver\n"
+	         "                                       pipeline cache on a schema version + GPU/driver ids\n"
+	         "                                       instead of the git revision, and enables it in\n"
+	         "                                       non-Release/dirty builds.\n");
 	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
 	         "                                       pipeline creation misses. Default: off.\n");
 }
@@ -421,6 +425,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.bench_frames_csv = Common::PathFromUtf8(value);
+		} else if (arg == "--pipeline-cache-key") {
+			if (Common::EqualNoCase(value, "revision")) {
+				options.config.pipeline_cache_key = Config::PipelineCacheKey::Revision;
+			} else if (Common::EqualNoCase(value, "schema")) {
+				options.config.pipeline_cache_key = Config::PipelineCacheKey::Schema;
+			} else {
+				::printf("invalid pipeline cache key (expected revision or schema): %s\n",
+				         value.c_str());
+				return false;
+			}
 		} else if (arg == "--shader-timing-log") {
 			if (value.empty()) {
 				::printf("invalid --shader-timing-log path\n");
