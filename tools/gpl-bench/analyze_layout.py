@@ -81,3 +81,31 @@ if g:
     avg = {k: v / len(pipes) for k, v in avg.items()}
     spp = min(1024, *[pools[k] / v for k, v in avg.items() if v and k in pools])
     print(f'today (mean per-pipeline layout {{{", ".join(f"{k}={v:.1f}" for k, v in avg.items())}}}): ~{spp:.0f} sets per pool')
+
+# ---- GPL library reuse potential (how many distinct libraries the captured pipelines would need) ----
+import hashlib, os
+
+
+def md5(path):
+    return hashlib.md5(open(path, 'rb').read()).hexdigest()
+
+
+def canon(o):
+    return json.dumps(o, sort_keys=True)
+
+
+keys = {'vi': set(), 'pre': set(), 'fs': set(), 'fo': set()}
+n = 0
+for p in pipes:
+    if p['mesh']:
+        continue
+    n += 1
+    spv = {s['stage']: md5(f"{d}/{s['spv']}") for s in p['stages']}
+    pre_stages = canon([(k, v) for k, v in sorted(spv.items()) if k != 16])
+    keys['vi'].add(canon([p.get('vertex_input'), p.get('input_assembly')]))
+    keys['pre'].add(canon([pre_stages, p.get('tess_patch_control_points'), p['negative_one_to_one'], p['raster'], p['layout']['push_range']]))
+    keys['fs'].add(canon([spv.get(16), p['multisample'], p.get('depth_stencil'), p['rendering']['depth'], p['rendering']['stencil']]))
+    keys['fo'].add(canon([p['blend'], p['multisample'], p['rendering']]))
+print(f'\n### GPL library reuse across the {n} captured non-mesh graphics pipelines (cold session)')
+for k, v in keys.items():
+    print(f'  {k:4s}: {len(v)} distinct libraries for {n} pipelines ({100*len(v)/n:.0f}% need compiling)')
