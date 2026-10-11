@@ -23,6 +23,12 @@ namespace Common::Speculation {
 void               Enter() noexcept;
 void               Leave() noexcept;
 
+// Non-fatal speculative failure ("this input is not usable"): code that would EXIT on the real
+// path records it and returns early; the lookahead caller checks TakeFailure() and drops the
+// request. Only meaningful on a thread where Active() is true.
+void               NoteFailure() noexcept;
+[[nodiscard]] bool TakeFailure() noexcept;
+
 // Set by Abort(); the lookahead producers check it and stop queueing work.
 [[nodiscard]] bool Aborted() noexcept;
 

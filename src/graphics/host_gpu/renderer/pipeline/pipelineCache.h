@@ -152,6 +152,26 @@ public:
 
 	// Returns nullptr only with --async-pipelines skip, when the pipeline is still being built:
 	// the caller must skip the draw.
+	// ---- --pipeline-lookahead, graphics (lookahead thread only) -----------------------------
+	// Same as GetGraphicsPrograms with `prefetch` set: the lookahead thread materializes
+	// privately, waits for the program jobs itself and never skips. An empty result (vertex[0]
+	// false) means "not prefetchable".
+	GraphicsPrograms
+	PrefetchGraphicsPrograms(const HW::VertexShaderInfo& vertex_regs,
+	                         const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,
+	                         const HW::Context& context, const HW::UserConfig& user_config,
+	                         std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
+	                         bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
+	                         ShaderPixelInputInfo& pixel_info);
+	// Builds the pipeline key exactly like the draw path and submits the creation job.
+	void PrefetchGraphicsPipeline(std::span<const RenderColorInfo>       colors,
+	                              const RenderDepthInfo&                 depth,
+	                              std::span<const ShaderVertexInputInfo> vertex_info,
+	                              const HW::Context& ctx, const HW::UserConfig& user_config,
+	                              const ShaderPixelInputInfo* ps_input_info,
+	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                              const GraphicsPrograms& programs);
+
 	Pipeline* GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,
 	                              std::span<const ShaderVertexInputInfo> vertex_info,
@@ -215,6 +235,22 @@ private:
 	struct GraphicsPipelineKeyHash {
 		std::size_t operator()(const GraphicsPipelineKey& key) const;
 	};
+
+	GraphicsPrograms GetGraphicsProgramsImpl(
+	    const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
+	    const HW::ShaderRegisters& sh, const HW::Context& context,
+	    const HW::UserConfig& user_config,
+	    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
+	    bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
+	    ShaderPixelInputInfo& pixel_info, bool prefetch);
+	GraphicsPipelineKey BuildGraphicsKey(std::span<const RenderColorInfo>       colors,
+	                                     const RenderDepthInfo&                 depth,
+	                                     std::span<const ShaderVertexInputInfo> vertex_info,
+	                                     const HW::Context& ctx, const HW::UserConfig& user_config,
+	                                     const ShaderPixelInputInfo* ps_input_info,
+	                                     vk::PrimitiveTopology topology,
+	                                     bool primitive_restart_enable,
+	                                     const GraphicsPrograms& programs);
 
 	GraphicContext&               m_graphics;
 	std::unique_ptr<ProgramCache> m_program_cache;

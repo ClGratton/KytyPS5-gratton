@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include <chrono>
+#include <fmt/format.h>
 #include <cstdio>
 
 #if defined(__linux__)
@@ -69,6 +70,15 @@ void PipelineLookahead::Stop() {
 		m_thread.join();
 	} else {
 		m_thread.detach();
+	}
+	const auto summary = fmt::format(
+	    "items={};items_late={};draws={};dispatches={};max_queue={};busy_ms={};aborted={}",
+	    m_stats.items.load(), m_stats.items_late.load(), m_stats.draws.load(),
+	    m_stats.dispatches.load(), m_stats.max_queue.load(), m_stats.busy_ns.load() / 1000000,
+	    Common::Speculation::Aborted() ? 1 : 0);
+	std::printf("Pipeline lookahead thread: %s\n", summary.c_str());
+	if (Bench::TimingEnabled()) {
+		Bench::LogTiming("summary_lookahead_thread", 0, Bench::NowNs(), 0, false, summary);
 	}
 }
 
@@ -143,8 +153,14 @@ void PipelineLookahead::Process(Item& item) {
 	m_stats.busy_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
 }
 
-void PipelineLookahead::OnDraw(CommandProcessor&, const ShadowDraw&) {
+void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	m_stats.draws.fetch_add(1, std::memory_order_relaxed);
+	if (m_current_late) {
+		return;
+	}
+	RenderExecutor::PrefetchDrawStatus status {};
+	(void)m_renderer.GetRenderExecutor().PrefetchDraw(cp.GetCtx(), cp.GetShCtx(), cp.GetUcfg(),
+	                                                  draw, status);
 }
 
 void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& dispatch) {
