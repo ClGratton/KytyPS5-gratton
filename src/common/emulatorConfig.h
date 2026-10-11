@@ -110,7 +110,7 @@ struct ConfigOptions {
 	// --debug-hang-watchdog <seconds>: write a thread/pool/lookahead state report when no frame
 	// was presented for that long (common/hangWatchdog.h). 0 = off.
 	uint32_t               hang_watchdog_seconds       = 0;
-	// --pipeline-lookahead-kinds <all|compute|graphics>: debug aid to bisect a misprediction.
+	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches.
 	uint32_t               pipeline_lookahead_kinds    = 3;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
