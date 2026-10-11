@@ -35,6 +35,14 @@ enum class PresentMode { Fifo, Mailbox, Immediate };
 //             builds. Opt-in via --pipeline-cache-key schema.
 enum class PipelineCacheKey { Revision, Schema };
 
+// Where shader translation and Vulkan pipeline creation run (--async-pipelines, shaders.md C1a).
+//   Off:   stock behaviour. Everything is synchronous on the GPU thread.
+//   Stall: a miss submits a self-contained job to the worker pool and the draw/dispatch waits for
+//          it. Same result as Off, but the work runs on a worker (foundation for lookahead).
+//   Skip:  a graphics draw whose program or pipeline is not ready is skipped (KytyPlus
+//          behaviour); compute dispatches always wait.
+enum class AsyncPipelineMode { Off, Stall, Skip };
+
 using Keymap = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
 
@@ -92,6 +100,9 @@ struct ConfigOptions {
 	uint64_t               bench_exit_after_frames     = 0;
 	std::filesystem::path  shader_timing_log;
 	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Revision;
+	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
+	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.
+	uint32_t               pipeline_workers            = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -131,6 +142,9 @@ std::filesystem::path GetCommandBufferDumpFolder();
 bool GraphicsDebugDumpEnabled();
 
 PipelineCacheKey GetPipelineCacheKey();
+AsyncPipelineMode GetAsyncPipelineMode();
+// Resolved worker count (never 0).
+uint32_t          GetPipelineWorkerCount();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

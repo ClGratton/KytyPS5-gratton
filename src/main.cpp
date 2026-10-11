@@ -107,6 +107,13 @@ static void PrintUsage() {
 	         "                                       non-Release/dirty builds.\n");
 	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
 	         "                                       pipeline creation misses. Default: off.\n");
+	::printf("  --async-pipelines <off|stall|skip>   Run shader translation and Vulkan pipeline creation\n"
+	         "                                       on worker threads. off (default): synchronous, stock\n"
+	         "                                       behaviour. stall: the draw/dispatch waits for the\n"
+	         "                                       worker. skip: graphics draws whose program or pipeline\n"
+	         "                                       is not ready are skipped (compute always waits).\n");
+	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
+	         "                                       Default: min(8, hardware threads / 2).\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -488,6 +495,25 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				         value.c_str());
 				return false;
 			}
+		} else if (arg == "--async-pipelines") {
+			if (Common::EqualNoCase(value, "off")) {
+				options.config.async_pipelines = Config::AsyncPipelineMode::Off;
+			} else if (Common::EqualNoCase(value, "stall")) {
+				options.config.async_pipelines = Config::AsyncPipelineMode::Stall;
+			} else if (Common::EqualNoCase(value, "skip")) {
+				options.config.async_pipelines = Config::AsyncPipelineMode::Skip;
+			} else {
+				::printf("invalid async pipelines mode (expected off, stall or skip): %s\n",
+				         value.c_str());
+				return false;
+			}
+		} else if (arg == "--pipeline-workers") {
+			uint64_t workers = 0;
+			if (!ParseUint64(value, workers) || workers == 0 || workers > 64) {
+				::printf("invalid pipeline worker count (expected 1-64): %s\n", value.c_str());
+				return false;
+			}
+			options.config.pipeline_workers = static_cast<uint32_t>(workers);
 		} else if (arg == "--shader-timing-log") {
 			if (value.empty()) {
 				::printf("invalid --shader-timing-log path\n");

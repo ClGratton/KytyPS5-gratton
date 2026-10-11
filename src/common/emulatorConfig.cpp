@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <thread>
 
 namespace Config {
 
@@ -37,6 +38,18 @@ void Load(const ConfigOptions& cfg) {
 
 PipelineCacheKey GetPipelineCacheKey() {
 	return g_config->pipeline_cache_key;
+}
+
+AsyncPipelineMode GetAsyncPipelineMode() {
+	return g_config->async_pipelines;
+}
+
+uint32_t GetPipelineWorkerCount() {
+	if (g_config->pipeline_workers != 0) {
+		return g_config->pipeline_workers;
+	}
+	const auto hardware = std::thread::hardware_concurrency();
+	return std::max(1u, std::min(8u, hardware / 2u));
 }
 
 uint32_t GetScreenWidth() {
