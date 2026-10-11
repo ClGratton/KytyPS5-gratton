@@ -1398,6 +1398,84 @@ void TestDirectMapQueryOffsetAndPartialMunmap() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestMemStatsAccounting() {
+	const char* test = "MemStatsAccounting";
+	Check(test, Config::MemStatsEnabled(), "this suite runs with --mem-stats on");
+	const bool punch = Config::MemReleasePunchEnabled();
+	const auto size  = SceKernelPageSize * 4;
+	namespace K      = Libs::LibKernel::Memory;
+
+	const auto s0 = K::KernelMemStatsSnapshot();
+	int64_t    phys = 0;
+	CheckOk(test,
+	        K::KernelAllocateDirectMemory(0, K::KernelGetDirectMemorySize(), size, SceKernelPageSize,
+	                                      SceKernelMtypeC, &phys),
+	        "KernelAllocateDirectMemory");
+	void* view = nullptr;
+	CheckOk(test,
+	        K::KernelMapNamedDirectMemory(&view, size, SceKernelProtCpuRw, 0, phys, SceKernelPageSize,
+	                                      "stats_view"),
+	        "KernelMapNamedDirectMemory");
+	std::memset(view, 0xC3, size);
+	const auto s1 = K::KernelMemStatsSnapshot();
+	Check(test, s1.direct_release.calls == s0.direct_release.calls,
+	      "allocating and mapping counts as a release");
+
+	// Unmapping the view alone is a munmap of a direct view, not a release of the memory.
+	CheckOk(test, K::KernelMunmap(reinterpret_cast<uint64_t>(view), size), "KernelMunmap");
+	const auto s2 = K::KernelMemStatsSnapshot();
+	Check(test, s2.munmap_direct.calls == s1.munmap_direct.calls + 1 &&
+	                s2.munmap_direct.bytes == s1.munmap_direct.bytes + size,
+	      "munmap of a direct view is counted once with its length");
+	Check(test, s2.direct_release.calls == s1.direct_release.calls,
+	      "munmap does not count as a direct-memory release");
+	Check(test, s2.released_unmapped_bytes == s1.released_unmapped_bytes,
+	      "memory the guest still owns is not released-and-unmapped");
+
+	// Releasing the unmapped block gives its bytes back, and with the punch flag on they are punched.
+	CheckOk(test, K::KernelReleaseDirectMemory(phys, size), "KernelReleaseDirectMemory");
+	const auto s3 = K::KernelMemStatsSnapshot();
+	Check(test, s3.direct_release.calls == s2.direct_release.calls + 1 &&
+	                s3.direct_release.bytes == s2.direct_release.bytes + size,
+	      "release is counted once with the released length");
+	Check(test, s3.released_unmapped_bytes == s2.released_unmapped_bytes + size,
+	      "released and unmapped bytes match the block");
+	if (punch) {
+		Check(test, s3.punch.calls > s2.punch.calls && s3.punch.bytes == s2.punch.bytes + size,
+		      "the released block was punched");
+	} else {
+		Check(test, s3.punch.calls == s2.punch.calls, "no punch without the flag");
+	}
+	Check(test, s3.punch_failures == s2.punch_failures, "no punch failure");
+
+	// The same physical range handed out and mapped again is counted as reallocated.
+	int64_t again = 0;
+	CheckOk(test,
+	        K::KernelAllocateDirectMemory(phys, phys + static_cast<int64_t>(size), size,
+	                                      SceKernelPageSize, SceKernelMtypeC, &again),
+	        "KernelAllocateDirectMemory(again)");
+	Check(test, again == phys, "released range was not handed out again");
+	void* view2 = nullptr;
+	CheckOk(test,
+	        K::KernelMapNamedDirectMemory(&view2, size, SceKernelProtCpuRw, 0, again,
+	                                      SceKernelPageSize, "stats_view2"),
+	        "KernelMapNamedDirectMemory(again)");
+	const auto s4 = K::KernelMemStatsSnapshot();
+	const auto reused = (s4.realloc_bytes - s3.realloc_bytes) +
+	                    (s4.realloc_after_punch_bytes - s3.realloc_after_punch_bytes);
+	Check(test, reused == size, "the remapped bytes are counted as reallocated exactly once");
+	if (punch) {
+		Check(test, s4.realloc_after_punch_bytes - s3.realloc_after_punch_bytes == size &&
+		                s4.realloc_bytes == s3.realloc_bytes,
+		      "bytes remapped after a punch are counted as after-punch");
+	} else {
+		Check(test, s4.realloc_bytes - s3.realloc_bytes == size, "bytes remapped without a punch");
+	}
+	CheckOk(test, K::KernelMunmap(reinterpret_cast<uint64_t>(view2), size), "KernelMunmap(again)");
+	CheckOk(test, K::KernelReleaseDirectMemory(again, size), "KernelReleaseDirectMemory(again)");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestReleasedDirectMemoryPunchKeepsNeighbors() {
 	const char* test = "ReleasedDirectMemoryPunchKeepsNeighbors";
 	const auto  size = SceKernelPageSize * 4;
@@ -4610,6 +4688,7 @@ int main(int argc, char** argv) {
 	RunTest(TestAutomaticMemoryFragmentedMapRollback);
 	RunTest(TestMemoryPoolAlignmentContracts);
 	RunTest(TestReleasedDirectMemoryPunchKeepsNeighbors);
+	RunTest(TestMemStatsAccounting);
 	RunTest(TestProsperoSampleMemoryPoolExpandCommit);
 	RunTest(TestFragmentedMemoryPoolBacking);
 	RunTest(TestMemoryPoolMultiRangeDecommit);
