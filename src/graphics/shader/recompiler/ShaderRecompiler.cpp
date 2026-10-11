@@ -617,10 +617,11 @@ const Decoder::Program& RefreshShaderSource(ShaderSource& source, const IR::SrtR
 	EXIT_IF(address == 0u);
 	const auto query_reads = reads.size();
 	if (source.linked) {
-		auto& linked = *source.linked;
+		const auto& linked = *source.linked;
 		const auto function = std::span(linked.code).subspan(source.code.size());
-		if (clean.read_memory(clean.userdata, address, linked.observed_function) &&
-		    std::ranges::equal(function, linked.observed_function)) {
+		source.observed_function.resize(function.size());
+		if (clean.read_memory(clean.userdata, address, source.observed_function) &&
+		    std::ranges::equal(function, source.observed_function)) {
 			return linked.decoded;
 		}
 		reads.resize(query_reads);
@@ -684,8 +685,8 @@ const Decoder::Program& RefreshShaderSource(ShaderSource& source, const IR::SrtR
 	reads.emplace_back(address, (linked.code.size() - source.code.size()) * sizeof(uint32_t));
 	linked.decoded.instructions[source.call->instruction].branch_target = function_pc;
 	linked.decoded.code = linked.code;
-	linked.observed_function.resize(linked.code.size() - source.code.size());
-	source.linked = std::move(linked);
+	// Publish a fresh immutable snapshot; the previous one stays valid for whoever still holds it.
+	source.linked = std::make_shared<const ShaderSource::Linked>(std::move(linked));
 	++source.revision;
 	return source.linked->decoded;
 }

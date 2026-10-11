@@ -28,8 +28,12 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <fmt/format.h>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
@@ -275,6 +279,24 @@ std::size_t PipelineCache::GraphicsPipelineKeyHash::operator()(const GraphicsPip
 	return hash;
 }
 
+// Translated-program cache. Thread-safety (phase 1 of shaders.md, "Thread-safe ProgramCache"):
+//
+//  * `programs_mutex` guards the map structure (find / try_emplace / rehash). Mapped SourceEntry
+//    objects are node-stable, so a SourceEntry* stays valid after the lock is dropped; entries are
+//    never erased while the cache lives.
+//  * Every SourceEntry has its own `mutex` guarding all of its mutable state: the call source
+//    (`linked` snapshot pointer, `reads`, `revision`), `resource_plan`, `resources`,
+//    `specialization` and the permutation list. Long work (translation, SPIR-V, module creation)
+//    runs outside any lock on snapshots/copies taken under it.
+//  * `permutations` is a deque and published Permutations are immutable, so a Permutation* handed
+//    out earlier stays valid while other threads append.
+//  * The lookup key is per call (thread_local scratch), and shader ids come from an atomic counter.
+//
+// Remaining single-owner aliasing (NOT solved here, it needs the captured-job split of phase 2):
+// Get() stores `&entry.resources` in input_info.stage.resources. That object is overwritten by the
+// next Get() of the same program, so two threads must not use the results of concurrent Get()
+// calls for the *same* ProgramKey at the same time. Today there is exactly one caller thread (the
+// GPU thread), which is why default behaviour is unchanged.
 struct PipelineCache::ProgramCache {
 	struct ProgramKey {
 		ShaderType            stage           = ShaderType::Unknown;
@@ -293,54 +315,127 @@ struct PipelineCache::ProgramCache {
 		ShaderProgram                                handle;
 	};
 
+	using LinkedPtr = std::shared_ptr<const ShaderRecompiler::ShaderSource::Linked>;
+
+	// Consistent copy of the mutable parts of a call source.
+	struct CallSnapshot {
+		LinkedPtr                                   linked;
+		std::vector<std::pair<uint64_t, uint64_t>> reads;
+	};
+
 	struct SourceEntry {
 		SourceEntry(ShaderRecompiler::IR::ResourcePlan plan,
 		            std::unique_ptr<ShaderRecompiler::ShaderSource> call_source)
-		    : call_source(std::move(call_source)), resource_plan(std::move(plan)) {
-			permutations.reserve(8);
+		    : call_source(std::move(call_source)), resource_plan(std::move(plan)) {}
+
+		// `call_source` itself (the pointer and its immutable `code`) never changes after
+		// construction; only the members listed in ShaderSource's contract are mutated, under `mutex`.
+		static std::span<const uint32_t> FunctionCode(const LinkedPtr& linked, size_t base_code_size) {
+			return linked ? std::span<const uint32_t>(linked->code).subspan(base_code_size)
+			              : std::span<const uint32_t> {};
 		}
 
-		std::span<const uint32_t> FunctionCode() const {
-			return call_source
-			    ? std::span<const uint32_t>(call_source->linked->code).subspan(call_source->code.size())
-			    : std::span<const uint32_t>{};
+		[[nodiscard]] CallSnapshot SnapshotCall() const {
+			std::shared_lock lock(mutex);
+			return {call_source->linked, call_source->reads};
 		}
 
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime) {
+			std::unique_lock lock(mutex);
 			const auto revision = call_source->revision;
 			ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
 			resource_plan.source_reads = call_source->reads;
 			return revision != call_source->revision;
 		}
 
+		void SetResourcePlan(ShaderRecompiler::IR::ResourcePlan plan) {
+			std::unique_lock lock(mutex);
+			resource_plan = std::move(plan);
+		}
+
+		// Re-reads guest memory and refreshes `resources`/`specialization`. Returns a copy of the
+		// specialization so callers can compile against exactly what was materialized.
+		ShaderRecompiler::IR::ResourceSpecialization
+		Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime, StepTime* materialize_time) {
+			std::unique_lock lock(mutex);
+			return MaterializeLocked(runtime, materialize_time);
+		}
+
+		// Materializes, then looks for an already-compiled permutation. `specialization_out`
+		// receives the materialized specialization (valid also when nothing matches).
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
-		                             uint32_t push_data_cursor, StepTime* materialize_time = nullptr) {
-			Stopwatch  materialize_sw;
-			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
-			    resource_plan, runtime, resources, specialization);
-			if (materialize_time != nullptr) materialize_time->Add(materialize_sw, materialize_sw.Lap());
-			EXIT_IF(!materialized);
-			for (auto& candidate: permutations) {
-				const auto& layout = candidate.program.bindings;
-				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
-				        push_data_cursor, layout.ShaderDataDwords()) ||
-				    candidate.specialization != specialization) {
-					continue;
-				}
-				if constexpr (HasCalls) {
-					if (!std::ranges::equal(candidate.function_code, FunctionCode())) continue;
-				}
-				return &candidate;
+		                             uint32_t push_data_cursor, StepTime* materialize_time,
+		                             ShaderRecompiler::IR::ResourceSpecialization* specialization_out) {
+			std::unique_lock lock(mutex);
+			auto             current = MaterializeLocked(runtime, materialize_time);
+			Permutation*     found   = nullptr;
+			if constexpr (HasCalls) {
+				const auto& linked = call_source->linked;
+				found = FindExistingLocked<true>(push_data_cursor, current,
+				                                 FunctionCode(linked, call_source->code.size()));
+			} else {
+				found = FindExistingLocked<false>(push_data_cursor, current, {});
 			}
-			return nullptr;
+			if (specialization_out != nullptr) {
+				*specialization_out = std::move(current);
+			}
+			return found;
+		}
+
+		// Publishes a freshly compiled permutation. If another thread already published an equal
+		// one (two threads missing the same program), keeps theirs and sets `duplicate`; in that
+		// case `compiled` is left untouched so the caller can release its shader module.
+		Permutation* Publish(Permutation& compiled, uint32_t push_data_cursor, bool has_calls,
+		                     bool& duplicate) {
+			std::unique_lock lock(mutex);
+			Permutation*     existing = has_calls
+			    ? FindExistingLocked<true>(push_data_cursor, compiled.specialization,
+			                               compiled.function_code)
+			    : FindExistingLocked<false>(push_data_cursor, compiled.specialization, {});
+			duplicate = existing != nullptr;
+			if (duplicate) {
+				return existing;
+			}
+			return &permutations.emplace_back(std::move(compiled));
 		}
 
 		std::unique_ptr<ShaderRecompiler::ShaderSource> call_source;
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
-		std::vector<Permutation>                    permutations;
+		std::deque<Permutation>                      permutations;
+		mutable std::shared_mutex                    mutex;
+
+	private:
+		ShaderRecompiler::IR::ResourceSpecialization
+		MaterializeLocked(const ShaderRecompiler::IR::SrtRuntime& runtime, StepTime* materialize_time) {
+			Stopwatch  materialize_sw;
+			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
+			    resource_plan, runtime, resources, specialization);
+			if (materialize_time != nullptr) materialize_time->Add(materialize_sw, materialize_sw.Lap());
+			EXIT_IF(!materialized);
+			return specialization;
+		}
+
+		template <bool HasCalls>
+		Permutation* FindExistingLocked(uint32_t push_data_cursor,
+		                                const ShaderRecompiler::IR::ResourceSpecialization& wanted,
+		                                std::span<const uint32_t> function_code) {
+			for (auto& candidate: permutations) {
+				const auto& layout = candidate.program.bindings;
+				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
+				        push_data_cursor, layout.ShaderDataDwords()) ||
+				    candidate.specialization != wanted) {
+					continue;
+				}
+				if constexpr (HasCalls) {
+					if (!std::ranges::equal(candidate.function_code, function_code)) continue;
+				}
+				return &candidate;
+			}
+			return nullptr;
+		}
 	};
 
 	struct ProgramKeyHash {
@@ -391,7 +486,8 @@ struct PipelineCache::ProgramCache {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),
 		    .program        = std::move(result.program).TakeCompiledInfo(),
-		    .handle         = {.id = ++next_shader_id, .module = module},
+		    .handle         = {.id = next_shader_id.fetch_add(1, std::memory_order_relaxed) + 1,
+		                       .module = module},
 		};
 	}
 
@@ -409,6 +505,14 @@ struct PipelineCache::ProgramCache {
 		}
 
 		const auto user_data = std::span(params.user_data).first(params.user_data_count);
+		// Per-call key. A thread_local scratch object avoids a heap allocation per draw (the
+		// static_state vector keeps its capacity) while never being shared between threads or
+		// between calls: Get() is not re-entrant on one thread.
+		thread_local ProgramKey lookup_key = [] {
+			ProgramKey key;
+			key.static_state.reserve(MaxStaticKeyWords);
+			return key;
+		}();
 		lookup_key.stage           = stage;
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = params.user_data_count;
@@ -434,7 +538,7 @@ struct PipelineCache::ProgramCache {
 			report("swappc_refresh", Bench::HitSlot::SwapPcRefresh, refresh_time);
 			report("materialize", Bench::HitSlot::Materialize, materialize_time);
 		};
-		auto                                         entry = programs.find(lookup_key);
+		SourceEntry* entry = FindEntry(lookup_key);
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
@@ -445,20 +549,22 @@ struct PipelineCache::ProgramCache {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 		}
 		bool source_changed = false;
-		if (entry != programs.end()) {
-			auto& cached = entry->second;
+		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		if (entry != nullptr) {
 			Permutation* permutation = nullptr;
-			if (cached.call_source) {
+			if (entry->call_source) {
 				Stopwatch refresh_sw;
-				source_changed = cached.RefreshCallSource(runtime);
+				source_changed = entry->RefreshCallSource(runtime);
 				refresh_time.Add(refresh_sw, refresh_sw.Lap());
 				if (!source_changed)
-					permutation = cached.FindPermutation<true>(runtime, push_data_cursor, &materialize_time);
+					permutation = entry->FindPermutation<true>(runtime, push_data_cursor, &materialize_time,
+					                                           &specialization);
 			} else {
-				permutation = cached.FindPermutation<false>(runtime, push_data_cursor, &materialize_time);
+				permutation = entry->FindPermutation<false>(runtime, push_data_cursor, &materialize_time,
+				                                            &specialization);
 			}
 			if (permutation != nullptr) {
-				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
+				input_info.stage = {.program = &permutation->program, .resources = &entry->resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				report_steps(false);
 				return permutation->handle;
@@ -467,7 +573,7 @@ struct PipelineCache::ProgramCache {
 
 		Stopwatch miss_sw;
 		int64_t   prepare_ns = 0, frontend_ns = 0, plan_ns = 0, backend_ns = 0, module_ns = 0;
-		const bool new_source = entry == programs.end();
+		const bool new_source = entry == nullptr;
 
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
@@ -511,20 +617,32 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
 		ShaderRecompiler::ShaderSource source;
-		if (entry == programs.end()) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
-		auto* current = entry == programs.end() ? &source : entry->second.call_source.get();
+		if (entry == nullptr) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+		auto* current = entry == nullptr ? &source : entry->call_source.get();
 		ShaderRecompiler::TranslateResult translated;
 		prepare_ns = miss_sw.Lap();
+		// The linked callee snapshot translation used, and where its function code starts; the
+		// permutation records exactly this function code, even if another thread refreshes later.
+		LinkedPtr translated_linked;
+		size_t    base_code_size = 0;
 		if (current != nullptr) {
 			if (current->call) {
-				if (entry == programs.end()) {
+				base_code_size = current->code.size();
+				if (entry == nullptr) {
+					// `source` is still private to this call: no lock needed.
 					Stopwatch refresh_sw;
 					ShaderRecompiler::RefreshShaderSource(*current, runtime);
 					refresh_time.Add(refresh_sw, refresh_sw.Lap());
 					miss_sw.Lap(); // refresh is reported on its own row, not as translate time
+					translated_linked = current->linked;
+					translated        = ShaderRecompiler::TranslateProgram(translated_linked->decoded, options);
+					translated.program.source_reads = current->reads;
+				} else {
+					auto snapshot     = entry->SnapshotCall();
+					translated_linked = snapshot.linked;
+					translated        = ShaderRecompiler::TranslateProgram(translated_linked->decoded, options);
+					translated.program.source_reads = std::move(snapshot.reads);
 				}
-				translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
-				translated.program.source_reads = current->reads;
 			} else {
 				translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
 			}
@@ -548,24 +666,20 @@ struct PipelineCache::ProgramCache {
 			                reused ? 1 : 0, prepare_ns, frontend_ns, plan_ns, materialize_time.dur,
 			                backend_ns, module_ns, params.code.size()));
 		};
-		if (entry == programs.end()) {
+		if (entry == nullptr) {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
-			entry = programs.try_emplace(lookup_key,
-			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program), std::move(retained)).first;
+			entry = InsertEntry(lookup_key, ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
+			                    std::move(retained));
 			plan_ns = miss_sw.Lap();
-			Stopwatch  materialize_sw;
-			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, entry->second.resources,
-			    entry->second.specialization);
-			materialize_time.Add(materialize_sw, materialize_sw.Lap());
+			specialization = entry->Materialize(runtime, &materialize_time);
 			miss_sw.Lap();
-			EXIT_IF(!materialized);
 		} else if (source_changed) {
-			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+			entry->SetResourcePlan(ShaderRecompiler::IR::ExtractResourcePlan(translated.program));
 			plan_ns = miss_sw.Lap();
-			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data_cursor, &materialize_time)) {
+			if (const auto* permutation = entry->FindPermutation<true>(
+			        runtime, push_data_cursor, &materialize_time, &specialization)) {
 				miss_sw.Lap();
-				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
+				input_info.stage = {.program = &permutation->program, .resources = &entry->resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				log_translate(true, permutation->handle.id);
 				report_steps(true);
@@ -573,34 +687,36 @@ struct PipelineCache::ProgramCache {
 			}
 			miss_sw.Lap();
 		}
-		entry->second.permutations.push_back(CompilePermutation(
-		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
-		    entry->second.FunctionCode(), timing ? &backend_ns : nullptr, timing ? &module_ns : nullptr));
-		const auto& permutation = entry->second.permutations.back();
-		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
+		auto compiled = CompilePermutation(
+		    stage_name, options, std::move(translated), std::move(specialization), push_data_cursor,
+		    SourceEntry::FunctionCode(translated_linked, base_code_size), timing ? &backend_ns : nullptr,
+		    timing ? &module_ns : nullptr);
+		bool        duplicate = false;
+		auto* const published = entry->Publish(compiled, push_data_cursor, translated_linked != nullptr, duplicate);
+		if (duplicate) {
+			// Another thread published an equal permutation first: drop our module, use theirs.
+			device.destroyShaderModule(compiled.handle.module, nullptr);
+		} else {
+			stage_permutation_counts[static_cast<size_t>(stage)].fetch_add(1, std::memory_order_relaxed);
+		}
+		const auto& permutation = *published;
+		input_info.stage = {.program = &permutation.program, .resources = &entry->resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
-		log_translate(false, permutation.handle.id);
+		log_translate(duplicate, permutation.handle.id);
 		report_steps(true);
 
-		std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> counts {};
-		for (const auto& [key, source]: programs) {
-			counts[static_cast<size_t>(key.stage)] += source.permutations.size();
-		}
 		// Guest geometry shaders are compiled through the host mesh stage.
+		const auto count = [this](ShaderType type) {
+			return stage_permutation_counts[static_cast<size_t>(type)].load(std::memory_order_relaxed);
+		};
 		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu | LS %zu | HS %zu | TES %zu\n",
-		            counts[static_cast<size_t>(ShaderType::Vertex)],
-		            counts[static_cast<size_t>(ShaderType::Pixel)],
-		            counts[static_cast<size_t>(ShaderType::Compute)],
-		            counts[static_cast<size_t>(ShaderType::Mesh)],
-		            counts[static_cast<size_t>(ShaderType::Local)],
-		            counts[static_cast<size_t>(ShaderType::TessellationControl)],
-		            counts[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
+		            count(ShaderType::Vertex), count(ShaderType::Pixel), count(ShaderType::Compute),
+		            count(ShaderType::Mesh), count(ShaderType::Local),
+		            count(ShaderType::TessellationControl), count(ShaderType::TessellationEvaluation));
 		return permutation.handle;
 	}
 
-	explicit ProgramCache(vk::Device device): device(device) {
-		lookup_key.static_state.reserve(MaxStaticKeyWords);
-	}
+	explicit ProgramCache(vk::Device device): device(device) {}
 	~ProgramCache() {
 		for (const auto& [key, entry]: programs) {
 			(void)key;
@@ -610,10 +726,28 @@ struct PipelineCache::ProgramCache {
 		}
 	}
 
+	[[nodiscard]] SourceEntry* FindEntry(const ProgramKey& key) {
+		std::lock_guard lock(programs_mutex);
+		const auto      iter = programs.find(key);
+		return iter != programs.end() ? &iter->second : nullptr;
+	}
+
+	// Inserts a new entry, or returns the one another thread inserted first (the caller then
+	// treats it like any existing entry; its own translation result is simply discarded).
+	SourceEntry* InsertEntry(const ProgramKey& key, ShaderRecompiler::IR::ResourcePlan plan,
+	                         std::unique_ptr<ShaderRecompiler::ShaderSource> call_source) {
+		std::lock_guard lock(programs_mutex);
+		return &programs.try_emplace(key, std::move(plan), std::move(call_source)).first->second;
+	}
+
+	std::mutex                                                  programs_mutex;
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
-	ProgramKey                                                  lookup_key;
 	vk::Device                                                  device;
-	uint64_t                                                    next_shader_id = 0;
+	std::atomic<uint64_t>                                       next_shader_id {0};
+	// Number of published permutations per logical stage, kept incrementally so the "Shaders:"
+	// progress line does not have to walk (and lock) the whole map on every miss.
+	std::array<std::atomic<size_t>, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1>
+	    stage_permutation_counts {};
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
