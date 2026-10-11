@@ -42,6 +42,35 @@ private:
 	bool                      m_made_progress = false;
 };
 
+class CommandProcessor;
+
+// --pipeline-lookahead: a "shadow" CommandProcessor decodes a submitted command buffer ahead of
+// the GPU thread, tracking the same register state, but performs no side effects (no guest
+// memory writes, no Vulkan work, no waits). Draws and dispatches are reported to the sink instead
+// (docs/lookahead-notes.md).
+struct ShadowDraw {
+	bool     indexed             = false;
+	bool     indirect            = false; // arguments live in guest memory and are not read
+	uint32_t index_count         = 0;     // vertex count for non-indexed draws
+	uint32_t instance_count      = 0;
+	uint32_t index_type_and_size = 0;
+};
+
+struct ShadowDispatch {
+	uint32_t x        = 0;
+	uint32_t y        = 0;
+	uint32_t z        = 0;
+	uint32_t mode     = 0;
+	bool     indirect = false;
+};
+
+class ShadowSink {
+public:
+	virtual ~ShadowSink()                                                  = default;
+	virtual void OnDraw(CommandProcessor& cp, const ShadowDraw& draw)         = 0;
+	virtual void OnDispatch(CommandProcessor& cp, const ShadowDispatch& dispatch) = 0;
+};
+
 class CommandProcessor {
 public:
 	struct FlipInfo {
@@ -56,6 +85,10 @@ public:
 	~CommandProcessor() = default;
 
 	KYTY_CLASS_NO_COPY(CommandProcessor);
+
+	// Turns this processor into a shadow (see ShadowSink). Call before any packet is processed.
+	void SetShadowSink(ShadowSink* sink) { m_shadow_sink = sink; }
+	[[nodiscard]] bool IsShadow() const noexcept { return m_shadow_sink != nullptr; }
 
 	void Reset();
 	void ApplyContextStateOperation(ContextStateOperation operation);
@@ -177,6 +210,7 @@ private:
 	uint64_t  m_submit_id                   = 0;
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
+	ShadowSink* m_shadow_sink               = nullptr;
 };
 
 } // namespace Libs::Graphics

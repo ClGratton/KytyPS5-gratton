@@ -68,6 +68,15 @@ public:
 	[[nodiscard]] uint64_t KeyHash() const { return m_key_hash; }
 	[[nodiscard]] int64_t  WaitNs() const { return m_wait_ns.load(std::memory_order_relaxed); }
 	[[nodiscard]] uint32_t Skipped() const { return m_skipped.load(std::memory_order_relaxed); }
+
+	// --pipeline-lookahead. A job submitted by the lookahead thread is "prefetched"; the first
+	// draw/dispatch that needs it "claims" it (prediction hit). ClaimByDraw() returns true only
+	// for that first claim of a prefetched job.
+	void SetPrefetched() { m_prefetched.store(true, std::memory_order_relaxed); }
+	[[nodiscard]] bool IsPrefetched() const { return m_prefetched.load(std::memory_order_relaxed); }
+	[[nodiscard]] bool ClaimByDraw() {
+		return IsPrefetched() && !m_claimed.exchange(true, std::memory_order_relaxed);
+	}
 	void                   CountSkippedDraw() { m_skipped.fetch_add(1, std::memory_order_relaxed); }
 
 	// Timing rows recorded while the job runs (worker thread only, before Execute() returns).
@@ -97,6 +106,8 @@ private:
 	std::condition_variable   m_cv;
 	std::atomic<int64_t>      m_wait_ns {0};
 	std::atomic<uint32_t>     m_skipped {0};
+	std::atomic<bool>         m_prefetched {false};
+	std::atomic<bool>         m_claimed {false};
 	int64_t                   m_submit_ns = 0;
 	int64_t                   m_start_ns  = 0;
 	int64_t                   m_end_ns    = 0;
@@ -189,8 +200,9 @@ public:
 	AsyncPipelineCompiler(const AsyncPipelineCompiler&)            = delete;
 	AsyncPipelineCompiler& operator=(const AsyncPipelineCompiler&) = delete;
 
-	// Queues `job`. Returns false (and does not queue it) once Shutdown() has begun.
-	bool Submit(std::shared_ptr<AsyncJob> job);
+	// Queues `job`. Returns false (and does not queue it) once Shutdown() has begun. `urgent`
+	// jobs (a draw is waiting on them) go to the front of the queue.
+	bool Submit(std::shared_ptr<AsyncJob> job, bool urgent = false);
 
 	// Stops accepting jobs, cancels the queued ones (Cancel() + Wait() returns false), lets the
 	// running ones finish and joins the workers. Idempotent. Must be called before the Vulkan
@@ -202,7 +214,8 @@ public:
 	[[nodiscard]] uint32_t WorkerCount() const { return m_worker_count; }
 	[[nodiscard]] AsyncStats& Stats() { return m_stats; }
 
-	// Waits for `job` on the calling (GPU) thread and accounts the blocked time.
+	// Waits for `job` on the calling (GPU) thread and accounts the blocked time. A job still in
+	// the queue is moved to the front first (the nearest draw wins).
 	bool WaitFor(AsyncJob& job);
 
 	// One-line summary (also written as a summary_async timing row when timing is on).
@@ -211,6 +224,7 @@ public:
 
 private:
 	void WorkerLoop(uint32_t index);
+	void Promote(AsyncJob& job);
 
 	const Config::AsyncPipelineMode m_mode;
 	const uint32_t                  m_worker_count;

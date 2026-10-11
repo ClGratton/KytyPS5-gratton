@@ -97,6 +97,9 @@ struct ConfigOptions {
 	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
 	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.
 	uint32_t               pipeline_workers            = 0;
+	// --pipeline-lookahead: prefetch pipelines from submitted command buffers (needs
+	// --async-pipelines stall or skip). Default off.
+	bool                   pipeline_lookahead          = false;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -134,6 +137,7 @@ PipelineCacheKey GetPipelineCacheKey();
 AsyncPipelineMode GetAsyncPipelineMode();
 // Resolved worker count (never 0).
 uint32_t          GetPipelineWorkerCount();
+bool              GetPipelineLookahead();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();
