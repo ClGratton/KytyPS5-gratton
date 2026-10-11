@@ -107,6 +107,9 @@ uint64_t CurrentThreadId() noexcept {
 }
 
 thread_local int64_t t_driver_create_ns = 0;
+thread_local uint64_t t_trace_seq        = 0;
+thread_local uint32_t t_trace_draws      = 0;
+thread_local uint32_t t_trace_dispatches = 0;
 
 void FlushAtExit() {
 	Flush();
@@ -135,6 +138,7 @@ void Configure(const Options& options) {
 	}
 	detail::g_frames_enabled.store(frames, std::memory_order_relaxed);
 	detail::g_timing_enabled.store(timing, std::memory_order_relaxed);
+	detail::g_trace_enabled.store(options.gpu_trace, std::memory_order_relaxed);
 }
 
 bool RecordPresent(uint64_t frame_idx) {
@@ -199,6 +203,32 @@ void SetDriverCreateNs(int64_t ns) noexcept {
 
 int64_t TakeDriverCreateNs() noexcept {
 	return std::exchange(t_driver_create_ns, 0);
+}
+
+void TraceSetSubmission(uint64_t seq) noexcept {
+	t_trace_seq        = seq;
+	t_trace_draws      = 0;
+	t_trace_dispatches = 0;
+}
+
+uint64_t TraceSubmission() noexcept {
+	return t_trace_seq;
+}
+
+uint32_t TraceDraw(const char* what) {
+	const bool     cs  = what[0] == 'c';
+	const uint32_t idx = cs ? t_trace_dispatches++ : t_trace_draws++;
+	LogTiming("gpu_draw", t_trace_seq, NowNs(), 0, true,
+	          fmt::format("k={};n={};n_all={}", what, idx, t_trace_draws + t_trace_dispatches - 1));
+	return idx;
+}
+
+uint32_t TraceDrawCount() noexcept {
+	return t_trace_draws;
+}
+
+uint32_t TraceDispatchCount() noexcept {
+	return t_trace_dispatches;
 }
 
 void Flush() {

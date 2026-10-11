@@ -22,6 +22,9 @@ struct Options {
 	// creation (misses only) and per slow MaterializeResources / S_SWAP_PC refresh, plus
 	// aggregate rows for the fast (hit) path. See docs/phase1-notes.md for the row format.
 	std::filesystem::path shader_timing_log;
+	// --bench-gpu-trace: with --shader-timing-log, also log the guest submit / GPU-thread execute
+	// timeline (rows gpu_submit, gpu_start, gpu_end, gpu_draw, gpu_miss). Observation only.
+	bool gpu_trace = false;
 };
 
 // Called once from Config::Load(). Replaces any previous state (the buffer is flushed first).
@@ -72,6 +75,22 @@ void LogTiming(const char* kind, uint64_t key_hash, int64_t t_start_ns, int64_t 
 // thread and written later by another (async pipeline jobs, docs/phase2-notes.md).
 void LogTimingAs(const char* kind, uint64_t key_hash, int64_t t_start_ns, int64_t dur_ns,
                  uint64_t thread_id, bool on_gpu_thread, const std::string& detail);
+
+// ---- GPU command trace (--bench-gpu-trace, docs/lookahead-notes.md) -----------------------------
+namespace detail {
+inline std::atomic<bool> g_trace_enabled {false};
+} // namespace detail
+
+[[nodiscard]] inline bool TraceEnabled() noexcept {
+	return detail::g_trace_enabled.load(std::memory_order_relaxed) && TimingEnabled();
+}
+// GPU thread: the submission being executed (0 = none) and the draw/dispatch counter inside it.
+void TraceSetSubmission(uint64_t seq) noexcept;
+[[nodiscard]] uint64_t TraceSubmission() noexcept;
+// Counts one draw/dispatch of the current submission and logs a gpu_draw row; returns its index.
+uint32_t TraceDraw(const char* what);
+[[nodiscard]] uint32_t TraceDrawCount() noexcept;
+[[nodiscard]] uint32_t TraceDispatchCount() noexcept;
 
 // Fast-path (cache hit) steps run on every draw, so they are aggregated, not logged per call.
 enum class HitSlot : uint32_t { Materialize = 0, SwapPcRefresh = 1, Count };
