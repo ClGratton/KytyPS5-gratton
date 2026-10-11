@@ -305,19 +305,21 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSpecialization
 		Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime, StepTime* materialize_time) {
 			std::unique_lock lock(mutex);
-			return MaterializeLocked(runtime, materialize_time);
+			MaterializeLocked(runtime, materialize_time);
+			return specialization;
 		}
 
 		// Materializes, then looks for an already-compiled permutation. `specialization_out`
-		// receives the materialized specialization (valid also when nothing matches).
+		// receives the materialized specialization when nothing matches (it is only copied then).
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t push_data_cursor, StepTime* materialize_time,
 		                             ShaderRecompiler::IR::ResourceSpecialization* specialization_out) {
 			std::unique_lock lock(mutex);
-			auto             current = MaterializeLocked(runtime, materialize_time);
-			Permutation*     found   = FindExistingLocked(push_data_cursor, current);
-			if (specialization_out != nullptr) {
-				*specialization_out = std::move(current);
+			MaterializeLocked(runtime, materialize_time);
+			Permutation* found = FindExistingLocked(push_data_cursor, specialization);
+			// Copy only on a miss: the hit path (every draw) stays allocation-free.
+			if (found == nullptr && specialization_out != nullptr) {
+				*specialization_out = specialization;
 			}
 			return found;
 		}
@@ -343,14 +345,13 @@ struct PipelineCache::ProgramCache {
 		mutable std::shared_mutex                    mutex;
 
 	private:
-		ShaderRecompiler::IR::ResourceSpecialization
-		MaterializeLocked(const ShaderRecompiler::IR::SrtRuntime& runtime, StepTime* materialize_time) {
+		void MaterializeLocked(const ShaderRecompiler::IR::SrtRuntime& runtime,
+		                       StepTime*                                materialize_time) {
 			Stopwatch  materialize_sw;
 			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization);
 			if (materialize_time != nullptr) materialize_time->Add(materialize_sw, materialize_sw.Lap());
 			EXIT_IF(!materialized);
-			return specialization;
 		}
 
 		Permutation* FindExistingLocked(uint32_t push_data_cursor,
