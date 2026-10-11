@@ -141,6 +141,27 @@ int KYTY_SYSV_ABI KernelAllocateMainDirectMemory(size_t len, size_t alignment, i
                                                  int64_t* phys_addr_out);
 int KYTY_SYSV_ABI KernelCheckedReleaseDirectMemory(int64_t start, size_t len);
 int KYTY_SYSV_ABI KernelReleaseDirectMemory(int64_t start, size_t len);
+
+// Counters of --mem-stats (all zero unless it is on). For tests and diagnostics.
+struct MemStatsSnapshot {
+	struct Pair {
+		uint64_t calls = 0;
+		uint64_t bytes = 0;
+	};
+	Pair     direct_release;
+	Pair     munmap_direct;
+	Pair     munmap_flexible;
+	Pair     munmap_pooled;
+	Pair     pool_decommit;
+	Pair     flexible_map;
+	Pair     flexible_unmap;
+	Pair     punch;
+	uint64_t released_unmapped_bytes       = 0;
+	uint64_t realloc_bytes                 = 0;
+	uint64_t realloc_after_punch_bytes     = 0;
+	uint64_t punch_failures                = 0;
+};
+MemStatsSnapshot KernelMemStatsSnapshot();
 int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int flags,
                                         int64_t direct_memory_start, size_t alignment);
 int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags,

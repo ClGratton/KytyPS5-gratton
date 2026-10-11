@@ -225,6 +225,27 @@ static void MemStatAdd(MemStats::Pair& pair, uint64_t bytes) {
 
 #include "memoryAddressSpace.inc"
 
+MemStatsSnapshot KernelMemStatsSnapshot() {
+	const auto pair = [](const MemStats::Pair& p) {
+		return MemStatsSnapshot::Pair {p.calls.load(std::memory_order_relaxed),
+		                               p.bytes.load(std::memory_order_relaxed)};
+	};
+	MemStatsSnapshot s;
+	s.direct_release   = pair(g_mem_stats.direct_release);
+	s.munmap_direct    = pair(g_mem_stats.munmap_direct);
+	s.munmap_flexible  = pair(g_mem_stats.munmap_flexible);
+	s.munmap_pooled    = pair(g_mem_stats.munmap_pooled);
+	s.pool_decommit    = pair(g_mem_stats.pool_decommit);
+	s.flexible_map     = pair(g_mem_stats.flexible_map);
+	s.flexible_unmap   = pair(g_mem_stats.flexible_unmap);
+	s.punch            = pair(g_mem_stats.punch);
+	s.released_unmapped_bytes   = g_mem_stats.released_unmapped_bytes.load(std::memory_order_relaxed);
+	s.realloc_bytes             = g_mem_stats.realloc_bytes.load(std::memory_order_relaxed);
+	s.realloc_after_punch_bytes = g_mem_stats.realloc_after_punch_bytes.load(std::memory_order_relaxed);
+	s.punch_failures            = g_mem_stats.punch_failures.load(std::memory_order_relaxed);
+	return s;
+}
+
 enum class VirtualRangeType {
 	Reserved,
 	PoolReserved,
