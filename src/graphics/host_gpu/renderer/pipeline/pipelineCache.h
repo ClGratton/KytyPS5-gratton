@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
@@ -11,6 +12,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <shared_mutex>
 #include <span>
 #include <type_traits>
 #include <unordered_map>
@@ -99,7 +101,10 @@ struct ShaderProgram {
 	explicit operator bool() const { return id != 0 && module != nullptr; }
 };
 
-// The owning renderer serializes access, including saves while the GPU is running.
+// The owning renderer serializes access, including saves while the GPU is running. With
+// --async-pipelines on, worker threads also touch the cache: they only publish into the program
+// cache (per-entry locks) and into the two pipeline maps (m_pipelines_mutex); see
+// docs/phase2-notes.md for the full thread-safety argument.
 class PipelineCache {
 public:
 	explicit PipelineCache(GraphicContext& graphics);
@@ -143,6 +148,8 @@ public:
 
 private:
 	struct ProgramCache;
+	struct GraphicsPipelineJob;
+	struct ComputePipelineJob;
 
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
@@ -173,11 +180,34 @@ private:
 	std::unique_ptr<ProgramCache> m_program_cache;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
+	// Guarded by m_pipelines_mutex whenever m_async_mode != Off (workers publish into them).
+	// Pipeline objects are heap nodes that are never erased while the cache lives, so a returned
+	// Pipeline& / Pipeline* stays valid after the lock is dropped.
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
+	std::shared_mutex                                       m_pipelines_mutex;
+
+	// --async-pipelines. The mode is fixed at construction; m_async is null in Off mode.
+	const Config::AsyncPipelineMode m_async_mode;
+	std::unique_ptr<AsyncPipelineCompiler> m_async;
+	InFlightRegistry<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_graphics_jobs;
+	InFlightRegistry<uint64_t>                                     m_compute_jobs;
 
 	void InitializeDriverCache();
+	// The pool when async is on and still running (it stops in Save()), else nullptr.
+	AsyncPipelineCompiler* AsyncPool();
+	// Stops the workers (cancels queued jobs, waits for running ones). Idempotent.
+	void ShutdownAsync();
+	Pipeline* FindGraphicsPipeline(const GraphicsPipelineKey& key);
+	Pipeline* FindComputePipeline(uint64_t program_id);
+	// Inserts a finished pipeline; returns the one in the map (ours, or an existing equal one, in
+	// which case `inserted` is false and `pipeline` is left untouched for the caller to destroy).
+	Pipeline* PublishGraphicsPipeline(const GraphicsPipelineKey& key,
+	                                  std::unique_ptr<Pipeline>& pipeline, bool& inserted);
+	Pipeline* PublishComputePipeline(uint64_t program_id, std::unique_ptr<Pipeline>& pipeline,
+	                                 bool& inserted);
+	void      DestroyPipeline(Pipeline& pipeline);
 };
 
 void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pixel_program_id);

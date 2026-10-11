@@ -987,6 +987,14 @@ void EnsureConfigInitialized() {
     subsystems.Initialize<Config::Lifecycle>();
     Config::ConfigOptions options;
     options.printf_direction = Config::LogDirection::Silent;
+    // ctest runs the suite once more with KYTY_TEST_ASYNC_PIPELINES=stall (everything through
+    // the worker pool).
+    if (const char *async_mode = std::getenv("KYTY_TEST_ASYNC_PIPELINES")) {
+      if (std::strcmp(async_mode, "stall") == 0) {
+        options.async_pipelines = Config::AsyncPipelineMode::Stall;
+      }
+      options.pipeline_workers = 4;
+    }
     Config::Load(options);
     subsystems.Initialize<Log::Lifecycle>();
     subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
