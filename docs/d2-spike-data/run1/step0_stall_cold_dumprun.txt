@@ -1,0 +1,50 @@
+run: frames=6087 span=151.2s
+
+== pipeline_create dur (per-miss creation stall) ==
+gfx create (CreatePipelineInternal)    n= 66 sum=  8.531s mean=  129.26ms p50=   26.71 p90=  274.80 p95= 1021.60 p99= 1399.53 max= 1413.57ms  (frames@60: p95=61.30 p99=83.97 max=84.8)
+gfx driver call only                   n= 66 sum=  8.483s mean=  128.53ms p50=   26.12 p90=  273.73 p95= 1020.24 p99= 1396.70 max= 1412.15ms  (frames@60: p95=61.21 p99=83.80 max=84.7)
+cs create                              n= 39 sum=  8.223s mean=  210.86ms p50=   32.26 p90=  270.13 p95=  575.79 p99= 2979.54 max= 3730.87ms  (frames@60: p95=34.55 p99=178.77 max=223.9)
+all create (gfx+cs)                    n=105 sum= 16.754s mean=  159.57ms p50=   28.41 p90=  275.96 p95= 1057.29 p99= 1740.09 max= 3730.87ms  (frames@60: p95=63.44 p99=104.41 max=223.9)
+translate (program_translate)          n=127 sum=  0.533s mean=    4.20ms p50=    1.47 p90=   12.15 p95=   21.16 p99=   39.99 max=   64.43ms  (frames@60: p95=1.27 p99=2.40 max=3.9)
+
+== per-miss event (translate rows since previous creation + creation) ==
+pipeline_create_gfx total miss stall   n= 66 sum=  8.868s mean=  134.36ms p50=   29.55 p90=  296.21 p95= 1054.55 p99= 1432.50 max= 1457.46ms  (frames@60: p95=63.27 p99=85.95 max=87.4)
+pipeline_create_cs total miss stall    n= 39 sum=  8.420s mean=  215.90ms p50=   33.23 p90=  276.45 p95=  601.20 p99= 3035.79 max= 3795.31ms  (frames@60: p95=36.07 p99=182.15 max=227.7)
+ALL miss total stall                   n=105 sum= 17.288s mean=  164.65ms p50=   30.37 p90=  297.73 p95= 1090.00 p99= 1783.02 max= 3795.31ms  (frames@60: p95=65.40 p99=106.98 max=227.7)
+
+== split: new-shader vs known-shader(new state/permutation) ==
+gfx new-shader (>=1 new program translated) n= 51 sum=  7.410s mean=  145.29ms p50=   31.62 p90=  303.79 p95=  937.34 p99= 1438.26 max= 1457.46ms  (frames@60: p95=56.24 p99=86.30 max=87.4)
+gfx known-programs, new state/perm     n= 15 sum=  1.458s mean=   97.17ms p50=    0.12 p90=  106.20 p95=  465.91 p99= 1078.61 max= 1231.79ms  (frames@60: p95=27.95 p99=64.72 max=73.9)
+cs new-shader (>=1 new program translated) n= 38 sum=  8.420s mean=  221.57ms p50=   33.35 p90=  288.31 p95=  667.61 p99= 3055.78 max= 3795.31ms  (frames@60: p95=40.06 p99=183.35 max=227.7)
+cs known-programs, new state/perm      n=  1 sum=  0.001s mean=    0.55ms p50=    0.55 p90=    0.55 p95=    0.55 p99=    0.55 max=    0.55ms  (frames@60: p95=0.03 p99=0.03 max=0.0)
+
+new-shader: 89 misses (84.8%), total 15.83s
+known/new-state: 16 misses (15.2%), total 1.46s
+
+== translation share of miss time ==
+translate 0.533s create 16.754s -> translate share 3.08% (per-miss: median 4.1%, max 98.9%)
+gfx only: translate 0.336s create 8.531s share 3.79%
+translate rows: 127 by stage Counter({'ps': 48, 'cs': 39, 'vs': 36, 'ms': 4}) new_source Counter({'1': 120, '0': 7})
+
+== frame-time context ==
+frames>1 frame-time(16.7ms)*2: 1146 >50ms: 17 >100ms: 11 median ms 16.7466145 p99 ms 37.68938205
+misses with stall > 1 frame(s): 66/105
+misses with stall > 2 frame(s): 44/105
+misses with stall > 4 frame(s): 27/105
+misses with stall > 10 frame(s): 16/105
+misses/min by 30s bin:
+[(0, 76), (1, 29)]
+
+Top 12 slowest misses:
+  cs t=  32.5s total=  3795.3ms create=  3730.9 translate= 64.43 newsrc=True
+  cs t=   1.0s total=  1796.6ms create=  1753.7 translate= 42.89 newsrc=True
+  gfx t=  29.7s total=  1457.5ms create=  1413.6 translate= 43.89 newsrc=True
+  gfx t=  25.7s total=  1419.1ms create=  1392.0 translate= 27.10 newsrc=True
+  gfx t=  27.9s total=  1351.8ms create=  1342.3 translate=  9.57 newsrc=True
+  gfx t=  31.2s total=  1231.8ms create=  1200.0 translate= 31.74 newsrc=False
+  gfx t=  40.5s total=   522.9ms create=   486.3 translate= 36.59 newsrc=True
+  cs t=   2.8s total=   468.4ms create=   444.9 translate= 23.46 newsrc=True
+  cs t=  24.9s total=   371.3ms create=   361.2 translate= 10.13 newsrc=True
+  gfx t=  27.6s total=   304.4ms create=   280.6 translate= 23.78 newsrc=True
+  gfx t=  27.2s total=   303.8ms create=   282.5 translate= 21.24 newsrc=True
+  gfx t=  29.3s total=   288.6ms create=   266.4 translate= 22.21 newsrc=True
