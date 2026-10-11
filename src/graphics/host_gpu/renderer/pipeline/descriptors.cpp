@@ -1002,6 +1002,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		if (descriptors.gds.buffer != nullptr) {
 			buffer.EndRendering();
 			const auto barrier = MakeGdsDependency(descriptors.gds.buffer);
+			Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 			vk_buffer.pipelineBarrier(
 			    vk::PipelineStageFlagBits::eHost | vk::PipelineStageFlagBits::eTransfer |
 			        vk::PipelineStageFlagBits::eAllGraphics |
@@ -1142,11 +1143,13 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	}
 
 	if (has_push_data) {
+		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0, sizeof(push_data),
 		                        push_data.dwords.data());
 	}
 
 	if (!m_descriptor_writes.empty()) {
+		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
 			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,

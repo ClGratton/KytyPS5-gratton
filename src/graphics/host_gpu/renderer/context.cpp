@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "common/gpuPhaseStats.h"
 #include "common/common.h"
 #include "common/profiler.h"
 #include "common/threads.h"
@@ -64,6 +65,7 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	if (m_rendering && m_render_state == state) {
 		return;
 	}
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
 	        state.num_color_attachments > RENDER_COLOR_ATTACHMENTS_MAX);
 	EndRendering();
@@ -112,6 +114,7 @@ void CommandBuffer::EndRendering() const {
 	if (!m_rendering) {
 		return;
 	}
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 	Handle().endRendering();
 	m_rendering    = false;
 	m_render_state = {};

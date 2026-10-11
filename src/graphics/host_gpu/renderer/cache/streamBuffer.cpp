@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/gpuPhaseStats.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -175,6 +176,7 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
                       uint64_t destination_offset, uint64_t size, vk::AccessFlags source_before,
                       vk::AccessFlags destination_before, vk::AccessFlags source_after,
                       vk::AccessFlags destination_after) {
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 	if (size == 0 || source_offset > source.Size() || size > source.Size() - source_offset ||
 	    destination_offset > Size() || size > Size() - destination_offset) {
 		EXIT("Buffer: invalid copy range\n");
@@ -211,6 +213,7 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 }
 
 void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 	if (((offset | size) & 3u) != 0) {
 		EXIT("Buffer: fill range must be dword aligned\n");
 	}

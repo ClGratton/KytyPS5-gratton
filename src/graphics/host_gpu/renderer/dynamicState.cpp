@@ -1,10 +1,12 @@
 #include "graphics/host_gpu/renderer/dynamicState.h"
 
+#include "common/gpuPhaseStats.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 namespace Libs::Graphics {
 
 void DynamicState::Commit(const GraphicContext& graphics, vk::CommandBuffer cmdbuf) {
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 	if (dirty_state.viewports) {
 		dirty_state.viewports = false;
 		cmdbuf.setViewportWithCount(num_viewports, viewports.data());

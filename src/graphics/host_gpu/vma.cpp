@@ -15,6 +15,7 @@
 #endif
 
 #include "common/assert.h"
+#include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -189,6 +190,7 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 }
 
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkAlloc);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
 
@@ -317,6 +319,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 }
 
 void GraphicContext::DeleteImage(VulkanImage& image) {
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkAlloc);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image == nullptr || image.allocation == nullptr);
 

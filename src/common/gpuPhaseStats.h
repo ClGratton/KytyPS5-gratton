@@ -28,6 +28,8 @@ enum class Phase : uint8_t {
 	PipelineJob, // waiting for an asynchronous program/pipeline job
 	Srt,         // SRT walk and binding preparation
 	Descriptors, // buffer/image rebinding and descriptor writes
+	VkCmd,       // vkCmd* recording (draws, dispatches, binds, barriers, copies, dynamic state)
+	VkAlloc,     // vkCreateImage/vkDestroyImage and memory allocation through VMA
 	Submit,      // closing the command buffer and vkQueueSubmit
 	DrainTick,   // CommandScheduler::Wait for a tick
 	DrainFlush,  // FlushAndWait

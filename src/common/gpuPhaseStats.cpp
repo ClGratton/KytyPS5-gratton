@@ -19,7 +19,7 @@ constexpr size_t kPhases    = static_cast<size_t>(Phase::Count);
 constexpr size_t kCoalesce  = static_cast<size_t>(Coalesce::Count);
 
 constexpr std::array<const char*, kPhases> kNames = {
-    "idle", "pm4", "draw", "pipeline", "pipeline_job", "srt", "descriptors",
+    "idle", "pm4", "draw", "pipeline", "pipeline_job", "srt", "descriptors", "vkcmd", "vkalloc",
     "submit", "drain_tick", "drain_flush", "drain_finish", "gc"};
 
 std::atomic<uint32_t> g_interval_s {0};
