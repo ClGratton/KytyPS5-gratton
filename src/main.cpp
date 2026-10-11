@@ -1,3 +1,7 @@
+#include <cstdlib>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #include "common/archive.h"
 #include "common/common.h"
 #include "common/dateTime.h"
@@ -627,6 +631,13 @@ int wmain(int argc, wchar_t* argv[]) {
 #else
 
 int main(int argc, char* argv[]) {
+#if defined(__linux__)
+    // Debug aid: with KYTY_ALLOW_PTRACE=1 any process of this user may attach (gdb, eu-stack) to
+    // get stacks of a hung emulator even where kernel.yama.ptrace_scope restricts attaching.
+    if (const char* allow = ::getenv("KYTY_ALLOW_PTRACE"); allow != nullptr && allow[0] == '1') {
+        ::prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+    }
+#endif
     return Main(argc, argv);
 }
 
