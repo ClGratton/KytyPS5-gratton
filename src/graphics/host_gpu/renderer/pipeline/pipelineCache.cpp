@@ -988,7 +988,8 @@ struct PipelineCache::ProgramCache {
 		if (entry == nullptr) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
 		// call-source (S_SWAP_PC) programs keep the synchronous path: their translation depends on
 		// the linked callee snapshot, which is refreshed under the entry lock.
-		const bool call_shader = entry == nullptr ? source.call : entry->call_source != nullptr;
+		const bool call_shader = entry == nullptr ? static_cast<bool>(source.call)
+		                                         : entry->call_source != nullptr;
 		if (prefetch && call_shader) {
 			return {}; // left to the GPU thread (see above)
 		}

@@ -16582,9 +16582,11 @@ public:
       for (const u32 wave : {32u, 64u}) {
         registers.SetShaderStages((saved_stages & ~0x00400000u) |
                                    (wave == 32u ? 0x00400000u : 0u));
-        const auto programs = context.GetPipelineCache().GetGraphicsPrograms(
+        const auto programs = RetryWhilePending([&] {
+          return context.GetPipelineCache().GetGraphicsPrograms(
             native_vertex_regs, native_pixel_regs, registers.GetShaderRegisters(),
             registers, user_config, export_mapping, true, native_vertex_info, pixel);
+        });
         vertex_shader = programs.vertex[0];
         pixel_shader = programs.pixel;
         vertex = native_vertex_info[0];
@@ -16651,9 +16653,11 @@ public:
         alpha_blend.separate_alpha_blend = test.separate;
         alpha_blend.alpha_srcblend = static_cast<uint8_t>(test.alpha_source);
         registers.SetBlendControl(0, alpha_blend);
-        const auto programs = context.GetPipelineCache().GetGraphicsPrograms(
+        const auto programs = RetryWhilePending([&] {
+          return context.GetPipelineCache().GetGraphicsPrograms(
             native_vertex_regs, native_pixel_regs, registers.GetShaderRegisters(),
             registers, user_config, export_mapping, true, native_vertex_info, pixel);
+        });
         Require(name, "logical alpha blend program", pixel.alpha_blend_source == test.mode &&
                     pixel.dual_source_blending,
                 "the separate alpha equation did not reach the compiled pixel program");
