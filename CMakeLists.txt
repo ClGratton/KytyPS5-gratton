@@ -454,6 +454,11 @@ add_executable(vram_policy_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(vram_policy_tests PRIVATE ${inc_headers})
 
+add_executable(texture_gc_policy_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/TextureGcPolicyTests.cpp"
+)
+target_include_directories(texture_gc_policy_tests PRIVATE ${inc_headers})
+
 add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
@@ -649,6 +654,7 @@ if(BUILD_TESTING)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME vram_policy COMMAND $<TARGET_FILE:vram_policy_tests>)
 	add_test(NAME lds_span COMMAND $<TARGET_FILE:lds_span_tests>)
+	add_test(NAME texture_gc_policy COMMAND $<TARGET_FILE:texture_gc_policy_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
