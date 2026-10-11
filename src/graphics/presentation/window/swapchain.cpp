@@ -1001,8 +1001,7 @@ void Presenter::Impl::Present() {
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
 		if (Bench::FramesEnabled()) {
-			// 581dad7 has no WindowLoopState::presented_frames counter (added upstream later), so
-			// the bench flags keep their own count of successfully presented frames.
+			// The bench flags keep their own count of successfully presented frames.
 			static std::atomic<uint64_t> bench_presented {0};
 			const auto presented = bench_presented.fetch_add(1, std::memory_order_relaxed) + 1;
 			if (Bench::RecordPresent(presented)) {
