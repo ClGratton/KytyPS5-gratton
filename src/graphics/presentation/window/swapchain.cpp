@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -998,7 +999,16 @@ void Presenter::Impl::Present() {
 		}
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
-		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+		const auto presented =
+		    window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (Bench::FramesEnabled() && Bench::RecordPresent(presented)) {
+			// --bench-exit-after-frames: take the normal clean-exit path (same as closing the
+			// window): the main loop sees SDL_EVENT_QUIT, saves the pipeline cache, then
+			// WindowRun() returns and the emulator calls std::quick_exit(0).
+			SDL_Event quit {};
+			quit.type = SDL_EVENT_QUIT;
+			SDL_PushEvent(&quit);
+		}
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
