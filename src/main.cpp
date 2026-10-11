@@ -119,6 +119,9 @@ static void PrintUsage() {
 	         "                                       --async-pipelines stall|skip). Default: false.\n");
 	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
 	         "                                       Default: min(8, hardware threads / 2).\n");
+	::printf("  --pipeline-lookahead-kinds <all|graphics|compute>\n"
+	         "                                       Debug: restrict --pipeline-lookahead to draws or\n"
+	         "                                       dispatches. Default: all.\n");
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
@@ -518,6 +521,18 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--pipeline-lookahead") {
 			if (!ParseBool(value, options.config.pipeline_lookahead)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--pipeline-lookahead-kinds") {
+			if (Common::EqualNoCase(value, "all")) {
+				options.config.pipeline_lookahead_kinds = 3;
+			} else if (Common::EqualNoCase(value, "graphics")) {
+				options.config.pipeline_lookahead_kinds = 1;
+			} else if (Common::EqualNoCase(value, "compute")) {
+				options.config.pipeline_lookahead_kinds = 2;
+			} else {
+				::printf("invalid lookahead kinds (expected all, graphics or compute): %s\n",
+				         value.c_str());
 				return false;
 			}
 		} else if (arg == "--debug-hang-watchdog") {

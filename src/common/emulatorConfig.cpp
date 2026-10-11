@@ -51,6 +51,10 @@ bool GetPipelineLookahead() {
 	return g_config->pipeline_lookahead && g_config->async_pipelines != AsyncPipelineMode::Off;
 }
 
+uint32_t GetPipelineLookaheadKinds() {
+	return g_config->pipeline_lookahead_kinds;
+}
+
 uint32_t GetPipelineWorkerCount() {
 	if (g_config->pipeline_workers != 0) {
 		return g_config->pipeline_workers;

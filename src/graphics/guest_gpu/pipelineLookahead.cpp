@@ -213,7 +213,7 @@ void PipelineLookahead::Process(Item& item) {
 
 void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	m_stats.draws.fetch_add(1, std::memory_order_relaxed);
-	if (m_current_late) {
+	if (m_current_late || (Config::GetPipelineLookaheadKinds() & 1u) == 0) {
 		return;
 	}
 	Common::Hang::Phase phase("lookahead_draw", m_stats.draws.load(std::memory_order_relaxed));
@@ -224,7 +224,7 @@ void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 
 void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& dispatch) {
 	m_stats.dispatches.fetch_add(1, std::memory_order_relaxed);
-	if (m_current_late) {
+	if (m_current_late || (Config::GetPipelineLookaheadKinds() & 2u) == 0) {
 		return; // already executing or executed: nothing to gain
 	}
 	if (!dispatch.indirect && (dispatch.x == 0 || dispatch.y == 0 || dispatch.z == 0)) {
