@@ -192,6 +192,14 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(), values.size_bytes());
 }
 
+// Marker for ShaderStageRuntime::resources in prefetched input infos: the stage must look valid
+// (operator bool), but workers never read the snapshot (docs/phase2-notes.md), so a shared empty
+// one is enough. The GPU thread never sees an input info made by the prefetch.
+const ShaderRecompiler::IR::ResourceSnapshot& PrefetchResources() {
+	static const ShaderRecompiler::IR::ResourceSnapshot empty;
+	return empty;
+}
+
 // Lookahead thread (--pipeline-lookahead): plain backing read. ReadShaderGuestMemory refuses every
 // guest address off the GPU thread because it needs the GPU thread's view of GPU-dirty ranges;
 // the lookahead accepts a possibly stale answer (a wrong prediction only wastes worker time).
@@ -710,7 +718,7 @@ struct PipelineCache::ProgramCache {
 				bool materialized = false;
 				if (auto* permutation = entry->PeekPermutation(runtime, push_data_cursor,
 				                                               specialization, materialized)) {
-					input_info.stage = {.program = &permutation->program, .resources = nullptr};
+					input_info.stage = {.program = &permutation->program, .resources = &PrefetchResources()};
 					permutation->program.bindings.AdvancePushData(push_data_cursor);
 					return permutation->handle;
 				}
@@ -739,7 +747,7 @@ struct PipelineCache::ProgramCache {
 		// Uses a permutation another thread (or an earlier request) published for this draw.
 		const auto use_published = [&](Permutation& permutation, bool miss_report) {
 			input_info.stage = {.program = &permutation.program,
-			                    .resources = prefetch ? nullptr : &entry->resources};
+			                    .resources = prefetch ? &PrefetchResources() : &entry->resources};
 			permutation.program.bindings.AdvancePushData(push_data_cursor);
 			report_steps(miss_report);
 			return permutation.handle;
