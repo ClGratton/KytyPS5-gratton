@@ -6,6 +6,7 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/gpuClock.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/videoOut.h"
@@ -14,32 +15,11 @@
 #include "libs/errno.h"
 
 #include <cstring>
-#include <limits>
 
 namespace Libs::Graphics::Sync {
 
-constexpr uint64_t GRAPHICS_REFERENCE_CLOCK_FREQUENCY = 100000000;
-
 bool ScaleReferenceClock(uint64_t host_ticks, uint64_t host_frequency, uint64_t& value) {
-	if (host_frequency == 0) {
-		return false;
-	}
-
-	const auto     whole_seconds = host_ticks / host_frequency;
-	const auto     remainder     = host_ticks % host_frequency;
-	constexpr auto MAX_VALUE     = std::numeric_limits<uint64_t>::max();
-	if (whole_seconds > MAX_VALUE / GRAPHICS_REFERENCE_CLOCK_FREQUENCY ||
-	    remainder > MAX_VALUE / GRAPHICS_REFERENCE_CLOCK_FREQUENCY) {
-		return false;
-	}
-
-	const auto whole_value      = whole_seconds * GRAPHICS_REFERENCE_CLOCK_FREQUENCY;
-	const auto fractional_value = (remainder * GRAPHICS_REFERENCE_CLOCK_FREQUENCY) / host_frequency;
-	if (whole_value > MAX_VALUE - fractional_value) {
-		return false;
-	}
-	value = whole_value + fractional_value;
-	return true;
+	return GpuClock::TscToReferenceClock(host_ticks, host_frequency, value);
 }
 
 uint64_t ReadReferenceClock() {
