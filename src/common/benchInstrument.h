@@ -65,6 +65,14 @@ inline std::atomic<bool> g_timing_enabled {false};
 void LogTiming(const char* kind, uint64_t key_hash, int64_t t_start_ns, int64_t dur_ns,
                bool on_gpu_thread, const std::string& detail);
 
+// OS thread id as written in the `thread` column.
+[[nodiscard]] uint64_t ThreadId() noexcept;
+
+// Same as LogTiming, but with an explicit `thread` column. Used when a row is recorded on one
+// thread and written later by another (async pipeline jobs, docs/phase2-notes.md).
+void LogTimingAs(const char* kind, uint64_t key_hash, int64_t t_start_ns, int64_t dur_ns,
+                 uint64_t thread_id, bool on_gpu_thread, const std::string& detail);
+
 // Fast-path (cache hit) steps run on every draw, so they are aggregated, not logged per call.
 enum class HitSlot : uint32_t { Materialize = 0, Count };
 // Calls at or above this duration are additionally logged as individual rows (miss=0).

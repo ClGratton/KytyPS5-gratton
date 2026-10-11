@@ -162,10 +162,19 @@ int64_t NowNs() noexcept {
 	                                .count());
 }
 
+uint64_t ThreadId() noexcept {
+	return CurrentThreadId();
+}
+
 void LogTiming(const char* kind, uint64_t key_hash, int64_t t_start_ns, int64_t dur_ns,
                bool on_gpu_thread, const std::string& detail) {
+	LogTimingAs(kind, key_hash, t_start_ns, dur_ns, CurrentThreadId(), on_gpu_thread, detail);
+}
+
+void LogTimingAs(const char* kind, uint64_t key_hash, int64_t t_start_ns, int64_t dur_ns,
+                 uint64_t thread_id, bool on_gpu_thread, const std::string& detail) {
 	auto row = fmt::format("{},{},{:016x},{},{},{},{}\n", t_start_ns, kind, key_hash, dur_ns,
-	                       CurrentThreadId(), on_gpu_thread ? 1 : 0, detail);
+	                       thread_id, on_gpu_thread ? 1 : 0, detail);
 	auto&           state = GetState();
 	std::lock_guard lock(state.mutex);
 	state.timing_rows.push_back(std::move(row));
