@@ -1952,8 +1952,8 @@ void TextureCache::RunGarbageCollector() {
 }
 
 // Called when an image allocation failed, with m_lock held by the caller (InsertImage paths).
-// Evicts every image that has not been touched for a couple of GC ticks and that can be dropped
-// without losing guest-visible data, then waits for the GPU so the memory is really released.
+// Evicts images idle for a couple of GC ticks (oldest first, up to 1/8 of the device budget) that
+// can be dropped without losing guest-visible data, then waits for the GPU so the memory is really released.
 void TextureCache::ReclaimMemory() {
 	const uint64_t tick = m_gc_tick;
 	const uint64_t age  = std::min<uint64_t>(2, tick);
@@ -1962,9 +1962,17 @@ void TextureCache::ReclaimMemory() {
 		candidates.push_back(id);
 		return false;
 	});
+	// Free oldest-first until a share of the device budget is back (scales with the GPU), or
+	// until nothing idle is left.
+	const uint64_t target =
+	    m_graphics.CanReportMemoryUsage() ? m_graphics.GetTotalMemoryBudget() / 8
+	                                       : std::numeric_limits<uint64_t>::max();
 	size_t   freed = 0;
 	uint64_t bytes = 0;
 	for (const auto id: candidates) {
+		if (bytes >= target) {
+			break;
+		}
 		auto owner = m_slot_images.try_get(id);
 		if (owner == nullptr || !owner->registered || owner->depth_id) {
 			continue;
