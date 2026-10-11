@@ -101,6 +101,8 @@ static void PrintUsage() {
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
+	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
+	         "                                       render passes since the last flip. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -472,6 +474,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.bench_frames_csv = Common::PathFromUtf8(value);
+		} else if (arg == "--bench-render-csv") {
+			if (value.empty()) {
+				::printf("invalid --bench-render-csv path\n");
+				return false;
+			}
+			options.config.bench_render_csv = Common::PathFromUtf8(value);
 		} else if (arg == "--bench-exit-after-frames") {
 			if (!ParseUint64(value, options.config.bench_exit_after_frames)) {
 				::printf("invalid frame count: %s\n", value.c_str());

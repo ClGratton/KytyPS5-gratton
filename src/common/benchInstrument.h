@@ -17,6 +17,9 @@ struct Options {
 	std::filesystem::path frames_csv;
 	// --bench-exit-after-frames <N>: request a clean exit once N frames were presented (0 = off).
 	uint64_t exit_after_frames = 0;
+	// --bench-render-csv <path>: one row per guest flip with the render-pass sizes recorded since
+	// the previous flip, and the size of the buffer that was flipped.
+	std::filesystem::path render_csv;
 };
 
 // Called once from Config::Load(). Replaces any previous state (the buffer is flushed first).
@@ -36,6 +39,22 @@ inline std::atomic<bool> g_frames_enabled {false};
 // Returns true when --bench-exit-after-frames was reached by this frame (the caller must then
 // request the emulator's normal clean exit). Call only when FramesEnabled().
 [[nodiscard]] bool RecordPresent(uint64_t frame_idx);
+
+namespace detail {
+inline std::atomic<bool> g_render_enabled {false};
+} // namespace detail
+
+[[nodiscard]] inline bool RenderEnabled() noexcept {
+	return detail::g_render_enabled.load(std::memory_order_relaxed);
+}
+
+// Counts one dynamic-rendering pass of width x height (any thread). Call only when RenderEnabled().
+void RecordRenderPass(uint32_t width, uint32_t height);
+
+// Closes the current frame group at a guest flip (GPU thread): writes
+// "flip_idx,t_ns,flip_w,flip_h,sizes" where sizes is "WxH:count;..." ordered by pixel count
+// (largest area first) and resets the group. Call only when RenderEnabled().
+void RecordGuestFlip(uint32_t flip_width, uint32_t flip_height);
 
 // Writes buffered rows to disk and clears the buffer. Idempotent, thread-safe, safe at exit.
 void Flush();
