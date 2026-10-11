@@ -3,6 +3,9 @@
 #include "common/logging/log.h"
 #include "common/phaseTimers.h"
 
+#include <tracy/Tracy.hpp>
+#include <tracy/TracyC.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -21,6 +24,24 @@ constexpr size_t kCoalesce  = static_cast<size_t>(Coalesce::Count);
 constexpr std::array<const char*, kPhases> kNames = {
     "idle", "pm4", "draw", "pipeline", "pipeline_job", "srt", "descriptors", "vkcmd", "vkalloc",
     "submit", "drain_tick", "drain_flush", "drain_finish", "gc"};
+
+// Tracy zone per phase (--profile): named "gpu:<phase>" and emitted only on the GPU thread, so
+// `tracy-csvexport -e -f gpu:` yields the exclusive time per phase of that thread alone.
+constexpr size_t kMaxZoneDepth = 24;
+const std::array<std::string, kPhases> kZoneNames = [] {
+	std::array<std::string, kPhases> names;
+	for (size_t i = 0; i < kPhases; ++i) {
+		names[i] = std::string("gpu:") + kNames[i];
+	}
+	return names;
+}();
+const std::array<___tracy_source_location_data, kPhases> kZoneLocations = [] {
+	std::array<___tracy_source_location_data, kPhases> locations {};
+	for (size_t i = 0; i < kPhases; ++i) {
+		locations[i] = {kZoneNames[i].c_str(), "GpuPhase", __FILE__, 0, 0};
+	}
+	return locations;
+}();
 
 std::atomic<uint32_t> g_interval_s {0};
 std::atomic<bool>     g_phases {true};
@@ -62,6 +83,9 @@ struct ThreadState {
 	std::array<uint64_t, 256>       window_drain_by_packet {};
 	std::array<uint64_t, kCoalesce> window_coalesce {};
 	bool                            phases = true;
+	bool                            zones  = false; // also emit Tracy zones
+	std::array<TracyCZoneCtx, kMaxZoneDepth> zone_stack {};
+	size_t                          zone_depth = 0;
 	std::FILE*                      csv    = nullptr;
 };
 
@@ -76,12 +100,23 @@ uint64_t Now() noexcept {
 }
 
 void Enter(ThreadState* state, Phase phase) noexcept {
+	if (state->zones && state->zone_depth < kMaxZoneDepth) {
+		state->zone_stack[state->zone_depth] =
+		    ___tracy_emit_zone_begin(&kZoneLocations[static_cast<size_t>(phase)], 1);
+	}
+	++state->zone_depth;
 	state->clock.Enter(static_cast<size_t>(phase), Now());
 }
 
 void Exit(ThreadState* state, Phase phase, uint64_t start) noexcept {
 	const auto now = Now();
 	state->clock.Exit(now);
+	if (state->zone_depth != 0) {
+		--state->zone_depth;
+		if (state->zones && state->zone_depth < kMaxZoneDepth) {
+			___tracy_emit_zone_end(state->zone_stack[state->zone_depth]);
+		}
+	}
 	if (IsDrain(phase) && now > start) {
 		state->drain_ticks_by_packet[state->current_opcode & 0xffu] += now - start;
 	}
@@ -137,12 +172,15 @@ uint64_t Frames() noexcept {
 }
 
 void AttachGpuThread() {
-	if (!Enabled() || t_report != nullptr) {
+	const bool stats = Enabled();
+	const bool zones = tracy::ProfilerAvailable();
+	if ((!stats && !zones) || t_report != nullptr) {
 		return;
 	}
 	// Intentionally leaked: the thread can be torn down by quick_exit().
 	auto* state           = new detail::ThreadState();
-	state->phases         = g_phases.load(std::memory_order_relaxed);
+	state->phases         = stats ? g_phases.load(std::memory_order_relaxed) : true;
+	state->zones          = zones;
 	state->window_wall_ns = WallNs();
 	state->first_wall_ns  = state->window_wall_ns;
 	state->window_tsc     = detail::Now();
@@ -151,7 +189,8 @@ void AttachGpuThread() {
 	for (size_t i = 0; i < kCoalesce; ++i) {
 		state->window_coalesce[i] = g_coalesce[i].load(std::memory_order_relaxed);
 	}
-	state->csv = std::fopen(state->phases ? "_gpu_phase.csv" : "_submit_stats.csv", "w");
+	state->csv = stats ? std::fopen(state->phases ? "_gpu_phase.csv" : "_submit_stats.csv", "w")
+	                   : nullptr;
 	if (state->csv != nullptr) {
 		std::string header = "t_s,window_s,frames,submits,coalesce_deferred,coalesce_batch,"
 		                     "coalesce_deadline,coalesce_forced";
@@ -167,7 +206,7 @@ void AttachGpuThread() {
 	}
 	t_report = state;
 	if (state->phases) {
-		detail::t_state = state;
+		detail::t_state = state; // --gpu-phase-stats or --profile: the scopes are live
 	}
 }
 
@@ -293,7 +332,7 @@ void Poll() {
 
 void Finish() {
 	auto* s = t_report;
-	if (s == nullptr) {
+	if (s == nullptr || !Enabled()) {
 		return;
 	}
 	Report(*s, true);

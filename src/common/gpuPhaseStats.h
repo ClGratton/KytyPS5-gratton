@@ -10,6 +10,8 @@
 // the drains (waits for the GPU) by cause and the PM4 packets that spent the most time. The same
 // numbers go to _gpu_phase.csv in the working directory.
 //
+// With --profile each scope is also a Tracy zone named gpu:<phase> (tracy-csvexport -e -f gpu:
+// gives the exclusive time per phase of this thread alone).
 // Cost when off: one thread_local load per scope. When on: two TSC reads per scope; a run with it
 // is for reading shares, never an fps baseline (bench/CONTROLS.md, timing-log rule).
 //
