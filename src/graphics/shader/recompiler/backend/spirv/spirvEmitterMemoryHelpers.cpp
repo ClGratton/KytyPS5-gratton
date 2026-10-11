@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
+#include "graphics/shader/recompiler/ir/ldsSpan.h"
 
 #include <algorithm>
 #include <bit>
@@ -119,9 +120,9 @@ void EmitMemoryOffsets(EmitterState& state) {
 
 bool FunctionLdsIsWrapped(const EmitterState& state) {
 	const auto& info = state.program.info;
-	return info.function_lds && !info.function_lds_unbounded && info.function_lds_dwords != 0 &&
+	return info.function_lds && !info.function_lds_unbounded &&
 	       ShaderWorkgroupInput(state.program.stage, state.input_info) == nullptr &&
-	       std::bit_ceil(std::max(info.function_lds_dwords, 64u)) < 8192u;
+	       IR::ReducedLdsDwords(info.function_lds_dwords) != 0;
 }
 
 uint32_t LdsDwordCount(const EmitterState& state) {
@@ -130,9 +131,9 @@ uint32_t LdsDwordCount(const EmitterState& state) {
 		return workgroup->lds_size_dwords;
 	}
 	if (FunctionLdsIsWrapped(state)) {
-		return std::bit_ceil(std::max(state.program.info.function_lds_dwords, 64u));
+		return IR::ReducedLdsDwords(state.program.info.function_lds_dwords);
 	}
-	return 8192u;
+	return IR::FullLdsDwords;
 }
 
 void EnsureLdsStorage(EmitterState& state) {
@@ -260,6 +261,7 @@ uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAcces
 			    TypeStorageBufferElementPointer(state, 32));
 		}
 		if (access.kind == IR::ResourceKind::Lds && FunctionLdsIsWrapped(state)) {
+			// WrapLdsIndex() as SPIR-V: index & (size - 1).
 			index = EmitAndU32(state, index, ConstantU32(state, LdsDwordCount(state) - 1u));
 		}
 		const auto pointer = state.builder.AllocateId();

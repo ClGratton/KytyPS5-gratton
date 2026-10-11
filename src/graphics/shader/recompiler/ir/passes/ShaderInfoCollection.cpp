@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/ldsSpan.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -375,10 +376,8 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			    program.stage != ShaderType::Mesh) {
 				// Immediate offsets are in bytes; the dynamic base is a per-lane address, so
 				// budget one dword per lane of the wave on top of the largest immediate.
-				const uint32_t last_byte =
-				    std::max(memory.offset, memory.secondary_offset) +
-				    4u * std::max<uint32_t>(memory.data_dwords, 1u);
-				const uint32_t span = (last_byte + 3u) / 4u + program.wave_size;
+				const uint32_t span = LdsAccessSpanDwords(memory.offset, memory.secondary_offset,
+				                                          memory.data_dwords, program.wave_size);
 				info.function_lds_dwords = std::max(info.function_lds_dwords, span);
 			}
 			if (shared_access == SharedAccess::Append || shared_access == SharedAccess::Consume) {
