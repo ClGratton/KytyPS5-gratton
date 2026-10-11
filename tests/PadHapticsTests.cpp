@@ -1294,6 +1294,50 @@ void TestSpeakerSinkParsing() {
 	Check(!Sink::ParseSink("Sink #1\n\tName: other\n").found, "missing sink was found");
 }
 
+// Opt-in (KYTY_TEST_PULSE=1): creates the real sink on the running PipeWire/PulseAudio server.
+void TestSpeakerSinkLive() {
+	if (std::getenv("KYTY_TEST_PULSE") == nullptr) {
+		return;
+	}
+	namespace Sink = Libs::Controller::DualSenseSpeakerSink;
+	auto wait_for  = [](auto&& condition) { // Returns the wait in ms, or -1 on timeout.
+		const auto start = std::chrono::steady_clock::now();
+		while (!condition()) {
+			if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
+				return -1.0;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+		    .count();
+	};
+	Sink::Ensure();
+	Check(wait_for([] { return Sink::Active(); }) >= 0, "sink was not created");
+	Check(std::abs(Sink::Gain() - 1.0f) < 1e-4f, "new sink does not start at unity");
+	const auto set = [&](const char* what, const char* value) {
+		const std::string command = std::string("pactl set-sink-") + what +
+		                            " kyty_dualsense_speaker " + value;
+		Check(std::system(command.c_str()) == 0, "pactl failed");
+	};
+	for (const auto& [volume, expected]: {std::pair {"50%", 0.125f}, std::pair {"20%", 0.008f},
+	                                      std::pair {"100%", 1.0f}}) {
+		set("volume", volume);
+		const auto ms = wait_for([&] { return std::abs(Sink::Gain() - expected) < 2e-3f; });
+		std::printf("sink volume %s -> gain %.3f after %.1f ms\n", volume, Sink::Gain(), ms);
+		Check(ms >= 0, "sink volume change was not followed");
+	}
+	set("mute", "1");
+	const auto mute_ms = wait_for([] { return Sink::Gain() == 0.0f; });
+	std::printf("sink mute -> gain 0 after %.1f ms\n", mute_ms);
+	Check(mute_ms >= 0, "sink mute was not followed");
+	set("mute", "0");
+	Check(wait_for([] { return Sink::Gain() > 0.5f; }) >= 0, "sink unmute was not followed");
+	Sink::Shutdown();
+	Check(!Sink::Active(), "sink still active after shutdown");
+	Check(std::system("pactl list short sinks | grep -q kyty_dualsense_speaker") != 0,
+	      "sink was not unloaded");
+}
+
 void TestBluetoothAudioSpeakerRouting() {
 	Fixture f;
 	wireless = hid_available = true;
@@ -1340,6 +1384,7 @@ int main() {
 	TestAudioVibrationGain();
 	TestSpeakerVolume();
 	TestSpeakerSinkParsing();
+	TestSpeakerSinkLive();
 	TestBluetoothAudioSpeakerRouting();
 	TestAudioDefaultResumeFailure();
 	TestFormatsAndVolume();
