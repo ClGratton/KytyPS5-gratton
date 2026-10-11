@@ -153,6 +153,10 @@ void InitSubsystems() {
 
 	Config::ConfigOptions options;
 	options.printf_direction = Config::LogDirection::Silent;
+	// Run the whole suite with the release tracking and hole punch on: every existing test then
+	// also checks that punching never breaks a mapping that is still in use.
+	options.mem_stats         = true;
+	options.mem_release_punch = true;
 	Config::Load(options);
 
 	subsystems.Initialize<Log::Lifecycle>();
@@ -1391,6 +1395,83 @@ void TestDirectMapQueryOffsetAndPartialMunmap() {
 	        Libs::LibKernel::Memory::KernelReleaseDirectMemory(phys_addr, SceKernelPageSize * 4),
 	        "KernelReleaseDirectMemory");
 
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestReleasedDirectMemoryPunchKeepsNeighbors() {
+	const char* test = "ReleasedDirectMemoryPunchKeepsNeighbors";
+	const auto  size = SceKernelPageSize * 4;
+	int64_t first = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(), size, SceKernelPageSize,
+	            SceKernelMtypeC, &first),
+	        "KernelAllocateDirectMemory(first)");
+	int64_t neighbour = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            first + static_cast<int64_t>(size), first + static_cast<int64_t>(size * 2), size,
+	            SceKernelPageSize, SceKernelMtypeC, &neighbour),
+	        "KernelAllocateDirectMemory(neighbour)");
+	Check(test, neighbour == first + static_cast<int64_t>(size), "neighbour is not adjacent");
+
+	void* first_address = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(&first_address, size,
+	                                                            SceKernelProtCpuRw, 0, first,
+	                                                            SceKernelPageSize, "punch_first"),
+	        "KernelMapNamedDirectMemory(first)");
+	void* neighbour_address = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(&neighbour_address, size,
+	                                                            SceKernelProtCpuRw, 0, neighbour,
+	                                                            SceKernelPageSize,
+	                                                            "punch_neighbour"),
+	        "KernelMapNamedDirectMemory(neighbour)");
+	std::memset(first_address, 0xA5, size);
+	std::memset(neighbour_address, 0x5A, size);
+
+	CheckOk(test, Libs::LibKernel::Memory::KernelReleaseDirectMemory(first, size),
+	        "KernelReleaseDirectMemory(first)");
+	const auto* kept = static_cast<const uint8_t*>(neighbour_address);
+	for (uint64_t i = 0; i < size; i++) {
+		if (kept[i] != 0x5A) {
+			Fail(test, "releasing the first block changed the adjacent block");
+		}
+	}
+
+	// The same physical range handed out again reads as zero when the host pages were punched.
+	int64_t again = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            first, first + static_cast<int64_t>(size), size, SceKernelPageSize, SceKernelMtypeC,
+	            &again),
+	        "KernelAllocateDirectMemory(again)");
+	Check(test, again == first, "released range was not handed out again");
+	void* again_address = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(&again_address, size,
+	                                                            SceKernelProtCpuRw, 0, again,
+	                                                            SceKernelPageSize, "punch_again"),
+	        "KernelMapNamedDirectMemory(again)");
+	if (Config::MemReleasePunchEnabled()) {
+		const auto* fresh = static_cast<const uint8_t*>(again_address);
+		for (uint64_t i = 0; i < size; i++) {
+			if (fresh[i] != 0) {
+				Fail(test, "punched range did not read back as zero");
+			}
+		}
+	}
+	for (uint64_t i = 0; i < size; i++) {
+		if (kept[i] != 0x5A) {
+			Fail(test, "remapping the released range changed the adjacent block");
+		}
+	}
+
+	CheckOk(test, Libs::LibKernel::Memory::KernelReleaseDirectMemory(again, size),
+	        "KernelReleaseDirectMemory(again)");
+	CheckOk(test, Libs::LibKernel::Memory::KernelReleaseDirectMemory(neighbour, size),
+	        "KernelReleaseDirectMemory(neighbour)");
 	std::printf("[host]    %-48s ok\n", test);
 }
 
@@ -4528,6 +4609,7 @@ int main(int argc, char** argv) {
 	RunTest(TestAutomaticMemoryReuseAndAliases);
 	RunTest(TestAutomaticMemoryFragmentedMapRollback);
 	RunTest(TestMemoryPoolAlignmentContracts);
+	RunTest(TestReleasedDirectMemoryPunchKeepsNeighbors);
 	RunTest(TestProsperoSampleMemoryPoolExpandCommit);
 	RunTest(TestFragmentedMemoryPoolBacking);
 	RunTest(TestMemoryPoolMultiRangeDecommit);

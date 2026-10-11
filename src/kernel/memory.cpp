@@ -2713,9 +2713,8 @@ static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
 				EXIT("failed to release unmapped pooled-memory range\n");
 			}
 			if (owner_unmapped) {
-				for (const auto& mapping: mappings) {
-					g_guest_address_space->NoteBackingReleased(mapping.phys_addr, mapping.size);
-				}
+				// The pool keeps the physical pages (and their contents) for the next commit, so
+				// they are counted but never offered to the release/punch tracking.
 				MemStatAdd(g_mem_stats.munmap_pooled, len);
 			}
 		}
@@ -4439,9 +4438,8 @@ static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
 	if (!g_pooled_memory->Release(vaddr, len, &gpu_mode)) {
 		EXIT("failed to release decommitted pooled-memory range\n");
 	}
-	for (const auto& mapping: mappings) {
-		g_guest_address_space->NoteBackingReleased(mapping.phys_addr, mapping.size);
-	}
+	// Decommitted pool pages stay with the pool and keep their contents for a later commit, so
+	// they are counted here but never offered to the release/punch tracking.
 	MemStatAdd(g_mem_stats.pool_decommit, len);
 
 	g_virtual_ranges->Remove(vaddr, len);
