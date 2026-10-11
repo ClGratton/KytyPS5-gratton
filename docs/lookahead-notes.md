@@ -9,7 +9,12 @@ Debug flag for the feasibility trace: `--bench-gpu-trace true` (needs `--shader-
 | SHA | What |
 |---|---|
 | `a17f838` | `--bench-gpu-trace`: `gpu_submit / gpu_start / gpu_end / gpu_draw / gpu_miss` rows in the shader timing log |
-| `1d15b6f`.. (see `git log`) | shadow CommandProcessor, lookahead thread, compute prefetch, graphics prefetch, accounting, tests |
+| `782a70a` | `--pipeline-lookahead`: shadow CommandProcessor, lookahead thread, compute prefetch, speculation guard, urgent/promote in the pool |
+| `c0b6abd` | placeholder resources marker for prefetched stage infos |
+| `11e5033` | graphics prefetch (programs, shared key builders `BuildGraphicsKey` / `DescribeRender*Target`) |
+| `bf37209` | single-claim hit accounting, skip-reason counters, lookahead thread summary |
+| `f62c659` | speculative shader-map miss is a non-fatal failure |
+| `b629db9` | unit test (urgent submit / promote / claim), this document |
 
 ## Step 1: feasibility (one trace run, `routes/intro90.json`, stall mode, fresh cache)
 
