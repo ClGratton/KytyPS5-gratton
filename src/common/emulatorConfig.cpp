@@ -186,6 +186,10 @@ bool VramStatsEnabled() {
 	return g_config->vram_stats || g_config->vram_paging;
 }
 
+uint32_t VramAuditSeconds() {
+	return g_config->vram_audit_s;
+}
+
 uint32_t VramBallastMb() {
 	return g_config->vram_ballast_mb;
 }

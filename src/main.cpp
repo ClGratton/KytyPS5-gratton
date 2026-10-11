@@ -103,6 +103,8 @@ static void PrintUsage() {
 	    "                                      Default: off.\n");
 	::printf("  --vram-stats <on|off>                Log VRAM heap usage and its split every 5 s.\n"
 	         "                                      Implied by --vram-paging. Default: off.\n");
+	::printf("  --vram-audit <seconds>               Debug: once, this many seconds after start, log the\n"
+	         "                                      resident image mix and content-duplicate textures.\n");
 	::printf("  --vram-ballast-mb <MiB>              Debug: hold this much device-local memory to\n"
 	         "                                      simulate a smaller GPU. Default: 0.\n");
 	::printf("  --gc-texture-trigger-mb <MiB>        Texture GC starts above this VRAM usage (0 = auto).\n"
@@ -478,6 +480,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--vram-stats") {
 			if (!ParseBool(value, options.config.vram_stats)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--vram-audit") {
+			if (!ParseUint32(value, options.config.vram_audit_s)) {
+				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--vram-ballast-mb") {

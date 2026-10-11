@@ -21,7 +21,11 @@
 #include <bit>
 #include <cinttypes>
 #include <cstring>
+#include <chrono>
 #include <limits>
+#include <map>
+#include <string>
+#include <xxhash.h>
 #include <mutex>
 #include <span>
 #include <tuple>
@@ -1891,6 +1895,12 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
+	if (Config::VramAuditSeconds() != 0 && !m_vram_audit_done &&
+	    std::chrono::steady_clock::now() - m_created >=
+	        std::chrono::seconds(Config::VramAuditSeconds())) {
+		m_vram_audit_done = true;
+		AuditVram();
+	}
 	if (Config::VramStatsEnabled()) {
 		m_graphics.LogMemoryBudgetPeriodic();
 	}
@@ -1992,6 +2002,130 @@ void TextureCache::ReclaimMemory() {
 	const auto tick_now = m_scheduler.CurrentTick();
 	m_scheduler.Wait(tick_now);
 	m_scheduler.PopPendingOperations();
+}
+
+// Debug (--vram-audit): one-off report of the resident image mix by class and format, and of
+// textures whose guest content is identical (xxHash3 of the full guest range). Caller holds m_lock.
+void TextureCache::AuditVram() {
+	struct Group {
+		uint64_t     bytes  = 0;
+		uint32_t     count  = 0;
+		std::string  label;
+	};
+	struct Totals {
+		uint64_t bytes = 0;
+		uint32_t count = 0;
+	};
+	std::map<std::string, Totals> by_format_uncompressed;
+	std::map<std::string, Totals> by_format_block;
+	Totals                        render_targets, depth, textures_block, textures_plain, other;
+	// (hash, guest size) -> images with that content; the exact key adds format and extent.
+	std::map<std::pair<uint64_t, uint64_t>, Group>                     content;
+	std::map<std::tuple<uint64_t, uint64_t, int, uint32_t, uint32_t, uint32_t>, Group> exact;
+	uint64_t hashed_bytes = 0;
+	uint32_t hash_failures = 0;
+	std::vector<uint8_t> chunk(1u << 20);
+
+	m_slot_images.ForEach([&](ImageId, const Image& image) {
+		if (image.backing.image == nullptr) {
+			return;
+		}
+		const uint64_t vram = image.backing.alloc_size;
+		const auto     fmt  = static_cast<int>(image.info.pixel_format);
+		const bool     block = fmt >= 131 && fmt <= 184;
+		if (image.usage.depth_target) {
+			depth.bytes += vram, depth.count++;
+			return;
+		}
+		if (image.usage.render_target || image.usage.video_out) {
+			render_targets.bytes += vram, render_targets.count++;
+			return;
+		}
+		if (!image.usage.texture) {
+			other.bytes += vram, other.count++;
+			return;
+		}
+		auto& totals = block ? textures_block : textures_plain;
+		totals.bytes += vram, totals.count++;
+		auto& per_format = block ? by_format_block : by_format_uncompressed;
+		auto& entry      = per_format[vk::to_string(image.info.pixel_format)];
+		entry.bytes += vram, entry.count++;
+
+		const auto range = image.info.data;
+		if (range.Empty()) {
+			return;
+		}
+		XXH3_state_t* state = XXH3_createState();
+		XXH3_64bits_reset(state);
+		bool ok = true;
+		for (uint64_t offset = 0; offset < range.size && ok; offset += chunk.size()) {
+			const auto size = std::min<uint64_t>(chunk.size(), range.size - offset);
+			ok = LibKernel::Memory::TryReadBacking(range.address + offset, chunk.data(), size);
+			if (ok) {
+				XXH3_64bits_update(state, chunk.data(), static_cast<size_t>(size));
+			}
+		}
+		const uint64_t hash = XXH3_64bits_digest(state);
+		XXH3_freeState(state);
+		if (!ok) {
+			hash_failures++;
+			return;
+		}
+		hashed_bytes += range.size;
+		auto label = fmt::format("{} {}x{}x{} mips={}", vk::to_string(image.info.pixel_format),
+		                         image.info.extent.width, image.info.extent.height,
+		                         image.info.extent.depth, image.info.resources.levels);
+		auto& by_content = content[{hash, range.size}];
+		by_content.bytes += vram, by_content.count++, by_content.label = label;
+		auto& by_exact = exact[{hash, range.size, fmt, image.info.extent.width,
+		                        image.info.extent.height, image.info.resources.levels}];
+		by_exact.bytes += vram, by_exact.count++, by_exact.label = label;
+	});
+
+	const auto mib = [](uint64_t bytes) { return bytes >> 20; };
+	const auto resident = textures_block.bytes + textures_plain.bytes + render_targets.bytes +
+	                      depth.bytes + other.bytes;
+	VRAM_LOG("VRAM audit (resident images %" PRIu64 " MiB): sampled BC/ASTC %" PRIu64 " MiB (%u), "
+	         "sampled uncompressed %" PRIu64 " MiB (%u), render targets %" PRIu64 " MiB (%u), "
+	         "depth %" PRIu64 " MiB (%u), other %" PRIu64 " MiB (%u)\n",
+	         mib(resident), mib(textures_block.bytes), textures_block.count,
+	         mib(textures_plain.bytes), textures_plain.count, mib(render_targets.bytes),
+	         render_targets.count, mib(depth.bytes), depth.count, mib(other.bytes), other.count);
+	const auto dump_formats = [&](const char* title, const std::map<std::string, Totals>& m) {
+		std::vector<std::pair<std::string, Totals>> sorted(m.begin(), m.end());
+		std::sort(sorted.begin(), sorted.end(),
+		          [](const auto& a, const auto& b) { return a.second.bytes > b.second.bytes; });
+		for (const auto& [name, totals]: sorted) {
+			VRAM_LOG("VRAM audit %s: %s = %" PRIu64 " MiB (%u images)\n", title, name.c_str(),
+			         mib(totals.bytes), totals.count);
+		}
+	};
+	dump_formats("uncompressed", by_format_uncompressed);
+	dump_formats("block", by_format_block);
+	const auto duplicate_bytes = [](const auto& groups, std::vector<const Group*>& dups) {
+		uint64_t total = 0;
+		for (const auto& [key, group]: groups) {
+			if (group.count > 1) {
+				total += group.bytes - group.bytes / group.count;
+				dups.push_back(&group);
+			}
+		}
+		return total;
+	};
+	std::vector<const Group*> content_dups, exact_dups;
+	const auto content_total = duplicate_bytes(content, content_dups);
+	const auto exact_total   = duplicate_bytes(exact, exact_dups);
+	VRAM_LOG("VRAM audit duplicates: hashed %" PRIu64 " MiB of guest data (%u unreadable); "
+	         "same content (any format) wastes %" PRIu64 " MiB in %zu groups, same content+format+"
+	         "extent wastes %" PRIu64 " MiB in %zu groups\n",
+	         mib(hashed_bytes), hash_failures, mib(content_total), content_dups.size(),
+	         mib(exact_total), exact_dups.size());
+	std::sort(exact_dups.begin(), exact_dups.end(),
+	          [](const Group* a, const Group* b) { return a->bytes > b->bytes; });
+	for (size_t i = 0; i < std::min<size_t>(exact_dups.size(), 12); i++) {
+		VRAM_LOG("VRAM audit duplicate: %s x%u = %" PRIu64 " MiB total\n",
+		         exact_dups[i]->label.c_str(), exact_dups[i]->count, mib(exact_dups[i]->bytes));
+	}
 }
 
 void TextureCache::ProcessDownloadImages() {

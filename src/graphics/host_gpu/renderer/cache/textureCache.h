@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
+#include <chrono>
 #include <map>
 #include <type_traits>
 #include <unordered_map>
@@ -72,6 +73,7 @@ public:
 	void ProcessDownloadImages();
 	void RunGarbageCollector();
 	void ReclaimMemory();
+	void AuditVram();
 
 private:
 	struct MetaDataInfo {
@@ -176,6 +178,8 @@ private:
 	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;
 	uint64_t         m_critical_gc_memory     = 3ull * 1024 * 1024 * 1024;
 	uint64_t         m_gc_tick                = 0;
+	std::chrono::steady_clock::time_point m_created = std::chrono::steady_clock::now();
+	bool             m_vram_audit_done        = false;
 	mutable uint32_t m_image_query_epoch      = 0;
 	bool             m_readback_linear_images = false;
 
