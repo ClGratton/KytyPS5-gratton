@@ -190,6 +190,10 @@ bool MemStatsEnabled() {
 	return g_config != nullptr && g_config->mem_stats;
 }
 
+bool MemReleasePunchEnabled() {
+	return g_config != nullptr && g_config->mem_release_punch;
+}
+
 uint32_t VramAuditSeconds() {
 	return g_config->vram_audit_s;
 }

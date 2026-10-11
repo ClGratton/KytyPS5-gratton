@@ -106,6 +106,9 @@ static void PrintUsage() {
 	::printf("  --mem-stats <on|off>                 Log guest memory release/unmap/decommit counters and\n"
 	         "                                      how much released memory is still resident, every 5 s\n"
 	         "                                      and on exit. Default: off.\n");
+	::printf("  --mem-release-punch <on|off>         Return guest memory the game released (and no view\n"
+	         "                                      maps) to the host with fallocate(PUNCH_HOLE). Whole\n"
+	         "                                      host pages only. Default: off.\n");
 	::printf("  --vram-audit <seconds>               Debug: once, this many seconds after start, log the\n"
 	         "                                      resident image mix and content-duplicate textures.\n");
 	::printf("  --vram-ballast-mb <MiB>              Debug: hold this much device-local memory to\n"
@@ -487,6 +490,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--mem-stats") {
 			if (!ParseBool(value, options.config.mem_stats)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--mem-release-punch") {
+			if (!ParseBool(value, options.config.mem_release_punch)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

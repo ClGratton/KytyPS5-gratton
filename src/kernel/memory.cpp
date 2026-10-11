@@ -49,6 +49,9 @@
 #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <cerrno>
 #include <fcntl.h>
+#if !defined(__APPLE__)
+#include <linux/falloc.h>
+#endif
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -177,9 +180,9 @@ static callback_func_t g_test_before_backing_map                   = nullptr;
 static callback_func_t g_test_backing_read                         = nullptr;
 #endif
 
-// Host-RAM diagnostics (--mem-stats). The counters
+// Host-RAM diagnostics (--mem-stats) and the opt-in hole punch (--mem-release-punch). The counters
 // only describe what the guest asked the memory manager to free; nothing here changes guest-visible
-// behaviour.
+// behaviour unless the punch flag is on.
 struct MemStats {
 	struct Pair {
 		std::atomic<uint64_t> calls {0};
@@ -201,11 +204,16 @@ struct MemStats {
 	// Backing-store view (Linux): released by the guest AND not mapped by any view.
 	std::atomic<uint64_t> released_unmapped_bytes {0};
 	std::atomic<uint64_t> released_unmapped_resident_bytes {0}; // resident (mincore) when it became so
-	std::atomic<uint64_t> realloc_bytes {0};                    // later mapped again
+	std::atomic<uint64_t> realloc_bytes {0};                    // later mapped again, not punched
+	std::atomic<uint64_t> realloc_after_punch_bytes {0};        // later mapped again, after a punch
+	Pair                  punch;
+	std::atomic<uint64_t> punch_resident_bytes {0}; // resident bytes freed by punches
+	std::atomic<uint64_t> punch_failures {0};
 };
 
 static MemStats g_mem_stats;
 static bool     g_mem_stats_on = false;
+static bool     g_mem_punch_on = false;
 
 static void MemStatAdd(MemStats::Pair& pair, uint64_t bytes) {
 	if (g_mem_stats_on) {
@@ -1076,7 +1084,8 @@ static void PrintMemStats(const char* tag) {
 	    " | flexible_map %llu/%llu MiB (zeroed %llu MiB), flexible_unmap %llu/%llu MiB"
 	    " | released_and_unmapped total %llu MiB (resident when released %llu MiB),"
 	    " outstanding now %llu MiB (resident %llu MiB), pending-mapped %llu MiB"
-	    " | reallocated %llu MiB\n",
+	    " | reallocated %llu MiB (after punch %llu MiB)"
+	    " | punch %s %llu calls/%llu MiB (resident freed %llu MiB, failures %llu)\n",
 	    tag, static_cast<long long>(seconds),
 	    static_cast<unsigned long long>(get(g_mem_stats.direct_release.calls)),
 	    static_cast<unsigned long long>(MiB(get(g_mem_stats.direct_release.bytes))),
@@ -1100,7 +1109,13 @@ static void PrintMemStats(const char* tag) {
 	    static_cast<unsigned long long>(MiB(gauges.outstanding_bytes)),
 	    static_cast<unsigned long long>(MiB(gauges.outstanding_resident_bytes)),
 	    static_cast<unsigned long long>(MiB(gauges.pending_bytes)),
-	    static_cast<unsigned long long>(MiB(get(g_mem_stats.realloc_bytes))));
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.realloc_bytes))),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.realloc_after_punch_bytes))),
+	    g_mem_punch_on ? "on" : "off",
+	    static_cast<unsigned long long>(get(g_mem_stats.punch.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.punch.bytes))),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.punch_resident_bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.punch_failures)));
 	Log::WriteToConsoleAndLog(text);
 }
 
@@ -1135,6 +1150,7 @@ void Initialize() {
 	g_flexible_memory_size_frozen = true;
 	VirtualMemory::Init();
 	g_mem_stats_on = Config::MemStatsEnabled();
+	g_mem_punch_on = Config::MemReleasePunchEnabled();
 	g_guest_address_space = std::make_unique<GuestAddressSpace>(PhysicalMemory::TotalSize());
 	g_physical_memory     = std::make_unique<PhysicalMemory>();
 	g_flexible_memory     = std::make_unique<FlexibleMemory>();

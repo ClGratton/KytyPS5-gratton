@@ -82,6 +82,7 @@ struct ConfigOptions {
 	bool                   vram_paging                 = false;
 	bool                   vram_stats                  = false;
 	bool                   mem_stats                   = false;
+	bool                   mem_release_punch           = false;
 	uint32_t               vram_ballast_mb             = 0;
 	uint32_t               vram_audit_s                = 0;
 	// GC thresholds in MiB; 0 keeps the budget-derived stock value.
@@ -149,9 +150,10 @@ bool PlayGoHackEnabled();
 bool SkipNoticeScreen();
 bool VramPagingEnabled();
 bool VramStatsEnabled();
-// Host-RAM diagnostics for guest memory release (log only). Safe to call before the config
-// exists (reports false).
+// Host-RAM diagnostics for guest memory release (log only) and the opt-in hole punch. Both are
+// safe to call before the config exists (they report false).
 bool MemStatsEnabled();
+bool MemReleasePunchEnabled();
 uint32_t VramBallastMb();
 uint32_t VramAuditSeconds();
 uint32_t GcTextureTriggerMb();

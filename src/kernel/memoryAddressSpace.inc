@@ -95,7 +95,7 @@ public:
 			return;
 		}
 		m_backing_base = static_cast<uint8_t*>(backing);
-		if (g_mem_stats_on) {
+		if (g_mem_stats_on || g_mem_punch_on) {
 			InitTrackingUnlocked();
 		}
 #endif
@@ -171,7 +171,7 @@ public:
 
 	// The guest freed [backing_offset, backing_offset + size) of the backing object (direct memory
 	// released, pool range decommitted, flexible memory unmapped). Whole host pages inside the range
-	// that no view maps any more are counted.
+	// that no view maps any more are counted and, with --mem-release-punch, returned to the host.
 	// Pages a view still maps are remembered and handled when the last view goes away.
 	void NoteReleased(uint64_t backing_offset, uint64_t size) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
@@ -187,7 +187,7 @@ public:
 	}
 
 	struct ReleaseGauges {
-		uint64_t outstanding_bytes          = 0; // released and unmapped
+		uint64_t outstanding_bytes          = 0; // released, unmapped, not punched
 		uint64_t outstanding_resident_bytes = 0; // ... of which resident in RAM right now
 		uint64_t pending_bytes              = 0; // released but a view still maps them
 	};
@@ -583,7 +583,8 @@ private:
 	// Per host page of the backing object: how many views map it and whether the guest freed it.
 	static constexpr uint8_t PAGE_LIVE      = 0; // in use, or never released
 	static constexpr uint8_t PAGE_PENDING   = 1; // freed by the guest, a view still maps it
-	static constexpr uint8_t PAGE_CANDIDATE = 2; // freed and unmapped: safe to give back
+	static constexpr uint8_t PAGE_CANDIDATE = 2; // freed and unmapped: safe to punch
+	static constexpr uint8_t PAGE_PUNCHED   = 3; // freed, unmapped and returned to the host
 
 	void InitTrackingUnlocked() {
 		const long host_page = sysconf(_SC_PAGESIZE);
@@ -613,17 +614,26 @@ private:
 		uint64_t last  = 0;
 		OverlapPages(offset, size, &first, &last);
 		uint64_t reused = 0;
+		uint64_t reused_punched = 0;
 		for (uint64_t page = first; page < last; page++) {
 			if (m_refs[page] != UINT16_MAX) {
 				m_refs[page]++;
 			}
-			if (m_pstate[page] == PAGE_CANDIDATE) {
-				reused += m_host_page;
+			switch (m_pstate[page]) {
+				case PAGE_CANDIDATE:
+					reused += m_host_page;
+					break;
+				case PAGE_PUNCHED: reused_punched += m_host_page; break;
+				default: break;
 			}
 			m_pstate[page] = PAGE_LIVE;
 		}
 		if (reused != 0) {
 			g_mem_stats.realloc_bytes.fetch_add(reused, std::memory_order_relaxed);
+		}
+		if (reused_punched != 0) {
+			g_mem_stats.realloc_after_punch_bytes.fetch_add(reused_punched,
+			                                                std::memory_order_relaxed);
 		}
 	}
 
@@ -657,7 +667,7 @@ private:
 		FinalizeUnlocked(first, last);
 	}
 
-	// Pending pages that no view maps any more become candidates; each run is counted.
+	// Pending pages that no view maps any more become candidates; each run is counted and punched.
 	void FinalizeUnlocked(uint64_t first, uint64_t last) {
 		for (uint64_t page = first; page < last;) {
 			if (m_pstate[page] != PAGE_PENDING || m_refs[page] != 0) {
@@ -708,6 +718,41 @@ private:
 			g_mem_stats.released_unmapped_resident_bytes.fetch_add(resident,
 			                                                       std::memory_order_relaxed);
 		}
+		if (!g_mem_punch_on) {
+			return;
+		}
+		const uint64_t offset = first * m_host_page;
+#if defined(__APPLE__)
+		constexpr bool punched = false; // no fallocate(PUNCH_HOLE) here
+#else
+		const bool punched = fallocate(m_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+		                               static_cast<off_t>(offset), static_cast<off_t>(bytes)) == 0;
+#endif
+		if (!punched) {
+			g_mem_stats.punch_failures.fetch_add(1, std::memory_order_relaxed);
+			if (g_mem_stats_on) {
+				Log::WriteToConsoleAndLog(
+				    "[mem-punch] FAILED off=0x" + ToHex(offset) + " len=" + std::to_string(bytes) +
+				    " errno=" + std::to_string(errno) + "\n");
+			}
+			return;
+		}
+		for (uint64_t page = first; page < last; page++) {
+			m_pstate[page] = PAGE_PUNCHED;
+		}
+		if (g_mem_stats_on) {
+			g_mem_stats.punch.Add(bytes);
+			g_mem_stats.punch_resident_bytes.fetch_add(resident, std::memory_order_relaxed);
+			Log::WriteToConsoleAndLog("[mem-punch] off=0x" + ToHex(offset) + " len=" +
+			                          std::to_string(bytes) + " resident=" + std::to_string(resident) +
+			                          "\n");
+		}
+	}
+
+	static std::string ToHex(uint64_t value) {
+		char buffer[24];
+		snprintf(buffer, sizeof(buffer), "%" PRIx64, value);
+		return buffer;
 	}
 
 	void RemoveMappingsUnlocked(uint64_t vaddr, uint64_t size) {
