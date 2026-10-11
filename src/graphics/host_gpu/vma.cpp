@@ -18,6 +18,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/vramPolicy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -187,36 +188,6 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
 }
 
-namespace {
-
-constexpr uint64_t DedicatedImageMinBytes = 8ull << 20;
-constexpr uint32_t MaxDedicatedImages     = 1024;
-
-// Rough size of an image (all mips and layers), only used to choose the allocation strategy.
-uint64_t EstimateImageBytes(const vk::ImageCreateInfo& info) {
-	const auto format = static_cast<int>(info.format);
-	double     bytes_per_texel = 4.0;
-	if (format >= 131 && format <= 184) { // block compressed
-		const bool half = format == 131 || format == 132 || format == 133 || format == 134 ||
-		                  format == 139 || format == 140;
-		bytes_per_texel = half ? 0.5 : 1.0;
-	} else if ((format >= 9 && format <= 15) || format == 127) {
-		bytes_per_texel = 1.0;
-	} else if ((format >= 16 && format <= 22) || (format >= 70 && format <= 76) || format == 124) {
-		bytes_per_texel = 2.0;
-	} else if ((format >= 91 && format <= 97) || (format >= 101 && format <= 103)) {
-		bytes_per_texel = 8.0;
-	} else if (format >= 107 && format <= 109) {
-		bytes_per_texel = 16.0;
-	}
-	const double levels = info.mipLevels > 1 ? 4.0 / 3.0 : 1.0;
-	return static_cast<uint64_t>(static_cast<double>(info.extent.width) * info.extent.height *
-	                             info.extent.depth * info.arrayLayers * bytes_per_texel * levels *
-	                             static_cast<double>(info.samples));
-}
-
-} // namespace
-
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
@@ -242,10 +213,13 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 	// Large images get their own VkDeviceMemory: freeing one returns exactly its size to the
 	// driver instead of leaving a hole in a shared block (the texture-cache reclaim could free
-	// 830 MB of allocations and only 73 MB of blocks). Bounded, the driver limits the number of
-	// live allocations.
-	if (EstimateImageBytes(image_info) >= DedicatedImageMinBytes &&
-	    dedicated_images.load(std::memory_order_relaxed) < MaxDedicatedImages) {
+	// 830 MB of allocations and only 73 MB of blocks).
+	const VramPolicy::ImageShape shape {image_info.extent.width,  image_info.extent.height,
+	                                    image_info.extent.depth,  image_info.arrayLayers,
+	                                    image_info.mipLevels,     static_cast<uint32_t>(image_info.samples),
+	                                    static_cast<int>(image_info.format)};
+	if (VramPolicy::UseDedicatedAllocation(VramPolicy::EstimateImageBytes(shape),
+	                                       dedicated_images.load(std::memory_order_relaxed))) {
 		alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
 	}
 	if (memory_priority_enabled) {
@@ -264,45 +238,50 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	}
 
 	vk::Image::CType native_image = VK_NULL_HANDLE;
-	auto             result       = static_cast<vk::Result>(
-	    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
-	                   &alloc_info, &native_image, &image.allocation, nullptr));
-	if (result != vk::Result::eSuccess) {
-		VRAM_LOG("Image allocation failed: %s extent=%ux%ux%u format=%d layers=%u levels=%u\n",
-		     vk::to_string(result).c_str(), image_info.extent.width, image_info.extent.height,
-		     image_info.extent.depth, static_cast<int>(image_info.format), image_info.arrayLayers,
-		     image_info.mipLevels);
-		LogMemoryBudget();
-		if (reclaim_memory && !in_reclaim) {
-			// Free what the caches can spare and try once more before giving up.
-			in_reclaim = true;
-			reclaim_memory();
-			in_reclaim = false;
-			LogMemoryBudget();
-			native_image     = VK_NULL_HANDLE;
-			image.allocation = nullptr;
-			result           = static_cast<vk::Result>(vmaCreateImage(
-                allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
-                &alloc_info, &native_image, &image.allocation, nullptr));
-			VRAM_LOG("Image allocation retry after reclaim: %s\n", vk::to_string(result).c_str());
+	vk::Result       result       = vk::Result::eSuccess;
+	const auto       try_allocate = [&](VramPolicy::AllocStage stage) {
+		if (stage == VramPolicy::AllocStage::HostFallback) {
+			// Any compatible memory type (system memory, or paged out by the driver when
+			// --vram-paging is on).
+			VRAM_LOG("VRAM exhausted: retrying image allocation without DEVICE_LOCAL\n");
+			alloc_info.requiredFlags  = 0;
+			alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+			alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
 		}
-	}
-	if (result != vk::Result::eSuccess) {
-		// Last resort: a slow image beats a dead emulator. Let it land in any compatible memory
-		// type (system memory, or paged out by the driver when --vram-paging is on).
-		VRAM_LOG("VRAM exhausted: retrying image allocation without DEVICE_LOCAL\n");
-		alloc_info.requiredFlags  = 0;
-		alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-		alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-		native_image              = VK_NULL_HANDLE;
-		image.allocation          = nullptr;
-		result                    = static_cast<vk::Result>(vmaCreateImage(
+		native_image     = VK_NULL_HANDLE;
+		image.allocation = nullptr;
+		result           = static_cast<vk::Result>(vmaCreateImage(
             allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &alloc_info,
             &native_image, &image.allocation, nullptr));
-		VRAM_LOG("VRAM exhausted: fallback allocation result: %s\n", vk::to_string(result).c_str());
-		if (result == vk::Result::eSuccess) {
-			host_fallback_images.fetch_add(1, std::memory_order_relaxed);
+		if (result != vk::Result::eSuccess) {
+			if (stage == VramPolicy::AllocStage::Normal) {
+				VRAM_LOG("Image allocation failed: %s extent=%ux%ux%u format=%d layers=%u levels=%u\n",
+				         vk::to_string(result).c_str(), image_info.extent.width,
+				         image_info.extent.height, image_info.extent.depth,
+				         static_cast<int>(image_info.format), image_info.arrayLayers,
+				         image_info.mipLevels);
+			}
+			LogMemoryBudget();
 		}
+		if (stage == VramPolicy::AllocStage::AfterReclaim) {
+			VRAM_LOG("Image allocation retry after reclaim: %s\n", vk::to_string(result).c_str());
+		} else if (stage == VramPolicy::AllocStage::HostFallback) {
+			VRAM_LOG("VRAM exhausted: fallback allocation result: %s\n",
+			         vk::to_string(result).c_str());
+		}
+		return result == vk::Result::eSuccess;
+	};
+	const auto outcome = VramPolicy::RunAllocationLadder(
+	    try_allocate,
+	    [&] {
+		    // Free what the caches can spare before trying once more.
+		    in_reclaim = true;
+		    reclaim_memory();
+		    in_reclaim = false;
+	    },
+	    reclaim_memory && !in_reclaim);
+	if (outcome.ok && outcome.stage == VramPolicy::AllocStage::HostFallback) {
+		host_fallback_images.fetch_add(1, std::memory_order_relaxed);
 	}
 	image.image = native_image;
 	if (result != vk::Result::eSuccess) {

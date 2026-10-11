@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "graphics/host_gpu/vramPolicy.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -126,15 +127,12 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
       m_buffer_cache(buffer_cache),
       m_readback_linear_images(Config::ReadbackLinearImagesEnabled()) {
 	if (m_graphics.CanReportMemoryUsage()) {
-		constexpr int64_t GiB = 1024ll * 1024 * 1024;
-		const auto        budget =
+		const auto budget =
 		    static_cast<int64_t>(std::min<uint64_t>(m_graphics.GetTotalMemoryBudget(), INT64_MAX));
-		const auto threshold = std::min<int64_t>(budget, 8 * GiB);
-		m_pressure_gc_memory = static_cast<uint64_t>(
-		    std::max<int64_t>(std::min(budget - 6 * threshold / 10, budget - GiB), GiB + GiB / 2));
-		m_critical_gc_memory = static_cast<uint64_t>(
-		    std::max<int64_t>(std::min(budget - 2 * threshold / 10, budget - GiB / 2), 3 * GiB));
-		m_trigger_gc_memory = static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
+		const auto thresholds = VramPolicy::ComputeGcThresholds(budget);
+		m_pressure_gc_memory  = thresholds.pressure;
+		m_critical_gc_memory  = thresholds.critical;
+		m_trigger_gc_memory   = thresholds.trigger;
 	}
 	constexpr uint64_t MiB = 1024ull * 1024;
 	if (Config::GcTextureTriggerMb() != 0) {
