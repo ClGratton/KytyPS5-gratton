@@ -139,6 +139,8 @@ struct ConfigOptions {
 	// --gpu-phase-stats <seconds>: report where the GPU thread spends its time every N seconds
 	// (common/gpuPhaseStats.h). 0 = off.
 	uint32_t               gpu_phase_stats_s           = 0;
+	// --submit-stats <seconds>: only the frame/submit/coalescing counters, no timers. 0 = off.
+	uint32_t               submit_stats_s              = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif

@@ -153,6 +153,9 @@ static void PrintUsage() {
 	         "                                       cause, slowest PM4 packets) and write\n"
 	         "                                       _gpu_phase.csv. For shares, never an fps baseline.\n"
 	         "                                       Default: 0 (off).\n");
+	::printf("  --submit-stats <seconds>             Every N seconds print frames, Vulkan submits per frame\n"
+	         "                                       and the --submit-coalesce counters (no timers; safe\n"
+	         "                                       next to fps measurements). Default: 0 (off).\n");
 	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
 	         "                                       its first use and compare the SPIR-V. Default: false.\n");
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
@@ -630,6 +633,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.gpu_phase_stats_s = static_cast<uint32_t>(seconds);
+		} else if (arg == "--submit-stats") {
+			uint64_t seconds = 0;
+			if (!ParseUint64(value, seconds) || seconds > 3600) {
+				::printf("invalid submit stats interval (expected 0-3600 seconds): %s\n",
+				         value.c_str());
+				return false;
+			}
+			options.config.submit_stats_s = static_cast<uint32_t>(seconds);
 		} else if (arg == "--debug-lookahead-verify") {
 			if (!ParseBool(value, options.config.lookahead_verify)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

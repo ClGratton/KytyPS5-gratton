@@ -36,8 +36,9 @@ enum class Phase : uint8_t {
 	Count
 };
 
-// Seconds between reports; 0 leaves everything off. Called from Config::Load().
-void Configure(uint32_t interval_seconds);
+// Seconds between reports; 0 leaves everything off. `phases` false is --submit-stats: only the
+// frame/submit/coalescing counters are reported, no scope is timed. Called from Config::Load().
+void Configure(uint32_t interval_seconds, bool phases = true);
 
 [[nodiscard]] bool Enabled() noexcept;
 
@@ -53,6 +54,11 @@ void NoteSubmit() noexcept;
 void NoteFrame() noexcept;
 [[nodiscard]] uint64_t Submits() noexcept;
 [[nodiscard]] uint64_t Frames() noexcept;
+
+// --submit-coalesce bookkeeping (always on, one relaxed add): events whose submit was held back,
+// and what finally submitted them.
+enum class Coalesce : uint8_t { Deferred, FlushBatch, FlushDeadline, FlushForced, Count };
+void NoteCoalesce(Coalesce kind, uint64_t count = 1) noexcept;
 
 namespace detail {
 struct ThreadState;
