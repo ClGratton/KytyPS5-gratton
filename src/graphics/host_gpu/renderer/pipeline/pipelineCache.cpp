@@ -1783,7 +1783,8 @@ void PipelineCache::NoteDrawUse(Pipeline& pipeline, bool graphics, bool joined_i
 }
 
 void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
-                                    const HW::ShaderRegisters& sh, uint32_t mode) {
+                                    const HW::ShaderRegisters& sh, uint32_t mode,
+                                    bool async_compute, const uint32_t (&groups)[3]) {
 	std::shared_lock gate(m_prefetch_gate);
 	Common::Speculation::HeldLock held(&m_prefetch_gate, true);
 	if (m_prefetch_stopped) {
@@ -1800,7 +1801,19 @@ void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
 	}
 	ShaderComputeInputInfo input_info {};
 	input_info.host_subgroup_size         = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	input_info.async_compute              = async_compute;
 	input_info.dispatch_thread_dimensions = (mode & (1u << 5u)) != 0;
+	std::copy(std::begin(groups), std::end(groups), input_info.workgroup_counts);
+	if (input_info.dispatch_thread_dimensions) {
+		// Same conversion as RenderExecutor::DispatchDirect.
+		const uint32_t group_sizes[] = {regs.cs_regs.num_thread_x, regs.cs_regs.num_thread_y,
+		                                regs.cs_regs.num_thread_z};
+		for (uint32_t axis = 0; axis < 3u; ++axis) {
+			const auto size    = std::max(group_sizes[axis], 1u);
+			const auto threads = input_info.workgroup_counts[axis];
+			input_info.workgroup_counts[axis] = threads / size + (threads % size != 0u);
+		}
+	}
 	const auto params                     = PrepareProgram(regs, sh, input_info);
 	if (Common::Speculation::TakeFailure()) {
 		m_lookahead.cs_skipped.fetch_add(1, std::memory_order_relaxed);
@@ -1808,6 +1821,8 @@ void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
 		    1, std::memory_order_relaxed);
 		return;
 	}
+	input_info.lds_storage = input_info.lds_size_dwords * 4u >
+	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	uint32_t   push_data_cursor           = 0;
 	ProgramCache::AsyncContext async {
 	    .pool = pool, .allow_skip = false, .prefetch = true, .counters = &m_lookahead};

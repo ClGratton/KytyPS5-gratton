@@ -231,8 +231,11 @@ void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& d
 		return;
 	}
 	Common::Hang::Phase phase("lookahead_dispatch", m_stats.dispatches.load(std::memory_order_relaxed));
+	const uint32_t groups[3] = {dispatch.indirect ? 0u : dispatch.x, dispatch.indirect ? 0u : dispatch.y,
+	                            dispatch.indirect ? 0u : dispatch.z};
 	m_renderer.GetPipelineCache().PrefetchCompute(cp.GetShCtx().GetCs(),
-	                                              cp.GetCtx().GetShaderRegisters(), dispatch.mode);
+	                                              cp.GetCtx().GetShaderRegisters(), dispatch.mode,
+	                                              cp.IsAsyncComputeQueue(), groups);
 }
 
 } // namespace Libs::Graphics

@@ -217,9 +217,12 @@ public:
 	void SetLookaheadThreadSummary(std::function<std::string()> summary) {
 		m_lookahead_thread_summary = std::move(summary);
 	}
-	// Compute: `mode` is the DISPATCH_DIRECT initiator.
+	// Compute: `mode` is the DISPATCH_DIRECT initiator; `groups` the direct group counts (all
+	// zero for an indirect dispatch, like the real path before it reads the arguments). Every
+	// input-info field the real dispatch sets before GetComputeProgram() must be set here too:
+	// whatever is not part of the program key (lds_storage) still changes the compiled shader.
 	void PrefetchCompute(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
-	                     uint32_t mode);
+	                     uint32_t mode, bool async_compute, const uint32_t (&groups)[3]);
 
 private:
 	struct ProgramCache;

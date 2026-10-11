@@ -26,6 +26,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <ctime>
 #include <deque>
 #include <fmt/format.h>
 #include <memory>
@@ -767,7 +768,20 @@ namespace {
 // wall time. Real command buffers are far below these (a 42k-dword buffer is at most 42k packets).
 constexpr uint64_t kShadowMaxPackets = 4'000'000;
 constexpr uint64_t kShadowMaxJumps   = 100'000;
-constexpr int64_t  kShadowMaxNs      = 500'000'000;
+constexpr int64_t  kShadowMaxCpuNs   = 500'000'000;
+
+// CPU time of the calling thread. The budget is CPU time, not wall time: a shadow decode may
+// legitimately block for seconds waiting for a program job (the worker pool compiles it), but it
+// must never burn that much CPU decoding.
+int64_t ThreadCpuNs() {
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+	timespec ts {};
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+	return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+#else
+	return Bench::NowNs(); // no per-thread CPU clock: fall back to wall time
+#endif
+}
 } // namespace
 
 void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain) {
@@ -791,14 +805,14 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		if (IsShadow()) {
 			// Spin guard: never let a speculative decode run unbounded.
 			if (execution.m_start_ns == 0) {
-				execution.m_start_ns = Bench::NowNs();
+				execution.m_start_ns = ThreadCpuNs();
 			}
 			if (!execution.m_abandoned) {
 				if (++execution.m_steps > kShadowMaxPackets) {
 					AbandonShadow("packet budget");
 				} else if ((execution.m_steps & 0x3ffu) == 0 &&
-				           Bench::NowNs() - execution.m_start_ns > kShadowMaxNs) {
-					AbandonShadow("time budget");
+				           ThreadCpuNs() - execution.m_start_ns > kShadowMaxCpuNs) {
+					AbandonShadow("cpu time budget");
 				}
 			}
 			if (execution.m_abandoned) {
