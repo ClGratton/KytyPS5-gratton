@@ -23,7 +23,8 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(g_config == nullptr);
 	EXIT_IF(cfg.user_name.empty() || cfg.user_name.size() > MAX_USER_NAME_LENGTH);
 	EXIT_IF(!IsConfiguredUserIdValid(cfg.user_id));
-	EXIT_IF(cfg.controller_speaker_volume > 100 || cfg.controller_vibration_intensity > 100);
+	EXIT_IF(cfg.controller_speaker_volume > 100 || cfg.controller_vibration_intensity > 100 ||
+	        cfg.pad_speaker_volume > 100);
 
 	*g_config = cfg;
 }
@@ -58,6 +59,14 @@ uint32_t GetControllerSpeakerVolume() {
 
 uint32_t GetControllerVibrationIntensity() {
 	return g_config->controller_vibration_intensity;
+}
+
+uint32_t GetPadSpeakerVolume() {
+	return g_config->pad_speaker_volume;
+}
+
+bool PadSpeakerOsSinkEnabled() {
+	return g_config->pad_speaker_os_sink;
 }
 
 PresentMode GetPresentMode() {
