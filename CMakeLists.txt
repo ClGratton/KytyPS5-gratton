@@ -464,6 +464,11 @@ add_executable(phase_timers_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(phase_timers_tests PRIVATE ${inc_headers})
 
+add_executable(submit_coalescer_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SubmitCoalescerTests.cpp"
+)
+target_include_directories(submit_coalescer_tests PRIVATE ${inc_headers})
+
 add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
@@ -661,6 +666,7 @@ if(BUILD_TESTING)
 	add_test(NAME lds_span COMMAND $<TARGET_FILE:lds_span_tests>)
 	add_test(NAME texture_gc_policy COMMAND $<TARGET_FILE:texture_gc_policy_tests>)
 	add_test(NAME phase_timers COMMAND $<TARGET_FILE:phase_timers_tests>)
+	add_test(NAME submit_coalescer COMMAND $<TARGET_FILE:submit_coalescer_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
