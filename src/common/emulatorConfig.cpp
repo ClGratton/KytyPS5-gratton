@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
+#include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
 
 #include <algorithm>
@@ -31,6 +32,7 @@ void Load(const ConfigOptions& cfg) {
 	*g_config = cfg;
 
 	Common::Hang::Start(cfg.hang_watchdog_seconds);
+	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s);
 	Bench::Configure({
 	    .frames_csv        = cfg.bench_frames_csv,
 	    .exit_after_frames = cfg.bench_exit_after_frames,

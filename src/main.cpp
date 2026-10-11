@@ -148,6 +148,11 @@ static void PrintUsage() {
 	::printf("  --debug-texture-gc <true|false|log>  Debug: false disables the texture garbage collector;\n"
 	         "                                       log logs every free of a GPU-written image with\n"
 	         "                                       the flags that decided it. Default: true.\n");
+	::printf("  --gpu-phase-stats <seconds>          Every N seconds print where the GPU thread spends its\n"
+	         "                                       time (phase shares, submits per frame, drains by\n"
+	         "                                       cause, slowest PM4 packets) and write\n"
+	         "                                       _gpu_phase.csv. For shares, never an fps baseline.\n"
+	         "                                       Default: 0 (off).\n");
 	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
 	         "                                       its first use and compare the SPIR-V. Default: false.\n");
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
@@ -617,6 +622,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--gpu-phase-stats") {
+			uint64_t seconds = 0;
+			if (!ParseUint64(value, seconds) || seconds > 3600) {
+				::printf("invalid gpu phase stats interval (expected 0-3600 seconds): %s\n",
+				         value.c_str());
+				return false;
+			}
+			options.config.gpu_phase_stats_s = static_cast<uint32_t>(seconds);
 		} else if (arg == "--debug-lookahead-verify") {
 			if (!ParseBool(value, options.config.lookahead_verify)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

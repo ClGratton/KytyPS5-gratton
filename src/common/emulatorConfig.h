@@ -136,6 +136,9 @@ struct ConfigOptions {
 	// --debug-texture-gc log: log every free of a GPU-written image by the texture GC (and the
 	// out-of-memory reclaim) with the flags that decided it.
 	bool                   texture_gc_log              = false;
+	// --gpu-phase-stats <seconds>: report where the GPU thread spends its time every N seconds
+	// (common/gpuPhaseStats.h). 0 = off.
+	uint32_t               gpu_phase_stats_s           = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
