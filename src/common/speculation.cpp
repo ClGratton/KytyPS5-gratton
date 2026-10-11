@@ -48,6 +48,10 @@ void NoteFailure() noexcept {
 	t_failed = true;
 }
 
+bool HasFailure() noexcept {
+	return t_failed;
+}
+
 bool TakeFailure() noexcept {
 	const bool failed = t_failed;
 	t_failed          = false;
