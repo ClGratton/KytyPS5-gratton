@@ -74,6 +74,9 @@ class Configuration: public QObject {
 public:
 	static constexpr int DEFAULT_CONSOLE_LANGUAGE = 1;
 	static constexpr int MAX_CONSOLE_LANGUAGE     = 29;
+	static constexpr int MAX_FPS_LIMIT            = 1000;
+	static constexpr int MIN_GPU_TIME_SCALE_PERCENT = 10;
+	static constexpr int MAX_GPU_TIME_SCALE_PERCENT = 1600;
 
 	enum class Resolution {
 		R1280X720,
@@ -91,6 +94,10 @@ public:
 
 	enum class LogDirection { Silent, Console, File };
 	Q_ENUM(LogDirection)
+
+	// Source of the GPU timestamps a game reads (emulator --gpu-timestamps).
+	enum class GpuTimestamps { Legacy, Gpu };
+	Q_ENUM(GpuTimestamps)
 
 	enum class GameStatus { Unknown, InGame, Logo, DoesntBoot, MainMenu };
 	Q_ENUM(GameStatus)
@@ -124,6 +131,11 @@ public:
 	bool                   trophy_enabled              = true;
 	bool                   skip_notice_screen          = false;
 	int                    vblank_frequency            = 60;
+	// Frame limiter in fps (emulator --fps-limit); 0 = off.
+	int                    fps_limit                   = 0;
+	// Dynamic-resolution bias in percent (emulator --gpu-time-scale x 100); 100 = off.
+	int                    gpu_time_scale_percent      = 100;
+	GpuTimestamps          gpu_timestamps              = GpuTimestamps::Legacy;
 	int                    console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
@@ -159,6 +171,9 @@ public:
 		trophy_enabled              = other.trophy_enabled;
 		skip_notice_screen          = other.skip_notice_screen;
 		vblank_frequency            = other.vblank_frequency;
+		fps_limit                   = other.fps_limit;
+		gpu_time_scale_percent      = other.gpu_time_scale_percent;
+		gpu_timestamps              = other.gpu_timestamps;
 		console_language            = other.console_language;
 		vulkan_validation_enabled   = other.vulkan_validation_enabled;
 		shader_validation_enabled   = other.shader_validation_enabled;

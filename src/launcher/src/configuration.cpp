@@ -17,6 +17,9 @@ QVariantMap Configuration::GameSettings() const {
 	KYTY_CFG_SET(trophy_enabled);
 	KYTY_CFG_SET(skip_notice_screen);
 	KYTY_CFG_SET(vblank_frequency);
+	KYTY_CFG_SET(fps_limit);
+	KYTY_CFG_SET(gpu_time_scale_percent);
+	KYTY_CFG_SET(gpu_timestamps);
 	KYTY_CFG_SET(console_language);
 	KYTY_CFG_SET(vulkan_validation_enabled);
 	KYTY_CFG_SET(shader_validation_enabled);
@@ -62,6 +65,12 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	trophy_enabled   = s.value("trophy_enabled", trophy_enabled).toBool();
 	KYTY_CFG_GET(skip_notice_screen);
 	vblank_frequency = s.value("vblank_frequency", vblank_frequency).toInt();
+	fps_limit        = s.value("fps_limit", 0).toInt();
+	gpu_time_scale_percent = s.value("gpu_time_scale_percent", 100).toInt();
+	KYTY_CFG_GET(gpu_timestamps);
+	if (EnumToText(gpu_timestamps).isEmpty()) {
+		gpu_timestamps = GpuTimestamps::Legacy;
+	}
 	console_language = s.value("console_language", console_language).toInt();
 	if (console_language < 0 || console_language > MAX_CONSOLE_LANGUAGE) {
 		console_language = DEFAULT_CONSOLE_LANGUAGE;
@@ -138,6 +147,15 @@ bool Configuration::SetGameSettings(const QJsonObject& settings, QString& error)
 	}
 	if (vblank_frequency < 30 || vblank_frequency > 360) {
 		return fail(tr("Vblank frequency must be between 30 and 360."));
+	}
+	if (fps_limit < 0 || fps_limit > MAX_FPS_LIMIT) {
+		return fail(tr("FPS limit must be between 0 (off) and %1.").arg(MAX_FPS_LIMIT));
+	}
+	if (gpu_time_scale_percent < MIN_GPU_TIME_SCALE_PERCENT ||
+	    gpu_time_scale_percent > MAX_GPU_TIME_SCALE_PERCENT) {
+		return fail(tr("GPU time scale must be between %1% and %2%.")
+		                .arg(MIN_GPU_TIME_SCALE_PERCENT)
+		                .arg(MAX_GPU_TIME_SCALE_PERCENT));
 	}
 	if ((shader_log_direction == LogDirection::File && shader_log_folder.isEmpty()) ||
 	    (printf_direction == LogDirection::File && printf_output_file.isEmpty()) ||

@@ -153,6 +153,13 @@ ConfigurationEditDialog::ConfigurationEditDialog(Configuration& info, QWidget* p
 	connect(m_ui->slider_controller_volume, &QSlider::valueChanged, this, [this](int value) {
 		m_ui->label_controller_volume_value->setText(tr("%1%").arg(value));
 	});
+	connect(m_ui->slider_fps_limit, &QSlider::valueChanged, this, [this](int value) {
+		m_ui->label_fps_limit_value->setText(value == 0 ? tr("Off") : tr("%1 fps").arg(value));
+	});
+	connect(m_ui->slider_gpu_time_scale, &QSlider::valueChanged, this, [this](int value) {
+		m_ui->label_gpu_time_scale_value->setText(
+		    value == 100 ? tr("1.00x (off)") : tr("%1x").arg(value / 100.0, 0, 'f', 2));
+	});
 	connect(m_ui->comboBox_shader_log_direction, &QComboBox::currentTextChanged, this,
 	        [this](const QString& text) {
 		        auto log = TextToEnum<Configuration::LogDirection>(text);
@@ -280,6 +287,16 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->checkBox_skip_notice_screen->setChecked(info.skip_notice_screen);
 	m_ui->checkBox_trophy_notifications->setChecked(info.trophy_enabled);
 	m_ui->spinBox_vblank_frequency->setValue(info.vblank_frequency);
+	m_ui->slider_fps_limit->setValue(info.fps_limit);
+	m_ui->slider_gpu_time_scale->setValue(info.gpu_time_scale_percent);
+	// Setting the same value emits no signal: refresh the labels directly.
+	m_ui->label_fps_limit_value->setText(info.fps_limit == 0 ? tr("Off")
+	                                                         : tr("%1 fps").arg(info.fps_limit));
+	m_ui->label_gpu_time_scale_value->setText(
+	    info.gpu_time_scale_percent == 100
+	        ? tr("1.00x (off)")
+	        : tr("%1x").arg(m_ui->slider_gpu_time_scale->value() / 100.0, 0, 'f', 2));
+	ListInit(m_ui->comboBox_gpu_timestamps, info.gpu_timestamps);
 	m_ui->comboBox_console_language->clear();
 	m_ui->comboBox_console_language->addItems(CONSOLE_LANGUAGE_NAMES);
 	m_ui->comboBox_console_language->setCurrentIndex(
@@ -441,6 +458,10 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	info.skip_notice_screen        = ui.checkBox_skip_notice_screen->isChecked();
 	info.trophy_enabled            = ui.checkBox_trophy_notifications->isChecked();
 	info.vblank_frequency          = ui.spinBox_vblank_frequency->value();
+	info.fps_limit                 = ui.slider_fps_limit->value();
+	info.gpu_time_scale_percent    = ui.slider_gpu_time_scale->value();
+	info.gpu_timestamps =
+	    TextToEnum<Configuration::GpuTimestamps>(ui.comboBox_gpu_timestamps->currentText());
 	info.console_language          = ui.comboBox_console_language->currentIndex();
 	info.vulkan_validation_enabled = ui.checkBox_vulkan_validation->isChecked();
 	info.shader_validation_enabled = ui.checkBox_shader_validation->isChecked();
