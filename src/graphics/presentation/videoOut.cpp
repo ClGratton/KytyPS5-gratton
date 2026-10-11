@@ -13,6 +13,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
+#include "graphics/presentation/framePacer.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/presenter.h"
@@ -850,6 +851,15 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	const auto frequency = Common::Timer::QueryPerformanceFrequency();
 	EXIT_IF(frequency == 0);
 
+	// --fps-limit: skips vblanks so that fewer flips are presented per second. The guest still
+	// sees every vblank; its flips wait in the flip queue, which throttles the game.
+	Graphics::FramePacer pacer;
+	pacer.Configure(Config::GetFpsLimit(), Config::GetVblankFrequency());
+	if (pacer.Active()) {
+		LOGF("Frame limiter: at most %u fps on a %u Hz vblank\n", Config::GetFpsLimit(),
+		     Config::GetVblankFrequency());
+	}
+
 	int64_t total_wait = 0;
 	while (!token.stop_requested()) {
 		const auto sleep_begin = Common::Timer::QueryPerformanceCounter();
@@ -877,7 +887,13 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		}
 
 		VblankBegin();
-		bool presented = m_flip_queue.Flip(0);
+		bool presented = false;
+		if (pacer.OnVblank()) {
+			presented = m_flip_queue.Flip(0);
+			if (presented) {
+				pacer.OnPresented();
+			}
+		}
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
 			if (m_presenter.PresentLastFrame()) {
 				presented = true;
