@@ -95,6 +95,8 @@ static void PrintUsage() {
 	         "                                       non-Release/dirty builds.\n");
 	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
 	         "                                       pipeline creation misses. Default: off.\n");
+	::printf("  --bench-gpu-trace <true|false>       With --shader-timing-log: also log the guest submit /\n"
+	         "                                       GPU-thread execute timeline. Default: off.\n");
 	::printf("  --async-pipelines <off|stall|skip>   Run shader translation and Vulkan pipeline creation\n"
 	         "                                       on worker threads. off (default): synchronous, stock\n"
 	         "                                       behaviour. stall: the draw/dispatch waits for the\n"
@@ -461,6 +463,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.pipeline_workers = static_cast<uint32_t>(workers);
+		} else if (arg == "--bench-gpu-trace") {
+			if (!ParseBool(value, options.config.bench_gpu_trace)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
 		} else if (arg == "--shader-timing-log") {
 			if (value.empty()) {
 				::printf("invalid --shader-timing-log path\n");

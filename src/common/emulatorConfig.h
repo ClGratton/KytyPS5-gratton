@@ -92,6 +92,7 @@ struct ConfigOptions {
 	std::filesystem::path  bench_frames_csv;
 	uint64_t               bench_exit_after_frames     = 0;
 	std::filesystem::path  shader_timing_log;
+	bool                   bench_gpu_trace             = false;
 	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Revision;
 	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
 	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.

@@ -76,6 +76,14 @@ AsyncPipelineCompiler::~AsyncPipelineCompiler() {
 }
 
 bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job) {
+	if (Bench::TraceEnabled()) {
+		const char* kind = job->GetKind() == AsyncJob::Kind::Program    ? "prog"
+		                   : job->GetKind() == AsyncJob::Kind::Graphics ? "gfx"
+		                                                                : "cs";
+		Bench::LogTiming("gpu_miss", job->KeyHash(), Bench::NowNs(), 0, true,
+		                 fmt::format("job={};seq={};draw={};disp={}", kind, Bench::TraceSubmission(),
+		                             Bench::TraceDrawCount(), Bench::TraceDispatchCount()));
+	}
 	{
 		std::lock_guard lock(m_mutex);
 		if (m_stopping.load(std::memory_order_relaxed)) {

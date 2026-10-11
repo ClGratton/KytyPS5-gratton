@@ -1,6 +1,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -25,6 +26,7 @@
 #include <atomic>
 #include <cstdio>
 #include <deque>
+#include <fmt/format.h>
 #include <memory>
 #include <mutex>
 #include <semaphore>
@@ -426,6 +428,20 @@ void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
+	if (Bench::TraceEnabled()) {
+		submission.trace_seq = ++m_trace_seq;
+		const char* type     = "gfx";
+		switch (submission.type) {
+			case SubmissionType::Graphics: type = "gfx"; break;
+			case SubmissionType::Compute: type = "cs"; break;
+			case SubmissionType::FlipPreparation: type = "flip"; break;
+			case SubmissionType::SuspendPoint: type = "susp"; break;
+		}
+		Bench::LogTiming("gpu_submit", submission.trace_seq, Bench::NowNs(), 0, false,
+		                 fmt::format("type={};queue={};dw={};cdw={};pending={}", type,
+		                             submission.queue_id, submission.commands.size(),
+		                             submission.constant_commands.size(), m_submission_count));
+	}
 	m_queues[submission.queue_id].push_back(std::move(submission));
 	m_submission_count++;
 	m_work_available.Signal();
@@ -537,6 +553,21 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
+	if (!Bench::TraceEnabled()) {
+		return ProcessImpl(submission);
+	}
+	Bench::TraceSetSubmission(submission.trace_seq);
+	Bench::LogTiming("gpu_start", submission.trace_seq, Bench::NowNs(), 0, true,
+	                 fmt::format("slice={}", submission.trace_slices++));
+	const bool complete = ProcessImpl(submission);
+	Bench::LogTiming("gpu_end", submission.trace_seq, Bench::NowNs(), 0, true,
+	                 fmt::format("complete={};draws={};dispatches={}", complete ? 1 : 0,
+	                             Bench::TraceDrawCount(), Bench::TraceDispatchCount()));
+	Bench::TraceSetSubmission(0);
+	return complete;
+}
+
+bool GuestGpu::ProcessImpl(Submission& submission) {
 	const bool first_slice = !submission.started;
 	auto&      cp          = GetProcessor(submission.queue_id);
 
@@ -849,6 +880,9 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
+	if (Bench::TraceEnabled()) {
+		Bench::TraceDraw("gfx");
+	}
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
@@ -1007,6 +1041,9 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	if (Bench::TraceEnabled()) {
+		Bench::TraceDraw("cs");
+	}
 
 	uint32_t frame_num = 0;
 
@@ -1043,10 +1080,16 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 		return;
 	}
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	if (Bench::TraceEnabled()) {
+		Bench::TraceDraw("csi");
+	}
 	m_renderer.GetRenderExecutor().DispatchIndirect(m_submit_id, CurrentBuffer(), args_addr, mode);
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
+	if (Bench::TraceEnabled()) {
+		Bench::TraceDraw("gfxa");
+	}
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
 	}
