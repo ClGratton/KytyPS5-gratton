@@ -88,6 +88,9 @@ struct ConfigOptions {
 	uint32_t               gc_texture_critical_mb      = 0;
 	uint32_t               gc_buffer_trigger_mb        = 0;
 	uint32_t               gc_buffer_critical_mb       = 0;
+	// Observation-only benchmark instrumentation (see common/benchInstrument.h). Off by default.
+	std::filesystem::path  bench_frames_csv;
+	uint64_t               bench_exit_after_frames     = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
