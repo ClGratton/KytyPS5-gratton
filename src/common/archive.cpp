@@ -1,5 +1,7 @@
 #include "common/archive.h"
 
+#include "common/profiler.h"
+
 #include "common/stringUtils.h"
 
 #include <algorithm>
@@ -210,6 +212,7 @@ private:
 	}
 
 	void Loop() {
+		KYTY_PROFILER_THREAD("kyArchiveIo");
 		for (;;) {
 			Request* request;
 			{

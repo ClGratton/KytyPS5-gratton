@@ -1239,7 +1239,7 @@ void RuntimeLinker::SaveProgram(Program* program, const std::filesystem::path& e
 }
 
 void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
-	KYTY_PROFILER_THREAD("Thread_Main");
+	KYTY_PROFILER_THREAD("kyGuestMain");
 
 	Libs::LibKernel::PthreadInitSelfForMainThread();
 	auto* main_stack_top = Libs::LibKernel::PthreadCreateMainGuestStack();

@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include "common/profiler.h"
+
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -260,6 +262,7 @@ bool CommandScheduler::HasPendingPriorityOperations() {
 }
 
 void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
+	KYTY_PROFILER_THREAD("kyPrioOps");
 	while (!stop.stop_requested()) {
 		PendingOperation operation;
 		{

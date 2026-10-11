@@ -1,6 +1,7 @@
 #include "libs/audio3d.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "common/threads.h"
 #include "kernel/semaphore.h"
 #include "libs/errno.h"
@@ -53,6 +54,7 @@ constexpr uint32_t MAX_PORTS = 4;
 static Audio3dInternal g_ports[MAX_PORTS] = {};
 
 static void playback_simulate(void* arg) {
+	KYTY_PROFILER_THREAD("kyAudio3d");
 	auto* port = static_cast<Audio3dInternal*>(arg);
 	EXIT_IF(port == nullptr);
 	EXIT_IF(port->data_mutex == nullptr);

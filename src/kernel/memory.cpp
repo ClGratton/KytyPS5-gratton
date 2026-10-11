@@ -1,5 +1,7 @@
 #include "kernel/memory.h"
 
+#include "common/profiler.h"
+
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -1123,6 +1125,7 @@ static void StartMemStats() {
 	g_mem_stats_start = std::chrono::steady_clock::now();
 	g_mem_stats_stop  = false;
 	g_mem_stats_thread = std::thread([] {
+		KYTY_PROFILER_THREAD("kyMemStats");
 		std::unique_lock<std::mutex> lock(g_mem_stats_mutex);
 		while (!g_mem_stats_cv.wait_for(lock, std::chrono::seconds(5),
 		                                [] { return g_mem_stats_stop; })) {

@@ -851,7 +851,7 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 }
 
 void WindowRun() {
-	KYTY_PROFILER_THREAD("Thread_Window");
+	KYTY_PROFILER_THREAD("kyWindow");
 	EXIT_IF(g_window == nullptr);
 
 	g_window->Run();

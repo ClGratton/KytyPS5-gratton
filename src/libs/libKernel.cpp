@@ -1,6 +1,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/profiler.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -1047,6 +1048,7 @@ static void SignalApcHandler(void* arg1, void* arg2, void* /*arg3*/, PCONTEXT co
 		if (!guest_context) {
 			SanitizeNonGuestSignalUcontext(&ctx, thread);
 			std::thread([thread, signum, handler, ctx]() mutable {
+				KYTY_PROFILER_THREAD("kySigDispatch");
 				SignalDispatchScope helper_scope;
 				auto*               previous_self = PthreadSwapSelfForSignal(thread);
 				handler(signum, &ctx);
