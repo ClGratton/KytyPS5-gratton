@@ -56,7 +56,9 @@ static void PrintUsage() {
 	::printf("  --controller-color <#RRGGBB>        Override the controller lightbar color.\n");
 	::printf("  --controller-volume <0-100>         DualSense speaker volume. Default: 50.\n");
 	::printf("  --controller-vibration <0-100>      DualSense vibration intensity. Default: 100.\n");
-	::printf("  --pad-speaker-volume <0-100>        DualSense speaker hardware level. Default: 50.\n");
+	::printf("  --pad-speaker <on|off>              Send controller-speaker audio to the DualSense; off plays\n"
+	         "                                      it on the normal output. Default: on.\n");
+	::printf("  --pad-speaker-volume <0-100>        DualSense speaker hardware level. Default: 15.\n");
 	::printf("  --pad-speaker-os-sink <on|off>      Linux: expose a Bluetooth DualSense speaker as an OS\n"
 	         "                                      volume control (PipeWire/Pulse sink). Default: on.\n");
 	::printf(
@@ -363,6 +365,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			if (!ParseUint32(value, options.config.controller_vibration_intensity) ||
 			    options.config.controller_vibration_intensity > 100) {
 				::printf("invalid controller vibration intensity: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--pad-speaker") {
+			if (!ParseBool(value, options.config.pad_speaker_enabled)) {
+				::printf("invalid pad speaker value (expected on|off): %s\n", value.c_str());
 				return false;
 			}
 		} else if (arg == "--pad-speaker-volume") {

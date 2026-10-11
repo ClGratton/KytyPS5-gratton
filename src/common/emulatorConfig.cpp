@@ -61,6 +61,10 @@ uint32_t GetControllerVibrationIntensity() {
 	return g_config->controller_vibration_intensity;
 }
 
+bool PadSpeakerEnabled() {
+	return g_config->pad_speaker_enabled;
+}
+
 uint32_t GetPadSpeakerVolume() {
 	return g_config->pad_speaker_volume;
 }

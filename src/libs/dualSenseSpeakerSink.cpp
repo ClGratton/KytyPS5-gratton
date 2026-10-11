@@ -280,6 +280,11 @@ void Worker() {
 			return;
 		}
 		module_id = out.substr(0, out.find_first_of("\r\n"));
+		// The sound server restores the volume a previous sink of this name had; start at unity,
+		// which is the hardware level chosen with --pad-speaker-volume, and unmuted.
+		std::string ignored;
+		Run({"pactl", "set-sink-volume", SINK_NAME, "100%"}, ignored);
+		Run({"pactl", "set-sink-mute", SINK_NAME, "0"}, ignored);
 		if (!Run({"pactl", "list", "sinks"}, out) || !(info = ParseSink(out)).found) {
 			LOGF("DualSenseSpeakerSink: the new sink did not appear\n");
 			if (!module_id.empty()) {

@@ -359,7 +359,7 @@ struct Fixture {
 		cached_rumble  = {};
 		effects        = {};
 		connected_pads = {1};
-		Haptics::SetSpeakerOptions(50, false);
+		Haptics::SetSpeakerOptions(true, 15, false);
 		fail_effect = wireless = wireless_pad3 = false;
 		hid_available = fail_hid_write = false;
 		duplicate_hid                  = false;
@@ -475,9 +475,9 @@ void TestSpeaker() {
 	ExpectPcm({0.5f, -0.25f, 0, 0, 1.0f, 0, 0, 0});
 	Check(rumble.large == 100 * 0x101, "speaker audio stopped the rumble");
 	const auto routed = effects[1];
-	Check(routed.size() == 38 && routed[0] == 0xa0 && routed[1] == 0x80 && routed[5] == 0x32 &&
+	Check(routed.size() == 38 && routed[0] == 0xa0 && routed[1] == 0x80 && routed[5] == 15 &&
 	          routed[7] == 0x30 && routed[37] == 0x00,
-	      "speaker not routed at the default level with a 0 dB preamp");
+	      "speaker not routed at the quiet default level with a 0 dB preamp");
 	Check(Haptics::Queue(speaker.get(), 1, stereo.data(), 2, 2, true, unity.data()) ==
 	          2 * 1000000 / 48000,
 	      "queued speaker playback time is wrong");
@@ -1237,7 +1237,7 @@ void TestSpeakerVolume() {
 	{
 		Fixture f;
 		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
-		Haptics::SetSpeakerOptions(100, false);
+		Haptics::SetSpeakerOptions(true, 100, false);
 		auto                       speaker = Open(true);
 		const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
 		Queue(speaker, stereo.data());
@@ -1247,26 +1247,33 @@ void TestSpeakerVolume() {
 	{
 		Fixture f;
 		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
-		Haptics::SetSpeakerOptions(25, false);
+		Haptics::SetSpeakerOptions(true, 25, false);
 		auto speaker = Open(true);
 		auto haptics = Open(false);
 		const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
 		Queue(speaker, stereo.data());
 		Check(effects[1][5] == 0x19, "quarter level is not a quarter of the hardware volume");
-		ExpectPcm({0.25f, -0.125f, 0, 0, 0.5f, 0, 0, 0});
-		// Vibration ports keep their own gain.
+		ExpectPcm({0.5f, -0.25f, 0, 0, 1.0f, 0, 0, 0}); // The level is hardware only.
+		// Vibration ports are not affected.
 		Queue(haptics, stereo.data());
 		ExpectPcm({0, 0, 0.5f, -0.25f, 0, 0, 1.0f, 0});
 	}
 	{
 		Fixture f;
 		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
-		Haptics::SetSpeakerOptions(0, false);
+		Haptics::SetSpeakerOptions(true, 0, false);
 		auto speaker = Open(true);
 		const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
 		Queue(speaker, stereo.data());
 		Check(effects[1][5] == 0x00, "zero level is not muted in hardware");
-		ExpectPcm({0, 0, 0, 0, 0, 0, 0, 0});
+	}
+	{
+		Fixture f;
+		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+		Haptics::SetSpeakerOptions(false, 15, false);
+		Check(Haptics::Open(48000, true) == nullptr, "disabled pad speaker still opened");
+		auto haptics = Open(false);
+		Check(effects[1].empty(), "pad speaker off routed the controller");
 	}
 }
 

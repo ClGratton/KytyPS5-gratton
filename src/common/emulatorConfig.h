@@ -50,9 +50,11 @@ struct ConfigOptions {
 	std::optional<ControllerColor> controller_color;
 	uint32_t               controller_speaker_volume      = 50;
 	uint32_t               controller_vibration_intensity = 100;
-	// Hardware level of the DualSense speaker (0-100) and whether a Bluetooth pad's speaker is
+	// Whether the game's controller-speaker audio goes to the DualSense (otherwise it plays on the
+	// normal output), its hardware level (0-100; the raw report volume) and whether a Bluetooth pad's speaker is
 	// exposed as a controllable PipeWire/PulseAudio sink on Linux.
-	uint32_t               pad_speaker_volume             = 50;
+	bool                   pad_speaker_enabled            = true;
+	uint32_t               pad_speaker_volume             = 15;
 	bool                   pad_speaker_os_sink            = true;
 	PresentMode            present_mode                = PresentMode::Mailbox;
 	int32_t                gpu_index                   = -1;
@@ -101,6 +103,7 @@ const std::string& GetAudioInputDevice();
 const std::optional<ControllerColor>& GetControllerColor();
 uint32_t GetControllerSpeakerVolume();
 uint32_t GetControllerVibrationIntensity();
+bool     PadSpeakerEnabled();
 uint32_t GetPadSpeakerVolume();
 bool     PadSpeakerOsSinkEnabled();
 PresentMode GetPresentMode();

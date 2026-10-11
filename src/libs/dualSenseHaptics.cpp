@@ -37,15 +37,12 @@ uint8_t            g_large_motor = 0, g_small_motor = 0;
 uint64_t           g_rumble_until = 0, g_haptics_until = 0;
 int                g_speaker_controller = -1;
 std::map<int, int> g_speaker_streams;
-uint32_t           g_speaker_volume = 50; // Percent.
+bool               g_speaker_enabled = true;
+uint32_t           g_speaker_volume  = 15; // Raw hardware level, 0-100.
 bool               g_speaker_os_sink = false;
 
-uint8_t SpeakerHardwareVolume() { // 0x64 is the Linux driver's level, kept as the maximum.
-	return static_cast<uint8_t>((0x64 * g_speaker_volume + 50) / 100);
-}
-
-float SpeakerSoftwareGain() { // Extends the range below the hardware's usable steps.
-	return std::min(1.0f, g_speaker_volume / 50.0f);
+uint8_t SpeakerHardwareVolume() { // 100 (0x64) is the Linux driver's level, kept as the maximum.
+	return static_cast<uint8_t>(g_speaker_volume);
 }
 
 void ApplyRumble(bool force = false) { // Caller holds g_mutex; no calls into Audio or Controller.
@@ -311,7 +308,7 @@ uint64_t QueueUsbAudio(Stream* stream, uint32_t frames) {
 } // namespace
 
 Stream* Open(uint32_t freq, bool speaker) {
-	if (freq == 0 || !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+	if (freq == 0 || (speaker && !g_speaker_enabled) || !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
 		return nullptr;
 	}
 	return new Stream {.freq = freq, .speaker = speaker};
@@ -365,11 +362,10 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 	const uint32_t output_channels = wireless ? 2 : 4;
 	const uint32_t channel_offset  = wireless || stream->speaker ? 0 : 2;
 	stream->buffer.assign(static_cast<size_t>(frames) * output_channels, 0.0f);
-	// The pad speaker level and, over Bluetooth, the OS sink's volume/mute. The OS gain changes
+	// Over Bluetooth, the OS sink's volume/mute. The OS gain changes
 	// linearly across the block so a slider drag does not click.
-	float speaker_gain = 1.0f, sink_from = 1.0f, sink_to = 1.0f;
+	float sink_from = 1.0f, sink_to = 1.0f;
 	if (stream->speaker) {
-		speaker_gain = SpeakerSoftwareGain();
 		if (wireless && g_speaker_os_sink && DualSenseSpeakerSink::Active()) {
 			sink_from = stream->sink_gain;
 			sink_to   = DualSenseSpeakerSink::Gain();
@@ -385,8 +381,7 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 			                             : static_cast<const int16_t*>(data)[index] / 32768.0f;
 			value *= volume[src_ch] / 32768.0f * gain * (gains != nullptr ? gains[src_ch] : 1.0f);
 			if (stream->speaker) {
-				value *= speaker_gain *
-				         (sink_from + (sink_to - sink_from) * (frame + 1) / static_cast<float>(frames));
+				value *= sink_from + (sink_to - sink_from) * (frame + 1) / static_cast<float>(frames);
 			}
 			// USB places the speaker in front and the actuators in back; Bluetooth takes stereo.
 			stream->buffer[static_cast<size_t>(frame) * output_channels + ch + channel_offset] =
@@ -429,8 +424,9 @@ bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor, uint
 	return true;
 }
 
-void SetSpeakerOptions(uint32_t volume_percent, bool os_sink) {
+void SetSpeakerOptions(bool enabled, uint32_t volume_percent, bool os_sink) {
 	Common::LockGuard lock(g_mutex);
+	g_speaker_enabled = enabled;
 	g_speaker_volume  = std::min<uint32_t>(volume_percent, 100);
 	g_speaker_os_sink = os_sink;
 }
