@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
+#include "common/speculation.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -212,6 +213,14 @@ bool ReadShaderScalarMemory(void*, uint64_t address, std::span<uint32_t> values)
 	return true;
 }
 
+// Lookahead thread (--pipeline-lookahead): plain backing read. ReadShaderGuestMemory refuses every
+// guest address off the GPU thread because it needs the GPU thread's view of GPU-dirty ranges;
+// the lookahead accepts a possibly stale answer (a wrong prediction only wastes worker time).
+bool ReadShaderGuestMemorySpeculative(void*, uint64_t address, std::span<uint32_t> values) {
+	return !values.empty() &&
+	       Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
 	if (!Config::GraphicsDebugDumpEnabled()) {
@@ -411,6 +420,36 @@ struct PipelineCache::ProgramCache {
 				*specialization_out = specialization;
 			}
 			return found;
+		}
+
+		// Lookahead thread: materializes into private storage (never into `resources` /
+		// `specialization`, which the GPU thread reads without the lock) and looks for a published
+		// permutation. The exclusive lock is still needed: MaterializeResources keeps mutable
+		// scratch inside the ResourcePlan (evaluation contexts, read capture), which the GPU
+		// thread's FindPermutation uses under the same lock. The lock is registered with the
+		// speculation guard so a speculative fatal check releases it before parking the thread.
+		Permutation* PeekPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
+		                             uint32_t                                push_data_cursor,
+		                             ShaderRecompiler::IR::ResourceSpecialization& specialization_out,
+		                             bool&                                   materialized) {
+			std::unique_lock lock(mutex);
+			Common::Speculation::HeldLock held(&mutex);
+			ShaderRecompiler::IR::ResourceSnapshot snapshot;
+			materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
+			                                                       specialization_out);
+			if (!materialized) {
+				return nullptr;
+			}
+			return FindExistingLocked<false>(push_data_cursor, specialization_out, {});
+		}
+
+		bool MaterializePrivate(const ShaderRecompiler::IR::SrtRuntime& runtime,
+		                        ShaderRecompiler::IR::ResourceSpecialization& specialization_out) {
+			std::unique_lock lock(mutex);
+			Common::Speculation::HeldLock held(&mutex);
+			ShaderRecompiler::IR::ResourceSnapshot snapshot;
+			return ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
+			                                                  specialization_out);
 		}
 
 		// Publishes a freshly compiled permutation. If another thread already published an equal
@@ -667,6 +706,9 @@ struct PipelineCache::ProgramCache {
 		AsyncPipelineCompiler* pool       = nullptr;
 		bool                   allow_skip = false; // graphics only; compute always waits
 		bool                   pending    = false; // out: skipped, program not ready
+		// Lookahead thread (--pipeline-lookahead): materialize privately, never skip, wait for
+		// jobs without accounting GPU-thread waits, never fall back to synchronous compilation.
+		bool prefetch = false;
 	};
 
 	void PrintShaderCounts() {
@@ -728,11 +770,13 @@ struct PipelineCache::ProgramCache {
 			report("materialize", Bench::HitSlot::Materialize, materialize_time);
 		};
 		SourceEntry* entry = FindEntry(lookup_key);
+		const bool prefetch = async != nullptr && async->prefetch;
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
 		    .read_memory                = ReadShaderScalarMemory,
-		    .read_specialization_memory = ReadShaderGuestMemory,
+		    .read_specialization_memory =
+		        prefetch ? ReadShaderGuestMemorySpeculative : ReadShaderGuestMemory,
 		};
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
@@ -741,7 +785,24 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		if (entry != nullptr) {
 			Permutation* permutation = nullptr;
-			if (entry->call_source) {
+			if (prefetch) {
+				// Lookahead thread: call-source (S_SWAP_PC) programs are left to the GPU thread
+				// (refreshing the linked callee reads live guest memory).
+				if (entry->call_source) {
+					return {};
+				}
+				bool materialized = false;
+				permutation = entry->PeekPermutation(runtime, push_data_cursor, specialization,
+				                                     materialized);
+				if (permutation != nullptr) {
+					input_info.stage = {.program = &permutation->program, .resources = nullptr};
+					permutation->program.bindings.AdvancePushData(push_data_cursor);
+					return permutation->handle;
+				}
+				if (!materialized) {
+					return {};
+				}
+			} else if (entry->call_source) {
 				Stopwatch refresh_sw;
 				source_changed = entry->RefreshCallSource(runtime);
 				refresh_time.Add(refresh_sw, refresh_sw.Lap());
@@ -759,6 +820,9 @@ struct PipelineCache::ProgramCache {
 				return permutation->handle;
 			}
 		}
+		if (prefetch && (async->pool == nullptr || !async->pool->Running())) {
+			return {};
+		}
 
 		// --async-pipelines. `pool` is null in Off mode (and once the pool has been shut down), in
 		// which case everything below is exactly the stock synchronous path.
@@ -768,10 +832,14 @@ struct PipelineCache::ProgramCache {
 		const bool may_skip = pool != nullptr && async->allow_skip && stage != ShaderType::Compute;
 		// Uses a permutation another thread (or an earlier request) published for this draw.
 		const auto use_published = [&](Permutation& permutation, bool miss_report) {
-			input_info.stage = {.program = &permutation.program, .resources = &entry->resources};
+			input_info.stage = {.program = &permutation.program,
+			                    .resources = prefetch ? nullptr : &entry->resources};
 			permutation.program.bindings.AdvancePushData(push_data_cursor);
 			report_steps(miss_report);
 			return permutation.handle;
+		};
+		const auto wait_job = [&](AsyncJob& job) {
+			return prefetch ? job.Wait() : pool->WaitFor(job);
 		};
 		const auto note_skip = [&] {
 			pool->Stats().skipped_program_draws.fetch_add(1, std::memory_order_relaxed);
@@ -790,10 +858,13 @@ struct PipelineCache::ProgramCache {
 					note_skip();
 					return {};
 				}
-				if (pool->WaitFor(*in_flight)) {
+				if (wait_job(*in_flight)) {
 					if (auto* result = std::static_pointer_cast<ProgramJob>(in_flight)->result) {
 						return use_published(*result, true);
 					}
+				}
+				if (prefetch) {
+					return {};
 				}
 				// Cancelled by a shutdown: fall back to the synchronous path below.
 			} else if (auto* published = entry->FindPublished(push_data_cursor, specialization)) {
@@ -896,7 +967,7 @@ struct PipelineCache::ProgramCache {
 				skipped = true;
 				return nullptr;
 			}
-			if (pool->WaitFor(*registered)) {
+			if (wait_job(*registered)) {
 				return std::static_pointer_cast<ProgramJob>(registered)->result;
 			}
 			return nullptr;
@@ -907,6 +978,9 @@ struct PipelineCache::ProgramCache {
 		// call-source (S_SWAP_PC) programs keep the synchronous path: their translation depends on
 		// the linked callee snapshot, which is refreshed under the entry lock.
 		const bool call_shader = entry == nullptr ? source.call : entry->call_source != nullptr;
+		if (prefetch && call_shader) {
+			return {}; // left to the GPU thread (see above)
+		}
 		if (pool != nullptr && entry != nullptr && !call_shader) {
 			// Known source: the worker translates from the copied code bytes and compiles.
 			const auto job = make_job(false);
@@ -916,6 +990,9 @@ struct PipelineCache::ProgramCache {
 			}
 			if (skipped) {
 				note_skip();
+				return {};
+			}
+			if (prefetch) {
 				return {};
 			}
 			// Pool stopped or job cancelled: stock path below translates and compiles here.
@@ -973,7 +1050,13 @@ struct PipelineCache::ProgramCache {
 			entry = InsertEntry(lookup_key, ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 			                    std::move(retained));
 			plan_ns = miss_sw.Lap();
-			specialization = entry->Materialize(runtime, &materialize_time);
+			if (prefetch) {
+				if (!entry->MaterializePrivate(runtime, specialization)) {
+					return {};
+				}
+			} else {
+				specialization = entry->Materialize(runtime, &materialize_time);
+			}
 			miss_sw.Lap();
 			if (pool != nullptr && !call_shader) {
 				// New source: the GPU thread has translated (the resource plan comes out of the
@@ -993,6 +1076,9 @@ struct PipelineCache::ProgramCache {
 				}
 				if (skipped) {
 					note_skip();
+					return {};
+				}
+				if (prefetch) {
 					return {};
 				}
 				// Pool stopped or job cancelled: take the translated program back and continue
@@ -1097,6 +1183,11 @@ void PipelineCache::ShutdownAsync() {
 	if (m_async == nullptr || !m_async->Running()) {
 		return; // off, or already stopped
 	}
+	{
+		// Wait for a running prefetch call to finish and keep new ones out.
+		std::unique_lock gate(m_prefetch_gate);
+		m_prefetch_stopped = true;
+	}
 	// Workers must be gone before the driver VkPipelineCache is read and destroyed (Save()),
 	// before the Vulkan device is destroyed and before Config::Shutdown(). Queued jobs are
 	// cancelled, running ones finish (and publish). Callers holding the render context lock
@@ -1107,6 +1198,22 @@ void PipelineCache::ShutdownAsync() {
 	m_compute_jobs.Clear();
 	PipelineCacheLog("Async pipelines: stopped ({})", m_async->Summary());
 	m_async->LogSummary();
+	if (Config::GetPipelineLookahead()) {
+		const auto& l = m_lookahead;
+		const auto  summary = fmt::format(
+		    "cs_seen={};cs_skipped={};cs_requested={};cs_already={};cs_hit_ready={};"
+		    "cs_hit_inflight={};cs_miss={};gfx_seen={};gfx_skipped={};gfx_requested={};"
+		    "gfx_already={};gfx_hit_ready={};gfx_hit_inflight={};gfx_miss={};programs_requested={}",
+		    l.cs_seen.load(), l.cs_skipped.load(), l.cs_requested.load(), l.cs_already.load(),
+		    l.cs_hit_ready.load(), l.cs_hit_inflight.load(), l.cs_miss.load(), l.gfx_seen.load(),
+		    l.gfx_skipped.load(), l.gfx_requested.load(), l.gfx_already.load(),
+		    l.gfx_hit_ready.load(), l.gfx_hit_inflight.load(), l.gfx_miss.load(),
+		    l.programs_requested.load());
+		PipelineCacheLog("Pipeline lookahead: {}", summary);
+		if (Bench::TimingEnabled()) {
+			Bench::LogTiming("summary_lookahead", 0, Bench::NowNs(), 0, false, summary);
+		}
+	}
 }
 
 PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const GraphicsPipelineKey& key) {
@@ -1363,6 +1470,7 @@ struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 
 	void Execute() override {
 		auto cached = std::make_unique<Pipeline>();
+		cached->prefetched = IsPrefetched();
 		LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
 		Stopwatch create_sw;
 		CreatePipelineInternal(cache.m_graphics, *cached, key.rendering, key.vertex_input,
@@ -1405,6 +1513,7 @@ struct PipelineCache::ComputePipelineJob final: AsyncJob {
 
 	void Execute() override {
 		auto      cached = std::make_unique<Pipeline>();
+		cached->prefetched = IsPrefetched();
 		Stopwatch create_sw;
 		CreatePipelineInternal(cache.m_graphics, *cached, input_info, module, driver_cache);
 		if (create_sw.On()) {
@@ -1559,6 +1668,55 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	// Compute dispatches are never skipped: the dispatch waits for the worker (stall and skip).
 	ProgramCache::AsyncContext async {.pool = AsyncPool(), .allow_skip = false};
 	return m_program_cache->Get(params, input_info, push_data_cursor, &async);
+}
+
+void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
+                                    const HW::ShaderRegisters& sh, uint32_t mode) {
+	std::shared_lock gate(m_prefetch_gate);
+	Common::Speculation::HeldLock held(&m_prefetch_gate, true);
+	if (m_prefetch_stopped) {
+		return;
+	}
+	auto* pool = AsyncPool();
+	if (pool == nullptr) {
+		return;
+	}
+	m_lookahead.cs_seen.fetch_add(1, std::memory_order_relaxed);
+	if (regs.cs_regs.data_addr == 0) {
+		m_lookahead.cs_skipped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	ShaderComputeInputInfo input_info {};
+	input_info.host_subgroup_size         = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	input_info.dispatch_thread_dimensions = (mode & (1u << 5u)) != 0;
+	const auto params                     = PrepareProgram(regs, sh, input_info);
+	uint32_t   push_data_cursor           = 0;
+	ProgramCache::AsyncContext async {.pool = pool, .allow_skip = false, .prefetch = true};
+	const auto program = m_program_cache->Get(params, input_info, push_data_cursor, &async);
+	if (!program) {
+		m_lookahead.cs_skipped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	if (FindComputePipeline(program.id) != nullptr || m_compute_jobs.Find(program.id) != nullptr) {
+		m_lookahead.cs_already.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	auto fresh = std::make_shared<ComputePipelineJob>(*this, program.id);
+	fresh->input_info   = input_info;
+	fresh->module       = program.module;
+	fresh->driver_cache = m_driver_cache;
+	fresh->SetPrefetched();
+	bool inserted = false;
+	m_compute_jobs.Insert(program.id, fresh, inserted);
+	if (!inserted) {
+		m_lookahead.cs_already.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	if (!pool->Submit(fresh)) {
+		m_compute_jobs.Erase(program.id);
+		return;
+	}
+	m_lookahead.cs_requested.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other) const noexcept {
@@ -1832,14 +1990,25 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	EXIT_IF(!compute_program);
 
 	if (auto* found = FindComputePipeline(compute_program.id)) {
+		if (found->prefetched && !found->claimed) {
+			found->claimed = true;
+			m_lookahead.cs_hit_ready.fetch_add(1, std::memory_order_relaxed);
+		}
 		return *found;
 	}
 
 	// --async-pipelines: compute dispatches are never skipped, they wait for the worker.
 	if (auto* pool = AsyncPool()) {
 		std::shared_ptr<AsyncJob> job = m_compute_jobs.Find(compute_program.id);
+		if (job != nullptr && job->ClaimByDraw()) {
+			m_lookahead.cs_hit_inflight.fetch_add(1, std::memory_order_relaxed);
+		}
 		if (job == nullptr) {
 			if (auto* published = FindComputePipeline(compute_program.id)) {
+				if (published->prefetched && !published->claimed) {
+					published->claimed = true;
+					m_lookahead.cs_hit_ready.fetch_add(1, std::memory_order_relaxed);
+				}
 				return *published;
 			}
 			auto fresh = std::make_shared<ComputePipelineJob>(*this, compute_program.id);
@@ -1848,7 +2017,12 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 			fresh->driver_cache = m_driver_cache;
 			bool inserted       = false;
 			job                 = m_compute_jobs.Insert(compute_program.id, fresh, inserted);
-			if (inserted && !pool->Submit(fresh)) {
+			if (inserted) {
+				m_lookahead.cs_miss.fetch_add(1, std::memory_order_relaxed);
+			} else if (job->ClaimByDraw()) {
+				m_lookahead.cs_hit_inflight.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (inserted && !pool->Submit(fresh, true)) {
 				m_compute_jobs.Erase(compute_program.id);
 				job = nullptr;
 			}

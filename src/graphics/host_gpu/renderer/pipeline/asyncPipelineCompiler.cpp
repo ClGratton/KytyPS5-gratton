@@ -29,8 +29,10 @@ AsyncJob::~AsyncJob() {
 		return;
 	}
 	const auto queue_ns = m_start_ns >= m_submit_ns ? m_start_ns - m_submit_ns : 0;
-	const auto tail     = fmt::format(";mode={};queue_ns={};wait_ns={};skipped={}",
-	                                  AsyncModeName(m_mode), queue_ns, WaitNs(), Skipped());
+	const auto tail     = fmt::format(";mode={};queue_ns={};wait_ns={};skipped={};prefetch={};claimed={}",
+	                                  AsyncModeName(m_mode), queue_ns, WaitNs(), Skipped(),
+	                                  IsPrefetched() ? 1 : 0,
+	                                  m_claimed.load(std::memory_order_relaxed) ? 1 : 0);
 	for (auto& row: m_rows) {
 		row.detail += tail;
 		Bench::LogTimingAs(row.kind, row.key_hash, row.t_start_ns, row.dur_ns, row.thread_id,
@@ -75,7 +77,7 @@ AsyncPipelineCompiler::~AsyncPipelineCompiler() {
 	Shutdown();
 }
 
-bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job) {
+bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job, bool urgent) {
 	if (Bench::TraceEnabled()) {
 		const char* kind = job->GetKind() == AsyncJob::Kind::Program    ? "prog"
 		                   : job->GetKind() == AsyncJob::Kind::Graphics ? "gfx"
@@ -91,7 +93,11 @@ bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job) {
 		}
 		job->m_submit_ns = Bench::NowNs();
 		job->m_mode      = m_mode;
-		m_queue.push_back(std::move(job));
+		if (urgent) {
+			m_queue.push_front(std::move(job));
+		} else {
+			m_queue.push_back(std::move(job));
+		}
 		const auto depth = static_cast<uint64_t>(m_queue.size());
 		auto       peak  = m_stats.peak_queue.load(std::memory_order_relaxed);
 		while (depth > peak &&
@@ -127,7 +133,26 @@ void AsyncPipelineCompiler::Shutdown() {
 	}
 }
 
+void AsyncPipelineCompiler::Promote(AsyncJob& job) {
+	std::lock_guard lock(m_mutex);
+	if (job.GetState() != AsyncJob::State::Queued || m_queue.empty() ||
+	    m_queue.front().get() == &job) {
+		return;
+	}
+	for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
+		if (it->get() == &job) {
+			auto moved = std::move(*it);
+			m_queue.erase(it);
+			m_queue.push_front(std::move(moved));
+			return;
+		}
+	}
+}
+
 bool AsyncPipelineCompiler::WaitFor(AsyncJob& job) {
+	if (job.GetState() == AsyncJob::State::Queued) {
+		Promote(job);
+	}
 	const auto before = job.WaitNs();
 	const bool ok     = job.Wait();
 	m_stats.gpu_waits.fetch_add(1, std::memory_order_relaxed);

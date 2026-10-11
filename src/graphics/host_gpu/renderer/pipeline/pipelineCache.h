@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
@@ -117,6 +118,10 @@ public:
 		vk::Pipeline            pipeline              = nullptr;
 		vk::DescriptorSetLayout descriptor_set_layout = nullptr;
 		bool                    uses_push_descriptors = false;
+		// --pipeline-lookahead: built by a prefetch job; `claimed` is set by the GPU thread when
+		// the first draw/dispatch uses it (prediction hit accounting only).
+		bool prefetched = false;
+		bool claimed    = false;
 	};
 
 	struct GraphicsPrograms {
@@ -151,6 +156,31 @@ public:
 	                              const GraphicsPrograms& programs);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	                             const ShaderProgram&          compute_program);
+
+	// ---- --pipeline-lookahead (lookahead thread only, docs/lookahead-notes.md) ---------------
+	// Counters of the prediction accounting. Predictions are made by the lookahead thread, hits
+	// and misses are counted by the GPU thread when a draw/dispatch needs its pipeline.
+	struct LookaheadCounters {
+		std::atomic<uint64_t> cs_seen {0};            // dispatches the lookahead looked at
+		std::atomic<uint64_t> cs_skipped {0};         // no prefetch (null shader, program not ready, ...)
+		std::atomic<uint64_t> cs_requested {0};       // pipeline jobs submitted by the lookahead
+		std::atomic<uint64_t> cs_already {0};         // pipeline already published or in flight
+		std::atomic<uint64_t> cs_hit_ready {0};       // dispatch found a prefetched pipeline ready
+		std::atomic<uint64_t> cs_hit_inflight {0};    // dispatch joined a prefetched job in flight
+		std::atomic<uint64_t> cs_miss {0};            // dispatch had to create its own job
+		std::atomic<uint64_t> gfx_seen {0};
+		std::atomic<uint64_t> gfx_skipped {0};
+		std::atomic<uint64_t> gfx_requested {0};
+		std::atomic<uint64_t> gfx_already {0};
+		std::atomic<uint64_t> gfx_hit_ready {0};
+		std::atomic<uint64_t> gfx_hit_inflight {0};
+		std::atomic<uint64_t> gfx_miss {0};
+		std::atomic<uint64_t> programs_requested {0}; // program jobs created by prefetch Get()
+	};
+	[[nodiscard]] LookaheadCounters& Lookahead() { return m_lookahead; }
+	// Compute: `mode` is the DISPATCH_DIRECT initiator.
+	void PrefetchCompute(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
+	                     uint32_t mode);
 
 private:
 	struct ProgramCache;
@@ -199,6 +229,12 @@ private:
 	std::unique_ptr<AsyncPipelineCompiler> m_async;
 	InFlightRegistry<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_graphics_jobs;
 	InFlightRegistry<uint64_t>                                     m_compute_jobs;
+
+	LookaheadCounters m_lookahead;
+	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
+	// (or starts) while the pool and the registries are torn down.
+	std::shared_mutex m_prefetch_gate;
+	bool              m_prefetch_stopped = false;
 
 	void InitializeDriverCache();
 	// The pool when async is on and still running (it stops in Save()), else nullptr.

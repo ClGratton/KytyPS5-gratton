@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/guest_gpu/pipelineLookahead.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -65,6 +66,9 @@ GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	GraphicsInitJmpTables();
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
 	m_gfx_cp->Reset();
+	if (Config::GetPipelineLookahead()) {
+		m_lookahead = std::make_unique<PipelineLookahead>(renderer);
+	}
 	m_thread = std::jthread(ThreadRun, this);
 }
 
@@ -85,6 +89,9 @@ void GuestGpu::Shutdown() {
 	}
 	if (m_thread.joinable()) {
 		m_thread.join();
+	}
+	if (m_lookahead != nullptr) {
+		m_lookahead->Stop();
 	}
 	m_shutdown_complete = true;
 }
@@ -240,14 +247,23 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 }
 
 void CommandProcessor::BufferInit() {
+	if (IsShadow()) {
+		return;
+	}
 	GetScheduler().Begin(m_ctx, m_ucfg, m_sh_ctx);
 }
 
 void CommandProcessor::BufferFlush() {
+	if (IsShadow()) {
+		return;
+	}
 	GetScheduler().Flush();
 }
 
 void CommandProcessor::BufferWait() {
+	if (IsShadow()) {
+		return;
+	}
 	BufferInit();
 	GetScheduler().Finish();
 }
@@ -259,12 +275,18 @@ void CommandProcessor::ResetDeCe() {
 }
 
 void CommandProcessor::WaitCe() {
+	if (IsShadow()) {
+		return;
+	}
 	if (m_ce_count <= m_de_count && !m_ce_complete) {
 		SuspendPm4();
 	}
 }
 
 void CommandProcessor::WaitDeDiff(uint32_t diff) {
+	if (IsShadow()) {
+		return;
+	}
 	EXIT_IF(m_de_count > m_ce_count);
 	if (m_ce_count - m_de_count >= diff) {
 		SuspendPm4();
@@ -272,6 +294,9 @@ void CommandProcessor::WaitDeDiff(uint32_t diff) {
 }
 
 void CommandProcessor::WaitForRewind(bool valid) {
+	if (IsShadow()) {
+		return;
+	}
 	if (!valid) {
 		SuspendPm4();
 	}
@@ -290,6 +315,9 @@ void CommandProcessor::WriteConstRam(uint32_t offset, const uint32_t* src, uint3
 }
 
 void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_num) {
+	if (IsShadow()) {
+		return;
+	}
 	memcpy(dst, m_const_ram + offset / 4, static_cast<size_t>(dw_num) * 4);
 }
 
@@ -311,6 +339,9 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 template <typename T>
 void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t poll,
                                   uint32_t wait_op) {
+	if (IsShadow()) {
+		return;
+	}
 	EXIT_IF(addr == nullptr);
 	if ((wait_op & ~1u) != 0) {
 		EXIT("unsupported wait_reg_mem operation: 0x%08" PRIx32 "\n", wait_op);
@@ -329,6 +360,9 @@ template void CommandProcessor::WaitRegMem<uint64_t>(uint32_t, const uint64_t*, 
 
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num,
                                  uint32_t write_control) {
+	if (IsShadow()) {
+		return;
+	}
 	const uint32_t dst_sel = ((write_control >> 30u) & 0x1u) | ((write_control >> 7u) & 0x1eu);
 	const bool     write_one_address = ((write_control >> 16u) & 0x1u) != 0;
 
@@ -354,6 +388,9 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 }
 
 void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes) {
+	if (IsShadow()) {
+		return;
+	}
 	if (dst_address == 0 || (num_bytes != sizeof(uint32_t) && num_bytes != sizeof(uint64_t)) ||
 	    (dst_address & (num_bytes - 1u)) != 0) {
 		EXIT("invalid reference-clock copy, dst=0x%016" PRIx64 " size=%u\n", dst_address,
@@ -375,6 +412,9 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
                                uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes,
                                uint8_t wait_for_previous, uint8_t write_confirm,
                                uint8_t block_engine) {
+	if (IsShadow()) {
+		return;
+	}
 	EXIT_NOT_IMPLEMENTED(engine > 1);
 	if (num_bytes == 0) {
 		return;
@@ -428,8 +468,27 @@ void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
-	if (Bench::TraceEnabled()) {
+	if (m_lookahead != nullptr && (submission.type == SubmissionType::Graphics ||
+	                               submission.type == SubmissionType::Compute ||
+	                               submission.type == SubmissionType::SuspendPoint)) {
 		submission.trace_seq = ++m_trace_seq;
+		PipelineLookahead::Item item;
+		item.seq      = submission.trace_seq;
+		item.queue_id = submission.queue_id;
+		switch (submission.type) {
+			case SubmissionType::Graphics: item.kind = PipelineLookahead::Kind::Graphics; break;
+			case SubmissionType::Compute: item.kind = PipelineLookahead::Kind::Compute; break;
+			default: item.kind = PipelineLookahead::Kind::Reset; break;
+		}
+		item.commands.assign(submission.commands.begin(), submission.commands.end());
+		item.constant_commands.assign(submission.constant_commands.begin(),
+		                              submission.constant_commands.end());
+		m_lookahead->Push(std::move(item));
+	}
+	if (Bench::TraceEnabled()) {
+		if (submission.trace_seq == 0) {
+			submission.trace_seq = ++m_trace_seq;
+		}
 		const char* type     = "gfx";
 		switch (submission.type) {
 			case SubmissionType::Graphics: type = "gfx"; break;
@@ -570,6 +629,9 @@ bool GuestGpu::Process(Submission& submission) {
 bool GuestGpu::ProcessImpl(Submission& submission) {
 	const bool first_slice = !submission.started;
 	auto&      cp          = GetProcessor(submission.queue_id);
+	if (first_slice && m_lookahead != nullptr && submission.trace_seq != 0) {
+		m_lookahead->NoteStarted(submission.trace_seq);
+	}
 
 	if (first_slice) {
 		submission.started = true;
@@ -830,6 +892,9 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
                                       const volatile void* address, uint32_t count_in_dwords) {
+	if (IsShadow()) {
+		return;
+	}
 	(void)count_in_dwords;
 	uint64_t value = 0;
 
@@ -880,12 +945,21 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
-	if (Bench::TraceEnabled()) {
-		Bench::TraceDraw("gfx");
-	}
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
+	}
+	if (IsShadow()) {
+		m_shadow_sink->OnDraw(*this, {.indexed             = true,
+		                              .indirect            = args.offset_source ==
+		                                                     DrawOffsetSource::IndirectArgs,
+		                              .index_count         = args.index_count,
+		                              .instance_count      = args.instance_count,
+		                              .index_type_and_size = args.index_type_and_size});
+		return;
+	}
+	if (Bench::TraceEnabled()) {
+		Bench::TraceDraw("gfx");
 	}
 	if (GraphicsRunDebugDumpEnabled() && (args.base_vertex != 0 || args.first_instance != 0)) {
 		LOGF("\t draw indexed offsets: base_vertex = %" PRId32 ", first_instance = %" PRIu32 "\n",
@@ -935,6 +1009,16 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          const volatile uint32_t* count_addr,
                                          uint32_t stride_in_bytes, IndirectDrawRegisters registers,
                                          uint32_t draw_initiator, bool indexed) {
+	if (IsShadow()) {
+		if (max_count_or_count != 0) {
+			m_shadow_sink->OnDraw(*this, {.indexed             = indexed,
+			                              .indirect            = true,
+			                              .index_count         = 1,
+			                              .instance_count      = 1,
+			                              .index_type_and_size = m_index_type_and_size});
+		}
+		return;
+	}
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != (indexed ? 0u : 2u));
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 
@@ -1013,6 +1097,11 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	if (IsShadow()) {
+		m_shadow_sink->OnDispatch(*this,
+		                          {thread_group_x, thread_group_y, thread_group_z, mode, false});
+		return;
+	}
 	if (Bench::TraceEnabled()) {
 		Bench::TraceDraw("cs");
 	}
@@ -1046,6 +1135,12 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
+	if (IsShadow()) {
+		// Arguments are in guest memory (often written by an earlier dispatch): not read.
+		m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+		m_shadow_sink->OnDispatch(*this, {1, 1, 1, mode, true});
+		return;
+	}
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
 		const auto* args = reinterpret_cast<const vk::DispatchIndirectCommand*>(args_addr);
 		DispatchDirect(args->x, args->y, args->z, mode);
@@ -1060,16 +1155,27 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
-	if (Bench::TraceEnabled()) {
-		Bench::TraceDraw("gfxa");
-	}
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;
+	}
+	if (IsShadow()) {
+		m_shadow_sink->OnDraw(*this, {.indexed        = false,
+		                              .indirect       = args.offset_source ==
+		                                                DrawOffsetSource::IndirectArgs,
+		                              .index_count    = args.vertex_count,
+		                              .instance_count = args.instance_count});
+		return;
+	}
+	if (Bench::TraceEnabled()) {
+		Bench::TraceDraw("gfxa");
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
+	if (IsShadow()) {
+		return;
+	}
 	BufferFlush();
 
 	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
@@ -1280,6 +1386,9 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
                                           void* dst_gpu_addr, uint32_t value,
                                           uint32_t interrupt_selector,
                                           uint32_t interrupt_context_id) {
+	if (IsShadow()) {
+		return;
+	}
 	WriteAtEndOfPipe(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
 	                 event_write_source, dst_gpu_addr, value, interrupt_selector,
 	                 interrupt_context_id);
@@ -1291,12 +1400,18 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
                                           void* dst_gpu_addr, uint64_t value,
                                           uint32_t interrupt_selector,
                                           uint32_t interrupt_context_id) {
+	if (IsShadow()) {
+		return;
+	}
 	WriteAtEndOfPipe(cache_policy, event_write_dest, eop_event_type, cache_action, event_index,
 	                 event_write_source, dst_gpu_addr, value, interrupt_selector,
 	                 interrupt_context_id);
 }
 
 void CommandProcessor::EmitGlobalBarrier() {
+	if (IsShadow()) {
+		return;
+	}
 	Common::LockGuard lock(m_renderer.GetMutex());
 
 	vk::MemoryBarrier2 barrier {};
@@ -1313,11 +1428,17 @@ void CommandProcessor::EmitGlobalBarrier() {
 }
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {
+	if (IsShadow()) {
+		return;
+	}
 	Sync::TriggerEopEventAtEndOfPipe(CurrentBuffer(), m_interrupt_event_id, interrupt_context_id);
 }
 
 void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
                                     uint64_t event_address) {
+	if (IsShadow()) {
+		return;
+	}
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::TriggerEvent()\n"
 		     "\t event_type  = 0x%08" PRIx32 "\n"
@@ -1396,6 +1517,9 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 }
 
 void CommandProcessor::Flip() {
+	if (IsShadow()) {
+		return;
+	}
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::Flip()\n");
 	}
@@ -1409,6 +1533,9 @@ void CommandProcessor::Flip() {
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
+	if (IsShadow()) {
+		return;
+	}
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -1429,6 +1556,9 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action,
                                          void* dst_gpu_addr, uint32_t value) {
+	if (IsShadow()) {
+		return;
+	}
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -1453,6 +1583,9 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 }
 
 void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
+	if (IsShadow()) {
+		return;
+	}
 	auto& command = CurrentBuffer();
 	if (g_current_processor != nullptr) {
 		EXIT("invalid graphics-thread CPU flip preparation\n");
@@ -1470,6 +1603,9 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 }
 
 void CommandProcessor::SynchronizeGpu() {
+	if (IsShadow()) {
+		return;
+	}
 	GetScheduler().Finish();
 }
 

@@ -20,6 +20,7 @@
 namespace Libs::Graphics {
 
 class RenderContext;
+class PipelineLookahead;
 
 class GuestGpu final {
 public:
@@ -95,6 +96,7 @@ private:
 	std::shared_ptr<std::binary_semaphore> m_suspend_point_ready =
 	    std::make_shared<std::binary_semaphore>(1);
 
+	std::unique_ptr<PipelineLookahead>                               m_lookahead;
 	std::unique_ptr<CommandProcessor>                                m_gfx_cp;
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;
 
