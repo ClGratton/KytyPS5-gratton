@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/textureGcPolicy.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -1890,6 +1891,18 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 	}
 }
 
+static TextureGcPolicy::Candidate GcCandidate(const Image& image) {
+	TextureGcPolicy::Candidate c;
+	c.registered      = image.registered;
+	c.has_depth_owner = static_cast<bool>(image.depth_id);
+	c.gpu_modified    = image.IsGpuModified();
+	c.tiled           = image.info.IsTiled();
+	c.buffer_modified = image.IsBufferModified();
+	c.cpu_dirty       = image.IsDefinitelyCpuDirty();
+	c.maybe_cpu_dirty = image.IsMaybeCpuDirty();
+	return c;
+}
+
 void TextureCache::LogGpuWrittenFree(ImageId id, const char* path, uint64_t tick, bool downloaded) {
 	const auto* image = m_slot_images.try_get(id);
 	if (image == nullptr || !image->IsGpuModified()) {
@@ -1933,48 +1946,50 @@ void TextureCache::RunGarbageCollector() {
 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
 		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
 		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
+		// Images the policy keeps are passed over without using the deletion budget: they are
+		// the ones nobody touches again, so they stay at the front of the LRU list and would
+		// otherwise starve the walk (textureGcPolicy.h).
 		std::vector<ImageId> candidates;
 		candidates.reserve(deletions);
 		// Deleting depth recursively deletes its stencil association, so finish LRU traversal
 		// first.
 		m_lru_cache.ForEachItemBelow(tick - age, [&](ImageId id) {
+			const auto* owner = m_slot_images.try_get(id);
+			if (owner == nullptr ||
+			    TextureGcPolicy::Classify(GcCandidate(*owner), pressured, aggressive) ==
+			        TextureGcPolicy::Action::Keep) {
+				return false;
+			}
 			candidates.push_back(id);
 			return candidates.size() == deletions;
 		});
-		for (const auto id: candidates) {
-			if (deletions == 0) {
-				break;
-			}
-			--deletions;
-			auto owner = m_slot_images.try_get(id);
-			if (owner == nullptr || !owner->registered || owner->depth_id) {
-				continue;
-			}
-			if (owner->IsGpuModified()) {
-				const bool safe = owner->SafeToDownload();
-				if (safe && owner->info.IsTiled()) {
-					continue;
-				}
-				if (safe && !pressured) {
-					continue;
-				}
-				if (safe && !DownloadImageMemory(id)) {
-					continue;
-				}
-				if (Config::TextureGcLog()) {
-					LogGpuWrittenFree(id, "gc", tick, safe);
-				}
-			}
-			FreeImage(id);
-			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
-				deletions >>= 2;
-				aggressive = false;
-			}
-			if (m_total_used_memory < m_pressure_gc_memory && pressured) {
-				deletions >>= 1;
-				pressured = false;
-			}
-		}
+		TextureGcPolicy::Walk(
+		    candidates, deletions,
+		    [&](ImageId id) {
+			    const auto* owner = m_slot_images.try_get(id);
+			    return owner == nullptr
+			               ? TextureGcPolicy::Action::Keep
+			               : TextureGcPolicy::Classify(GcCandidate(*owner), pressured, aggressive);
+		    },
+		    [&](ImageId id, TextureGcPolicy::Action action) {
+			    const bool download = action == TextureGcPolicy::Action::DownloadThenFree;
+			    if (download && !DownloadImageMemory(id)) {
+				    return false;
+			    }
+			    if (Config::TextureGcLog()) {
+				    LogGpuWrittenFree(id, "gc", tick, download);
+			    }
+			    FreeImage(id);
+			    if (m_total_used_memory < m_critical_gc_memory && aggressive) {
+				    deletions >>= 2;
+				    aggressive = false;
+			    }
+			    if (m_total_used_memory < m_pressure_gc_memory && pressured) {
+				    deletions >>= 1;
+				    pressured = false;
+			    }
+			    return true;
+		    });
 	};
 	collect(false);
 	if (m_total_used_memory >= m_critical_gc_memory) {
