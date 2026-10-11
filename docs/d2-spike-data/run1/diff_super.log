@@ -1,0 +1,522 @@
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   0 plain layout=super bytes=0 covered_texels=0 distinct_texels=0 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   1 plain layout=super bytes=65536 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   2 plain layout=super bytes=131072 covered_texels=578 distinct_texels=3 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   3 plain layout=super bytes=131072 covered_texels=32767 distinct_texels=1645 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 0 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+DIFF summary: rendered=0 identical=0 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   5 plain layout=super bytes=32768 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   6 plain layout=super bytes=65536 covered_texels=307 distinct_texels=79 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   7 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   8 plain layout=super bytes=65536 covered_texels=16303 distinct_texels=5537 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq   9 plain layout=super bytes=65536 covered_texels=16378 distinct_texels=7593 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  10 plain layout=super bytes=65536 covered_texels=16382 distinct_texels=3611 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  11 plain layout=super bytes=65536 covered_texels=16382 distinct_texels=10344 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  12 plain layout=super bytes=131072 covered_texels=32767 distinct_texels=15554 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  13 plain layout=super bytes=65536 covered_texels=3078 distinct_texels=3061 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  14 plain layout=super bytes=262144 covered_texels=1184 distinct_texels=990 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  15 plain layout=super bytes=262144 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  16 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  17 plain layout=super bytes=65536 covered_texels=3078 distinct_texels=3061 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  18 plain layout=super bytes=65536 covered_texels=575 distinct_texels=345 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  19 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  20 plain layout=super bytes=262144 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  21 plain layout=super bytes=0 covered_texels=0 distinct_texels=0 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  22 plain layout=super bytes=262144 covered_texels=321 distinct_texels=245 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  23 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  24 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 0 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+DIFF summary: rendered=0 identical=0 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  26 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  27 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  28 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  29 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  30 plain layout=super bytes=131072 covered_texels=32767 distinct_texels=1645 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  31 plain layout=super bytes=262144 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  32 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  33 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 0 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+DIFF summary: rendered=0 identical=0 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  35 plain layout=super bytes=65536 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  36 plain layout=super bytes=196608 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 0 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+DIFF summary: rendered=0 identical=0 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 0 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+DIFF summary: rendered=0 identical=0 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 0 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+DIFF summary: rendered=0 identical=0 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  40 plain layout=super bytes=131072 covered_texels=32767 distinct_texels=16733 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  41 plain layout=super bytes=262144 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  42 plain layout=super bytes=131072 covered_texels=32767 distinct_texels=26680 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  43 plain layout=super bytes=32768 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  44 plain layout=super bytes=65536 covered_texels=307 distinct_texels=79 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  45 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  46 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  47 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  48 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  49 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  50 plain layout=super bytes=0 covered_texels=0 distinct_texels=0 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  51 plain layout=super bytes=458752 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  52 plain layout=super bytes=458752 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  53 plain layout=super bytes=65536 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  54 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  55 plain layout=super bytes=458752 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  56 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  57 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  58 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  59 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  60 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  61 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  62 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  63 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  64 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 1 pipelines (variant=diff layout=super warm=0 retain=1 order=forward)
+seq  65 plain layout=super bytes=131072 covered_texels=0 distinct_texels=1 | mono-vs-mono(control) diff=0 | mono-vs-fast diff=0 max=0 | mono-vs-opt diff=0 max=0 | fast-vs-opt diff=0 max=0
+DIFF summary: rendered=1 identical=1 skipped=0

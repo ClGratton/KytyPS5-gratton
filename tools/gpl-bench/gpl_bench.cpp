@@ -559,8 +559,12 @@ static void EnsureOwnLayout(Pipe& p) {
 
 enum LibPart { kVI = 0, kPRE = 1, kFS = 2, kFO = 3 };
 
+static bool g_dup_layout = false; // --dup-layout: every library gets its own identically-defined layout object
+static VkPipelineCreateFlags g_extra_flags = 0; // --disable-opt: VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT on everything
+
 static VkGraphicsPipelineCreateInfo BuildMono(Pipe& p, VkPipelineLayout layout) {
 	VkGraphicsPipelineCreateInfo ci {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+	ci.flags               = g_extra_flags;
 	ci.pNext               = &p.rendering;
 	ci.stageCount          = static_cast<uint32_t>(p.stage_ci.size());
 	ci.pStages             = p.stage_ci.data();
@@ -588,7 +592,7 @@ static void BuildLib(Pipe& p, LibPart part, VkPipelineLayout layout, bool retain
 	out.stages.clear();
 	auto& ci = out.ci;
 	ci       = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-	ci.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR |
+	ci.flags = g_extra_flags | VK_PIPELINE_CREATE_LIBRARY_BIT_KHR |
 	           (retain ? VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : 0);
 	out.lib.pNext = &p.rendering; // dynamic rendering info (viewMask / formats)
 	ci.pNext      = &out.lib;
@@ -597,8 +601,12 @@ static void BuildLib(Pipe& p, LibPart part, VkPipelineLayout layout, bool retain
 	switch (part) {
 		case kVI:
 			out.lib.flags          = VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT;
-			ci.pVertexInputState   = p.has_vi ? &p.vi : nullptr;
-			ci.pInputAssemblyState = p.has_ia ? &p.ia : nullptr;
+			// mesh pipelines have no vertex input state in the monolithic create-info, but the
+			// vertex-input-interface library itself must be given (empty) state or the driver crashes.
+			static const VkPipelineVertexInputStateCreateInfo   kEmptyVi {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+			static const VkPipelineInputAssemblyStateCreateInfo kEmptyIa {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, nullptr, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE};
+			ci.pVertexInputState   = p.has_vi ? &p.vi : &kEmptyVi;
+			ci.pInputAssemblyState = p.has_ia ? &p.ia : &kEmptyIa;
 			break;
 		case kPRE:
 			out.lib.flags = VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT;
@@ -638,7 +646,7 @@ static VkGraphicsPipelineCreateInfo BuildLink(const VkPipeline libs[4], VkPipeli
 	li.pLibraries   = libs;
 	VkGraphicsPipelineCreateInfo ci {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 	ci.pNext  = &li;
-	ci.flags  = lto ? VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT : 0;
+	ci.flags  = g_extra_flags | (lto ? VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT : 0);
 	ci.layout = layout;
 	ci.basePipelineIndex = -1;
 	return ci;
@@ -728,7 +736,11 @@ struct GplResult {
 static void BuildLibs(Pipe& p, VkPipelineLayout layout, bool retain, VkPipelineCache cache, GplResult& out, double* tout) {
 	for (int part = 0; part < 4; part++) {
 		LibCI l;
-		BuildLib(p, static_cast<LibPart>(part), layout, retain, l);
+		VkPipelineLayout lay = layout;
+		if (g_dup_layout && (part == kPRE || part == kFS)) {
+			lay = MakePl(MakeDsl(p.bindings, p.push_descriptors, 0), p.push_stages, p.push_offset, p.push_size);
+		}
+		BuildLib(p, static_cast<LibPart>(part), lay, retain, l);
 		tout[part] = TimedCreate(cache, l.ci, out.libs[part], out.res[part]);
 	}
 }
@@ -849,6 +861,8 @@ int main(int argc, char** argv) {
 		else if (a == "--seed") o.seed = static_cast<uint32_t>(std::atoi(next().c_str()));
 		else if (a == "--include-mesh") o.include_mesh = true;
 		else if (a == "--no-rect") o.include_rect = false;
+		else if (a == "--dup-layout") g_dup_layout = true;
+		else if (a == "--disable-opt") g_extra_flags = VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
 		else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
 	}
 	if (o.dump.empty()) { std::fprintf(stderr, "usage: gpl_bench --dump <dir> --variant mono|gpl|e2e|par-mono|par-gpl|diff|info [--layout own|super] [--warm] [--csv f]\n"); return 2; }

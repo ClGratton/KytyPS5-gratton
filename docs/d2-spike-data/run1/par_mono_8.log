@@ -1,0 +1,7 @@
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 60 pipelines (variant=par-mono layout=own warm=0 retain=1 order=forward)
+PAR variant=par-mono workers=8 pipelines=60 makespan_ms=687.2 sum_ms=4076.4

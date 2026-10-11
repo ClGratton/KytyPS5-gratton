@@ -1,0 +1,66 @@
+device: NVIDIA GeForce RTX 3080 Ti driver=0x988e4100 api=1.4.341
+graphicsPipelineLibraryFastLinking=1 graphicsPipelineLibraryIndependentInterpolationDecoration=1 maxPushDescriptors=32
+GL_SHADER_DISK_CACHE=0
+loaded 66 graphics pipelines
+superset layout: 16 bindings, 86 descriptors total (maxPushDescriptors=32) type0=8 type2=51 type3=1 type7=26
+selected 60 pipelines (variant=gpl layout=own warm=0 retain=1 order=forward)
+seq   0 plain    mono=   -1.00 vi=  0.03 pre=    4.83 fs=    3.41 fo=  0.00 fast=   0.01 opt=    2.55 e2e4=   -1.00 ok
+seq   1 plain    mono=   -1.00 vi=  0.01 pre=    3.76 fs=    3.08 fo=  0.00 fast=   0.00 opt=    3.61 e2e4=   -1.00 ok
+seq   2 plain    mono=   -1.00 vi=  0.00 pre=    4.15 fs=   17.52 fo=  0.01 fast=   0.01 opt=    4.05 e2e4=   -1.00 ok
+seq   3 plain    mono=   -1.00 vi=  0.01 pre=    2.60 fs=    8.71 fo=  0.00 fast=   0.00 opt=    2.34 e2e4=   -1.00 ok
+seq   5 plain    mono=   -1.00 vi=  0.01 pre=    4.68 fs=    9.02 fo=  0.00 fast=   0.00 opt=    4.45 e2e4=   -1.00 ok
+seq   6 plain    mono=   -1.00 vi=  0.01 pre=    5.50 fs=   10.07 fo=  0.01 fast=   0.01 opt=    4.78 e2e4=   -1.00 ok
+seq   7 plain    mono=   -1.00 vi=  0.01 pre=    4.34 fs=    6.97 fo=  0.00 fast=   0.00 opt=    4.02 e2e4=   -1.00 ok
+seq   8 plain    mono=   -1.00 vi=  0.01 pre=    2.29 fs=    6.08 fo=  0.00 fast=   0.00 opt=    2.12 e2e4=   -1.00 ok
+seq   9 plain    mono=   -1.00 vi=  0.01 pre=    2.10 fs=    4.97 fo=  0.00 fast=   0.00 opt=    2.11 e2e4=   -1.00 ok
+seq  10 plain    mono=   -1.00 vi=  0.00 pre=    2.09 fs=    6.80 fo=  0.00 fast=   0.00 opt=    2.11 e2e4=   -1.00 ok
+seq  11 plain    mono=   -1.00 vi=  0.00 pre=    2.17 fs=    5.85 fo=  0.00 fast=   0.00 opt=    2.10 e2e4=   -1.00 ok
+seq  12 plain    mono=   -1.00 vi=  0.00 pre=    2.08 fs=    3.39 fo=  0.00 fast=   0.00 opt=    2.09 e2e4=   -1.00 ok
+seq  13 plain    mono=   -1.00 vi=  0.00 pre=    3.27 fs=   20.18 fo=  0.00 fast=   0.00 opt=    3.39 e2e4=   -1.00 ok
+seq  14 plain    mono=   -1.00 vi=  0.01 pre=   22.14 fs=   33.27 fo=  0.00 fast=   0.00 opt=   22.93 e2e4=   -1.00 ok
+seq  15 plain    mono=   -1.00 vi=  0.01 pre=    4.10 fs=   21.62 fo=  0.01 fast=   0.00 opt=    3.46 e2e4=   -1.00 ok
+seq  16 plain    mono=   -1.00 vi=  0.01 pre=   22.62 fs=   24.02 fo=  0.01 fast=   0.01 opt=   23.20 e2e4=   -1.00 ok
+seq  17 plain    mono=   -1.00 vi=  0.01 pre=    3.64 fs=   20.00 fo=  0.01 fast=   0.01 opt=    3.69 e2e4=   -1.00 ok
+seq  18 plain    mono=   -1.00 vi=  0.01 pre=    7.37 fs=    4.67 fo=  0.00 fast=   0.00 opt=    6.94 e2e4=   -1.00 ok
+seq  19 plain    mono=   -1.00 vi=  0.01 pre=   22.91 fs=   23.99 fo=  0.01 fast=   0.00 opt=   23.17 e2e4=   -1.00 ok
+seq  20 plain    mono=   -1.00 vi=  0.01 pre=    6.07 fs=    4.75 fo=  0.00 fast=   0.00 opt=    5.65 e2e4=   -1.00 ok
+seq  21 plain    mono=   -1.00 vi=  0.01 pre=   11.44 fs=   11.57 fo=  0.00 fast=   0.00 opt=   11.78 e2e4=   -1.00 ok
+seq  22 plain    mono=   -1.00 vi=  0.01 pre=   21.63 fs=   33.17 fo=  0.01 fast=   0.01 opt=   21.90 e2e4=   -1.00 ok
+seq  23 plain    mono=   -1.00 vi=  0.01 pre=    4.92 fs=   28.04 fo=  0.01 fast=   0.00 opt=    3.99 e2e4=   -1.00 ok
+seq  24 plain    mono=   -1.00 vi=  0.01 pre=    4.42 fs=   22.26 fo=  0.01 fast=   0.00 opt=    4.04 e2e4=   -1.00 ok
+seq  26 plain    mono=   -1.00 vi=  0.01 pre=   23.05 fs=   24.64 fo=  0.01 fast=   0.00 opt=   23.22 e2e4=   -1.00 ok
+seq  27 plain    mono=   -1.00 vi=  0.01 pre=   22.71 fs=   28.10 fo=  0.01 fast=   0.00 opt=   22.98 e2e4=   -1.00 ok
+seq  28 plain    mono=   -1.00 vi=  0.01 pre=   23.44 fs=   24.88 fo=  0.01 fast=   0.01 opt=   22.53 e2e4=   -1.00 ok
+seq  29 plain    mono=   -1.00 vi=  0.01 pre=   22.55 fs=   27.36 fo=  0.01 fast=   0.01 opt=   23.09 e2e4=   -1.00 ok
+seq  30 plain    mono=   -1.00 vi=  0.01 pre=    2.33 fs=    8.52 fo=  0.00 fast=   0.00 opt=    2.16 e2e4=   -1.00 ok
+seq  31 plain    mono=   -1.00 vi=  0.01 pre=   24.59 fs=  239.74 fo=  0.01 fast=   0.01 opt=   25.67 e2e4=   -1.00 ok
+seq  32 plain    mono=   -1.00 vi=  0.01 pre=   23.88 fs=   28.12 fo=  0.01 fast=   0.01 opt=   23.63 e2e4=   -1.00 ok
+seq  33 plain    mono=   -1.00 vi=  0.01 pre=  167.40 fs=  126.22 fo=  0.01 fast=   0.01 opt=  135.18 e2e4=   -1.00 ok
+seq  35 plain    mono=   -1.00 vi=  0.01 pre=  138.96 fs=  111.31 fo=  0.01 fast=   0.01 opt=  136.53 e2e4=   -1.00 ok
+seq  36 plain    mono=   -1.00 vi=  0.01 pre=  138.97 fs=  125.90 fo=  0.01 fast=   0.01 opt=  120.36 e2e4=   -1.00 ok
+seq  40 plain    mono=   -1.00 vi=  0.01 pre=    2.82 fs=    4.73 fo=  0.00 fast=   0.01 opt=    2.39 e2e4=   -1.00 ok
+seq  41 plain    mono=   -1.00 vi=  0.01 pre=    3.45 fs=   21.26 fo=  0.01 fast=   0.00 opt=    3.37 e2e4=   -1.00 ok
+seq  42 plain    mono=   -1.00 vi=  0.01 pre=    2.46 fs=    5.33 fo=  0.00 fast=   0.00 opt=    2.18 e2e4=   -1.00 ok
+seq  43 plain    mono=   -1.00 vi=  0.01 pre=    4.39 fs=    8.72 fo=  0.00 fast=   0.00 opt=    4.33 e2e4=   -1.00 ok
+seq  44 plain    mono=   -1.00 vi=  0.01 pre=    4.71 fs=    9.93 fo=  0.00 fast=   0.00 opt=    4.78 e2e4=   -1.00 ok
+seq  45 plain    mono=   -1.00 vi=  0.01 pre=    4.17 fs=    6.98 fo=  0.00 fast=   0.00 opt=    4.05 e2e4=   -1.00 ok
+seq  46 plain    mono=   -1.00 vi=  0.01 pre=  139.88 fs=  324.19 fo=  0.01 fast=   0.01 opt=  136.91 e2e4=   -1.00 ok
+seq  47 plain    mono=   -1.00 vi=  0.01 pre=   23.77 fs=   25.52 fo=  0.01 fast=   0.01 opt=   23.65 e2e4=   -1.00 ok
+seq  48 plain    mono=   -1.00 vi=  0.01 pre=   24.32 fs=   27.96 fo=  0.01 fast=   0.01 opt=   23.49 e2e4=   -1.00 ok
+seq  49 plain    mono=   -1.00 vi=  0.01 pre=   23.53 fs=   25.35 fo=  0.01 fast=   0.00 opt=   23.39 e2e4=   -1.00 ok
+seq  50 plain    mono=   -1.00 vi=  0.01 pre=   14.31 fs=    0.00 fo=  0.00 fast=   0.00 opt=    0.00 e2e4=   -1.00 ok
+seq  51 plain    mono=   -1.00 vi=  0.01 pre=   23.06 fs=   67.84 fo=  0.01 fast=   0.01 opt=   23.58 e2e4=   -1.00 ok
+seq  52 plain    mono=   -1.00 vi=  0.01 pre=   22.97 fs=   67.01 fo=  0.01 fast=   0.01 opt=   23.88 e2e4=   -1.00 ok
+seq  53 plain    mono=   -1.00 vi=  0.01 pre=   11.97 fs=    0.00 fo=  0.00 fast=   0.00 opt=    0.00 e2e4=   -1.00 ok
+seq  54 plain    mono=   -1.00 vi=  0.01 pre=   23.32 fs=   25.15 fo=  0.01 fast=   0.00 opt=   23.02 e2e4=   -1.00 ok
+seq  55 plain    mono=   -1.00 vi=  0.01 pre=   33.21 fs=  102.12 fo=  0.01 fast=   0.01 opt=   32.57 e2e4=   -1.00 ok
+seq  56 plain    mono=   -1.00 vi=  0.01 pre=   25.01 fs=   25.96 fo=  0.01 fast=   0.01 opt=   23.76 e2e4=   -1.00 ok
+seq  57 plain    mono=   -1.00 vi=  0.01 pre=   24.75 fs=   25.75 fo=  0.01 fast=   0.00 opt=   24.30 e2e4=   -1.00 ok
+seq  58 plain    mono=   -1.00 vi=  0.01 pre=   25.08 fs=   26.81 fo=  0.01 fast=   0.01 opt=   24.98 e2e4=   -1.00 ok
+seq  59 plain    mono=   -1.00 vi=  0.01 pre=   40.52 fs=   23.95 fo=  0.01 fast=   0.01 opt=   39.05 e2e4=   -1.00 ok
+seq  60 plain    mono=   -1.00 vi=  0.01 pre=   39.34 fs=   23.80 fo=  0.01 fast=   0.01 opt=   39.04 e2e4=   -1.00 ok
+seq  61 plain    mono=   -1.00 vi=  0.01 pre=   40.19 fs=   25.89 fo=  0.01 fast=   0.00 opt=   38.66 e2e4=   -1.00 ok
+seq  62 plain    mono=   -1.00 vi=  0.01 pre=   22.66 fs=   25.21 fo=  0.01 fast=   0.01 opt=   23.08 e2e4=   -1.00 ok
+seq  63 plain    mono=   -1.00 vi=  0.01 pre=   23.40 fs=   25.18 fo=  0.01 fast=   0.01 opt=   22.74 e2e4=   -1.00 ok
+seq  64 plain    mono=   -1.00 vi=  0.01 pre=  138.20 fs=  125.02 fo=  0.01 fast=   0.01 opt=  120.68 e2e4=   -1.00 ok
+seq  65 plain    mono=   -1.00 vi=  0.01 pre=   24.99 fs=   27.62 fo=  0.01 fast=   0.00 opt=   24.38 e2e4=   -1.00 ok

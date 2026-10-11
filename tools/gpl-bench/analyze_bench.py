@@ -9,11 +9,14 @@ import csv, sys, math, statistics as st, os, collections
 def load(path):
     if not os.path.exists(path):
         return []
-    rows = list(csv.DictReader(open(path)))
-    for r in rows:
-        for k, v in r.items():
-            if k not in ('class', 'variant', 'layout', 'status'):
-                r[k] = float(v)
+    rows = []
+    for raw in csv.DictReader(open(path)):
+        r = {}
+        for k, v in raw.items():
+            nk = k.replace('_warm_ms', '_w').replace('_ms', '')
+            r[nk] = v if nk in ('class', 'variant', 'layout', 'status') else float(v)
+        r['seq'] = int(r['seq'])
+        rows.append(r)
     return rows
 
 
@@ -79,7 +82,7 @@ print(f'optimized link alone vs mono: {tot_opt/tot_mono:.3f}; libs+opt link vs m
 if mwarm and gwarm:
     print('\n== warm (second creation with the same VkPipelineCache), ms ==')
     ws = [s for s in seqs if s in mwarm and s in gwarm and ok(mwarm[s]) and ok(gwarm[s])]
-    summ('mono warm', [mwarm[s]['mono_warm'] for s in ws])
+    summ('mono warm', [mwarm[s]['mono_w'] for s in ws])
     summ('gpl fast warm', [gwarm[s]['fast_w'] for s in ws])
     summ('gpl pre warm', [gwarm[s]['pre_w'] for s in ws])
     summ('gpl fs warm', [gwarm[s]['fs_w'] for s in ws])
@@ -134,3 +137,55 @@ if len(sys.argv) > 2:
             print(f'  mono (today) within {nm}: {n}/{len(out)}')
         tshare = [o[1] + o[2] for o in out]
         print(f'  translation share of GPL new-shader miss: {100*sum(tshare)/sum(o[7] for o in out):.1f}%  (share of mono: {100*sum(tshare)/sum(o[8] for o in out):.1f}%)')
+
+
+# ---- stall model with library sharing (capture order, one cold session) ----
+def reuse_model(dump_dir, seqs, gown, mono, tr):
+    import json, glob, hashlib
+    pipes = {}
+    for f in sorted(glob.glob(f'{dump_dir}/pipelines/*.json')):
+        j = json.load(open(f))
+        pipes[j['seq']] = j
+    md5 = lambda p: hashlib.md5(open(f'{dump_dir}/{p}', 'rb').read()).hexdigest()
+    canon = lambda o: json.dumps(o, sort_keys=True)
+    seen = {k: set() for k in ('vi', 'pre', 'fs', 'fo')}
+    stalls_serial, stalls_par, monos, new_flags = [], [], [], []
+    trans_seen = set()
+    for s in sorted(seqs):
+        p = pipes[s]
+        spv = {st_['stage']: md5(st_['spv']) for st_ in p['stages']}
+        keys = {
+            'vi': canon([p.get('vertex_input'), p.get('input_assembly')]),
+            'pre': canon([[(k, v) for k, v in sorted(spv.items()) if k != 16], p.get('tess_patch_control_points'), p['negative_one_to_one'], p['raster'], p['layout']['push_range']]),
+            'fs': canon([spv.get(16), p['multisample'], p.get('depth_stencil'), p['rendering']['depth'], p['rendering']['stencil']]),
+            'fo': canon([p['blend'], p['multisample'], p['rendering']]),
+        }
+        g = gown[s]
+        t = {'vi': g['vi'], 'pre': g['pre'], 'fs': g['fs'], 'fo': g['fo']}
+        cost = {}
+        for k in keys:
+            cost[k] = 0.0 if keys[k] in seen[k] else t[k]
+            seen[k].add(keys[k])
+        # translation only for shaders not seen before in this session
+        tt = 0.0
+        for sid in (p['vs_id'], p['ps_id']):
+            if sid and sid not in trans_seen:
+                tt += tr.get(sid, 0.0)
+                trans_seen.add(sid)
+        stalls_serial.append(tt + sum(cost.values()) + g['fast'])
+        stalls_par.append(max(cost['pre'], cost['fs'], cost['vi'], cost['fo']) + tt + g['fast'])
+        monos.append(tt + mono[s]['mono'])
+        new_flags.append(any(cost[k] > 0.05 for k in ('pre', 'fs')))
+    return stalls_serial, stalls_par, monos, new_flags
+
+
+if len(sys.argv) > 2:
+    sers, pars, monos, flags = reuse_model(os.environ['GPLB_DUMP'], es, gown, mono, tr)
+    print('\n== per-miss stall with GPL library sharing (capture order, 60 non-mesh gfx pipelines of one cold session) ==')
+    summ('mono (today): translate+create', monos)
+    summ('GPL libs serial on 1 worker + link', sers)
+    summ('GPL libs on 2+ workers + link', pars)
+    for fr in (1, 2):
+        lim = fr * 1000 / 60
+        print(f'  within {fr} frame(s) ({lim:.1f} ms): mono {sum(1 for x in monos if x<=lim)}/{len(monos)}; GPL 1 worker {sum(1 for x in sers if x<=lim)}/{len(sers)}; GPL parallel {sum(1 for x in pars if x<=lim)}/{len(pars)}')
+    print(f'  sum: mono {sum(monos):.0f} ms, GPL serial {sum(sers):.0f} ms, GPL parallel {sum(pars):.0f} ms')

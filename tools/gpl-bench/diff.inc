@@ -294,8 +294,32 @@ static bool RenderOnce(Pipe& p, VkPipeline pl, VkPipelineLayout layout, VkDescri
 	vkCmdBeginRendering(cb, &ri);
 	vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
 	SetDynamicState(p, cb, W, H);
-	std::vector<VkBuffer>     vb(p.vib.size(), dr.rnd.b);
+	// Per-binding vertex buffers: random floats, except that a float vec3/vec4 attribute at location 0 is
+	// overwritten with screen-covering triangles (the position in nearly every captured vertex layout).
+	std::vector<Buf> vbufs;
+	std::vector<VkBuffer>     vb;
 	std::vector<VkDeviceSize> vo(p.vib.size(), 0);
+	for (auto& b: p.vib) {
+		const uint32_t verts = 3000;
+		vbufs.push_back(MakeBuf(std::max<VkDeviceSize>(4096, static_cast<VkDeviceSize>(b.stride) * verts + 64), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT));
+		FillRandomFloats(vbufs.back(), 4242 + b.binding);
+		for (auto& a: p.via) {
+			if (a.binding != b.binding || a.location != 0) continue;
+			uint32_t comps = a.format == VK_FORMAT_R32G32B32A32_SFLOAT ? 4 : a.format == VK_FORMAT_R32G32B32_SFLOAT ? 3 : a.format == VK_FORMAT_R32G32_SFLOAT ? 2 : 0;
+			if (!comps || b.inputRate != VK_VERTEX_INPUT_RATE_VERTEX) continue;
+			std::mt19937 rng(7);
+			for (uint32_t v = 0; v < verts; v++) {
+				float cx = (static_cast<float>(rng() & 0xffff) / 65535.f - 0.5f), cy = (static_cast<float>(rng() & 0xffff) / 65535.f - 0.5f);
+				static const float ox[3] = {-1.2f, 1.2f, 0.0f}, oy[3] = {-1.0f, -1.0f, 1.4f};
+				float* dst = reinterpret_cast<float*>(static_cast<uint8_t*>(vbufs.back().map) + static_cast<size_t>(v) * b.stride + a.offset);
+				if (a.offset + comps * 4 > b.stride) break;
+				dst[0] = ox[v % 3] + cx * 0.5f; dst[1] = oy[v % 3] + cy * 0.5f;
+				if (comps >= 3) dst[2] = 0.5f;
+				if (comps == 4) dst[3] = 1.0f;
+			}
+		}
+		vb.push_back(vbufs.back().b);
+	}
 	if (!vb.empty()) vkCmdBindVertexBuffers(cb, 0, static_cast<uint32_t>(vb.size()), vb.data(), vo.data());
 	if (set) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
 	{
@@ -304,7 +328,7 @@ static bool RenderOnce(Pipe& p, VkPipeline pl, VkPipelineLayout layout, VkDescri
 		for (auto& x: pc) x = rng() & 0xffff;
 		vkCmdPushConstants(cb, layout, p.push_stages ? p.push_stages : kAllGraphics, 0, p.push_size, pc.data());
 	}
-	vkCmdDraw(cb, 192, 2, 0, 0);
+	vkCmdDraw(cb, 3000, 2, 0, 0);
 	vkCmdEndRendering(cb);
 	std::vector<VkDeviceSize> sizes;
 	for (auto& c: colors) {
@@ -331,6 +355,7 @@ static bool RenderOnce(Pipe& p, VkPipeline pl, VkPipelineLayout layout, VkDescri
 	}
 	(void)depth_copied;
 	EndSubmit(cb);
+	for (auto& v: vbufs) { vkUnmapMemory(g.dev, v.m); vkDestroyBuffer(g.dev, v.b, nullptr); vkFreeMemory(g.dev, v.m, nullptr); }
 	out.clear();
 	for (auto& b: rb) {
 		out.emplace_back(static_cast<uint8_t*>(b.map), static_cast<uint8_t*>(b.map) + b.size);
@@ -353,6 +378,15 @@ static DiffStats Compare(const std::vector<std::vector<uint8_t>>& a, const std::
 		}
 	}
 	return s;
+}
+
+// texels (first attachment, 4-byte groups) that differ from the texel at index 0: a measure of how much geometry landed
+static size_t CountCovered(const std::vector<std::vector<uint8_t>>& a) {
+	if (a.empty() || a[0].size() < 8) return 0;
+	uint32_t base; std::memcpy(&base, &a[0][0], 4);
+	size_t n = 0;
+	for (size_t k = 0; k + 4 <= a[0].size(); k += 4) { uint32_t v; std::memcpy(&v, &a[0][k], 4); if (v != base) n++; }
+	return n;
 }
 
 static size_t CountDistinct(const std::vector<std::vector<uint8_t>>& a) {
@@ -480,8 +514,8 @@ static int RunDiff(Opts& o, std::vector<Pipe*>& sel, SuperLayout& super) {
 		auto d_fo = Compare(im_fast, im_opt);
 		auto d_mm = Compare(im_mono, im_mono2); // determinism control
 		size_t distinct = CountDistinct(im_mono);
-		std::printf("seq %3d %-5s layout=%s bytes=%zu distinct_texels=%zu | mono-vs-mono(control) diff=%zu | mono-vs-fast diff=%zu max=%d | mono-vs-opt diff=%zu max=%d | fast-vs-opt diff=%zu max=%d\n",
-		            p->seq, p->Class(), o.layout.c_str(), d_fm.bytes, distinct, d_mm.diff_bytes, d_fm.diff_bytes, d_fm.max_abs, d_om.diff_bytes, d_om.max_abs, d_fo.diff_bytes, d_fo.max_abs);
+		std::printf("seq %3d %-5s layout=%s bytes=%zu covered_texels=%zu distinct_texels=%zu | mono-vs-mono(control) diff=%zu | mono-vs-fast diff=%zu max=%d | mono-vs-opt diff=%zu max=%d | fast-vs-opt diff=%zu max=%d\n",
+		            p->seq, p->Class(), o.layout.c_str(), d_fm.bytes, CountCovered(im_mono), distinct, d_mm.diff_bytes, d_fm.diff_bytes, d_fm.max_abs, d_om.diff_bytes, d_om.max_abs, d_fo.diff_bytes, d_fo.max_abs);
 		std::fflush(stdout);
 		n_ok++;
 		if (d_fm.diff_bytes == 0 && d_om.diff_bytes == 0 && d_fo.diff_bytes == 0) n_same++;
