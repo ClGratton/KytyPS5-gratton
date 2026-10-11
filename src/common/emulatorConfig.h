@@ -75,6 +75,7 @@ struct ConfigOptions {
 	// Observation-only benchmark instrumentation (see common/benchInstrument.h). Off by default.
 	std::filesystem::path  bench_frames_csv;
 	uint64_t               bench_exit_after_frames     = 0;
+	std::filesystem::path  shader_timing_log;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif

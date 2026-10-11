@@ -89,6 +89,8 @@ static void PrintUsage() {
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
+	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
+	         "                                       pipeline creation misses. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -419,6 +421,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.bench_frames_csv = Common::PathFromUtf8(value);
+		} else if (arg == "--shader-timing-log") {
+			if (value.empty()) {
+				::printf("invalid --shader-timing-log path\n");
+				return false;
+			}
+			options.config.shader_timing_log = Common::PathFromUtf8(value);
 		} else if (arg == "--bench-exit-after-frames") {
 			if (!ParseUint64(value, options.config.bench_exit_after_frames)) {
 				::printf("invalid frame count: %s\n", value.c_str());

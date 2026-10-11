@@ -1,11 +1,13 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -91,6 +93,56 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	auto message = fmt::format(format, std::forward<Args>(args)...);
 	message += '\n';
 	Log::WriteToConsoleAndLog(message);
+}
+
+// --shader-timing-log helpers. Everything is a no-op (one relaxed atomic load) when the flag is
+// absent: Stopwatch records nothing and callers skip all formatting behind On().
+class Stopwatch {
+public:
+	Stopwatch(): m_on(Bench::TimingEnabled()), m_start(m_on ? Bench::NowNs() : 0), m_last(m_start) {}
+	[[nodiscard]] bool    On() const noexcept { return m_on; }
+	[[nodiscard]] int64_t Start() const noexcept { return m_start; }
+	// Nanoseconds since construction or the previous Lap().
+	int64_t Lap() noexcept {
+		if (!m_on) {
+			return 0;
+		}
+		const auto now = Bench::NowNs();
+		const auto dt  = now - m_last;
+		m_last         = now;
+		return dt;
+	}
+	[[nodiscard]] int64_t Elapsed() const noexcept { return m_on ? Bench::NowNs() - m_start : 0; }
+
+private:
+	bool    m_on;
+	int64_t m_start;
+	int64_t m_last;
+};
+
+// Duration of a hit-path step (MaterializeResources) inside one program Get().
+struct StepTime {
+	int64_t t_start = 0;
+	int64_t dur     = 0;
+	void    Add(const Stopwatch& sw, int64_t lap) noexcept {
+		if (dur == 0) {
+			t_start = sw.Start();
+		}
+		dur += lap;
+	}
+};
+
+const char* StageShortName(ShaderType stage) {
+	switch (stage) {
+		case ShaderType::Vertex: return "vs";
+		case ShaderType::Mesh: return "ms";
+		case ShaderType::Local: return "ls";
+		case ShaderType::TessellationControl: return "hs";
+		case ShaderType::TessellationEvaluation: return "ds";
+		case ShaderType::Pixel: return "ps";
+		case ShaderType::Compute: return "cs";
+		default: return "unknown";
+	}
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
@@ -245,7 +297,9 @@ struct PipelineCache::ProgramCache {
 	                               const ShaderRecompiler::CompileOptions&      options,
 	                               ShaderRecompiler::TranslateResult            translated,
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
-	                               uint32_t push_data_start_dword) {
+	                               uint32_t push_data_start_dword,
+	                               int64_t* backend_ns = nullptr, int64_t* module_ns = nullptr) {
+		Stopwatch backend_sw;
 		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
 		                                               specialization, push_data_start_dword);
 		if (!ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv)) {
@@ -254,8 +308,11 @@ struct PipelineCache::ProgramCache {
 			     options.shader_hash);
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
+		if (backend_ns != nullptr) *backend_ns = backend_sw.Lap();
 
+		Stopwatch module_sw;
 		const auto module = CompileSPV(result.spirv, device);
+		if (module_ns != nullptr) *module_ns = module_sw.Lap();
 		EXIT_IF(module == nullptr);
 		if (options.dump_ir) {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
@@ -287,6 +344,24 @@ struct PipelineCache::ProgramCache {
 		lookup_key.user_data_count = params.user_data_count;
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
 		BuildStageStaticKey(input_info, lookup_key.static_state);
+		const bool timing = Bench::TimingEnabled();
+		StepTime   materialize_time;
+		const auto program_key_hash = timing ? static_cast<uint64_t>(ProgramKeyHash {}(lookup_key)) : 0u;
+		// Hit-path steps are aggregated; on a miss (or when slow) they are logged individually.
+		const auto report_steps = [&](bool miss) {
+			if (!timing) return;
+			const bool gpu_thread = GuestGpu::IsGpuThread();
+			const auto report = [&](const char* kind, Bench::HitSlot slot, const StepTime& step) {
+				if (step.t_start == 0) return;
+				if (miss || step.dur >= Bench::kSlowHitNs) {
+					Bench::LogTiming(kind, program_key_hash, step.t_start, step.dur, gpu_thread,
+					                 fmt::format("miss={};stage={};shader_hash={:016x}", miss ? 1 : 0,
+					                             StageShortName(stage), params.hash));
+				}
+				if (!miss) Bench::AccumulateHit(slot, step.dur);
+			};
+			report("materialize", Bench::HitSlot::Materialize, materialize_time);
+		};
 		auto                                         entry = programs.find(lookup_key);
 		if (entry != programs.end() && entry->second.skip_dispatch) {
 			return {};
@@ -297,9 +372,12 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+			Stopwatch  materialize_sw;
+			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
 			    entry->second.resource_plan, runtime, entry->second.resources,
-			    entry->second.specialization));
+			    entry->second.specialization);
+			materialize_time.Add(materialize_sw, materialize_sw.Lap());
+			EXIT_IF(!materialized);
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations, [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
@@ -312,9 +390,14 @@ struct PipelineCache::ProgramCache {
 				input_info.stage = {.program   = &permutation->program,
 				                    .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
+				report_steps(false);
 				return permutation->handle;
 			}
 		}
+
+		Stopwatch miss_sw;
+		int64_t   prepare_ns = 0, frontend_ns = 0, plan_ns = 0, backend_ns = 0, module_ns = 0;
+		const bool new_source = entry == programs.end();
 
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
@@ -358,23 +441,49 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
+		prepare_ns = 0; // no separate source-preparation step at this base (no S_SWAP_PC linking)
+		frontend_ns = miss_sw.Lap();
 		if (translated.skip_dispatch) {
 			entry = programs.try_emplace(lookup_key, ShaderRecompiler::IR::ResourcePlan {}).first;
 			entry->second.skip_dispatch = true;
 			return {};
 		}
+		// One row per program translation (a miss). dur_ns = translate_ns = prepare + frontend +
+		// plan + backend + module; MaterializeResources is reported on
+		// its own row (miss=1), and the detail field carries materialize_ns for convenience.
+		const auto log_translate = [&](bool reused, uint64_t shader_id) {
+			if (!timing) return;
+			const auto translate_ns = prepare_ns + frontend_ns + plan_ns + backend_ns + module_ns;
+			Bench::LogTiming(
+			    "program_translate", program_key_hash, miss_sw.Start(), translate_ns,
+			    GuestGpu::IsGpuThread(),
+			    fmt::format("stage={};shader_hash={:016x};shader_id={};new_source={};reused_permutation={};"
+			                "prepare_ns={};frontend_ns={};plan_ns={};materialize_ns={};backend_ns={};"
+			                "module_ns={};code_dwords={}",
+			                StageShortName(stage), params.hash, shader_id, new_source ? 1 : 0,
+			                reused ? 1 : 0, prepare_ns, frontend_ns, plan_ns, materialize_time.dur,
+			                backend_ns, module_ns, params.code.size()));
+		};
 		if (entry == programs.end()) {
 			entry = programs.try_emplace(lookup_key,
 			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program)).first;
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+			plan_ns = miss_sw.Lap();
+			Stopwatch  materialize_sw;
+			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
 			    entry->second.resource_plan, runtime, entry->second.resources,
-			    entry->second.specialization));
+			    entry->second.specialization);
+			materialize_time.Add(materialize_sw, materialize_sw.Lap());
+			miss_sw.Lap();
+			EXIT_IF(!materialized);
 		}
 		entry->second.permutations.push_back(CompilePermutation(
-		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor));
+		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
+		    timing ? &backend_ns : nullptr, timing ? &module_ns : nullptr));
 		const auto& permutation = entry->second.permutations.back();
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
+		log_translate(false, permutation.handle.id);
+		report_steps(true);
 
 		std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> counts {};
 		for (const auto& [key, source]: programs) {
@@ -434,6 +543,22 @@ PipelineCache::~PipelineCache() {
 }
 
 void PipelineCache::InitializeDriverCache() {
+	// --shader-timing-log: one row so analysis can tell cold (empty cache) from warm sessions.
+	Stopwatch   init_sw;
+	size_t      loaded_bytes = 0;
+	const char* init_result  = "disabled";
+	struct InitReport {
+		const Stopwatch& sw;
+		const size_t&    loaded_bytes;
+		const char* const& result;
+		const PipelineCache& cache;
+		~InitReport() {
+			if (!sw.On()) return;
+			Bench::LogTiming("driver_cache_init", 0, sw.Start(), sw.Elapsed(), false,
+			                 fmt::format("result={};loaded_bytes={};active={}", result, loaded_bytes,
+			                             cache.m_driver_cache != nullptr ? 1 : 0));
+		}
+	} init_report {init_sw, loaded_bytes, init_result, *this};
 	const auto title_id = PipelineCacheTitleId();
 	if (title_id.empty()) {
 		return;
@@ -514,8 +639,11 @@ void PipelineCache::InitializeDriverCache() {
 	if (!initial_data.empty()) {
 		PipelineCacheLog("Vulkan pipeline cache: loaded {} bytes from {}", initial_data.size(),
 		                 path);
+		loaded_bytes = initial_data.size();
+		init_result  = "loaded";
 	} else {
 		PipelineCacheLog("Vulkan pipeline cache: initialized empty");
+		init_result = "empty";
 	}
 }
 
@@ -843,8 +971,19 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 
 	auto cached = std::make_unique<Pipeline>();
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
+	Stopwatch create_sw;
 	CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
 	                       ps_input_info, programs, static_params, m_driver_cache);
+	if (create_sw.On()) {
+		// One row per pipeline creation (a miss). dur_ns = create_ns (layouts + vkCreate*), of
+		// which driver_ns is the vkCreateGraphicsPipelines call itself.
+		const auto create_ns = create_sw.Elapsed();
+		Bench::LogTiming("pipeline_create_gfx", GraphicsPipelineKeyHash {}(key), create_sw.Start(),
+		                 create_ns, GuestGpu::IsGpuThread(),
+		                 fmt::format("vs_id={};ps_id={};tess={};driver_cache={};driver_ns={}", vs_id,
+		                             ps_id, programs.VertexStageCount() == 3 ? 1 : 0,
+		                             m_driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs()));
+	}
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
@@ -873,7 +1012,15 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	}
 
 	auto cached = std::make_unique<Pipeline>();
+	Stopwatch create_sw;
 	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+	if (create_sw.On()) {
+		const auto create_ns = create_sw.Elapsed();
+		Bench::LogTiming("pipeline_create_cs", compute_program.id, create_sw.Start(), create_ns,
+		                 GuestGpu::IsGpuThread(),
+		                 fmt::format("cs_id={};driver_cache={};driver_ns={}", compute_program.id,
+		                             m_driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs()));
+	}
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
