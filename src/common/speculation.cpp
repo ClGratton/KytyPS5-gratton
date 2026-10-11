@@ -8,6 +8,7 @@ namespace Common::Speculation {
 
 namespace {
 thread_local int     t_depth = 0;
+thread_local bool    t_failed = false;
 constexpr int        kMaxHeld = 4;
 thread_local std::shared_mutex* t_held[kMaxHeld] = {};
 thread_local bool t_held_shared[kMaxHeld] = {};
@@ -41,6 +42,16 @@ HeldLock::~HeldLock() {
 	if (t_held_count < kMaxHeld) {
 		t_held[t_held_count] = nullptr;
 	}
+}
+
+void NoteFailure() noexcept {
+	t_failed = true;
+}
+
+bool TakeFailure() noexcept {
+	const bool failed = t_failed;
+	t_failed          = false;
+	return failed;
 }
 
 bool Aborted() noexcept {

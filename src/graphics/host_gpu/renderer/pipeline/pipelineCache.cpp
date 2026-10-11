@@ -1554,12 +1554,39 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info) {
+	return GetGraphicsProgramsImpl(vertex_regs, pixel_regs, sh, context, user_config,
+	                               target_export_mapping, pixel_active, vertex_info, pixel_info,
+	                               false);
+}
+
+PipelineCache::GraphicsPrograms PipelineCache::PrefetchGraphicsPrograms(
+    const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
+    const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
+    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
+    std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info) {
+	return GetGraphicsProgramsImpl(vertex_regs, pixel_regs, sh, context, user_config,
+	                               target_export_mapping, pixel_active, vertex_info, pixel_info,
+	                               true);
+}
+
+PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
+    const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
+    const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
+    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
+    std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
+    bool prefetch) {
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
+	if (prefetch && tess_active) {
+		return {}; // not prefetched
+	}
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
 	} else {
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
+		if (prefetch && Common::Speculation::TakeFailure()) {
+			return {};
+		}
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
 	if (mesh_active) {
@@ -1645,13 +1672,18 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	// Off mode: `async.pool` is null and every Get() below is the stock synchronous call. In skip
 	// mode a stage whose program is not ready stops the whole lookup: the stages after it cannot
 	// be captured because their push-data start depends on the earlier stages' compiled layouts.
-	ProgramCache::AsyncContext async {.pool = AsyncPool(),
-	                                  .allow_skip = m_async_mode == Config::AsyncPipelineMode::Skip};
+	ProgramCache::AsyncContext async {
+	    .pool       = AsyncPool(),
+	    .allow_skip = !prefetch && m_async_mode == Config::AsyncPipelineMode::Skip,
+	    .prefetch   = prefetch};
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor, &async);
 		if (async.pending) {
 			result.pending = true;
 			return result;
+		}
+		if (prefetch && !result.pixel) {
+			return {};
 		}
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
@@ -1660,6 +1692,9 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		if (async.pending) {
 			result.pending = true;
 			return result;
+		}
+		if (prefetch && !result.vertex[i]) {
+			return {};
 		}
 	}
 	return result;
@@ -1720,6 +1755,11 @@ void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
 		m_lookahead.cs_already.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
+	if (FindComputePipeline(program.id) != nullptr) { // published between the checks above
+		m_compute_jobs.Erase(program.id);
+		m_lookahead.cs_already.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
 	if (!pool->Submit(fresh)) {
 		m_compute_jobs.Erase(program.id);
 		return;
@@ -1731,15 +1771,15 @@ bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other)
 	return std::memcmp(this, &other, sizeof(*this)) == 0;
 }
 
-PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
+PipelineCache::GraphicsPipelineKey PipelineCache::BuildGraphicsKey(
     std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
-    std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
-    const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
-    bool primitive_restart_enable, const GraphicsPrograms& programs) {
+    std::span<const ShaderVertexInputInfo> vertex_info, const HW::Context& ctx,
+    const HW::UserConfig& user_config, const ShaderPixelInputInfo* ps_input_info,
+    vk::PrimitiveTopology topology, bool primitive_restart_enable,
+    const GraphicsPrograms& programs) {
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
-	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
 	EXIT_IF(colors.size() > RENDER_COLOR_ATTACHMENTS_MAX);
 	EXIT_IF(!vertex_program);
@@ -1747,11 +1787,8 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	EXIT_IF(ps_active && !pixel_program);
 	const auto color_count = static_cast<uint32_t>(colors.size());
 
-	auto&             ctx = command.GetRegisters();
-
 	const HW::ModeControl& mc = ctx.GetModeControl();
 
-	const auto vs_id = vertex_program.id;
 	const auto ps_id = ps_active ? pixel_program.id : 0;
 
 	GraphicsPipelineKey key {};
@@ -1869,7 +1906,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	if (static_params.sample_shading_enable && !m_graphics.sample_rate_shading_enabled) {
 		EXIT("Pipeline: sample-rate shading is required but unsupported by the host\n");
 	}
-	const bool rect_list = Prospero::IsRectList(command.GetUserConfig().GetPrimType());
+	const bool rect_list = Prospero::IsRectList(user_config.GetPrimType());
 	static_params.cull_back  = !rect_list && mc.cull_back;
 	static_params.cull_front = !rect_list && mc.cull_front;
 	static_params.face       = mc.face;
@@ -1900,7 +1937,33 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 		}
 	}
 
+	return key;
+}
+
+PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
+    std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
+    std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
+    const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
+    bool primitive_restart_enable, const GraphicsPrograms& programs) {
+	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
+
+	const auto  key = BuildGraphicsKey(colors, depth, vertex_info, command.GetRegisters(),
+	                                   command.GetUserConfig(), ps_input_info, topology,
+	                                   primitive_restart_enable, programs);
+	const bool  ps_active      = ps_input_info != nullptr;
+	const auto  vs_id          = programs.vertex[0].id;
+	const auto  ps_id          = ps_active ? programs.pixel.id : 0;
+	const auto& vertex_program = programs.vertex[0];
+	const auto& pixel_program  = programs.pixel;
+	const auto& vs_input_info  = vertex_info.front();
+	const auto& rendering      = key.rendering;
+	const auto& static_params  = key.static_params;
+
 	if (auto* found = FindGraphicsPipeline(key)) {
+		if (found->prefetched && !found->claimed) {
+			found->claimed = true;
+			m_lookahead.gfx_hit_ready.fetch_add(1, std::memory_order_relaxed);
+		}
 		return found;
 	}
 
@@ -1910,10 +1973,17 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	if (auto* pool = AsyncPool()) {
 		const bool                may_skip = m_async_mode == Config::AsyncPipelineMode::Skip;
 		std::shared_ptr<AsyncJob> job      = m_graphics_jobs.Find(key, may_skip);
+		if (job != nullptr && job->ClaimByDraw()) {
+			m_lookahead.gfx_hit_inflight.fetch_add(1, std::memory_order_relaxed);
+		}
 		if (job == nullptr) {
 			// Not in flight. It may have been published since the lookup above: a worker
 			// publishes before it unregisters.
 			if (auto* published = FindGraphicsPipeline(key)) {
+				if (published->prefetched && !published->claimed) {
+					published->claimed = true;
+					m_lookahead.gfx_hit_ready.fetch_add(1, std::memory_order_relaxed);
+				}
 				return published;
 			}
 			auto fresh = std::make_shared<GraphicsPipelineJob>(*this, key,
@@ -1929,14 +1999,20 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 			bool inserted       = false;
 			job                 = m_graphics_jobs.Insert(key, fresh, inserted);
 			if (inserted) {
-				if (!pool->Submit(fresh)) {
+				m_lookahead.gfx_miss.fetch_add(1, std::memory_order_relaxed);
+				if (!pool->Submit(fresh, true)) {
 					m_graphics_jobs.Erase(key);
 					job = nullptr;
 				} else if (may_skip) {
 					fresh->CountSkippedDraw();
 				}
-			} else if (may_skip) {
-				job->CountSkippedDraw();
+			} else {
+				if (job->ClaimByDraw()) {
+					m_lookahead.gfx_hit_inflight.fetch_add(1, std::memory_order_relaxed);
+				}
+				if (may_skip) {
+					job->CountSkippedDraw();
+				}
 			}
 		}
 		if (job != nullptr) {
@@ -1988,6 +2064,58 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	EXIT_IF(!inserted);
 
 	return published;
+}
+
+void PipelineCache::PrefetchGraphicsPipeline(std::span<const RenderColorInfo> colors,
+                                             const RenderDepthInfo&           depth,
+                                             std::span<const ShaderVertexInputInfo> vertex_info,
+                                             const HW::Context&               ctx,
+                                             const HW::UserConfig&            user_config,
+                                             const ShaderPixelInputInfo*      ps_input_info,
+                                             vk::PrimitiveTopology            topology,
+                                             bool primitive_restart_enable,
+                                             const GraphicsPrograms&          programs) {
+	std::shared_lock gate(m_prefetch_gate);
+	Common::Speculation::HeldLock held(&m_prefetch_gate, true);
+	if (m_prefetch_stopped) {
+		return;
+	}
+	auto* pool = AsyncPool();
+	if (pool == nullptr) {
+		return;
+	}
+	const auto key = BuildGraphicsKey(colors, depth, vertex_info, ctx, user_config, ps_input_info,
+	                                  topology, primitive_restart_enable, programs);
+	if (FindGraphicsPipeline(key) != nullptr || m_graphics_jobs.Find(key) != nullptr) {
+		m_lookahead.gfx_already.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	auto fresh = std::make_shared<GraphicsPipelineJob>(*this, key, GraphicsPipelineKeyHash {}(key));
+	fresh->vertex_info.assign(vertex_info.begin(), vertex_info.end());
+	if (ps_input_info != nullptr) {
+		fresh->ps_input_info = *ps_input_info;
+	}
+	fresh->programs     = programs;
+	fresh->driver_cache = m_driver_cache;
+	fresh->vs_id        = programs.vertex[0].id;
+	fresh->ps_id        = ps_input_info != nullptr ? programs.pixel.id : 0;
+	fresh->SetPrefetched();
+	bool inserted = false;
+	m_graphics_jobs.Insert(key, fresh, inserted);
+	if (!inserted) {
+		m_lookahead.gfx_already.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	if (FindGraphicsPipeline(key) != nullptr) { // published between the checks above
+		m_graphics_jobs.Erase(key);
+		m_lookahead.gfx_already.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	if (!pool->Submit(fresh)) {
+		m_graphics_jobs.Erase(key);
+		return;
+	}
+	m_lookahead.gfx_requested.fetch_add(1, std::memory_order_relaxed);
 }
 
 PipelineCache::Pipeline&

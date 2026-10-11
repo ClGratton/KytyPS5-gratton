@@ -2,6 +2,7 @@
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_COMMAND_PROCESSOR_H
 
 #include "common/assert.h"
+#include "graphics/guest_gpu/command_processor/shadowTypes.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -54,22 +55,6 @@ class CommandProcessor;
 // the GPU thread, tracking the same register state, but performs no side effects (no guest
 // memory writes, no Vulkan work, no waits). Draws and dispatches are reported to the sink instead
 // (docs/lookahead-notes.md).
-struct ShadowDraw {
-	bool     indexed             = false;
-	bool     indirect            = false; // arguments live in guest memory and are not read
-	uint32_t index_count         = 0;     // vertex count for non-indexed draws
-	uint32_t instance_count      = 0;
-	uint32_t index_type_and_size = 0;
-};
-
-struct ShadowDispatch {
-	uint32_t x        = 0;
-	uint32_t y        = 0;
-	uint32_t z        = 0;
-	uint32_t mode     = 0;
-	bool     indirect = false;
-};
-
 class ShadowSink {
 public:
 	virtual ~ShadowSink()                                                  = default;
