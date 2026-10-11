@@ -1,6 +1,7 @@
 #include "kernel/memory.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -14,6 +15,8 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -22,6 +25,8 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -171,6 +176,42 @@ static uint32_t        g_test_backing_store_unmaps_before_failure = UINT32_MAX;
 static callback_func_t g_test_before_backing_map                   = nullptr;
 static callback_func_t g_test_backing_read                         = nullptr;
 #endif
+
+// Host-RAM diagnostics (--mem-stats). The counters
+// only describe what the guest asked the memory manager to free; nothing here changes guest-visible
+// behaviour.
+struct MemStats {
+	struct Pair {
+		std::atomic<uint64_t> calls {0};
+		std::atomic<uint64_t> bytes {0};
+		void Add(uint64_t n) {
+			calls.fetch_add(1, std::memory_order_relaxed);
+			bytes.fetch_add(n, std::memory_order_relaxed);
+		}
+	};
+	Pair direct_release;         // sceKernelReleaseDirectMemory: physical blocks given back
+	Pair pool_expansion_release; // release of a memory-pool physical expansion
+	Pair munmap_direct;          // guest munmap of a direct-memory-backed view
+	Pair munmap_flexible;        // guest munmap of flexible memory (frees it)
+	Pair munmap_pooled;          // guest munmap of a pool-committed view
+	Pair pool_decommit;          // sceKernelMemoryPoolDecommit
+	Pair flexible_map;
+	Pair flexible_unmap;
+	std::atomic<uint64_t> flexible_zeroed_bytes {0}; // eager memset in FlexibleMemory::Map
+	// Backing-store view (Linux): released by the guest AND not mapped by any view.
+	std::atomic<uint64_t> released_unmapped_bytes {0};
+	std::atomic<uint64_t> released_unmapped_resident_bytes {0}; // resident (mincore) when it became so
+	std::atomic<uint64_t> realloc_bytes {0};                    // later mapped again
+};
+
+static MemStats g_mem_stats;
+static bool     g_mem_stats_on = false;
+
+static void MemStatAdd(MemStats::Pair& pair, uint64_t bytes) {
+	if (g_mem_stats_on) {
+		pair.Add(bytes);
+	}
+}
 
 #include "memoryAddressSpace.inc"
 
@@ -1008,9 +1049,92 @@ static bool SelfTestSub64SharedPlaceholderAlias() {
 
 static bool ReplaceFixedRangeWithReserved(uint64_t start, uint64_t size);
 
+static std::thread             g_mem_stats_thread;
+static std::mutex              g_mem_stats_mutex;
+static std::condition_variable g_mem_stats_cv;
+static bool                    g_mem_stats_stop = false;
+static std::chrono::steady_clock::time_point g_mem_stats_start;
+
+static void PrintMemStats(const char* tag) {
+	const auto MiB = [](uint64_t bytes) { return bytes >> 20u; };
+	const auto get = [](const std::atomic<uint64_t>& value) {
+		return value.load(std::memory_order_relaxed);
+	};
+	const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+	                         std::chrono::steady_clock::now() - g_mem_stats_start)
+	                         .count();
+	GuestBackingStore::ReleaseGauges gauges {};
+	if (g_guest_address_space != nullptr) {
+		gauges = g_guest_address_space->GetBackingReleaseGauges();
+	}
+	char text[1536];
+	std::snprintf(
+	    text, sizeof(text),
+	    "[mem-stats %s t=%llds] direct_release %llu calls/%llu MiB, pool_expansion_release %llu/%llu MiB"
+	    " | munmap direct %llu/%llu MiB, flexible %llu/%llu MiB, pooled %llu/%llu MiB"
+	    " | pool_decommit %llu/%llu MiB"
+	    " | flexible_map %llu/%llu MiB (zeroed %llu MiB), flexible_unmap %llu/%llu MiB"
+	    " | released_and_unmapped total %llu MiB (resident when released %llu MiB),"
+	    " outstanding now %llu MiB (resident %llu MiB), pending-mapped %llu MiB"
+	    " | reallocated %llu MiB\n",
+	    tag, static_cast<long long>(seconds),
+	    static_cast<unsigned long long>(get(g_mem_stats.direct_release.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.direct_release.bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.pool_expansion_release.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.pool_expansion_release.bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.munmap_direct.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.munmap_direct.bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.munmap_flexible.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.munmap_flexible.bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.munmap_pooled.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.munmap_pooled.bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.pool_decommit.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.pool_decommit.bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.flexible_map.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.flexible_map.bytes))),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.flexible_zeroed_bytes))),
+	    static_cast<unsigned long long>(get(g_mem_stats.flexible_unmap.calls)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.flexible_unmap.bytes))),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.released_unmapped_bytes))),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.released_unmapped_resident_bytes))),
+	    static_cast<unsigned long long>(MiB(gauges.outstanding_bytes)),
+	    static_cast<unsigned long long>(MiB(gauges.outstanding_resident_bytes)),
+	    static_cast<unsigned long long>(MiB(gauges.pending_bytes)),
+	    static_cast<unsigned long long>(MiB(get(g_mem_stats.realloc_bytes))));
+	Log::WriteToConsoleAndLog(text);
+}
+
+static void StartMemStats() {
+	g_mem_stats_start = std::chrono::steady_clock::now();
+	g_mem_stats_stop  = false;
+	g_mem_stats_thread = std::thread([] {
+		std::unique_lock<std::mutex> lock(g_mem_stats_mutex);
+		while (!g_mem_stats_cv.wait_for(lock, std::chrono::seconds(5),
+		                                [] { return g_mem_stats_stop; })) {
+			lock.unlock();
+			PrintMemStats("periodic");
+			lock.lock();
+		}
+	});
+}
+
+static void StopMemStats() {
+	if (!g_mem_stats_thread.joinable()) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_mem_stats_mutex);
+		g_mem_stats_stop = true;
+	}
+	g_mem_stats_cv.notify_all();
+	g_mem_stats_thread.join();
+	PrintMemStats("final");
+}
+
 void Initialize() {
 	g_flexible_memory_size_frozen = true;
 	VirtualMemory::Init();
+	g_mem_stats_on = Config::MemStatsEnabled();
 	g_guest_address_space = std::make_unique<GuestAddressSpace>(PhysicalMemory::TotalSize());
 	g_physical_memory     = std::make_unique<PhysicalMemory>();
 	g_flexible_memory     = std::make_unique<FlexibleMemory>();
@@ -1018,9 +1142,13 @@ void Initialize() {
 	g_virtual_ranges      = std::make_unique<VirtualRanges>();
 	EXIT_IF(!g_guest_address_space->SelfTest());
 	EXIT_IF(!SelfTestSub64SharedPlaceholderAlias());
+	if (g_mem_stats_on) {
+		StartMemStats();
+	}
 }
 
 void Shutdown() {
+	StopMemStats();
 	g_pooled_memory.reset();
 	g_flexible_memory.reset();
 	g_physical_memory.reset();
@@ -1754,6 +1882,9 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 			}
 			return false;
 		}
+		if (g_mem_stats_on) {
+			g_mem_stats.flexible_zeroed_bytes.fetch_add(block.map_size, std::memory_order_relaxed);
+		}
 		if (!g_guest_address_space->MapBacking(block.map_vaddr, block.map_size,
 		                                       block.backing_offset, block.mode)) {
 			for (auto it = mapped.rbegin(); it != mapped.rend(); ++it) {
@@ -1776,6 +1907,7 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	std::sort(m_allocated.begin(), m_allocated.end(),
 	          [](const auto& left, const auto& right) { return left.map_vaddr < right.map_vaddr; });
 	m_allocated_total += len;
+	MemStatAdd(g_mem_stats.flexible_map, len);
 
 	return true;
 }
@@ -1829,6 +1961,8 @@ bool FlexibleMemory::Unmap(uint64_t vaddr, uint64_t size, GpuAccessMode* gpu_mod
 		const auto overlap_end   = std::min(end, block_end);
 		const auto overlap_size  = overlap_end - overlap_start;
 		AddFreeRange(block.backing_offset + overlap_start - block.map_vaddr, overlap_size);
+		g_guest_address_space->NoteBackingReleased(
+		    block.backing_offset + overlap_start - block.map_vaddr, overlap_size);
 		removed += overlap_size;
 
 		if (block.map_vaddr < overlap_start) {
@@ -1847,6 +1981,7 @@ bool FlexibleMemory::Unmap(uint64_t vaddr, uint64_t size, GpuAccessMode* gpu_mod
 	EXIT_IF(removed != size || removed > m_allocated_total);
 	m_allocated = std::move(remaining);
 	m_allocated_total -= removed;
+	MemStatAdd(g_mem_stats.flexible_unmap, removed);
 	return true;
 }
 
@@ -2561,6 +2696,12 @@ static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
 			if (owner_unmapped && !g_pooled_memory->Release(vaddr, len, &gpu_mode)) {
 				EXIT("failed to release unmapped pooled-memory range\n");
 			}
+			if (owner_unmapped) {
+				for (const auto& mapping: mappings) {
+					g_guest_address_space->NoteBackingReleased(mapping.phys_addr, mapping.size);
+				}
+				MemStatAdd(g_mem_stats.munmap_pooled, len);
+			}
 		}
 		if (!owner_unmapped) {
 			return KERNEL_ERROR_EACCES;
@@ -2575,6 +2716,7 @@ static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
 			uint64_t ignored_host = 0;
 			if (g_physical_memory->Unmap(vaddr, len, &gpu_mode, &ignored_host)) {
 				owner_unmapped = true;
+				MemStatAdd(g_mem_stats.munmap_direct, len);
 			} else {
 				EXIT_IF(!g_guest_address_space->MapBacking(vaddr, len, direct_offset, direct_mode));
 			}
@@ -2584,6 +2726,9 @@ static int UnmapMemoryRange(uint64_t vaddr, size_t len) {
 	} else {
 		uint64_t ignored_host = 0;
 		owner_unmapped        = g_flexible_memory->Unmap(vaddr, len, &gpu_mode, &ignored_host);
+		if (owner_unmapped) {
+			MemStatAdd(g_mem_stats.munmap_flexible, len);
+		}
 	}
 	if (!owner_unmapped) {
 		return KERNEL_ERROR_EACCES;
@@ -2854,6 +2999,8 @@ static int ReleaseDirectMemoryInternal(int64_t start, size_t len) {
 		if (!g_physical_memory->ReleasePoolExpansion(static_cast<uint64_t>(start), len)) {
 			EXIT("failed to release physical pool expansion\n");
 		}
+		g_guest_address_space->NoteBackingReleased(static_cast<uint64_t>(start), len);
+		MemStatAdd(g_mem_stats.pool_expansion_release, len);
 		return OK;
 	}
 
@@ -2927,6 +3074,13 @@ static int ReleaseDirectMemoryInternal(int64_t start, size_t len) {
 		EXIT_IF(!g_physical_memory->Release(block.start_addr, block.size, &unused_vaddr,
 		                                    &unused_size, &unused_gpu));
 	}
+
+	uint64_t released_bytes = 0;
+	for (const auto& block: allocated_span) {
+		g_guest_address_space->NoteBackingReleased(block.start_addr, block.size);
+		released_bytes += block.size;
+	}
+	MemStatAdd(g_mem_stats.direct_release, released_bytes);
 
 	if (g_free_callback != nullptr) {
 		for (const auto& alias: mapped_aliases) {
@@ -4269,6 +4423,10 @@ static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
 	if (!g_pooled_memory->Release(vaddr, len, &gpu_mode)) {
 		EXIT("failed to release decommitted pooled-memory range\n");
 	}
+	for (const auto& mapping: mappings) {
+		g_guest_address_space->NoteBackingReleased(mapping.phys_addr, mapping.size);
+	}
+	MemStatAdd(g_mem_stats.pool_decommit, len);
 
 	g_virtual_ranges->Remove(vaddr, len);
 	g_virtual_ranges->Add(vaddr, len, 0, 0, 0, VirtualRangeType::PoolReserved, old_range.name);

@@ -186,6 +186,10 @@ bool VramStatsEnabled() {
 	return g_config->vram_stats || g_config->vram_paging;
 }
 
+bool MemStatsEnabled() {
+	return g_config != nullptr && g_config->mem_stats;
+}
+
 uint32_t VramAuditSeconds() {
 	return g_config->vram_audit_s;
 }

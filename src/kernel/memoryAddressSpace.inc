@@ -95,6 +95,9 @@ public:
 			return;
 		}
 		m_backing_base = static_cast<uint8_t*>(backing);
+		if (g_mem_stats_on) {
+			InitTrackingUnlocked();
+		}
 #endif
 	}
 
@@ -164,6 +167,60 @@ public:
 		std::lock_guard lock(m_mutex);
 		std::memset(m_backing_base + backing_offset, 0, size);
 		return true;
+	}
+
+	// The guest freed [backing_offset, backing_offset + size) of the backing object (direct memory
+	// released, pool range decommitted, flexible memory unmapped). Whole host pages inside the range
+	// that no view maps any more are counted.
+	// Pages a view still maps are remembered and handled when the last view goes away.
+	void NoteReleased(uint64_t backing_offset, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+		if (!m_tracking || size == 0 || !RangeOk(backing_offset, size)) {
+			return;
+		}
+		std::lock_guard lock(m_mutex);
+		TrackReleaseUnlocked(backing_offset, size);
+#else
+		(void)backing_offset;
+		(void)size;
+#endif
+	}
+
+	struct ReleaseGauges {
+		uint64_t outstanding_bytes          = 0; // released and unmapped
+		uint64_t outstanding_resident_bytes = 0; // ... of which resident in RAM right now
+		uint64_t pending_bytes              = 0; // released but a view still maps them
+	};
+
+	[[nodiscard]] ReleaseGauges GetReleaseGauges() {
+		ReleaseGauges gauges;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+		if (!m_tracking) {
+			return gauges;
+		}
+		std::shared_lock lock(m_mutex);
+		const uint64_t   pages = m_pstate.size();
+		for (uint64_t page = 0; page < pages;) {
+			const uint8_t state = m_pstate[page];
+			if (state == PAGE_PENDING) {
+				gauges.pending_bytes += m_host_page;
+				page++;
+				continue;
+			}
+			if (state != PAGE_CANDIDATE) {
+				page++;
+				continue;
+			}
+			uint64_t end = page;
+			while (end < pages && m_pstate[end] == PAGE_CANDIDATE) {
+				end++;
+			}
+			gauges.outstanding_bytes += (end - page) * m_host_page;
+			gauges.outstanding_resident_bytes += ResidentBytes(page, end);
+			page = end;
+		}
+#endif
+		return gauges;
 	}
 
 	bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
@@ -316,6 +373,9 @@ public:
 		if (mapped == nullptr || reinterpret_cast<uint64_t>(mapped) != vaddr) {
 			return false;
 		}
+		// Count the new view before dropping the ones it replaced, so pages that stay mapped are
+		// never seen as unmapped in between.
+		TrackMapUnlocked(backing_offset, size);
 		RemoveMappingsUnlocked(vaddr, size);
 		EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
 		SetFailure(failure_reason, FailureReason::None);
@@ -520,6 +580,136 @@ private:
 	};
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	// Per host page of the backing object: how many views map it and whether the guest freed it.
+	static constexpr uint8_t PAGE_LIVE      = 0; // in use, or never released
+	static constexpr uint8_t PAGE_PENDING   = 1; // freed by the guest, a view still maps it
+	static constexpr uint8_t PAGE_CANDIDATE = 2; // freed and unmapped: safe to give back
+
+	void InitTrackingUnlocked() {
+		const long host_page = sysconf(_SC_PAGESIZE);
+		if (host_page <= 0 || m_size % static_cast<uint64_t>(host_page) != 0) {
+			return;
+		}
+		m_host_page = static_cast<uint64_t>(host_page);
+		m_refs.assign(m_size / m_host_page, 0);
+		m_pstate.assign(m_size / m_host_page, PAGE_LIVE);
+		m_tracking = true;
+	}
+
+	// Pages touched by a view: every page the byte range overlaps.
+	void OverlapPages(uint64_t offset, uint64_t size, uint64_t* first, uint64_t* last) const {
+		*first = offset / m_host_page;
+		*last  = (offset + size + m_host_page - 1) / m_host_page;
+		if (*last > m_pstate.size()) {
+			*last = m_pstate.size();
+		}
+	}
+
+	void TrackMapUnlocked(uint64_t offset, uint64_t size) {
+		if (!m_tracking) {
+			return;
+		}
+		uint64_t first = 0;
+		uint64_t last  = 0;
+		OverlapPages(offset, size, &first, &last);
+		uint64_t reused = 0;
+		for (uint64_t page = first; page < last; page++) {
+			if (m_refs[page] != UINT16_MAX) {
+				m_refs[page]++;
+			}
+			if (m_pstate[page] == PAGE_CANDIDATE) {
+				reused += m_host_page;
+			}
+			m_pstate[page] = PAGE_LIVE;
+		}
+		if (reused != 0) {
+			g_mem_stats.realloc_bytes.fetch_add(reused, std::memory_order_relaxed);
+		}
+	}
+
+	void TrackUnmapUnlocked(uint64_t offset, uint64_t size) {
+		if (!m_tracking) {
+			return;
+		}
+		uint64_t first = 0;
+		uint64_t last  = 0;
+		OverlapPages(offset, size, &first, &last);
+		for (uint64_t page = first; page < last; page++) {
+			if (m_refs[page] != 0 && m_refs[page] != UINT16_MAX) {
+				m_refs[page]--;
+			}
+		}
+		FinalizeUnlocked(first, last);
+	}
+
+	void TrackReleaseUnlocked(uint64_t offset, uint64_t size) {
+		// Only whole host pages are ours to give back; the partial edges stay as they are.
+		const uint64_t first = (offset + m_host_page - 1) / m_host_page;
+		const uint64_t last  = std::min<uint64_t>((offset + size) / m_host_page, m_pstate.size());
+		if (first >= last) {
+			return;
+		}
+		for (uint64_t page = first; page < last; page++) {
+			if (m_pstate[page] == PAGE_LIVE) {
+				m_pstate[page] = PAGE_PENDING;
+			}
+		}
+		FinalizeUnlocked(first, last);
+	}
+
+	// Pending pages that no view maps any more become candidates; each run is counted.
+	void FinalizeUnlocked(uint64_t first, uint64_t last) {
+		for (uint64_t page = first; page < last;) {
+			if (m_pstate[page] != PAGE_PENDING || m_refs[page] != 0) {
+				page++;
+				continue;
+			}
+			uint64_t end = page;
+			while (end < last && m_pstate[end] == PAGE_PENDING && m_refs[end] == 0) {
+				end++;
+			}
+			HandleCandidateRunUnlocked(page, end);
+			page = end;
+		}
+	}
+
+	uint64_t ResidentBytes(uint64_t first, uint64_t last) const {
+		uint64_t resident = 0;
+		// Bounded chunks keep the vector small for very large runs.
+		constexpr uint64_t CHUNK = 1u << 18;
+		std::vector<unsigned char> vec;
+		for (uint64_t page = first; page < last; page += CHUNK) {
+			const uint64_t count = std::min(CHUNK, last - page);
+			vec.resize(count);
+#if defined(__APPLE__)
+			continue;
+#else
+			if (mincore(m_backing_base + page * m_host_page, count * m_host_page, vec.data()) !=
+			    0) {
+				continue;
+			}
+#endif
+			for (uint64_t i = 0; i < count; i++) {
+				resident += (vec[i] & 1u) != 0 ? m_host_page : 0;
+			}
+		}
+		return resident;
+	}
+
+	void HandleCandidateRunUnlocked(uint64_t first, uint64_t last) {
+		const uint64_t bytes = (last - first) * m_host_page;
+		for (uint64_t page = first; page < last; page++) {
+			m_pstate[page] = PAGE_CANDIDATE;
+		}
+		uint64_t resident = 0;
+		if (g_mem_stats_on) {
+			resident = ResidentBytes(first, last);
+			g_mem_stats.released_unmapped_bytes.fetch_add(bytes, std::memory_order_relaxed);
+			g_mem_stats.released_unmapped_resident_bytes.fetch_add(resident,
+			                                                       std::memory_order_relaxed);
+		}
+	}
+
 	void RemoveMappingsUnlocked(uint64_t vaddr, uint64_t size) {
 		const auto end = vaddr + size;
 		auto       it = m_maps.upper_bound(vaddr);
@@ -533,6 +723,8 @@ private:
 				++it;
 				continue;
 			}
+			TrackUnmapUnlocked(old.backing_offset + std::max(vaddr, old.vaddr) - old.vaddr,
+			                   std::min(end, old_end) - std::max(vaddr, old.vaddr));
 			it = m_maps.erase(it);
 			if (old.vaddr < vaddr) {
 				m_maps.emplace(old.vaddr,
@@ -674,6 +866,11 @@ private:
 	}
 
 	int m_fd = -1;
+
+	bool                 m_tracking = false;
+	uint64_t             m_host_page = 0;
+	std::vector<uint16_t> m_refs;   // views mapping each host page
+	std::vector<uint8_t>  m_pstate; // PAGE_* per host page
 #endif
 
 	uint8_t*                     m_backing_base = nullptr;
@@ -743,6 +940,14 @@ public:
 
 	bool ZeroBacking(uint64_t backing_offset, uint64_t size) {
 		return m_backing->ZeroRange(backing_offset, size);
+	}
+
+	void NoteBackingReleased(uint64_t backing_offset, uint64_t size) {
+		m_backing->NoteReleased(backing_offset, size);
+	}
+
+	[[nodiscard]] GuestBackingStore::ReleaseGauges GetBackingReleaseGauges() {
+		return m_backing->GetReleaseGauges();
 	}
 
 	[[nodiscard]] bool Owns(uint64_t vaddr, uint64_t size) {
