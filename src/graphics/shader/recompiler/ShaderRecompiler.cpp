@@ -687,6 +687,8 @@ const Decoder::Program& RefreshShaderSource(ShaderSource& source, const IR::SrtR
 	linked.decoded.code = linked.code;
 	// Publish a fresh immutable snapshot; the previous one stays valid for whoever still holds it.
 	source.linked = std::make_shared<const ShaderSource::Linked>(std::move(linked));
+	// Size the comparison scratch now so an unchanged refresh never allocates.
+	source.observed_function.resize(source.linked->code.size() - source.code.size());
 	++source.revision;
 	return source.linked->decoded;
 }
