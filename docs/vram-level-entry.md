@@ -14,7 +14,7 @@ invocation). The NVIDIA driver backs Function arrays with per-thread local memor
 `bytes per thread x resident threads` of VRAM: 32 KiB x 80 SMs x 1536 threads = 3.75 GiB on a 3080 Ti.
 That memory is not a Vulkan allocation: VMA and `VK_EXT_memory_budget` `usage` do not include it, but the
 driver subtracts it from the `budget`, which is why the budget fell from 10.4 to 6.7 GiB at the same instant.
-It is reserved once, when the first pipeline with such an array is used, and never returned.
+In the runs it appeared as one step, when the first pipeline with such an array was used, and was never returned.
 
 Evidence (`--vram-stats`, run dirs under `bench/runs/`): `20261011T211343Z-lvlC` (`gpu_procs.csv`: process
 3973 -> 8556 MiB within one 5 s sample while VMA usage moved 3.95 -> 4.69 GiB, budget 10461 -> 6689 MiB);
@@ -49,7 +49,8 @@ Code: `src/graphics/shader/recompiler/ir/ldsSpan.h` (tests: `tests/LdsSpanTests.
 
 ## Known limits
 - A GPU hang (`NVRM Xid 109 CTX SWITCH TIMEOUT`, frame counter stuck, CPU idle) follows the first frames of the
-  level in every run that gets past the load. It also happens with the baseline binary and with the LDS
-  shrink and the mesh-restart draws disabled, so it is not caused by this branch; it needs its own investigation.
+  level in every run that gets past the load. It also happens with the LDS shrink and the mesh-restart draws disabled, the
+  baseline binary stops at the same point (frame counter stuck), and stock gratton-main stopped the same way in an earlier
+  session; so it is not caused by this branch and needs its own investigation.
 - Non-compute shaders whose Function LDS span is unknown (FLAT access) still cost 32 KiB per thread.
 - Function-storage scratch arrays (`function_scratch`) have the same per-thread cost and are not shrunk.
