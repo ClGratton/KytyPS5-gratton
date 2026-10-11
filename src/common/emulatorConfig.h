@@ -79,6 +79,9 @@ struct ConfigOptions {
 	bool                   trophy_enabled              = true;
 	bool                   playgo_hack_enabled         = false;
 	bool                   skip_notice_screen          = false;
+	// Observation-only benchmark instrumentation (see common/benchInstrument.h). Off by default.
+	std::filesystem::path  bench_frames_csv;
+	uint64_t               bench_exit_after_frames     = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif

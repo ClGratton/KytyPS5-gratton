@@ -98,6 +98,9 @@ static void PrintUsage() {
 #endif
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
+	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
+	         "                                       frame; buffered, flushed at exit. Default: off.\n");
+	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -150,6 +153,16 @@ static bool ParseConsoleLanguage(const std::string& value, uint32_t& out) {
 
 static bool ParseUint32(const std::string& value, uint32_t& out) {
 	uint32_t number   = 0;
+	auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
+	if (error != std::errc {} || end != value.data() + value.size()) {
+		return false;
+	}
+	out = number;
+	return true;
+}
+
+static bool ParseUint64(const std::string& value, uint64_t& out) {
+	uint64_t number   = 0;
 	auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
 	if (error != std::errc {} || end != value.data() + value.size()) {
 		return false;
@@ -451,6 +464,17 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--skip-notice-screen") {
 			if (!ParseBool(value, options.config.skip_notice_screen)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--bench-frames-csv") {
+			if (value.empty()) {
+				::printf("invalid --bench-frames-csv path\n");
+				return false;
+			}
+			options.config.bench_frames_csv = Common::PathFromUtf8(value);
+		} else if (arg == "--bench-exit-after-frames") {
+			if (!ParseUint64(value, options.config.bench_exit_after_frames)) {
+				::printf("invalid frame count: %s\n", value.c_str());
 				return false;
 			}
 		} else if (arg == "--keymap") {
