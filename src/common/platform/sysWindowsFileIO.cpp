@@ -63,6 +63,11 @@ static DWORD GetCacheAccessType(sys_file_cache_type_t t) {
 	return FILE_ATTRIBUTE_NORMAL;
 }
 
+// The Windows read already finishes through a host buffer on ERROR_NOACCESS and does not count.
+uint64_t SysFileReadFallbackCount() {
+	return 0;
+}
+
 void SysFileRead(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read) {
 	if (f.type == SYS_FILE_FILE) {
 		DWORD w = 0;

@@ -24,6 +24,10 @@ struct sys_dir_entry_t {
 	bool        is_file;
 };
 
+// Linux: number of reads that hit a short read into write-protected guest memory and were
+// finished through a host buffer (see SysFileRead). Always 0 elsewhere.
+uint64_t    SysFileReadFallbackCount();
+
 void        SysFileRead(void* data, uint32_t size, sys_file_t& f,
                         uint32_t* bytes_read = nullptr); // NOLINT(google-runtime-references)
 void        SysFileWrite(const void* data, uint32_t size, sys_file_t& f,
