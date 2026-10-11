@@ -200,3 +200,10 @@ the thing it describes is deadlocked. It never fired in the 15+ lookahead runs o
 
 Root cause statement: the registered-but-never-submitted window (1) is the only code path found that can freeze the GPU thread indefinitely; it was not reproduced (the race is too narrow to hit on demand), so the link to the
 user's freeze is by code reading, not by observation.
+
+## Desert colour ("saturated yellow") - verdict: not a lookahead problem, parked
+- skip2 reaches the desert only in about half of the runs (bimodal start: Start was pressed at a fixed time and in the other half landed in the warp-tunnel part of the intro, so the pause menu never opened).
+  `bench/routes/skip3.json` fixes this: it taps Start until the Resume/Skip menu is on screen (`routes/refs/skip2-pause-menu.png`, dHash 16 on the left 25 % of the screen, max distance 50), then skips; 24 checkpoints every 3 s. `bench/lum.py RUN...` prints the mean colour per checkpoint and flags the lemon state.
+- Both states occur with every mode, stock gratton-main included: lemon = stock 1 of 4 valid desert runs, lookahead `all` 3 of 3 (and compute-only, programs-only, stall-only 1 of 1 each), normal = `none`, graphics-only and stock 3 of 4. In the lemon state the sand and sky are flat saturated yellow, the shadow under the character and the haze are missing; the character is unaffected. The normal state (e.g. `20261011T214532Z-sk3-stock` s14) looks like the PS5 capture, so the comparison does not depend on the YouTube hue.
+- Whether lookahead raises the lemon rate (3 of 3 against 1 of 4) or only changes timing is open; a speculative cause that was prepared but not tested is the texture GC freeing a GPU-only image that cannot be downloaded (`TextureCache::RunGarbageCollector`, an unsafe GPU-modified image falls through to `FreeImage`); `--debug-texture-gc false` exists to test it.
+- Offline log check (all skip3 runs): no "unimplemented", no skipped dispatch or draw warnings in the desert scene; the only warning is the constant "occlusion queries are treated as always visible". Nothing points at a skipped haze/post pass, so no GPU runs were spent on it.
