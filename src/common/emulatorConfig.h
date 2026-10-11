@@ -27,6 +27,14 @@ enum class LogDirection { Silent, Console, File };
 
 enum class PresentMode { Fifo, Mailbox, Immediate };
 
+// What the on-disk driver VkPipelineCache signature is keyed on (see pipelineCache.cpp).
+//   Revision: stock behaviour. The git revision is part of the signature, so every commit drops
+//             the cache, and non-Release / unknown-revision / dirty builds disable it entirely.
+//   Schema:   a schema-version constant plus vendor/device/driverVersion/pipelineCacheUUID. The
+//             cache survives emulator revisions and is also enabled in dev (non-Release, dirty)
+//             builds. Opt-in via --pipeline-cache-key schema.
+enum class PipelineCacheKey { Revision, Schema };
+
 using Keymap = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
 
@@ -83,6 +91,7 @@ struct ConfigOptions {
 	std::filesystem::path  bench_frames_csv;
 	uint64_t               bench_exit_after_frames     = 0;
 	std::filesystem::path  shader_timing_log;
+	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Revision;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -120,6 +129,8 @@ bool                  CommandBufferDumpEnabled();
 std::filesystem::path GetCommandBufferDumpFolder();
 
 bool GraphicsDebugDumpEnabled();
+
+PipelineCacheKey GetPipelineCacheKey();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();
