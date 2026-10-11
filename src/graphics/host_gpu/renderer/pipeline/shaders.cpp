@@ -19,6 +19,8 @@
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cinttypes>
 #include <bit>
 #include <limits>
 #include <span>
@@ -541,8 +543,24 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		     (with_depth ? "true" : "false"), (static_params.blend_enable[0] ? "true" : "false"),
 		     dynamic_state.dynamicStateCount);
 	}
+	const bool log_compile = Config::VramStatsEnabled();
+	if (log_compile) {
+		VRAM_LOG("Pipeline compile begin: gfx VS=%" PRIu64 " PS=%" PRIu64 " mesh=%d\n",
+		         vertex_program.id, ps_active ? pixel_program.id : 0, mesh ? 1 : 0);
+	}
+	const auto compile_begin = std::chrono::steady_clock::now();
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 	                                                 &pipeline.pipeline);
+	if (log_compile) {
+		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		                    std::chrono::steady_clock::now() - compile_begin)
+		                    .count();
+		if (ms >= 500) {
+			VRAM_LOG("Pipeline compile slow: gfx VS=%" PRIu64 " PS=%" PRIu64 " mesh=%d took %lld ms\n",
+			         vertex_program.id, ps_active ? pixel_program.id : 0, mesh ? 1 : 0,
+			         static_cast<long long>(ms));
+		}
+	}
 	if (graphics_debug_dump_enabled()) {
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
