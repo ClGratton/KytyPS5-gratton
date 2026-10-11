@@ -1,4 +1,6 @@
 #include "common/emulatorConfig.h"
+#include "common/gpuPhaseStats.h"
+#include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
 #include "common/alignment.h"
@@ -623,7 +625,17 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::RunGarbageCollector() {
-	const auto tick = m_gc_tick++;
+	const bool     frame_clock = Config::GcClockFrames();
+	const uint64_t run         = m_gc_runs++;
+	uint64_t       tick        = 0;
+	if (frame_clock) {
+		tick      = std::max(m_gc_tick, GcClock::Tick(GcClock::Mode::Frames, run,
+		                                              Common::GpuPhase::Frames()));
+		m_gc_tick = tick;
+	} else {
+		tick = m_gc_tick++;
+	}
+	const auto clock_mode = frame_clock ? GcClock::Mode::Frames : GcClock::Mode::Runs;
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}
@@ -632,7 +644,12 @@ void BufferCache::RunGarbageCollector() {
 	}
 
 	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
-	const uint64_t age        = std::min<uint64_t>(aggressive ? 80 : 160, tick);
+	const auto     ages       = GcClock::BufferAgesFor(clock_mode, Config::GetVblankFrequency());
+	const uint64_t want_age   = aggressive ? ages.aggressive : ages.normal;
+	if (!GcClock::AgeReached(clock_mode, tick, want_age)) {
+		return;
+	}
+	const uint64_t age        = std::min<uint64_t>(want_age, tick);
 	const size_t   limit      = aggressive ? 64 : 32;
 
 	std::vector<BufferId> dirty_buffers;

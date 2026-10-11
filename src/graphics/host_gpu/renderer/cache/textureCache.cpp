@@ -10,6 +10,8 @@
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "common/gpuPhaseStats.h"
+#include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/textureGcPolicy.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
@@ -1922,7 +1924,20 @@ void TextureCache::LogGpuWrittenFree(ImageId id, const char* path, uint64_t tick
 
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
-	const uint64_t   tick = m_gc_tick++;
+	const bool       frame_clock = Config::GcClockFrames();
+	const uint64_t   run         = m_gc_runs++;
+	uint64_t         tick        = 0;
+	if (frame_clock) {
+		// Monotone: the frame count only grows, and the fallback step covers stretches without
+		// presents.
+		tick      = std::max(m_gc_tick, GcClock::Tick(GcClock::Mode::Frames, run,
+		                                              Common::GpuPhase::Frames()));
+		m_gc_tick = tick;
+	} else {
+		tick = m_gc_tick++;
+	}
+	const auto clock_mode = frame_clock ? GcClock::Mode::Frames : GcClock::Mode::Runs;
+	const auto ages       = GcClock::TextureAgesFor(clock_mode, Config::GetVblankFrequency());
 	if (Config::VramAuditSeconds() != 0 && !m_vram_audit_done &&
 	    std::chrono::steady_clock::now() - m_created >=
 	        std::chrono::seconds(Config::VramAuditSeconds())) {
@@ -1944,7 +1959,11 @@ void TextureCache::RunGarbageCollector() {
 	const auto collect = [&](bool allow_aggressive) {
 		bool           pressured  = m_total_used_memory >= m_pressure_gc_memory;
 		bool           aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
-		const uint64_t age       = std::min<uint64_t>(aggressive ? 160 : pressured ? 80 : 16, tick);
+		const uint64_t want_age = aggressive ? ages.aggressive : pressured ? ages.pressured : ages.normal;
+		if (!GcClock::AgeReached(clock_mode, tick, want_age)) {
+			return;
+		}
+		const uint64_t age       = std::min<uint64_t>(want_age, tick);
 		size_t         deletions = aggressive ? 40 : pressured ? 20 : 10;
 		// Images the policy keeps are passed over without using the deletion budget: they are
 		// the ones nobody touches again, so they stay at the front of the LRU list and would

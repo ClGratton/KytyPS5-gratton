@@ -153,6 +153,9 @@ static void PrintUsage() {
 	         "                                       cause, slowest PM4 packets) and write\n"
 	         "                                       _gpu_phase.csv. For shares, never an fps baseline.\n"
 	         "                                       Default: 0 (off).\n");
+	::printf("  --gc-clock <runs|frames>             Age the texture and buffer caches in collector runs\n"
+	         "                                       (one per guest submission, stock) or in presented\n"
+	         "                                       frames. Default: runs.\n");
 	::printf("  --submit-stats <seconds>             Every N seconds print frames, Vulkan submits per frame\n"
 	         "                                       and the --submit-coalesce counters (no timers; safe\n"
 	         "                                       next to fps measurements). Default: 0 (off).\n");
@@ -640,6 +643,15 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.gpu_phase_stats_s = static_cast<uint32_t>(seconds);
+		} else if (arg == "--gc-clock") {
+			if (Common::EqualNoCase(value, "runs")) {
+				options.config.gc_clock_frames = false;
+			} else if (Common::EqualNoCase(value, "frames")) {
+				options.config.gc_clock_frames = true;
+			} else {
+				::printf("invalid gc clock (expected runs or frames): %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--submit-coalesce") {
 			if (!ParseBool(value, options.config.submit_coalesce)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

@@ -63,6 +63,10 @@ bool TextureGcLog() {
 	return g_config->texture_gc_log;
 }
 
+bool GcClockFrames() {
+	return g_config->gc_clock_frames;
+}
+
 bool SubmitCoalesceEnabled() {
 	return g_config->submit_coalesce;
 }

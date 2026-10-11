@@ -144,6 +144,9 @@ struct ConfigOptions {
 	// --submit-coalesce (K13): hold back the submit of RELEASE_MEM end-of-pipe events (up to
 	// submit_coalesce_max events, or an age derived from the vblank period). Default off.
 	bool                   submit_coalesce             = false;
+	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
+	// presented frames (renderer/cache/gcClock.h).
+	bool                   gc_clock_frames             = false;
 	uint32_t               submit_coalesce_max         = 16;
 	// 0 = derive from the vblank frequency (period / 8); otherwise microseconds.
 	uint32_t               submit_coalesce_us          = 0;
@@ -195,6 +198,7 @@ bool              GetLookaheadVerify();
 bool              TextureGcEnabled();
 bool              TextureGcLog();
 bool              SubmitCoalesceEnabled();
+bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 
