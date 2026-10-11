@@ -3,6 +3,7 @@
 #include "common/assert.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <bit>
 #include <functional>
 #include <optional>
@@ -676,6 +677,21 @@ void EmitProgram(EmitterState& state) {
 	                          state.mesh_guest_func != 0 ? state.mesh_guest_func : state.main_func,
 	                          spv::FunctionControlMaskNone, TypeFunction(state));
 	EmitLabel(state, state.entry_label);
+	if (state.program.info.function_lds || state.program.info.function_scratch) {
+		// Function-storage arrays live in per-thread local memory. The driver reserves
+		// local-memory-per-thread x resident-threads of VRAM outside the app's allocations.
+		const uint64_t lds_bytes     = state.program.info.function_lds ? 4ull * LdsDwordCount(state) : 0;
+		const uint64_t scratch_bytes = state.program.info.function_scratch
+		                                   ? 4ull * state.program.scratch_dwords * state.lane_count
+		                                   : 0;
+		if (lds_bytes + scratch_bytes >= 1024) {
+			::printf("Shader local memory: stage=%d hash=%016llx function_lds=%llu B function_scratch=%llu B (lanes=%u)\n",
+			         static_cast<int>(state.program.stage),
+			         static_cast<unsigned long long>(state.program.shader_hash),
+			         static_cast<unsigned long long>(lds_bytes),
+			         static_cast<unsigned long long>(scratch_bytes), state.lane_count);
+		}
+	}
 	if (state.program.info.function_lds) {
 		state.builder.AddFunction(
 		    spv::OpVariable,
