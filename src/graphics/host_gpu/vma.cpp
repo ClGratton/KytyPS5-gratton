@@ -44,6 +44,9 @@ bool GraphicContext::CreateAllocator() {
 	info.pVulkanFunctions = &functions;
 	info.vulkanApiVersion = VULKAN_TARGET_API_VERSION;
 	info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+	// 64 MiB blocks (VMA's default is 256 MiB on large heaps): a freed image leaves a smaller
+	// hole, so more blocks become completely empty and are handed back to the driver.
+	info.preferredLargeHeapBlockSize = 64ull << 20;
 	if (memory_budget_ext_enabled) {
 		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 	}
@@ -111,6 +114,14 @@ void GraphicContext::LogMemoryBudgetPeriodic() const {
 		     static_cast<uint64_t>(budgets[i].budget) >> 20,
 		     static_cast<uint64_t>(budgets[i].statistics.allocationBytes) >> 20,
 		     static_cast<uint64_t>(budgets[i].statistics.blockBytes) >> 20);
+		VRAM_LOG("VRAM heap %u: driver usage minus VMA blocks=%" PRId64 " MiB, pipelines gfx=%u comp=%u, "
+		     "vma blocks=%u allocs=%u dedicated_images=%u host_fallback=%u\n",
+		     i,
+		     (static_cast<int64_t>(budgets[i].usage) -
+		      static_cast<int64_t>(budgets[i].statistics.blockBytes)) >> 20,
+		     pipelines_graphics.load(), pipelines_compute.load(),
+		     budgets[i].statistics.blockCount, budgets[i].statistics.allocationCount,
+		     dedicated_images.load(), host_fallback_images.load());
 	}
 	static constexpr const char* names[] = {"tex",       "rt",        "depth",
 	                                        "buf_local", "buf_bda",   "buf_upload",
@@ -176,6 +187,36 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
 }
 
+namespace {
+
+constexpr uint64_t DedicatedImageMinBytes = 8ull << 20;
+constexpr uint32_t MaxDedicatedImages     = 1024;
+
+// Rough size of an image (all mips and layers), only used to choose the allocation strategy.
+uint64_t EstimateImageBytes(const vk::ImageCreateInfo& info) {
+	const auto format = static_cast<int>(info.format);
+	double     bytes_per_texel = 4.0;
+	if (format >= 131 && format <= 184) { // block compressed
+		const bool half = format == 131 || format == 132 || format == 133 || format == 134 ||
+		                  format == 139 || format == 140;
+		bytes_per_texel = half ? 0.5 : 1.0;
+	} else if ((format >= 9 && format <= 15) || format == 127) {
+		bytes_per_texel = 1.0;
+	} else if ((format >= 16 && format <= 22) || (format >= 70 && format <= 76) || format == 124) {
+		bytes_per_texel = 2.0;
+	} else if ((format >= 91 && format <= 97) || (format >= 101 && format <= 103)) {
+		bytes_per_texel = 8.0;
+	} else if (format >= 107 && format <= 109) {
+		bytes_per_texel = 16.0;
+	}
+	const double levels = info.mipLevels > 1 ? 4.0 / 3.0 : 1.0;
+	return static_cast<uint64_t>(static_cast<double>(info.extent.width) * info.extent.height *
+	                             info.extent.depth * info.arrayLayers * bytes_per_texel * levels *
+	                             static_cast<double>(info.samples));
+}
+
+} // namespace
+
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
@@ -199,6 +240,14 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 
 	VmaAllocationCreateInfo alloc_info {};
 	alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	// Large images get their own VkDeviceMemory: freeing one returns exactly its size to the
+	// driver instead of leaving a hole in a shared block (the texture-cache reclaim could free
+	// 830 MB of allocations and only 73 MB of blocks). Bounded, the driver limits the number of
+	// live allocations.
+	if (EstimateImageBytes(image_info) >= DedicatedImageMinBytes &&
+	    dedicated_images.load(std::memory_order_relaxed) < MaxDedicatedImages) {
+		alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+	}
 	if (memory_priority_enabled) {
 		// Depth and render targets are rewritten every frame: keep them resident. VMA only
 		// applies a priority to dedicated allocations, so those get their own VkDeviceMemory.
@@ -238,18 +287,22 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 			VRAM_LOG("Image allocation retry after reclaim: %s\n", vk::to_string(result).c_str());
 		}
 	}
-	if (result != vk::Result::eSuccess && pageable_memory_enabled) {
-		// Last resort with VRAM paging on: let the image land in any compatible memory type
-		// (system memory) instead of failing the whole emulator.
-		VRAM_LOG("VRAM paging: retrying image allocation without DEVICE_LOCAL\n");
+	if (result != vk::Result::eSuccess) {
+		// Last resort: a slow image beats a dead emulator. Let it land in any compatible memory
+		// type (system memory, or paged out by the driver when --vram-paging is on).
+		VRAM_LOG("VRAM exhausted: retrying image allocation without DEVICE_LOCAL\n");
 		alloc_info.requiredFlags  = 0;
 		alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
 		native_image              = VK_NULL_HANDLE;
 		image.allocation          = nullptr;
 		result                    = static_cast<vk::Result>(vmaCreateImage(
             allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &alloc_info,
             &native_image, &image.allocation, nullptr));
-		VRAM_LOG("VRAM paging: retry result: %s\n", vk::to_string(result).c_str());
+		VRAM_LOG("VRAM exhausted: fallback allocation result: %s\n", vk::to_string(result).c_str());
+		if (result == vk::Result::eSuccess) {
+			host_fallback_images.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 	image.image = native_image;
 	if (result != vk::Result::eSuccess) {
@@ -259,6 +312,14 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	VmaAllocationInfo allocation_result {};
 	vmaGetAllocationInfo(allocator, image.allocation, &allocation_result);
 	image.alloc_size = allocation_result.size;
+	{
+		VmaAllocationInfo2 info2 {};
+		vmaGetAllocationInfo2(allocator, image.allocation, &info2);
+		image.dedicated = info2.dedicatedMemory != VK_FALSE;
+		if (image.dedicated) {
+			dedicated_images.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
 	image.vram_class = vram_class;
 	AccountVram(vram_class, static_cast<int64_t>(image.alloc_size));
 
@@ -281,6 +342,10 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	EXIT_IF(allocator == nullptr || image.image == nullptr || image.allocation == nullptr);
 
 	AccountVram(image.vram_class, -static_cast<int64_t>(image.alloc_size));
+	if (image.dedicated) {
+		dedicated_images.fetch_sub(1, std::memory_order_relaxed);
+		image.dedicated = false;
+	}
 	vmaDestroyImage(allocator, image.image, image.allocation);
 	image.image      = nullptr;
 	image.allocation = nullptr;

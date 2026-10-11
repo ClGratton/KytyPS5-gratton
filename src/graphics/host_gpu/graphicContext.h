@@ -129,6 +129,11 @@ struct GraphicContext {
 	std::function<void()> reclaim_memory;
 	bool                  in_reclaim = false;
 	uint64_t              ballast_bytes = 0;
+	// Diagnostics (--vram-stats): driver objects that live in VRAM outside VMA.
+	std::atomic<uint32_t> dedicated_images {0};
+	std::atomic<uint32_t> host_fallback_images {0};
+	std::atomic<uint32_t> pipelines_graphics {0};
+	std::atomic<uint32_t> pipelines_compute {0};
 	std::array<std::atomic<int64_t>, static_cast<size_t>(VramClass::Count)> vram_bytes {};
 	std::array<std::atomic<int64_t>, static_cast<size_t>(VramClass::Count)> vram_count {};
 	std::vector<std::pair<VkBuffer, VmaAllocation>> ballast;
@@ -175,6 +180,7 @@ struct VulkanImage {
 	VmaAllocation                allocation = nullptr;
 	uint64_t                     alloc_size = 0;
 	VramClass                    vram_class = VramClass::ImageTexture;
+	bool                         dedicated  = false;
 };
 
 

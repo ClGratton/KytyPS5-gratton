@@ -548,6 +548,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	graphics.pipelines_graphics.fetch_add(1, std::memory_order_relaxed);
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 
@@ -617,6 +618,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	graphics.pipelines_compute.fetch_add(1, std::memory_order_relaxed);
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 }
