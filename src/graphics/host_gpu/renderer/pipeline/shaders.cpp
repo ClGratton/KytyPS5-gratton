@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineDump.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -20,6 +21,8 @@
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
+#include <fmt/format.h>
+#include <string>
 #include <limits>
 #include <span>
 #include <vector>
@@ -234,10 +237,16 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	vk::ShaderModule tess_control_shader_module = nullptr;
 	vk::ShaderModule tess_eval_shader_module    = nullptr;
+	std::string      dump_tcs_spv;
+	std::string      dump_tes_spv;
 
 	if (rect_list) {
 		const auto shaders =
 		    BuildRectListShaders(vs_input_info, ps_active ? ps_input_info : nullptr);
+		if (PipelineDump::Enabled()) {
+			dump_tcs_spv = PipelineDump::WriteGeneratedSpirv("tcs", shaders.control);
+			dump_tes_spv = PipelineDump::WriteGeneratedSpirv("tes", shaders.evaluation);
+		}
 		tess_control_shader_module = CompileSPV(shaders.control, graphics.device);
 		if (graphics_debug_dump_enabled()) {
 			LOGF("PipelineTrace: vkCreateShaderModule RectList TCS done module=%p\n",
@@ -553,10 +562,59 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		     (with_depth ? "true" : "false"), (static_params.blend_enable[0] ? "true" : "false"),
 		     dynamic_state.dynamicStateCount);
 	}
-	const auto driver_t0 = Bench::TimingEnabled() ? Bench::NowNs() : int64_t {0};
+	const bool dump       = PipelineDump::Enabled();
+	const auto driver_t0  = (Bench::TimingEnabled() || dump) ? Bench::NowNs() : int64_t {0};
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 	                                                 &pipeline.pipeline);
-	if (driver_t0 != 0) Bench::SetDriverCreateNs(Bench::NowNs() - driver_t0);
+	const auto driver_ns = driver_t0 != 0 ? Bench::NowNs() - driver_t0 : int64_t {0};
+	if (driver_t0 != 0 && Bench::TimingEnabled()) Bench::SetDriverCreateNs(driver_ns);
+	if (dump && result == vk::Result::eSuccess) {
+		PipelineDump::GraphicsDump d;
+		for (uint32_t i = 0; i < vertex_info.size(); i++) {
+			d.stages.push_back({static_cast<uint32_t>(NativeShaderStage(vertex_info[i].logical_stage)),
+			                    programs.vertex[i].id,
+			                    fmt::format("spv/{}.spv", programs.vertex[i].id)});
+		}
+		if (rect_list) {
+			d.stages.push_back({static_cast<uint32_t>(vk::ShaderStageFlagBits::eTessellationControl),
+			                    0, dump_tcs_spv});
+			d.stages.push_back(
+			    {static_cast<uint32_t>(vk::ShaderStageFlagBits::eTessellationEvaluation), 0,
+			     dump_tes_spv});
+		}
+		if (ps_active) {
+			d.stages.push_back({static_cast<uint32_t>(vk::ShaderStageFlagBits::eFragment),
+			                    pixel_program.id, fmt::format("spv/{}.spv", pixel_program.id)});
+		}
+		d.vertex_input        = pipeline_info.pVertexInputState;
+		d.input_assembly      = pipeline_info.pInputAssemblyState;
+		d.tessellation        = pipeline_info.pTessellationState;
+		d.negative_one_to_one = static_params.negative_one_to_one;
+		d.raster              = &rasterizer;
+#if !defined(__APPLE__)
+		d.has_depth_clip_ext = true;
+		d.depth_clip_enable  = static_params.depth_clip_enable;
+		d.has_color_write_ext = true;
+#endif
+		d.provoking_mode = graphics.provoking_vertex_last_enabled
+		                       ? (static_params.provoking_vtx_last ? 1 : 0)
+		                       : -1;
+		d.multisample    = &multisampling;
+		d.depth_stencil  = pipeline_info.pDepthStencilState;
+		d.color_blend    = &color_blending;
+		d.dynamic_states = dynamic_states;
+		d.rendering      = &rendering_info;
+		d.layout_bindings = descriptor_bindings;
+		d.push_descriptors = pipeline.uses_push_descriptors;
+		d.push_range       = push_constants;
+		d.mesh             = mesh;
+		d.rect_list        = rect_list;
+		d.tess             = tessellation;
+		d.vs_id            = vertex_program.id;
+		d.ps_id            = ps_active ? pixel_program.id : 0;
+		d.game_driver_ns   = driver_ns;
+		PipelineDump::WriteGraphicsPipeline(d);
+	}
 	if (graphics_debug_dump_enabled()) {
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
@@ -576,8 +634,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache) {
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
+                            uint64_t program_id) {
 	EXIT_IF(compute_module == nullptr);
+	const uint64_t compute_id = program_id; // only used by --dump-pipelines
 
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
 	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo comp_subgroup_size {};
@@ -626,10 +686,21 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	LOGF("PipelineTrace: vkCreateComputePipelines begin layout=%p\n",
 	     static_cast<void*>(pipeline.pipeline_layout));
-	const auto driver_t0 = Bench::TimingEnabled() ? Bench::NowNs() : int64_t {0};
+	const bool dump      = PipelineDump::Enabled();
+	const auto driver_t0 = (Bench::TimingEnabled() || dump) ? Bench::NowNs() : int64_t {0};
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
 	                                                &pipeline.pipeline);
-	if (driver_t0 != 0) Bench::SetDriverCreateNs(Bench::NowNs() - driver_t0);
+	const auto driver_ns = driver_t0 != 0 ? Bench::NowNs() - driver_t0 : int64_t {0};
+	if (driver_t0 != 0 && Bench::TimingEnabled()) Bench::SetDriverCreateNs(driver_ns);
+	if (dump && result == vk::Result::eSuccess) {
+		PipelineDump::ComputeDump d;
+		d.cs_id                  = compute_id;
+		d.required_subgroup_size = comp_shader_stage_info.pNext != nullptr ? wave_size : 0;
+		d.layout_bindings        = descriptor_bindings;
+		d.push_descriptors       = pipeline.uses_push_descriptors;
+		d.game_driver_ns         = driver_ns;
+		PipelineDump::WriteComputePipeline(d);
+	}
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);

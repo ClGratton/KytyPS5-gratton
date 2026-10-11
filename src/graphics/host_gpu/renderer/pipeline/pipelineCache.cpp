@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineDump.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -411,11 +412,14 @@ struct PipelineCache::ProgramCache {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
 		}
+		const uint64_t shader_id = next_shader_id.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (PipelineDump::Enabled()) {
+			PipelineDump::WriteSpirv(shader_id, result.spirv, stage_name, options.shader_hash);
+		}
 		return {
 		    .specialization = std::move(specialization),
 		    .program        = std::move(result.program).TakeCompiledInfo(),
-		    .handle         = {.id = next_shader_id.fetch_add(1, std::memory_order_relaxed) + 1,
-	                       .module = module},
+		    .handle         = {.id = shader_id, .module = module},
 		};
 	}
 
@@ -1121,7 +1125,8 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 
 	auto cached = std::make_unique<Pipeline>();
 	Stopwatch create_sw;
-	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache,
+	                       compute_program.id);
 	if (create_sw.On()) {
 		const auto create_ns = create_sw.Elapsed();
 		Bench::LogTiming("pipeline_create_cs", compute_program.id, create_sw.Start(), create_ns,

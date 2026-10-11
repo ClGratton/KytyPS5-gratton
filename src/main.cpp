@@ -95,6 +95,9 @@ static void PrintUsage() {
 	         "                                       non-Release/dirty builds.\n");
 	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
 	         "                                       pipeline creation misses. Default: off.\n");
+	::printf("  --dump-pipelines <dir>               Debug (D2 spike): on every pipeline miss write the\n"
+	         "                                       SPIR-V and a JSON description of the full pipeline\n"
+	         "                                       state + descriptor layout into <dir>. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -441,6 +444,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.shader_timing_log = Common::PathFromUtf8(value);
+		} else if (arg == "--dump-pipelines") {
+			if (value.empty()) {
+				::printf("invalid --dump-pipelines path\n");
+				return false;
+			}
+			options.config.dump_pipelines = Common::PathFromUtf8(value);
 		} else if (arg == "--bench-exit-after-frames") {
 			if (!ParseUint64(value, options.config.bench_exit_after_frames)) {
 				::printf("invalid frame count: %s\n", value.c_str());
