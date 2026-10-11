@@ -23,14 +23,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-extern char **environ;
+extern char** environ;
 
 namespace Libs::Controller::DualSenseSpeakerSink {
 
 namespace {
 
-constexpr const char *SINK_NAME = "kyty_dualsense_speaker";
-constexpr const char *SINK_ARGS = "sink_properties=\"device.description='DualSense Speaker (Kyty)' "
+constexpr const char* SINK_NAME = "kyty_dualsense_speaker";
+constexpr const char* SINK_ARGS = "sink_properties=\"device.description='DualSense Speaker (Kyty)' "
 								  "device.icon_name=input-gaming\"";
 constexpr float MAX_GAIN		= 4.0f;
 
@@ -48,7 +48,7 @@ struct Child {
 
 // Runs a command without a shell (no fork of this large process: posix_spawn) with the C locale
 // so that pactl output is parseable. Closes every other descriptor in the child.
-bool Spawn(const std::vector<std::string> &args, Child &child) {
+bool Spawn(const std::vector<std::string>& args, Child& child) {
 	int fds[2];
 	if (pipe2(fds, O_CLOEXEC) != 0) {
 		return false;
@@ -76,20 +76,20 @@ bool Spawn(const std::vector<std::string> &args, Child &child) {
 	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
 
 	std::vector<std::string> env_storage;
-	for (char **e = environ; e != nullptr && *e != nullptr; e++) {
+	for (char** e = environ; e != nullptr && *e != nullptr; e++) {
 		if (std::strncmp(*e, "LC_", 3) != 0 && std::strncmp(*e, "LANG", 4) != 0) {
 			env_storage.emplace_back(*e);
 		}
 	}
 	env_storage.emplace_back("LC_ALL=C");
-	std::vector<char *> envp;
-	for (auto &e : env_storage) {
+	std::vector<char*> envp;
+	for (auto& e : env_storage) {
 		envp.push_back(e.data());
 	}
 	envp.push_back(nullptr);
-	std::vector<char *> argv;
-	for (const auto &a : args) {
-		argv.push_back(const_cast<char *>(a.c_str()));
+	std::vector<char*> argv;
+	for (const auto& a : args) {
+		argv.push_back(const_cast<char*>(a.c_str()));
 	}
 	argv.push_back(nullptr);
 
@@ -107,7 +107,7 @@ bool Spawn(const std::vector<std::string> &args, Child &child) {
 	return true;
 }
 
-void Reap(Child &child, bool kill_it) {
+void Reap(Child& child, bool kill_it) {
 	if (child.out >= 0) {
 		close(child.out);
 		child.out = -1;
@@ -123,7 +123,7 @@ void Reap(Child &child, bool kill_it) {
 }
 
 // Runs to completion; false when pactl is missing, times out or fails.
-bool Run(const std::vector<std::string> &args, std::string &out, int timeout_ms = 3000) {
+bool Run(const std::vector<std::string>& args, std::string& out, int timeout_ms = 3000) {
 	out.clear();
 	Child child;
 	if (!Spawn(args, child)) {
@@ -165,14 +165,14 @@ struct SinkInfo {
 
 // Mean channel volume of a "front-left: 32768 /  50% / -18.06 dB,   front-right: ..." line as an
 // amplitude gain. PulseAudio volumes are cubic in amplitude (pa_sw_volume_to_linear).
-float VolumeLineGain(const std::string &line, bool muted) {
+float VolumeLineGain(const std::string& line, bool muted) {
 	if (muted) {
 		return 0.0f;
 	}
 	double sum = 0;
 	int count  = 0;
 	for (size_t p = 0; (p = line.find(':', p)) != std::string::npos; p++) {
-		char *end		 = nullptr;
+		char* end		 = nullptr;
 		const double raw = std::strtod(line.c_str() + p + 1, &end);
 		if (end != line.c_str() + p + 1) {
 			sum += raw;
@@ -184,7 +184,7 @@ float VolumeLineGain(const std::string &line, bool muted) {
 }
 
 // Parses `pactl list sinks` for our sink: "Sink #N" ... "Name: ..." / "Mute: ..." / "Volume: ...".
-SinkInfo ParseSink(const std::string &text) {
+SinkInfo ParseSink(const std::string& text) {
 	SinkInfo info;
 	size_t pos		 = 0;
 	bool in_block	 = false;
@@ -236,7 +236,11 @@ SinkInfo ParseSink(const std::string &text) {
 	return info;
 }
 
-void Publish(const SinkInfo &info) {
+void Publish(const SinkInfo& info) {
+	const float gain = info.found ? info.gain : 1.0f;
+	if (std::fabs(gain - g_gain.load(std::memory_order_relaxed)) > 1e-4f) {
+		LOGF("DualSenseSpeakerSink: speaker gain %.3f\n", static_cast<double>(gain));
+	}
 	g_gain.store(info.found ? info.gain : 1.0f, std::memory_order_relaxed);
 	g_active.store(info.found, std::memory_order_relaxed);
 }
@@ -385,7 +389,7 @@ void Shutdown() {
 	if (g_thread.joinable()) {
 		g_thread.join();
 	}
-	for (auto &fd : g_wake) {
+	for (auto& fd : g_wake) {
 		if (fd >= 0) {
 			close(fd);
 			fd = -1;
