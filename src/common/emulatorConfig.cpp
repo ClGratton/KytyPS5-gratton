@@ -55,6 +55,10 @@ bool TextureGcEnabled() {
 	return g_config->texture_gc_enabled;
 }
 
+bool TextureGcLog() {
+	return g_config->texture_gc_log;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

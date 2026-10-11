@@ -76,6 +76,9 @@ public:
 	void AuditVram();
 
 private:
+	// --debug-texture-gc log: one line per free of a GPU-written image. Caller holds m_lock.
+	void LogGpuWrittenFree(ImageId id, const char* path, uint64_t tick, bool downloaded);
+
 	struct MetaDataInfo {
 		enum class Type : uint8_t { CMask, FMask, HTile };
 

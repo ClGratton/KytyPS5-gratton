@@ -133,6 +133,9 @@ struct ConfigOptions {
 	// --debug-texture-gc <true|false>: false disables the texture garbage collector (debug:
 	// tells whether a rendering difference comes from an evicted GPU-only image).
 	bool                   texture_gc_enabled          = true;
+	// --debug-texture-gc log: log every free of a GPU-written image by the texture GC (and the
+	// out-of-memory reclaim) with the flags that decided it.
+	bool                   texture_gc_log              = false;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -179,6 +182,7 @@ bool              GetPipelineLookahead();
 uint32_t          GetPipelineLookaheadKinds();
 bool              GetLookaheadVerify();
 bool              TextureGcEnabled();
+bool              TextureGcLog();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

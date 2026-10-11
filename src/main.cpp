@@ -145,8 +145,9 @@ static void PrintUsage() {
 	         "                                       --async-pipelines stall|skip). Default: false.\n");
 	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
 	         "                                       Default: min(8, hardware threads / 2).\n");
-	::printf("  --debug-texture-gc <true|false>      Debug: false disables the texture garbage collector.\n"
-	         "                                       Default: true.\n");
+	::printf("  --debug-texture-gc <true|false|log>  Debug: false disables the texture garbage collector;\n"
+	         "                                       log logs every free of a GPU-written image with\n"
+	         "                                       the flags that decided it. Default: true.\n");
 	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
 	         "                                       its first use and compare the SPIR-V. Default: false.\n");
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
@@ -609,7 +610,10 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 		} else if (arg == "--debug-texture-gc") {
-			if (!ParseBool(value, options.config.texture_gc_enabled)) {
+			if (Common::EqualNoCase(value, "log")) {
+				options.config.texture_gc_enabled = true;
+				options.config.texture_gc_log     = true;
+			} else if (!ParseBool(value, options.config.texture_gc_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

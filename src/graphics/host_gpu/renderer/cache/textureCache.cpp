@@ -1890,6 +1890,23 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 	}
 }
 
+void TextureCache::LogGpuWrittenFree(ImageId id, const char* path, uint64_t tick, bool downloaded) {
+	const auto* image = m_slot_images.try_get(id);
+	if (image == nullptr || !image->IsGpuModified()) {
+		return;
+	}
+	VRAM_LOG("TexGC: free gpu-written image id=%u via=%s gc_tick=%" PRIu64 " addr=0x%" PRIx64
+	         " size=%" PRIu64 " %ux%u fmt=%d tiled=%d rt=%d downloaded=%d safe=%d buffer_modified=%d "
+	         "cpu_dirty=%d maybe_cpu_dirty=%d used_mem_mib=%" PRIu64 "\n",
+	         static_cast<unsigned>(id.index), path, tick, image->info.data.address,
+	         image->info.data.size, image->info.extent.width, image->info.extent.height,
+	         static_cast<int>(image->info.pixel_format), image->info.IsTiled() ? 1 : 0,
+	         image->usage.render_target ? 1 : 0, downloaded ? 1 : 0,
+	         image->SafeToDownload() ? 1 : 0, image->IsBufferModified() ? 1 : 0,
+	         image->IsDefinitelyCpuDirty() ? 1 : 0, image->IsMaybeCpuDirty() ? 1 : 0,
+	         m_total_used_memory >> 20);
+}
+
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
@@ -1944,6 +1961,9 @@ void TextureCache::RunGarbageCollector() {
 				if (safe && !DownloadImageMemory(id)) {
 					continue;
 				}
+				if (Config::TextureGcLog()) {
+					LogGpuWrittenFree(id, "gc", tick, safe);
+				}
 			}
 			FreeImage(id);
 			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
@@ -1994,6 +2014,9 @@ void TextureCache::ReclaimMemory() {
 			}
 		}
 		bytes += owner->AccountedSize();
+		if (Config::TextureGcLog()) {
+			LogGpuWrittenFree(id, "reclaim", tick, true);
+		}
 		FreeImage(id);
 		freed++;
 	}
