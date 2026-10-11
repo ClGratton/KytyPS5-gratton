@@ -23,6 +23,8 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <fmt/format.h>
+#include <string>
 
 namespace Libs::Graphics {
 
@@ -61,6 +63,7 @@ void GraphicContext::DestroyAllocator() {
 	if (allocator == nullptr) {
 		return;
 	}
+	FreeBallast();
 	vmaDestroyAllocator(allocator);
 	allocator = nullptr;
 }
@@ -109,6 +112,15 @@ void GraphicContext::LogMemoryBudgetPeriodic() const {
 		     static_cast<uint64_t>(budgets[i].statistics.allocationBytes) >> 20,
 		     static_cast<uint64_t>(budgets[i].statistics.blockBytes) >> 20);
 	}
+	static constexpr const char* names[] = {"tex",       "rt",        "depth",
+	                                        "buf_local", "buf_bda",   "buf_upload",
+	                                        "buf_download", "buf_stream"};
+	std::string split;
+	for (size_t i = 0; i < vram_bytes.size(); i++) {
+		split += fmt::format(" {}={}MiB({})", names[i], vram_bytes[i].load() >> 20,
+		                     vram_count[i].load());
+	}
+	LOGF("VRAM split:%s ballast=%" PRIu64 "MiB\n", split.c_str(), ballast_bytes >> 20);
 }
 
 uint64_t GraphicContext::GetDeviceMemoryUsage() const {
@@ -128,7 +140,8 @@ uint64_t GraphicContext::GetDeviceMemoryUsage() const {
 			usage += budgets[heap].usage;
 		}
 	}
-	return usage;
+	// The debug ballast simulates a smaller GPU: the caches must not see it as usage.
+	return usage > ballast_bytes ? usage - ballast_bytes : 0;
 }
 
 uint64_t GraphicContext::GetTotalMemoryBudget() const {
@@ -155,6 +168,7 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 		}
 	}
 	if (discrete) {
+		budget = budget > ballast_bytes ? budget - ballast_bytes : 0;
 		return budget - std::min<uint64_t>(budget / 8, 1024ull * 1024 * 1024);
 	}
 	constexpr uint64_t system_reserve = 8ull * 1024 * 1024 * 1024;
@@ -166,17 +180,34 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
 
+	// Classification for priorities and --vram-stats. Block-compressed images are textures.
+	// Depth images and large single-level uncompressed color images are treated as render
+	// targets; everything else is a sampled texture.
+	const bool is_depth =
+	    static_cast<bool>(image_info.usage & vk::ImageUsageFlagBits::eDepthStencilAttachment);
+	// VK_FORMAT_BC1_RGB_UNORM_BLOCK (131) .. VK_FORMAT_ASTC_12x12_SRGB_BLOCK (184).
+	const auto format_value = static_cast<int>(image_info.format);
+	const bool is_block     = format_value >= 131 && format_value <= 184;
+	const bool is_render_target =
+	    !is_depth && !is_block &&
+	    static_cast<bool>(image_info.usage & vk::ImageUsageFlagBits::eColorAttachment) &&
+	    image_info.extent.width >= 512 && image_info.extent.height >= 512 &&
+	    image_info.mipLevels == 1 && image_info.arrayLayers == 1;
+	const VramClass vram_class = is_depth ? VramClass::ImageDepth
+	                             : is_render_target ? VramClass::ImageRenderTarget
+	                                                : VramClass::ImageTexture;
+
 	VmaAllocationCreateInfo alloc_info {};
 	alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 	if (memory_priority_enabled) {
-		// Render targets, depth targets and storage images are rewritten every frame: keep
-		// them resident (priority 1.0). Sampled-only textures can be re-uploaded: 0.5.
-		// VMA only applies a priority to dedicated allocations, so keep the hot classes dedicated.
-		const auto hot = vk::ImageUsageFlagBits::eColorAttachment |
-		                 vk::ImageUsageFlagBits::eDepthStencilAttachment |
-		                 vk::ImageUsageFlagBits::eStorage;
-		if (image_info.usage & hot) {
+		// Depth and render targets are rewritten every frame: keep them resident. VMA only
+		// applies a priority to dedicated allocations, so those get their own VkDeviceMemory.
+		// Sampled textures stay pooled at the default 0.5 and are the first to be paged out.
+		if (is_depth) {
 			alloc_info.priority = 1.0f;
+			alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+		} else if (is_render_target) {
+			alloc_info.priority = 0.75f;
 			alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
 		} else {
 			alloc_info.priority = 0.5f;
@@ -187,14 +218,30 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	auto             result       = static_cast<vk::Result>(
 	    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
 	                   &alloc_info, &native_image, &image.allocation, nullptr));
+	if (result != vk::Result::eSuccess) {
+		LOGF("Image allocation failed: %s extent=%ux%ux%u format=%d layers=%u levels=%u\n",
+		     vk::to_string(result).c_str(), image_info.extent.width, image_info.extent.height,
+		     image_info.extent.depth, static_cast<int>(image_info.format), image_info.arrayLayers,
+		     image_info.mipLevels);
+		LogMemoryBudget();
+		if (reclaim_memory && !in_reclaim) {
+			// Free what the caches can spare and try once more before giving up.
+			in_reclaim = true;
+			reclaim_memory();
+			in_reclaim = false;
+			LogMemoryBudget();
+			native_image     = VK_NULL_HANDLE;
+			image.allocation = nullptr;
+			result           = static_cast<vk::Result>(vmaCreateImage(
+                allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
+                &alloc_info, &native_image, &image.allocation, nullptr));
+			LOGF("Image allocation retry after reclaim: %s\n", vk::to_string(result).c_str());
+		}
+	}
 	if (result != vk::Result::eSuccess && pageable_memory_enabled) {
 		// Last resort with VRAM paging on: let the image land in any compatible memory type
 		// (system memory) instead of failing the whole emulator.
-		LOGF("VRAM paging: image allocation failed (%s) extent=%ux%ux%u format=%d levels=%u; "
-		     "retrying without DEVICE_LOCAL\n",
-		     vk::to_string(result).c_str(), image_info.extent.width, image_info.extent.height,
-		     image_info.extent.depth, static_cast<int>(image_info.format), image_info.mipLevels);
-		LogMemoryBudget();
+		LOGF("VRAM paging: retrying image allocation without DEVICE_LOCAL\n");
 		alloc_info.requiredFlags  = 0;
 		alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 		native_image              = VK_NULL_HANDLE;
@@ -206,12 +253,14 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	}
 	image.image = native_image;
 	if (result != vk::Result::eSuccess) {
-		LOGF("vmaCreateImage failed: %s extent=%ux%ux%u format=%d levels=%u\n",
-		     vk::to_string(result).c_str(), image_info.extent.width, image_info.extent.height,
-		     image_info.extent.depth, static_cast<int>(image_info.format), image_info.mipLevels);
-		LogMemoryBudget();
 		return false;
 	}
+
+	VmaAllocationInfo allocation_result {};
+	vmaGetAllocationInfo(allocator, image.allocation, &allocation_result);
+	image.alloc_size = allocation_result.size;
+	image.vram_class = vram_class;
+	AccountVram(vram_class, static_cast<int64_t>(image.alloc_size));
 
 	image.format     = image_info.format;
 	image.image_type = image_info.imageType;
@@ -231,9 +280,56 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image == nullptr || image.allocation == nullptr);
 
+	AccountVram(image.vram_class, -static_cast<int64_t>(image.alloc_size));
 	vmaDestroyImage(allocator, image.image, image.allocation);
 	image.image      = nullptr;
 	image.allocation = nullptr;
+	image.alloc_size = 0;
+}
+
+void GraphicContext::AccountVram(VramClass vram_class, int64_t delta) noexcept {
+	const auto index = static_cast<size_t>(vram_class);
+	vram_bytes[index].fetch_add(delta, std::memory_order_relaxed);
+	vram_count[index].fetch_add(delta > 0 ? 1 : -1, std::memory_order_relaxed);
+}
+
+bool GraphicContext::AllocateBallast(uint64_t mebibytes) {
+	constexpr uint64_t chunk_mb = 256;
+	uint64_t           left     = mebibytes;
+	while (left > 0) {
+		const uint64_t this_mb = std::min(left, chunk_mb);
+		VkBufferCreateInfo buffer_info {};
+		buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		buffer_info.size  = this_mb << 20;
+		buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		VmaAllocationCreateInfo alloc_info {};
+		alloc_info.flags         = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+		alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		alloc_info.priority      = 1.0f;
+		VkBuffer      buffer     = VK_NULL_HANDLE;
+		VmaAllocation allocation = nullptr;
+		const auto    result =
+		    static_cast<vk::Result>(vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &buffer,
+		                                             &allocation, nullptr));
+		if (result != vk::Result::eSuccess) {
+			LOGF("VRAM ballast: allocation failed after %" PRIu64 " MiB: %s\n",
+			     ballast_bytes >> 20, vk::to_string(result).c_str());
+			return false;
+		}
+		ballast.emplace_back(buffer, allocation);
+		ballast_bytes += this_mb << 20;
+		left -= this_mb;
+	}
+	LOGF("VRAM ballast: holding %" PRIu64 " MiB of device-local memory\n", ballast_bytes >> 20);
+	return true;
+}
+
+void GraphicContext::FreeBallast() {
+	for (auto& [buffer, allocation]: ballast) {
+		vmaDestroyBuffer(allocator, buffer, allocation);
+	}
+	ballast.clear();
+	ballast_bytes = 0;
 }
 
 } // namespace Libs::Graphics

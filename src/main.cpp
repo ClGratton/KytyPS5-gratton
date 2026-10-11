@@ -101,6 +101,15 @@ static void PrintUsage() {
 	    "                                      VK_EXT_pageable_device_local_memory so the driver\n"
 	    "                                      pages low-priority VRAM out instead of failing.\n"
 	    "                                      Default: off.\n");
+	::printf("  --vram-stats <on|off>                Log VRAM heap usage and its split every 5 s.\n"
+	         "                                      Implied by --vram-paging. Default: off.\n");
+	::printf("  --vram-ballast-mb <MiB>              Debug: hold this much device-local memory to\n"
+	         "                                      simulate a smaller GPU. Default: 0.\n");
+	::printf("  --gc-texture-trigger-mb <MiB>        Texture GC starts above this VRAM usage (0 = auto).\n"
+	         "  --gc-texture-pressure-mb <MiB>       Texture GC evicts harder above this (0 = auto).\n"
+	         "  --gc-texture-critical-mb <MiB>       Texture GC is aggressive above this (0 = auto).\n"
+	         "  --gc-buffer-trigger-mb <MiB>         Buffer GC starts above this (0 = auto).\n"
+	         "  --gc-buffer-critical-mb <MiB>        Buffer GC is aggressive above this (0 = auto).\n");
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
 }
@@ -451,6 +460,41 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--trophy-notifications") {
 			if (!ParseBool(value, options.config.trophy_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--vram-stats") {
+			if (!ParseBool(value, options.config.vram_stats)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--vram-ballast-mb") {
+			if (!ParseUint32(value, options.config.vram_ballast_mb)) {
+				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--gc-texture-trigger-mb") {
+			if (!ParseUint32(value, options.config.gc_texture_trigger_mb)) {
+				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--gc-texture-pressure-mb") {
+			if (!ParseUint32(value, options.config.gc_texture_pressure_mb)) {
+				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--gc-texture-critical-mb") {
+			if (!ParseUint32(value, options.config.gc_texture_critical_mb)) {
+				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--gc-buffer-trigger-mb") {
+			if (!ParseUint32(value, options.config.gc_buffer_trigger_mb)) {
+				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--gc-buffer-critical-mb") {
+			if (!ParseUint32(value, options.config.gc_buffer_critical_mb)) {
+				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--vram-paging") {

@@ -92,6 +92,17 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	m_buffer = native_buffer;
+	{
+		VmaAllocationInfo accounted {};
+		vmaGetAllocationInfo(graphics.allocator, m_allocation, &accounted);
+		m_vram_class = with_bda ? VramClass::BufferBda
+		               : usage == MemoryUsage::DeviceLocal ? VramClass::BufferDeviceLocal
+		               : usage == MemoryUsage::Upload      ? VramClass::BufferUpload
+		               : usage == MemoryUsage::Download    ? VramClass::BufferDownload
+		                                                   : VramClass::BufferStream;
+		m_alloc_size = accounted.size;
+		graphics.AccountVram(m_vram_class, static_cast<int64_t>(m_alloc_size));
+	}
 	if (with_bda) {
 		vk::BufferDeviceAddressInfo address_info {};
 		address_info.buffer = m_buffer;
@@ -110,6 +121,7 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 
 Buffer::~Buffer() {
 	if (m_buffer != nullptr) {
+		m_graphics->AccountVram(m_vram_class, -static_cast<int64_t>(m_alloc_size));
 		vmaDestroyBuffer(m_graphics->allocator, m_buffer, m_allocation);
 	}
 }

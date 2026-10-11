@@ -132,9 +132,26 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 		    std::max<int64_t>(std::min(budget - 2 * threshold / 10, budget - GiB / 2), 3 * GiB));
 		m_trigger_gc_memory = static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
 	}
+	constexpr uint64_t MiB = 1024ull * 1024;
+	if (Config::GcTextureTriggerMb() != 0) {
+		m_trigger_gc_memory = Config::GcTextureTriggerMb() * MiB;
+	}
+	if (Config::GcTexturePressureMb() != 0) {
+		m_pressure_gc_memory = Config::GcTexturePressureMb() * MiB;
+	}
+	if (Config::GcTextureCriticalMb() != 0) {
+		m_critical_gc_memory = Config::GcTextureCriticalMb() * MiB;
+	}
+	if (m_graphics.CanReportMemoryUsage()) {
+		LOGF("Texture GC thresholds: trigger=%" PRIu64 " MiB pressure=%" PRIu64
+		     " MiB critical=%" PRIu64 " MiB\n",
+		     m_trigger_gc_memory / MiB, m_pressure_gc_memory / MiB, m_critical_gc_memory / MiB);
+	}
+	m_graphics.reclaim_memory = [this] { ReclaimMemory(); };
 }
 
 TextureCache::~TextureCache() {
+	m_graphics.reclaim_memory = nullptr;
 	m_slot_images.ForEach([&](ImageId id, const Image& image) {
 		if (image.registered) {
 			UnregisterImage(id);
@@ -1874,7 +1891,7 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
-	if (Config::VramPagingEnabled()) {
+	if (Config::VramStatsEnabled()) {
 		m_graphics.LogMemoryBudgetPeriodic();
 	}
 	if (m_graphics.CanReportMemoryUsage()) {
@@ -1932,6 +1949,41 @@ void TextureCache::RunGarbageCollector() {
 	if (m_total_used_memory >= m_critical_gc_memory) {
 		collect(true);
 	}
+}
+
+// Called when an image allocation failed, with m_lock held by the caller (InsertImage paths).
+// Evicts every image that has not been touched for a couple of GC ticks and that can be dropped
+// without losing guest-visible data, then waits for the GPU so the memory is really released.
+void TextureCache::ReclaimMemory() {
+	const uint64_t tick = m_gc_tick;
+	const uint64_t age  = std::min<uint64_t>(2, tick);
+	std::vector<ImageId> candidates;
+	m_lru_cache.ForEachItemBelow(tick - age, [&](ImageId id) {
+		candidates.push_back(id);
+		return false;
+	});
+	size_t   freed = 0;
+	uint64_t bytes = 0;
+	for (const auto id: candidates) {
+		auto owner = m_slot_images.try_get(id);
+		if (owner == nullptr || !owner->registered || owner->depth_id) {
+			continue;
+		}
+		if (owner->IsGpuModified()) {
+			if (!owner->SafeToDownload() || owner->info.IsTiled() || !DownloadImageMemory(id)) {
+				continue;
+			}
+		}
+		bytes += owner->AccountedSize();
+		FreeImage(id);
+		freed++;
+	}
+	LOGF("Texture cache reclaim: freed %zu images (%" PRIu64 " MiB accounted)\n", freed,
+	     bytes >> 20);
+	// Deferred deletions are released once the GPU is done with the current work.
+	const auto tick_now = m_scheduler.CurrentTick();
+	m_scheduler.Wait(tick_now);
+	m_scheduler.PopPendingOperations();
 }
 
 void TextureCache::ProcessDownloadImages() {

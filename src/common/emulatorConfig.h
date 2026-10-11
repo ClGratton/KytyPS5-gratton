@@ -80,6 +80,14 @@ struct ConfigOptions {
 	bool                   playgo_hack_enabled         = false;
 	bool                   skip_notice_screen          = false;
 	bool                   vram_paging                 = false;
+	bool                   vram_stats                  = false;
+	uint32_t               vram_ballast_mb             = 0;
+	// GC thresholds in MiB; 0 keeps the budget-derived stock value.
+	uint32_t               gc_texture_trigger_mb       = 0;
+	uint32_t               gc_texture_pressure_mb      = 0;
+	uint32_t               gc_texture_critical_mb      = 0;
+	uint32_t               gc_buffer_trigger_mb        = 0;
+	uint32_t               gc_buffer_critical_mb       = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -135,6 +143,13 @@ bool TrophyEnabled();
 bool PlayGoHackEnabled();
 bool SkipNoticeScreen();
 bool VramPagingEnabled();
+bool VramStatsEnabled();
+uint32_t VramBallastMb();
+uint32_t GcTextureTriggerMb();
+uint32_t GcTexturePressureMb();
+uint32_t GcTextureCriticalMb();
+uint32_t GcBufferTriggerMb();
+uint32_t GcBufferCriticalMb();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 #endif

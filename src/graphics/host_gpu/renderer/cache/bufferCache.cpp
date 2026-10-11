@@ -1,3 +1,4 @@
+#include "common/emulatorConfig.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 
 #include "common/alignment.h"
@@ -249,6 +250,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	const auto critical  = std::min(budget - 2 * threshold / 10, budget - GiB / 2);
 	m_trigger_gc_memory  = static_cast<uint64_t>(std::max<int64_t>(expected, GiB));
 	m_critical_gc_memory = static_cast<uint64_t>(std::max<int64_t>(critical, 2 * GiB));
+	if (Config::GcBufferTriggerMb() != 0) {
+		m_trigger_gc_memory = Config::GcBufferTriggerMb() * 1024ull * 1024;
+	}
+	if (Config::GcBufferCriticalMb() != 0) {
+		m_critical_gc_memory = Config::GcBufferCriticalMb() * 1024ull * 1024;
+	}
 }
 
 BufferCache::~BufferCache() {

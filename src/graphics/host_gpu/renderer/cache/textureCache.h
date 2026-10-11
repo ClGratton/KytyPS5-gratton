@@ -71,6 +71,7 @@ public:
 	void UnmapMemory(uint64_t address, uint64_t size);
 	void ProcessDownloadImages();
 	void RunGarbageCollector();
+	void ReclaimMemory();
 
 private:
 	struct MetaDataInfo {

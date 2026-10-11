@@ -91,6 +91,8 @@ private:
 	VmaAllocation                 m_allocation = nullptr;
 	uint64_t                      m_size;
 	bool                          m_coherent = false;
+	VramClass                     m_vram_class = VramClass::BufferDeviceLocal;
+	uint64_t                      m_alloc_size = 0;
 	std::span<uint8_t>            m_mapped;
 };
 

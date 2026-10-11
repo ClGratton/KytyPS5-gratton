@@ -176,6 +176,34 @@ bool VramPagingEnabled() {
 	return g_config->vram_paging;
 }
 
+bool VramStatsEnabled() {
+	return g_config->vram_stats || g_config->vram_paging;
+}
+
+uint32_t VramBallastMb() {
+	return g_config->vram_ballast_mb;
+}
+
+uint32_t GcTextureTriggerMb() {
+	return g_config->gc_texture_trigger_mb;
+}
+
+uint32_t GcTexturePressureMb() {
+	return g_config->gc_texture_pressure_mb;
+}
+
+uint32_t GcTextureCriticalMb() {
+	return g_config->gc_texture_critical_mb;
+}
+
+uint32_t GcBufferTriggerMb() {
+	return g_config->gc_buffer_trigger_mb;
+}
+
+uint32_t GcBufferCriticalMb() {
+	return g_config->gc_buffer_critical_mb;
+}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled() {
 	return g_config->red_zone_protection_enabled;

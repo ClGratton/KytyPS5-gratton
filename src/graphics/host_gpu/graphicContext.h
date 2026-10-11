@@ -6,6 +6,9 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
+#include <array>
+#include <atomic>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <tuple>
@@ -15,6 +18,21 @@
 namespace Libs::Graphics {
 
 struct VulkanImage;
+
+// VRAM accounting classes (--vram-stats). Image classes are a heuristic: the usage flags do
+// not distinguish render targets from textures (every uncompressed color image is allowed as
+// attachment and storage), so only block-compressed images count as textures.
+enum class VramClass : uint8_t {
+	ImageTexture,
+	ImageRenderTarget,
+	ImageDepth,
+	BufferDeviceLocal,
+	BufferBda,
+	BufferUpload,
+	BufferDownload,
+	BufferStream,
+	Count,
+};
 
 inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 
@@ -99,6 +117,17 @@ struct GraphicContext {
 	void               DestroyAllocator();
 	void               LogMemoryBudget() const;
 	void               LogMemoryBudgetPeriodic() const;
+	void               AccountVram(VramClass vram_class, int64_t delta) noexcept;
+	// Debug: hold `mebibytes` of device-local memory (--vram-ballast-mb) to simulate a smaller GPU.
+	[[nodiscard]] bool AllocateBallast(uint64_t mebibytes);
+	void               FreeBallast();
+	// Called once when an image allocation fails: should free memory (set by the texture cache).
+	std::function<void()> reclaim_memory;
+	bool                  in_reclaim = false;
+	uint64_t              ballast_bytes = 0;
+	std::array<std::atomic<int64_t>, static_cast<size_t>(VramClass::Count)> vram_bytes {};
+	std::array<std::atomic<int64_t>, static_cast<size_t>(VramClass::Count)> vram_count {};
+	std::vector<std::pair<VkBuffer, VmaAllocation>> ballast;
 	[[nodiscard]] bool CanReportMemoryUsage() const noexcept { return memory_budget_ext_enabled; }
 	[[nodiscard]] uint64_t GetDeviceMemoryUsage() const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
@@ -140,6 +169,8 @@ struct VulkanImage {
 	VulkanImageState              state;
 	std::vector<VulkanImageState> subresource_states;
 	VmaAllocation                allocation = nullptr;
+	uint64_t                     alloc_size = 0;
+	VramClass                    vram_class = VramClass::ImageTexture;
 };
 
 

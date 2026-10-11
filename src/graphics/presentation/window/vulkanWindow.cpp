@@ -1099,6 +1099,13 @@ void WindowContext::CreateVulkan() {
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");
 	}
+	if (Config::VramBallastMb() != 0) {
+		graphic_ctx.LogMemoryBudget();
+		if (!graphic_ctx.AllocateBallast(Config::VramBallastMb())) {
+			EXIT("Could not allocate the VRAM ballast\n");
+		}
+		graphic_ctx.LogMemoryBudget();
+	}
 
 	render_context = std::make_unique<RenderContext>(graphic_ctx);
 	LibKernel::Memory::InstallGpuResources(render_context.get());
