@@ -1518,7 +1518,7 @@ bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_c
 	bool depth_copy   = false;
 	bool stencil_copy = false;
 	DepthStencilCopyPlan(ctx, depth_copy, stencil_copy);
-	if (depth_copy || stencil_copy) {
+	if (depth_copy || stencil_copy || ctx.GetRenderControl().copy_depth_to_color) {
 		return skip(Skip::SkipDepthCopy);
 	}
 	if (!DrawHasValidVertexShader(sh_ctx)) {
@@ -1560,7 +1560,7 @@ bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_c
 	if (state.ps_active) {
 		for (const auto& output: state.ps_input_info.stage.program->info.outputs) {
 			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt) {
-				mrt_mask |= 1u << output.index;
+				mrt_mask |= 1u << output.location;
 			}
 		}
 	}
