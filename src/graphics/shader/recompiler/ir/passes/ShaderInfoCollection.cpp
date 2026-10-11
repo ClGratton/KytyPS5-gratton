@@ -4,6 +4,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <fmt/format.h>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -366,6 +367,9 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			}
 			info.function_lds |= kind == ResourceKind::Lds &&
 			                     program.stage != ShaderType::Compute && program.stage != ShaderType::Mesh;
+			if (kind == ResourceKind::Lds && program.stage != ShaderType::Compute && program.stage != ShaderType::Mesh) {
+				::printf("LDS-in-graphics-shader: stage=%d hash=%016llx op=%s offset=%u args=%u arg0_imm=%d\n", static_cast<int>(program.stage), static_cast<unsigned long long>(program.shader_hash), std::string(ValueOpcodeName(op)).c_str(), memory.offset, static_cast<unsigned>(inst.NumArgs()), inst.NumArgs() != 0 && inst.Arg(0).IsImmediate());
+			}
 			if (shared_access == SharedAccess::Append || shared_access == SharedAccess::Consume) {
 				info.subgroup_ballot = true;
 				info.subgroup_shuffle = true;
