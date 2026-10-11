@@ -306,6 +306,59 @@ void TestShutdownCancelsQueuedAndJoinsRunning() {
 	Check(!pool.Summary().empty(), "summary");
 }
 
+// --pipeline-lookahead: an urgent submit goes in front of the queue, and WaitFor() promotes a job
+// that is still queued ("the nearest draw wins"). One worker, so the order is observable.
+void TestUrgentSubmitAndPromote() {
+	AsyncPipelineCompiler pool(Config::AsyncPipelineMode::Stall, 1);
+	std::atomic<bool>     release {false};
+	std::atomic<bool>     running {false};
+	std::mutex            order_mutex;
+	std::vector<int>      order;
+	const auto            record = [&](int id) {
+        return [&, id] {
+            std::lock_guard lock(order_mutex);
+            order.push_back(id);
+        };
+	};
+
+	auto blocker = std::make_shared<TestJob>(nullptr, 0, [&] {
+		running.store(true);
+		Check(WaitUntil([&] { return release.load(); }), "release");
+	});
+	Check(pool.Submit(blocker), "submit blocker");
+	Check(WaitUntil([&] { return running.load(); }), "blocker started");
+
+	auto a = std::make_shared<TestJob>(nullptr, 1, record(1));
+	auto b = std::make_shared<TestJob>(nullptr, 2, record(2));
+	auto c = std::make_shared<TestJob>(nullptr, 3, record(3));
+	auto d = std::make_shared<TestJob>(nullptr, 4, record(4));
+	Check(pool.Submit(a) && pool.Submit(b) && pool.Submit(c), "submit queued");
+	Check(pool.Submit(d, true), "urgent submit");
+
+	// c is still queued: WaitFor() moves it in front of a and b (but behind urgent d).
+	std::atomic<bool> waited {false};
+	std::thread       waiter([&] {
+        Check(pool.WaitFor(*c), "c completes");
+        waited.store(true);
+    });
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	release.store(true);
+	waiter.join();
+	Check(WaitUntil([&] { return a->IsFinished() && b->IsFinished() && d->IsFinished(); }),
+	      "all finished");
+	std::lock_guard lock(order_mutex);
+	Check(order.size() == 4, "four jobs ran");
+	Check(order[0] == 3 && order[1] == 4 && order[2] == 1 && order[3] == 2,
+	      "promoted job first, then the urgent one, then FIFO");
+	pool.Shutdown();
+
+	auto prefetched = std::make_shared<TestJob>(nullptr, 5, nullptr);
+	Check(!prefetched->IsPrefetched() && !prefetched->ClaimByDraw(), "not prefetched");
+	prefetched->SetPrefetched();
+	Check(prefetched->IsPrefetched() && prefetched->ClaimByDraw(), "first claim of a prefetch");
+	Check(!prefetched->ClaimByDraw(), "second claim is not a hit");
+}
+
 } // namespace
 
 int main() {
@@ -314,6 +367,7 @@ int main() {
 	TestPublishThenUnregisterContract();
 	TestManyJobsAllRunOnce();
 	TestShutdownCancelsQueuedAndJoinsRunning();
+	TestUrgentSubmitAndPromote();
 	std::printf("AsyncPipelineTests: all cases passed\n");
 	return 0;
 }
