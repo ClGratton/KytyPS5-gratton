@@ -327,8 +327,12 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 					return Fail("scratch operation has no per-thread storage");
 				}
 				info.function_scratch = true;
-				info.function_lds |= kind == ResourceKind::FlatLocal &&
-				                     program.stage != ShaderType::Compute && program.stage != ShaderType::Mesh;
+				if (kind == ResourceKind::FlatLocal && program.stage != ShaderType::Compute &&
+				    program.stage != ShaderType::Mesh) {
+					// A flat access can reach any LDS address.
+					info.function_lds = true;
+					info.function_lds_unbounded = true;
+				}
 			} else if (address_access == AddressAccess::Write) {
 				return Fail("writable FLAT/GLOBAL addresses require GPU ownership tracking");
 			} else {
@@ -367,8 +371,15 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			}
 			info.function_lds |= kind == ResourceKind::Lds &&
 			                     program.stage != ShaderType::Compute && program.stage != ShaderType::Mesh;
-			if (kind == ResourceKind::Lds && program.stage != ShaderType::Compute && program.stage != ShaderType::Mesh) {
-				::printf("LDS-in-graphics-shader: stage=%d hash=%016llx op=%s offset=%u args=%u arg0_imm=%d\n", static_cast<int>(program.stage), static_cast<unsigned long long>(program.shader_hash), std::string(ValueOpcodeName(op)).c_str(), memory.offset, static_cast<unsigned>(inst.NumArgs()), inst.NumArgs() != 0 && inst.Arg(0).IsImmediate());
+			if (kind == ResourceKind::Lds && program.stage != ShaderType::Compute &&
+			    program.stage != ShaderType::Mesh) {
+				// Immediate offsets are in bytes; the dynamic base is a per-lane address, so
+				// budget one dword per lane of the wave on top of the largest immediate.
+				const uint32_t last_byte =
+				    std::max(memory.offset, memory.secondary_offset) +
+				    4u * std::max<uint32_t>(memory.data_dwords, 1u);
+				const uint32_t span = (last_byte + 3u) / 4u + program.wave_size;
+				info.function_lds_dwords = std::max(info.function_lds_dwords, span);
 			}
 			if (shared_access == SharedAccess::Append || shared_access == SharedAccess::Consume) {
 				info.subgroup_ballot = true;
@@ -575,6 +586,8 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 	    info.subgroup_local_invocation_id = info.compute_derivatives = info.image_gather_extended =
 	    info.function_lds = info.function_scratch = info.pixel_valid_mask = info.buffer_int64_atomics =
 	    info.buffer_u8 = info.buffer_u16 = info.shared_int64_atomics = info.coherent_buffers = info.float64 = false;
+	info.function_lds_dwords    = 0;
+	info.function_lds_unbounded = false;
 	InputUsage inputs;
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {

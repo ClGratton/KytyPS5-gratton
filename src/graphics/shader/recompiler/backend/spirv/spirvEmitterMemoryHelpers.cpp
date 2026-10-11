@@ -1,5 +1,8 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
+#include <algorithm>
+#include <bit>
+
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
 uint32_t EmitShaderDataDwordLoad(EmitterState& state, uint32_t dword_index) {
@@ -114,9 +117,22 @@ void EmitMemoryOffsets(EmitterState& state) {
 	}
 }
 
+bool FunctionLdsIsWrapped(const EmitterState& state) {
+	const auto& info = state.program.info;
+	return info.function_lds && !info.function_lds_unbounded && info.function_lds_dwords != 0 &&
+	       ShaderWorkgroupInput(state.program.stage, state.input_info) == nullptr &&
+	       std::bit_ceil(std::max(info.function_lds_dwords, 64u)) < 8192u;
+}
+
 uint32_t LdsDwordCount(const EmitterState& state) {
 	const auto* workgroup = ShaderWorkgroupInput(state.program.stage, state.input_info);
-	return workgroup != nullptr ? workgroup->lds_size_dwords : 8192u;
+	if (workgroup != nullptr) {
+		return workgroup->lds_size_dwords;
+	}
+	if (FunctionLdsIsWrapped(state)) {
+		return std::bit_ceil(std::max(state.program.info.function_lds_dwords, 64u));
+	}
+	return 8192u;
 }
 
 void EnsureLdsStorage(EmitterState& state) {
@@ -225,6 +241,9 @@ MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::
 
 uint32_t EmitMemoryElementInBounds(EmitterState& state, const MemoryResourceAccess& access,
                                    uint32_t index) {
+	if (access.kind == IR::ResourceKind::Lds && FunctionLdsIsWrapped(state)) {
+		return ConstantBool(state, true); // addresses wrap inside the reduced array
+	}
 	const auto in_bounds = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpULessThan, TypeBool(state), in_bounds, index, access.length);
 	return in_bounds;
@@ -239,6 +258,9 @@ uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAcces
 			return EmitStorageBufferElementPointer(
 			    state, access, EmitAddU32(state, state.lds_base_dwords, index),
 			    TypeStorageBufferElementPointer(state, 32));
+		}
+		if (access.kind == IR::ResourceKind::Lds && FunctionLdsIsWrapped(state)) {
+			index = EmitAndU32(state, index, ConstantU32(state, LdsDwordCount(state) - 1u));
 		}
 		const auto pointer = state.builder.AllocateId();
 		if (access.kind == IR::ResourceKind::Lds && state.program.info.shared_int64_atomics) {

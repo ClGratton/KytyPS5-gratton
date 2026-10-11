@@ -486,6 +486,12 @@ struct ShaderInfo {
 	bool                            compute_derivatives           = false;
 	bool                            image_gather_extended         = false;
 	bool                            function_lds                  = false;
+	// Non-compute shaders emulate LDS as a per-invocation Function array. The driver reserves
+	// that much local memory for every resident thread, so it is sized to what the shader can
+	// touch: `function_lds_dwords` is the span of its LDS accesses (0 = unknown, use the full
+	// 8192 dwords), always a power of two so out-of-span addresses can wrap.
+	uint32_t                        function_lds_dwords           = 0;
+	bool                            function_lds_unbounded        = false;
 	bool                            function_scratch              = false;
 	bool                            pixel_valid_mask              = false;
 	bool                            buffer_int64_atomics          = false;
