@@ -111,7 +111,8 @@ struct ConfigOptions {
 	// was presented for that long (common/hangWatchdog.h). 0 = off.
 	uint32_t               hang_watchdog_seconds       = 0;
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
-	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches.
+	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
+	// bit 2 = programs only (do not request pipelines).
 	uint32_t               pipeline_lookahead_kinds    = 3;
 	// --debug-lookahead-verify: the GPU thread recompiles every program a prefetch built before
 	// its first use and compares the SPIR-V; mismatches are logged (finds prefetch inputs that

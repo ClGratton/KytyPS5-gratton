@@ -1864,6 +1864,9 @@ void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
 		m_lookahead.cs_skipped.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
+	if ((Config::GetPipelineLookaheadKinds() & 4u) != 0) {
+		return; // --pipeline-lookahead-kinds *-programs: debug, programs only
+	}
 	if (FindComputePipeline(program.id) != nullptr || m_compute_jobs.Find(program.id) != nullptr) {
 		m_lookahead.cs_already.fetch_add(1, std::memory_order_relaxed);
 		return;
@@ -2196,6 +2199,9 @@ void PipelineCache::PrefetchGraphicsPipeline(std::span<const RenderColorInfo> co
 	auto* pool = AsyncPool();
 	if (pool == nullptr) {
 		return;
+	}
+	if ((Config::GetPipelineLookaheadKinds() & 4u) != 0) {
+		return; // --pipeline-lookahead-kinds *-programs: debug, programs only
 	}
 	const auto key = BuildGraphicsKey(colors, depth, vertex_info, ctx, user_config, ps_input_info,
 	                                  topology, primitive_restart_enable, programs);

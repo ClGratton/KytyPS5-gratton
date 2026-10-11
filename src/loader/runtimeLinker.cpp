@@ -1,6 +1,7 @@
 #include "loader/runtimeLinker.h"
 
 #include "common/assert.h"
+#include "common/enomemTrace.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -680,6 +681,28 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		std::printf("--- Guest fault context ---\n");
 		std::printf("thread: %s\n", thread_name);
+		std::printf("kernel ENOMEM returned so far: %llu\n",
+		            static_cast<unsigned long long>(Common::EnomemCount()));
+		{
+			// module + offset of the faulting pc and of the code addresses on the stack, so the
+			// fault can be located in the (decrypted) eboot without a symbol file.
+			auto*      linker = Common::Singleton<Loader::RuntimeLinker>::Instance();
+			const auto locate = [&](uint64_t address, const char* label) {
+				if (auto* program = linker->FindProgramByAddr(address)) {
+					std::printf("%s %016" PRIx64 " = %s+0x%" PRIx64 "\n", label, address,
+					            Common::FilenameWithoutDirectory(
+					                Common::PathToGenericString(program->file_name)).c_str(),
+					            address - program->base_vaddr);
+				}
+			};
+			locate(info->exception_address, "pc  ");
+			if (IsReadableRange(info->rsp, 64 * sizeof(uint64_t))) {
+				const auto* stack = reinterpret_cast<const uint64_t*>(info->rsp);
+				for (int i = 0; i < 64; i++) {
+					locate(stack[i], "ret?");
+				}
+			}
+		}
 		std::printf("rax=%016" PRIx64 " rbx=%016" PRIx64 " rcx=%016" PRIx64 " rdx=%016" PRIx64 "\n"
 		            "rsi=%016" PRIx64 " rdi=%016" PRIx64 " rbp=%016" PRIx64 " rsp=%016" PRIx64 "\n"
 		            "r8 =%016" PRIx64 " r9 =%016" PRIx64 " r10=%016" PRIx64 " r11=%016" PRIx64 "\n"

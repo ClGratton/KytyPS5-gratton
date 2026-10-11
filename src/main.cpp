@@ -537,10 +537,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.pipeline_lookahead_kinds = 1;
 			} else if (Common::EqualNoCase(value, "compute")) {
 				options.config.pipeline_lookahead_kinds = 2;
+			} else if (Common::EqualNoCase(value, "programs")) {
+				options.config.pipeline_lookahead_kinds = 3 | 4; // programs only, no pipelines
+			} else if (Common::EqualNoCase(value, "compute-programs")) {
+				options.config.pipeline_lookahead_kinds = 2 | 4;
+			} else if (Common::EqualNoCase(value, "graphics-programs")) {
+				options.config.pipeline_lookahead_kinds = 1 | 4;
 			} else if (Common::EqualNoCase(value, "none")) {
 				options.config.pipeline_lookahead_kinds = 0; // shadow decode only
 			} else {
-				::printf("invalid lookahead kinds (expected all, graphics, compute or none): %s\n",
+				::printf("invalid lookahead kinds (expected all, graphics, compute, programs, compute-programs, graphics-programs or none): %s\n",
 				         value.c_str());
 				return false;
 			}
