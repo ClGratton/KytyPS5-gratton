@@ -9,6 +9,10 @@ Method: grep for `static`, `thread_local`, `extern`, `inline` variables, namespa
 `mutable`, `getenv`/`Singleton`/`rand`/locale calls, `Config::`, logging, then read each hit.
 Line numbers: stock `16a7fe6` unless marked `p1:` (phase1 branch at the ProgramCache commit).
 
+> Port note (`phase1-581`, base `581dad7`): this audit was written against `16a7fe6`. At 581dad7 the S_SWAP_PC
+> call-source machinery (`ShaderSource`, `PrepareCallTarget`, `RefreshShaderSource`) does not exist yet, so
+> the rows about it and about the immutable `Linked` snapshot do not apply; line numbers will differ.
+
 **Result in one line:** the translator itself has no problematic mutable global state. The real
 obstacles to worker translation are borrowed memory (guest spans, raw pointers in `input_info`),
 GPU-thread-only scratch inside the retained `ResourcePlan`, and the cache entry aliasing in
