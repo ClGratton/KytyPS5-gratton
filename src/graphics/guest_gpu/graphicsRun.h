@@ -20,6 +20,7 @@
 namespace Libs::Graphics {
 
 class RenderContext;
+class PipelineLookahead;
 
 class GuestGpu final {
 public:
@@ -66,11 +67,14 @@ private:
 		bool                      constant_complete = false;
 		bool                      blocked           = false;
 		uint64_t                  flip_request_id   = 0;
+		uint64_t                  trace_seq         = 0; // --bench-gpu-trace
+		uint32_t                  trace_slices      = 0;
 	};
 
 	void              Enqueue(Submission submission);
 	void              ProcessCommands();
 	bool              Process(Submission& submission);
+	bool              ProcessImpl(Submission& submission);
 	static void       ThreadRun(void* data);
 	CommandProcessor& GetProcessor(uint32_t queue_id);
 
@@ -92,10 +96,12 @@ private:
 	std::shared_ptr<std::binary_semaphore> m_suspend_point_ready =
 	    std::make_shared<std::binary_semaphore>(1);
 
+	std::unique_ptr<PipelineLookahead>                               m_lookahead;
 	std::unique_ptr<CommandProcessor>                                m_gfx_cp;
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;
 
 	uint64_t        m_submit_id = 0;
+	uint64_t        m_trace_seq = 0; // guarded by m_queue_mutex
 	std::atomic_int m_done_num  = 0;
 	std::jthread    m_thread;
 

@@ -89,6 +89,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
@@ -979,6 +980,21 @@ std::string Hex(u32 value) {
 void Require(const char *shader_name, const char *stage, bool value,
              const std::string &message);
 
+// --async-pipelines skip (KYTY_TEST_ASYNC_PIPELINES=skip): GetGraphicsPrograms reports `pending`
+// while a program is built on a worker; retry like the next frame's draw would.
+template <typename F> auto RetryWhilePending(F &&get) {
+  auto programs = get();
+  for (uint32_t attempt = 0; attempt < 20000 && programs.pending; attempt++) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    programs = get();
+  }
+  if (programs.pending) {
+    std::fprintf(stderr, "ShaderRecompilerComputeTests: programs still pending after 20 s\n");
+    std::abort();
+  }
+  return programs;
+}
+
 void EnsureConfigInitialized() {
   static bool config_initialized = false;
   if (!config_initialized) {
@@ -987,6 +1003,16 @@ void EnsureConfigInitialized() {
     subsystems.Initialize<Config::Lifecycle>();
     Config::ConfigOptions options;
     options.printf_direction = Config::LogDirection::Silent;
+    // ctest runs the suite once more with KYTY_TEST_ASYNC_PIPELINES=stall (everything through
+    // the worker pool) and the polygon-mode check with =skip.
+    if (const char *async_mode = std::getenv("KYTY_TEST_ASYNC_PIPELINES")) {
+      if (std::strcmp(async_mode, "stall") == 0) {
+        options.async_pipelines = Config::AsyncPipelineMode::Stall;
+      } else if (std::strcmp(async_mode, "skip") == 0) {
+        options.async_pipelines = Config::AsyncPipelineMode::Skip;
+      }
+      options.pipeline_workers = 4;
+    }
     Config::Load(options);
     subsystems.Initialize<Log::Lifecycle>();
     subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
@@ -16108,10 +16134,21 @@ public:
       mode.polymode_back_ptype = back;
       mode.provoking_vtx_last = provoking_last;
       registers.SetModeControl(mode);
-      return context.GetPipelineCache().GetGraphicsPipeline(
-          std::span{&color, 1u}, depth, std::span{&vertex, 1u}, scheduler.Current(), &pixel,
-          topology, false,
-          PipelineCache::GraphicsPrograms{{vertex_shader}, pixel_shader});
+      // --async-pipelines skip (KYTY_TEST_ASYNC_PIPELINES=skip): nullptr means "still being
+      // built on a worker"; retry like the next frame's draw would.
+      PipelineCache::Pipeline *selected = nullptr;
+      for (uint32_t attempt = 0; attempt < 20000 && selected == nullptr; attempt++) {
+        selected = context.GetPipelineCache().GetGraphicsPipeline(
+            std::span{&color, 1u}, depth, std::span{&vertex, 1u}, scheduler.Current(), &pixel,
+            topology, false,
+            PipelineCache::GraphicsPrograms{{vertex_shader}, pixel_shader});
+        if (selected == nullptr) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+      Require(name, "polygon mode pipeline", selected != nullptr,
+              "pipeline was not ready after 20 s");
+      return *selected;
     };
     auto &filled = pipeline(true, 2, 2);
     const auto draw = [&](const PipelineCache::Pipeline &selected, uint32_t vertex_count = 3,
@@ -16480,9 +16517,11 @@ public:
                               PixelWaveCase{0x8008, 32, 0x3e800000},
                               PixelWaveCase{0x0008, 64, 0}}) {
         registers.SetPsInControl(wave.control);
-        const auto programs = context.GetPipelineCache().GetGraphicsPrograms(
+        const auto programs = RetryWhilePending([&] {
+          return context.GetPipelineCache().GetGraphicsPrograms(
             native_vertex_regs, native_pixel_regs, registers.GetShaderRegisters(),
             registers, user_config, export_mapping, true, native_vertex_info, pixel);
+        });
         Require(name, "pixel wave metadata propagation",
                 pixel.input_num == 8 && pixel.stage.program->wave_size == wave.width,
                 "SPI_PS_IN_CONTROL width did not reach the compiled pixel program");
@@ -16543,9 +16582,11 @@ public:
       for (const u32 wave : {32u, 64u}) {
         registers.SetShaderStages((saved_stages & ~0x00400000u) |
                                    (wave == 32u ? 0x00400000u : 0u));
-        const auto programs = context.GetPipelineCache().GetGraphicsPrograms(
+        const auto programs = RetryWhilePending([&] {
+          return context.GetPipelineCache().GetGraphicsPrograms(
             native_vertex_regs, native_pixel_regs, registers.GetShaderRegisters(),
             registers, user_config, export_mapping, true, native_vertex_info, pixel);
+        });
         vertex_shader = programs.vertex[0];
         pixel_shader = programs.pixel;
         vertex = native_vertex_info[0];
@@ -16612,9 +16653,11 @@ public:
         alpha_blend.separate_alpha_blend = test.separate;
         alpha_blend.alpha_srcblend = static_cast<uint8_t>(test.alpha_source);
         registers.SetBlendControl(0, alpha_blend);
-        const auto programs = context.GetPipelineCache().GetGraphicsPrograms(
+        const auto programs = RetryWhilePending([&] {
+          return context.GetPipelineCache().GetGraphicsPrograms(
             native_vertex_regs, native_pixel_regs, registers.GetShaderRegisters(),
             registers, user_config, export_mapping, true, native_vertex_info, pixel);
+        });
         Require(name, "logical alpha blend program", pixel.alpha_blend_source == test.mode &&
                     pixel.dual_source_blending,
                 "the separate alpha equation did not reach the compiled pixel program");
@@ -16687,9 +16730,11 @@ public:
             {.type = Prospero::ShaderBinaryType::kGs,
              .user_data = &native_user_data,
              .code_size_bytes = static_cast<uint32_t>(code.size() * sizeof(u32))});
-        const auto programs = context.GetPipelineCache().GetGraphicsPrograms(
+        const auto programs = RetryWhilePending([&] {
+          return context.GetPipelineCache().GetGraphicsPrograms(
             native_vertex_regs, native_pixel_regs, registers.GetShaderRegisters(),
             registers, user_config, export_mapping, true, native_vertex_info, pixel);
+        });
         vertex_shader = programs.vertex[0];
         pixel_shader = programs.pixel;
         vertex = native_vertex_info[0];
@@ -16704,6 +16749,12 @@ public:
         }
         Require(name, "zero homogeneous position culling", second_triangle == (i >= 2),
                 "zero positions drew an extra triangle, or a valid position was culled");
+      }
+
+      if (Config::GetAsyncPipelineMode() == Config::AsyncPipelineMode::Skip) {
+        // The remaining checks drive RenderExecutor draws, which --async-pipelines skip drops
+        // while a pipeline is being built (by design); the pipeline checks above retry.
+        return;
       }
 
       // A NULL-export stencil pass must ignore smaller stale color targets,

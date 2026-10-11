@@ -127,6 +127,34 @@ static void PrintUsage() {
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
+	::printf("  --pipeline-cache-key <value>         revision (default) or schema. schema keys the driver\n"
+	         "                                       pipeline cache on a schema version + GPU/driver ids\n"
+	         "                                       instead of the git revision, and enables it in\n"
+	         "                                       non-Release/dirty builds.\n");
+	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
+	         "                                       pipeline creation misses. Default: off.\n");
+	::printf("  --bench-gpu-trace <true|false>       With --shader-timing-log: also log the guest submit /\n"
+	         "                                       GPU-thread execute timeline. Default: off.\n");
+	::printf("  --async-pipelines <off|stall|skip>   Run shader translation and Vulkan pipeline creation\n"
+	         "                                       on worker threads. off (default): synchronous, stock\n"
+	         "                                       behaviour. stall: the draw/dispatch waits for the\n"
+	         "                                       worker. skip: graphics draws whose program or pipeline\n"
+	         "                                       is not ready are skipped (compute always waits).\n");
+	::printf("  --pipeline-lookahead <true|false>    Prefetch shader programs and pipelines from submitted\n"
+	         "                                       command buffers into the worker pool (needs\n"
+	         "                                       --async-pipelines stall|skip). Default: false.\n");
+	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
+	         "                                       Default: min(8, hardware threads / 2).\n");
+	::printf("  --debug-texture-gc <true|false>      Debug: false disables the texture garbage collector.\n"
+	         "                                       Default: true.\n");
+	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
+	         "                                       its first use and compare the SPIR-V. Default: false.\n");
+	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
+	         "                                       Debug: restrict --pipeline-lookahead to draws or\n"
+	         "                                       dispatches. Default: all.\n");
+	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
+	         "                                       write a thread / worker pool / lookahead report to\n"
+	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -553,6 +581,88 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.bench_frames_csv = Common::PathFromUtf8(value);
+		} else if (arg == "--pipeline-cache-key") {
+			if (Common::EqualNoCase(value, "revision")) {
+				options.config.pipeline_cache_key = Config::PipelineCacheKey::Revision;
+			} else if (Common::EqualNoCase(value, "schema")) {
+				options.config.pipeline_cache_key = Config::PipelineCacheKey::Schema;
+			} else {
+				::printf("invalid pipeline cache key (expected revision or schema): %s\n",
+				         value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-pipelines") {
+			if (Common::EqualNoCase(value, "off")) {
+				options.config.async_pipelines = Config::AsyncPipelineMode::Off;
+			} else if (Common::EqualNoCase(value, "stall")) {
+				options.config.async_pipelines = Config::AsyncPipelineMode::Stall;
+			} else if (Common::EqualNoCase(value, "skip")) {
+				options.config.async_pipelines = Config::AsyncPipelineMode::Skip;
+			} else {
+				::printf("invalid async pipelines mode (expected off, stall or skip): %s\n",
+				         value.c_str());
+				return false;
+			}
+		} else if (arg == "--pipeline-lookahead") {
+			if (!ParseBool(value, options.config.pipeline_lookahead)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-texture-gc") {
+			if (!ParseBool(value, options.config.texture_gc_enabled)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-lookahead-verify") {
+			if (!ParseBool(value, options.config.lookahead_verify)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--pipeline-lookahead-kinds") {
+			if (Common::EqualNoCase(value, "all")) {
+				options.config.pipeline_lookahead_kinds = 3;
+			} else if (Common::EqualNoCase(value, "graphics")) {
+				options.config.pipeline_lookahead_kinds = 1;
+			} else if (Common::EqualNoCase(value, "compute")) {
+				options.config.pipeline_lookahead_kinds = 2;
+			} else if (Common::EqualNoCase(value, "programs")) {
+				options.config.pipeline_lookahead_kinds = 3 | 4; // programs only, no pipelines
+			} else if (Common::EqualNoCase(value, "compute-programs")) {
+				options.config.pipeline_lookahead_kinds = 2 | 4;
+			} else if (Common::EqualNoCase(value, "graphics-programs")) {
+				options.config.pipeline_lookahead_kinds = 1 | 4;
+			} else if (Common::EqualNoCase(value, "none")) {
+				options.config.pipeline_lookahead_kinds = 0; // shadow decode only
+			} else {
+				::printf("invalid lookahead kinds (expected all, graphics, compute, programs, compute-programs, graphics-programs or none): %s\n",
+				         value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-hang-watchdog") {
+			uint64_t seconds = 0;
+			if (!ParseUint64(value, seconds) || seconds > 3600) {
+				::printf("invalid watchdog seconds (expected 0-3600): %s\n", value.c_str());
+				return false;
+			}
+			options.config.hang_watchdog_seconds = static_cast<uint32_t>(seconds);
+		} else if (arg == "--pipeline-workers") {
+			uint64_t workers = 0;
+			if (!ParseUint64(value, workers) || workers == 0 || workers > 64) {
+				::printf("invalid pipeline worker count (expected 1-64): %s\n", value.c_str());
+				return false;
+			}
+			options.config.pipeline_workers = static_cast<uint32_t>(workers);
+		} else if (arg == "--bench-gpu-trace") {
+			if (!ParseBool(value, options.config.bench_gpu_trace)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--shader-timing-log") {
+			if (value.empty()) {
+				::printf("invalid --shader-timing-log path\n");
+				return false;
+			}
+			options.config.shader_timing_log = Common::PathFromUtf8(value);
 		} else if (arg == "--bench-exit-after-frames") {
 			if (!ParseUint64(value, options.config.bench_exit_after_frames)) {
 				::printf("invalid frame count: %s\n", value.c_str());

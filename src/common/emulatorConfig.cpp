@@ -2,9 +2,11 @@
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
+#include "common/hangWatchdog.h"
 
 #include <algorithm>
 #include <memory>
+#include <thread>
 
 namespace Config {
 
@@ -28,10 +30,45 @@ void Load(const ConfigOptions& cfg) {
 
 	*g_config = cfg;
 
+	Common::Hang::Start(cfg.hang_watchdog_seconds);
 	Bench::Configure({
 	    .frames_csv        = cfg.bench_frames_csv,
 	    .exit_after_frames = cfg.bench_exit_after_frames,
+	    .shader_timing_log = cfg.shader_timing_log,
+	    .gpu_trace         = cfg.bench_gpu_trace,
 	});
+}
+
+PipelineCacheKey GetPipelineCacheKey() {
+	return g_config->pipeline_cache_key;
+}
+
+AsyncPipelineMode GetAsyncPipelineMode() {
+	return g_config->async_pipelines;
+}
+
+bool GetPipelineLookahead() {
+	return g_config->pipeline_lookahead && g_config->async_pipelines != AsyncPipelineMode::Off;
+}
+
+bool TextureGcEnabled() {
+	return g_config->texture_gc_enabled;
+}
+
+bool GetLookaheadVerify() {
+	return g_config->lookahead_verify && g_config->pipeline_lookahead;
+}
+
+uint32_t GetPipelineLookaheadKinds() {
+	return g_config->pipeline_lookahead_kinds;
+}
+
+uint32_t GetPipelineWorkerCount() {
+	if (g_config->pipeline_workers != 0) {
+		return g_config->pipeline_workers;
+	}
+	const auto hardware = std::thread::hardware_concurrency();
+	return std::max(1u, std::min(8u, hardware / 2u));
 }
 
 uint32_t GetScreenWidth() {

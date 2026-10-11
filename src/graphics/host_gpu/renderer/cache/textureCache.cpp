@@ -1902,6 +1902,9 @@ void TextureCache::RunGarbageCollector() {
 	if (Config::VramStatsEnabled()) {
 		m_graphics.LogMemoryBudgetPeriodic();
 	}
+	if (!Config::TextureGcEnabled()) {
+		return;
+	}
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}

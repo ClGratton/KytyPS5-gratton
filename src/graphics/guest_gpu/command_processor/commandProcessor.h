@@ -2,6 +2,7 @@
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_COMMAND_PROCESSOR_H
 
 #include "common/assert.h"
+#include "graphics/guest_gpu/command_processor/shadowTypes.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -32,6 +33,10 @@ struct IndirectDrawRegisters {
 class Pm4Execution {
 public:
 	[[nodiscard]] bool MadeProgress() const noexcept { return m_made_progress; }
+	// Shadow mode only: the decode budget ran out or a condition could not be read, so the rest
+	// of the stream was dropped (docs/lookahead-notes.md, "spin guard").
+	[[nodiscard]] bool Abandoned() const noexcept { return m_abandoned; }
+	[[nodiscard]] const char* AbandonReason() const noexcept { return m_abandon_reason; }
 
 private:
 	friend class CommandProcessor;
@@ -46,6 +51,26 @@ private:
 	bool                      m_chain         = false;
 	bool                      m_suspended     = false;
 	bool                      m_made_progress = false;
+	// Shadow-mode decode budget (a stream whose branches depend on GPU-written memory can loop
+	// forever when nothing ever writes that memory).
+	uint64_t                  m_steps         = 0;
+	uint64_t                  m_jumps         = 0;
+	int64_t                   m_start_ns      = 0;
+	bool                      m_abandoned     = false;
+	const char*               m_abandon_reason = nullptr;
+};
+
+class CommandProcessor;
+
+// --pipeline-lookahead: a "shadow" CommandProcessor decodes a submitted command buffer ahead of
+// the GPU thread, tracking the same register state, but performs no side effects (no guest
+// memory writes, no Vulkan work, no waits). Draws and dispatches are reported to the sink instead
+// (docs/lookahead-notes.md).
+class ShadowSink {
+public:
+	virtual ~ShadowSink()                                                  = default;
+	virtual void OnDraw(CommandProcessor& cp, const ShadowDraw& draw)         = 0;
+	virtual void OnDispatch(CommandProcessor& cp, const ShadowDispatch& dispatch) = 0;
 };
 
 class CommandProcessor {
@@ -62,6 +87,10 @@ public:
 	~CommandProcessor() = default;
 
 	KYTY_CLASS_NO_COPY(CommandProcessor);
+
+	// Turns this processor into a shadow (see ShadowSink). Call before any packet is processed.
+	void SetShadowSink(ShadowSink* sink) { m_shadow_sink = sink; }
+	[[nodiscard]] bool IsShadow() const noexcept { return m_shadow_sink != nullptr; }
 
 	void Reset();
 	void ApplyContextStateOperation(ContextStateOperation operation);
@@ -140,6 +169,8 @@ public:
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain);
+	// Shadow mode: stop decoding the current stream (unreadable condition, budget).
+	void             AbandonShadow(const char* reason);
 
 	void SetFlip(const FlipInfo& flip) { m_flip = flip; }
 
@@ -184,6 +215,7 @@ private:
 	uint64_t  m_submit_id                   = 0;
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
+	ShadowSink* m_shadow_sink               = nullptr;
 };
 
 } // namespace Libs::Graphics

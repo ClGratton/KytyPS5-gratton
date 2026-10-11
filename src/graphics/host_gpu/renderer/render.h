@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/guest_gpu/command_processor/shadowTypes.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -154,6 +155,11 @@ class RenderExecutor {
 public:
 	explicit RenderExecutor(RenderContext& context): m_context(context) {}
 	KYTY_CLASS_NO_COPY(RenderExecutor);
+
+	// --pipeline-lookahead (lookahead thread): request the pipeline a draw is going to need.
+	enum class PrefetchDrawStatus { Skipped, NoPrograms, Requested };
+	bool PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_ctx, const HW::UserConfig& ucfg,
+	                  const ShadowDraw& draw, PrefetchDrawStatus& status);
 
 	void DispatchDirect(uint64_t submit_id, CommandBuffer& buffer, uint32_t thread_group_x,
 	                    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool async_compute);

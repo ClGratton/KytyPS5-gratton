@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/speculation.h"
 #include "common/stringUtils.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -15,6 +16,7 @@
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderVertexMetadata.h"
+#include "kernel/memory.h"
 #include "libs/errno.h"
 
 #include <algorithm>
@@ -70,10 +72,16 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {
 	EXIT_IF(g_shader_map == nullptr);
 
-	std::scoped_lock lock(g_shader_map_mutex);
-
-	if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
-		return iter->second;
+	{
+		std::scoped_lock lock(g_shader_map_mutex);
+		if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
+			return iter->second;
+		}
+	}
+	if (Common::Speculation::Active()) {
+		// A lookahead guess at a stale register value: not fatal, and the mutex is released.
+		Common::Speculation::NoteFailure();
+		return {};
 	}
 
 	EXIT("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
@@ -337,7 +345,18 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 	}
 }
 
-static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
+// Guest vertex tables are read through raw pointers on the real path. On the lookahead thread the
+// tables can be unwritten or stale, so the reads go through the bounds-checked backing reader.
+static bool ReadVertexTableDwords(const uint32_t* source, uint32_t count, uint32_t* out) {
+	if (Common::Speculation::Active()) {
+		return LibKernel::Memory::TryReadBacking(reinterpret_cast<uint64_t>(source), out,
+		                                         static_cast<uint64_t>(count) * sizeof(uint32_t));
+	}
+	std::memcpy(out, source, static_cast<size_t>(count) * sizeof(uint32_t));
+	return true;
+}
+
+static bool ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
                                        std::span<const ShaderSemantic> input_semantics,
                                        const uint32_t* attrib, const uint32_t* buffer) {
 	KYTY_PROFILER_FUNCTION();
@@ -354,20 +373,29 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		uint32_t reg  = in.hardware_mapping;
 		uint32_t size = in.size_in_elements;
 
+		uint32_t attrib_word = 0;
+		if (!ReadVertexTableDwords(&attrib[in.semantic], 1, &attrib_word)) {
+			return false;
+		}
 		if (debug_dump) {
-			LOGF("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i,
-			     attrib[in.semantic]);
+			LOGF("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, attrib_word);
 		}
 
-		size_t index = attrib[in.semantic] & 0x1fu;
+		size_t index = attrib_word & 0x1fu;
 		auto   format =
-		    static_cast<Prospero::VertexAttribFormat>((attrib[in.semantic] >> 5u) & 0x1ffu);
-		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
-		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
+		    static_cast<Prospero::VertexAttribFormat>((attrib_word >> 5u) & 0x1ffu);
+		uint32_t offset      = (attrib_word >> 14u) & 0xfffu;
+		uint32_t fetch_index = (attrib_word >> 26u) & 0x1u;
 
+		if (Common::Speculation::Active() && index >= ShaderVertexInputInfo::RES_MAX) {
+			return false;
+		}
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
 
-		const auto* sharp = &buffer[index * 4];
+		uint32_t sharp[4] = {};
+		if (!ReadVertexTableDwords(&buffer[index * 4], 4, sharp)) {
+			return false;
+		}
 
 		EXIT_NOT_IMPLEMENTED(info.resources_num >= ShaderVertexInputInfo::RES_MAX);
 
@@ -400,6 +428,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 
 		info.resources_num++;
 	}
+	return true;
 }
 
 static uint32_t ShaderCalcPsSystemInputBase(const HW::ShaderRegisters& regs) {
@@ -502,7 +531,9 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 			     shader_addr);
 			return false;
 		}
-		ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer);
+		if (!ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer)) {
+			return false;
+		}
 		ShaderDetectBuffers(info);
 	}
 	return true;
@@ -708,6 +739,9 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
                             const HW::UserConfig& user_config, ShaderVertexInputInfo& info) {
 	const auto& sh     = context.GetShaderRegisters();
 	const auto [data, hash] = ShaderGetMappedData(regs.es_regs.data_addr, "ShaderGetInputInfoVS():");
+	if (Common::Speculation::HasFailure()) {
+		return {};
+	}
 	const bool merged = (context.GetShaderStages() & 0x20u) != 0;
 	// GS_EN controls amplification, not whether an NGG shader uses a workgroup.
 	const bool native_ngg = !merged && data.type == Prospero::ShaderBinaryType::kGs &&
@@ -719,6 +753,10 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	if (!merged && !native_ngg) {
 		if (!ShaderGetStaticVertexInputInfo(regs.es_regs.data_addr, regs.gs_user_sgpr,
 		                                    regs.gs_regs.rsrc2.user_sgpr, sh, data, info)) {
+			if (Common::Speculation::Active()) {
+				Common::Speculation::NoteFailure();
+				return params;
+			}
 			EXIT("failed to prepare vertex shader program\n");
 		}
 		info.wave_size = (context.GetShaderStages() & 0x00400000u) != 0 ? 32u : 64u;
@@ -852,6 +890,9 @@ ShaderParams PrepareProgram(
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
     ShaderPixelInputInfo&                               ps_info) {
 	const auto [data, hash] = ShaderGetMappedData(regs.ps_regs.data_addr, "ShaderGetInputInfoPS():");
+	if (Common::Speculation::HasFailure()) {
+		return {};
+	}
 	ShaderGetStaticInputInfoPS(regs, sh, target_export_mapping, data, ps_info);
 	return GetShaderParams(
 	    regs.ps_regs.data_addr, hash,
@@ -861,6 +902,9 @@ ShaderParams PrepareProgram(
 ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
                             ShaderComputeInputInfo& info) {
 	const auto [data, hash] = ShaderGetMappedData(regs.cs_regs.data_addr, "ShaderGetInputInfoCS():");
+	if (Common::Speculation::HasFailure()) {
+		return {};
+	}
 	ShaderGetStaticInputInfoCS(regs, sh, data, info);
 	return GetShaderParams(
 	    regs.cs_regs.data_addr, hash,

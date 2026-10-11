@@ -11,12 +11,24 @@
 
 namespace Libs::Graphics {
 
+struct GraphicContext;
+namespace HW {
+class Context;
+}
+
 // Without a stencil plane, Hi-Stencil fields are inactive. An active plane is compatible when
 // Hi-Stencil is disabled or HTile backing is present.
 inline constexpr bool depth_htile_stencil_acceleration_compatible(bool has_stencil, bool has_htile,
                                                                   bool htile_stencil_disabled) {
 	return !has_stencil || htile_stencil_disabled || has_htile;
 }
+
+struct RenderDepthInfo;
+// Whether a draw is really a depth/stencil copy (DepthStencilCopy runs it instead of the draw).
+void DepthStencilCopyPlan(const HW::Context& hw, bool& depth_copy, bool& stencil_copy);
+// Register-only part of ResolveRenderDepthTarget (no image lookup); false when no depth/stencil
+// attachment is active. Shared with the --pipeline-lookahead prefetch.
+bool DescribeRenderDepthTarget(GraphicContext& graphics, const HW::Context& hw, RenderDepthInfo& target);
 
 struct RenderDepthInfo {
 	// Discovery keeps guest image information but can remap the view into a larger cache image.

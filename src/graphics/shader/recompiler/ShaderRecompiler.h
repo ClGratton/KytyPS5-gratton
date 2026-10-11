@@ -8,6 +8,7 @@
 #include "graphics/shader/shader.h"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -41,6 +42,13 @@ struct CompileResult {
 };
 
 // Decoded source and typed scalar call queries are retained once per cache source.
+//
+// Thread-safety contract (ProgramCache relies on it): a ShaderSource is mutated only by
+// RefreshShaderSource(), and the mutated members are `reads`, `revision`, `observed_function`
+// and the `linked` pointer. The pointee of `linked` is immutable once published: a refresh builds
+// a new Linked and swaps the pointer, never edits the old object, so a reader that copied the
+// shared_ptr (under the owner's lock) can keep using its snapshot while a later refresh replaces it.
+// The owner must serialise RefreshShaderSource() against every reader of the mutated members.
 struct ShaderSource {
 	struct Call {
 		uint32_t instruction;
@@ -49,13 +57,14 @@ struct ShaderSource {
 	struct Linked {
 		std::vector<uint32_t> code;
 		Decoder::Program decoded;
-		std::vector<uint32_t> observed_function;
 	};
 	std::vector<uint32_t> code;
 	Decoder::Program decoded;
 	IR::ResourcePlan call_targets;
 	std::optional<Call> call;
-	std::optional<Linked> linked;
+	std::shared_ptr<const Linked> linked;
+	// Scratch for the per-refresh "did the callee change" comparison. Owner-serialised, not shared.
+	std::vector<uint32_t> observed_function;
 	uint64_t revision = 0;
 	std::vector<std::pair<uint64_t, uint64_t>> reads;
 };

@@ -4,6 +4,7 @@
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
+#include "common/enomemTrace.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -2453,7 +2454,7 @@ static int MapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags
 		return KERNEL_ERROR_EINVAL;
 	}
 	if (len > g_flexible_memory->Available()) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	if (name == nullptr) {
@@ -2491,7 +2492,7 @@ static int MapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags
 			return KERNEL_ERROR_EINVAL;
 		}
 		if ((flags & GUEST_MAP_NO_OVERWRITE) != 0 && g_virtual_ranges->HasOverlap(in_addr, len)) {
-			return KERNEL_ERROR_ENOMEM;
+			return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		}
 		std::vector<VirtualRanges::Range> reserved_ranges;
 		if (g_virtual_ranges->QuerySpan(in_addr, len, &reserved_ranges) &&
@@ -2517,12 +2518,12 @@ static int MapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags
 	*addr_in_out = reinterpret_cast<void*>(out_addr);
 
 	if (out_addr == 0) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	if (!g_flexible_memory->Map(out_addr, len, prot, mode, gpu_mode, name)) {
 		LOGF_COLOR(Log::Color::Red, "\t [Fail]\n");
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	const bool published = reserved_target
@@ -2839,7 +2840,7 @@ int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t search_start, int64_t 
 
 	if (search_end <= search_start) {
 		LOGF_COLOR(Log::Color::Red, "\t[Fail]\n");
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	uint64_t phys_addr = 0;
@@ -2848,7 +2849,7 @@ int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t search_start, int64_t 
 	                                  static_cast<uint64_t>(search_end), alignment, &phys_addr,
 	                                  &size)) {
 		LOGF_COLOR(Log::Color::Red, "\t[Fail]\n");
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	*phys_addr_out = static_cast<int64_t>(phys_addr);
@@ -3202,7 +3203,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 		return KERNEL_ERROR_EINVAL;
 	}
 	if (!g_physical_memory->CanMapDirect(static_cast<uint64_t>(direct_memory_start), len)) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	auto     in_addr         = reinterpret_cast<uint64_t>(*addr);
@@ -3236,7 +3237,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 			return KERNEL_ERROR_EINVAL;
 		}
 		if (no_overwrite && g_virtual_ranges->HasOverlap(in_addr, len)) {
-			return KERNEL_ERROR_ENOMEM;
+			return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		}
 
 		std::vector<VirtualRanges::Range> reserved_ranges;
@@ -3278,7 +3279,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 			// do not publish a temporary reserved/PROT_NONE range between two direct views.
 			if (!map_shared_fixed(in_addr)) {
 				restore_mappings(replaced_mappings.size(), true);
-				return KERNEL_ERROR_ENOMEM;
+				return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 			}
 			out_addr       = in_addr;
 			shared_backing = true;
@@ -3296,7 +3297,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 				reserved_target = true;
 			}
 			if (!reserved_target) {
-				return KERNEL_ERROR_ENOMEM;
+				return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 			}
 			if (map_shared_fixed(in_addr)) {
 				out_addr       = in_addr;
@@ -3352,7 +3353,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	     magic_enum::enum_name(gpu_mode), shared_backing ? "yes" : "no", shared_reason);
 
 	if (out_addr == 0) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	PhysicalMemory::AllocatedBlock mapped_block {};
@@ -3729,7 +3730,7 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 			return KERNEL_ERROR_EINVAL;
 		}
 		if ((flags & GUEST_MAP_NO_OVERWRITE) != 0 && g_virtual_ranges->HasOverlap(in_addr, len)) {
-			return KERNEL_ERROR_ENOMEM;
+			return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		}
 		if (ReplaceFixedRangeWithReserved(in_addr, len)) {
 			out_addr            = in_addr;
@@ -3744,7 +3745,7 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 	}
 
 	if (out_addr == 0) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	if (!range_already_added &&
@@ -4272,7 +4273,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 		return KERNEL_ERROR_EINVAL;
 	}
 	if (static_cast<uint64_t>(search_end - search_start) < len) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	const auto effective_alignment = (alignment != 0 ? alignment : POOL_PAGE_SIZE);
@@ -4280,7 +4281,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 	if (!g_physical_memory->Alloc(static_cast<uint64_t>(search_start),
 	                              static_cast<uint64_t>(search_end), len, effective_alignment,
 	                              &phys_addr, 0, PhysicalMemory::AllocationKind::Pooled)) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	g_pooled_memory->Expand(phys_addr, len);
@@ -4381,7 +4382,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 
 	std::vector<PooledMemory::Mapping> mappings;
 	if (!g_pooled_memory->Allocate(vaddr, len, gpu_mode, &mappings)) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 	}
 
 	std::vector<PooledMemory::Mapping> mapped;
@@ -4403,7 +4404,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 			LOGF_COLOR(Log::Color::Red, "\t pool backing map failed: %s\n",
 			           GuestBackingStore::GetFailureReasonName(failure_reason));
 			rollback();
-			return KERNEL_ERROR_ENOMEM;
+			return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		}
 		mapped.push_back(mapping);
 	}

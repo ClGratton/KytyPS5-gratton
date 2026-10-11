@@ -4,13 +4,18 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
+#include <string>
 #include <memory>
+#include <shared_mutex>
 #include <span>
 #include <type_traits>
 #include <unordered_map>
@@ -99,7 +104,10 @@ struct ShaderProgram {
 	explicit operator bool() const { return id != 0 && module != nullptr; }
 };
 
-// The owning renderer serializes access, including saves while the GPU is running.
+// The owning renderer serializes access, including saves while the GPU is running. With
+// --async-pipelines on, worker threads also touch the cache: they only publish into the program
+// cache (per-entry locks) and into the two pipeline maps (m_pipelines_mutex); see
+// docs/phase2-notes.md for the full thread-safety argument.
 class PipelineCache {
 public:
 	explicit PipelineCache(GraphicContext& graphics);
@@ -112,11 +120,19 @@ public:
 		vk::Pipeline            pipeline              = nullptr;
 		vk::DescriptorSetLayout descriptor_set_layout = nullptr;
 		bool                    uses_push_descriptors = false;
+		// --pipeline-lookahead: built by a prefetch job; `claimed` is set by the GPU thread when
+		// the first draw/dispatch uses it (prediction hit accounting only).
+		bool prefetched = false;
+		bool claimed    = false;
 	};
 
 	struct GraphicsPrograms {
 		std::array<ShaderProgram, 3> vertex;
 		ShaderProgram pixel;
+
+		// --async-pipelines skip: a program was not ready, nothing else in here is valid and
+		// the draw must be skipped.
+		bool pending = false;
 
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
@@ -132,7 +148,29 @@ public:
 	                                const HW::ShaderRegisters&   sh,
 	                                ShaderComputeInputInfo&      input_info);
 
-	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
+	// Returns nullptr only with --async-pipelines skip, when the pipeline is still being built:
+	// the caller must skip the draw.
+	// ---- --pipeline-lookahead, graphics (lookahead thread only) -----------------------------
+	// Same as GetGraphicsPrograms with `prefetch` set: the lookahead thread materializes
+	// privately, waits for the program jobs itself and never skips. An empty result (vertex[0]
+	// false) means "not prefetchable".
+	GraphicsPrograms
+	PrefetchGraphicsPrograms(const HW::VertexShaderInfo& vertex_regs,
+	                         const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,
+	                         const HW::Context& context, const HW::UserConfig& user_config,
+	                         std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
+	                         bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
+	                         ShaderPixelInputInfo& pixel_info);
+	// Builds the pipeline key exactly like the draw path and submits the creation job.
+	void PrefetchGraphicsPipeline(std::span<const RenderColorInfo>       colors,
+	                              const RenderDepthInfo&                 depth,
+	                              std::span<const ShaderVertexInputInfo> vertex_info,
+	                              const HW::Context& ctx, const HW::UserConfig& user_config,
+	                              const ShaderPixelInputInfo* ps_input_info,
+	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                              const GraphicsPrograms& programs);
+
+	Pipeline* GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,
 	                              std::span<const ShaderVertexInputInfo> vertex_info,
 	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
@@ -141,8 +179,55 @@ public:
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	                             const ShaderProgram&          compute_program);
 
+	// ---- --pipeline-lookahead (lookahead thread only, docs/lookahead-notes.md) ---------------
+	// Counters of the prediction accounting. Predictions are made by the lookahead thread, hits
+	// and misses are counted by the GPU thread when a draw/dispatch needs its pipeline.
+	struct LookaheadCounters {
+		std::atomic<uint64_t> cs_seen {0};            // dispatches the lookahead looked at
+		std::atomic<uint64_t> cs_skipped {0};         // no prefetch (null shader, program not ready, ...)
+		std::atomic<uint64_t> cs_requested {0};       // pipeline jobs submitted by the lookahead
+		std::atomic<uint64_t> cs_already {0};         // pipeline already published or in flight
+		std::atomic<uint64_t> cs_hit_ready {0};       // dispatch found a prefetched pipeline ready
+		std::atomic<uint64_t> cs_hit_inflight {0};    // dispatch joined a prefetched job in flight
+		std::atomic<uint64_t> cs_miss {0};            // dispatch had to create its own job
+		std::atomic<uint64_t> gfx_seen {0};
+		std::atomic<uint64_t> gfx_skipped {0};
+		std::atomic<uint64_t> gfx_requested {0};
+		std::atomic<uint64_t> gfx_already {0};
+		std::atomic<uint64_t> gfx_hit_ready {0};
+		std::atomic<uint64_t> gfx_hit_inflight {0};
+		std::atomic<uint64_t> gfx_miss {0};
+		// Why a prefetch request was dropped (graphics draws, then program lookups).
+		enum Skip : uint32_t {
+			SkipZeroCount, SkipColorMode, SkipDepthCopy, SkipNoVertexShader, SkipTopology,
+			SkipIndexType, SkipPrograms, SkipNoTarget, SkipRectNoExport, SkipMesh,
+			SkipPrepareFailed, SkipMaterializeFailed, SkipCount
+		};
+		std::atomic<uint64_t> skip[SkipCount] {};
+		static constexpr const char* SkipName(uint32_t reason) {
+			constexpr const char* names[] = {"zero_count", "color_mode", "depth_copy",
+			                                 "no_vertex_shader", "topology", "index_type",
+			                                 "programs", "no_target", "rect_no_export", "mesh",
+			                                 "prepare_failed", "materialize_failed"};
+			return reason < SkipCount ? names[reason] : "?";
+		}
+	};
+	[[nodiscard]] LookaheadCounters& Lookahead() { return m_lookahead; }
+	// Printed with the lookahead counters when the pool stops (the lookahead thread's own stats).
+	void SetLookaheadThreadSummary(std::function<std::string()> summary) {
+		m_lookahead_thread_summary = std::move(summary);
+	}
+	// Compute: `mode` is the DISPATCH_DIRECT initiator; `groups` the direct group counts (all
+	// zero for an indirect dispatch, like the real path before it reads the arguments). Every
+	// input-info field the real dispatch sets before GetComputeProgram() must be set here too:
+	// whatever is not part of the program key (lds_storage) still changes the compiled shader.
+	void PrefetchCompute(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
+	                     uint32_t mode, bool async_compute, const uint32_t (&groups)[3]);
+
 private:
 	struct ProgramCache;
+	struct GraphicsPipelineJob;
+	struct ComputePipelineJob;
 
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
@@ -169,15 +254,62 @@ private:
 		std::size_t operator()(const GraphicsPipelineKey& key) const;
 	};
 
+	GraphicsPrograms GetGraphicsProgramsImpl(
+	    const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
+	    const HW::ShaderRegisters& sh, const HW::Context& context,
+	    const HW::UserConfig& user_config,
+	    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
+	    bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
+	    ShaderPixelInputInfo& pixel_info, bool prefetch);
+	void NoteDrawUse(Pipeline& pipeline, bool graphics, bool joined_in_flight);
+	GraphicsPipelineKey BuildGraphicsKey(std::span<const RenderColorInfo>       colors,
+	                                     const RenderDepthInfo&                 depth,
+	                                     std::span<const ShaderVertexInputInfo> vertex_info,
+	                                     const HW::Context& ctx, const HW::UserConfig& user_config,
+	                                     const ShaderPixelInputInfo* ps_input_info,
+	                                     vk::PrimitiveTopology topology,
+	                                     bool primitive_restart_enable,
+	                                     const GraphicsPrograms& programs);
+
 	GraphicContext&               m_graphics;
 	std::unique_ptr<ProgramCache> m_program_cache;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
+	// Guarded by m_pipelines_mutex whenever m_async_mode != Off (workers publish into them).
+	// Pipeline objects are heap nodes that are never erased while the cache lives, so a returned
+	// Pipeline& / Pipeline* stays valid after the lock is dropped.
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
+	std::shared_mutex                                       m_pipelines_mutex;
+
+	// --async-pipelines. The mode is fixed at construction; m_async is null in Off mode.
+	const Config::AsyncPipelineMode m_async_mode;
+	std::unique_ptr<AsyncPipelineCompiler> m_async;
+	InFlightRegistry<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_graphics_jobs;
+	InFlightRegistry<uint64_t>                                     m_compute_jobs;
+
+	LookaheadCounters m_lookahead;
+	std::function<std::string()> m_lookahead_thread_summary;
+	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
+	// (or starts) while the pool and the registries are torn down.
+	std::shared_mutex m_prefetch_gate;
+	bool              m_prefetch_stopped = false;
 
 	void InitializeDriverCache();
+	// The pool when async is on and still running (it stops in Save()), else nullptr.
+	AsyncPipelineCompiler* AsyncPool();
+	// Stops the workers (cancels queued jobs, waits for running ones). Idempotent.
+	void ShutdownAsync();
+	Pipeline* FindGraphicsPipeline(const GraphicsPipelineKey& key);
+	Pipeline* FindComputePipeline(uint64_t program_id);
+	// Inserts a finished pipeline; returns the one in the map (ours, or an existing equal one, in
+	// which case `inserted` is false and `pipeline` is left untouched for the caller to destroy).
+	Pipeline* PublishGraphicsPipeline(const GraphicsPipelineKey& key,
+	                                  std::unique_ptr<Pipeline>& pipeline, bool& inserted);
+	Pipeline* PublishComputePipeline(uint64_t program_id, std::unique_ptr<Pipeline>& pipeline,
+	                                 bool& inserted);
+	void      DestroyPipeline(Pipeline& pipeline);
 };
 
 void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pixel_program_id);

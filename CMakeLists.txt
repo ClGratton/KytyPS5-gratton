@@ -438,6 +438,12 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+add_executable(sys_file_read_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SysFileReadTests.cpp"
+)
+target_link_libraries(sys_file_read_tests common)
+target_include_directories(sys_file_read_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
@@ -452,6 +458,12 @@ add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
 target_include_directories(lds_span_tests PRIVATE ${inc_headers})
+add_executable(async_pipeline_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/AsyncPipelineTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.cpp"
+)
+target_link_libraries(async_pipeline_tests fmt::fmt common)
+target_include_directories(async_pipeline_tests PRIVATE ${inc_headers})
 
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
@@ -637,6 +649,8 @@ if(BUILD_TESTING)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME vram_policy COMMAND $<TARGET_FILE:vram_policy_tests>)
 	add_test(NAME lds_span COMMAND $<TARGET_FILE:lds_span_tests>)
+	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
+	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -658,6 +672,17 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	# --async-pipelines through the real PipelineCache: the whole suite with every program and
+	# pipeline built on a worker (stall), and the graphics pipeline check with draws that retry
+	# until the worker has published the pipeline (skip; compute dispatches wait either way).
+	add_test(NAME shader_recompiler_compute_async_stall
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_async_stall PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=stall")
+	add_test(NAME graphics_pipeline_rasterization_async_skip
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(graphics_pipeline_rasterization_async_skip PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=skip")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME virtual_memory_allocation
@@ -713,6 +738,8 @@ if(BUILD_TESTING)
 		avplayer_file_tests
 		bit_array_tests
 		lru_cache_tests
+		sys_file_read_tests
+		async_pipeline_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests

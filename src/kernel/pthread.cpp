@@ -5,6 +5,7 @@
 #include "common/dateTime.h"
 #include "common/emulatorConfig.h"
 #include "common/hostException.h"
+#include "common/enomemTrace.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -1574,7 +1575,7 @@ int KYTY_SYSV_ABI PthreadMutexattrInit(PthreadMutexattr* attr) {
 
 	switch (result) {
 		case 0: return OK;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		default: return KERNEL_ERROR_EINVAL;
 	}
 }
@@ -1591,7 +1592,7 @@ int KYTY_SYSV_ABI PthreadMutexattrDestroy(PthreadMutexattr* attr) {
 
 	switch (result) {
 		case 0: return OK;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		default: return KERNEL_ERROR_EINVAL;
 	}
 }
@@ -1692,7 +1693,7 @@ static int PthreadMutexInitNamed(PthreadMutex* mutex, const PthreadMutexattr* at
 		case 0: return OK;
 		case EAGAIN: return KERNEL_ERROR_EAGAIN;
 		case EINVAL: return KERNEL_ERROR_EINVAL;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		default: return KERNEL_ERROR_EINVAL;
 	}
 }
@@ -1871,7 +1872,7 @@ int KYTY_SYSV_ABI PthreadAttrInit(PthreadAttr* attr) {
 
 	switch (result) {
 		case 0: return OK;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		default: return KERNEL_ERROR_EINVAL;
 	}
 }
@@ -2604,7 +2605,7 @@ int KYTY_SYSV_ABI PthreadRwlockattrInit(PthreadRwlockattr* attr) {
 
 	switch (result) {
 		case 0: return OK;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		default: return KERNEL_ERROR_EINVAL;
 	}
 }
@@ -2663,7 +2664,7 @@ int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr) {
 
 	switch (result) {
 		case 0: return OK;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		default: return KERNEL_ERROR_EINVAL;
 	}
 }
@@ -2784,7 +2785,7 @@ static int PthreadCondInitNamed(PthreadCond* cond, const PthreadCondattr* attr, 
 		case 0: return OK;
 		case EAGAIN: return KERNEL_ERROR_EAGAIN;
 		case EINVAL: return KERNEL_ERROR_EINVAL;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		default: return KERNEL_ERROR_EINVAL;
 	}
 }
@@ -3305,7 +3306,7 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr,
 
 	switch (result) {
 		case 0: return OK;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case ENOMEM: return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		case EAGAIN: return KERNEL_ERROR_EAGAIN;
 		case EDEADLK: return KERNEL_ERROR_EDEADLK;
 		case EPERM: return KERNEL_ERROR_EPERM;
@@ -3925,7 +3926,7 @@ int KYTY_SYSV_ABI PthreadSetspecific(PthreadKey key, void* value) {
 		}
 		g_pthread_specific.reset(new (std::nothrow) PthreadSpecificValue[KEYS_MAX] {});
 		if (g_pthread_specific == nullptr) {
-			return KERNEL_ERROR_ENOMEM;
+			return Common::NoteEnomem(KERNEL_ERROR_ENOMEM, __func__, __LINE__);
 		}
 	}
 	g_pthread_specific[key] = {generation, value};

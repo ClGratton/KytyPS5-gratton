@@ -10483,10 +10483,10 @@ void TestMemoryFedScalarLeafCall() {
             source.reads.back() == std::pair<uint64_t, uint64_t>{base + 0x100, 12},
         "aliased call target, exact leaf range, or continuation was lost");
   const auto* storage = linked.instructions.data();
-  const auto* scratch = source.linked->observed_function.data();
+  const auto* scratch = source.observed_function.data();
   (void)RefreshShaderSource(source, runtime);
   Check(source.revision == 1 && source.linked->decoded.instructions.data() == storage &&
-            source.linked->observed_function.data() == scratch,
+            source.observed_function.data() == scratch,
         "unchanged leaf rebuilt decoded instructions or refresh storage");
   auto translated = TranslateProgram(linked, options);
   translated.program.source_reads = source.reads;

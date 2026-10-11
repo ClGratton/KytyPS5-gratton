@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <atomic>
 #include <bit>
 #include <limits>
 #include <span>
@@ -98,11 +100,11 @@ static void GetInputFormat(const ShaderBufferResource& res, vk::Format& format, 
 	const auto fmt        = res.Format();
 	const auto raw_format = res.RawFormat();
 	if (raw_format == kTemporaryVertexAttribFormat113) {
-		static bool logged_113 = false;
-		if (!logged_113) {
+		// Atomic: pipelines are created on worker threads with --async-pipelines.
+		static std::atomic_bool logged_113 = false;
+		if (!logged_113.exchange(true, std::memory_order_relaxed)) {
 			LOGF("InputFormat: temporary: accepting invalid PS5 buffer format 113 as "
 			     "vk::Format::eR32G32B32A32Sfloat\n");
-			logged_113 = true;
 		}
 		format = vk::Format::eR32G32B32A32Sfloat;
 		size   = 4;
@@ -113,10 +115,9 @@ static void GetInputFormat(const ShaderBufferResource& res, vk::Format& format, 
 		return;
 	}
 	if (raw_format == kTemporaryPs5BufferFormat121) {
-		static bool logged_121 = false;
-		if (!logged_121) {
+		static std::atomic_bool logged_121 = false;
+		if (!logged_121.exchange(true, std::memory_order_relaxed)) {
 			LOGF("InputFormat: accepting PS5 buffer format 121 as vk::Format::eR16G16Sfloat\n");
-			logged_121 = true;
 		}
 		format = vk::Format::eR16G16Sfloat;
 		size   = 2;
@@ -324,11 +325,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		}
 
 		if (vs_input_info.resources[index].OutOfBounds() != 0) {
-			static bool logged = false;
-			if (!logged) {
+			static std::atomic_bool logged = false;
+			if (!logged.exchange(true, std::memory_order_relaxed)) {
 				LOGF("VertexInput: temporary: accepting PS5 out-of-bounds behavior %" PRIu8 "\n",
 				     vs_input_info.resources[index].OutOfBounds());
-				logged = true;
 			}
 		}
 
@@ -549,8 +549,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		         vertex_program.id, ps_active ? pixel_program.id : 0, mesh ? 1 : 0);
 	}
 	const auto compile_begin = std::chrono::steady_clock::now();
+	const auto driver_t0     = Bench::TimingEnabled() ? Bench::NowNs() : int64_t {0};
 	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
 	                                                 &pipeline.pipeline);
+	if (driver_t0 != 0) Bench::SetDriverCreateNs(Bench::NowNs() - driver_t0);
 	if (log_compile) {
 		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 		                    std::chrono::steady_clock::now() - compile_begin)
@@ -631,8 +633,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	LOGF("PipelineTrace: vkCreateComputePipelines begin layout=%p\n",
 	     static_cast<void*>(pipeline.pipeline_layout));
+	const auto driver_t0 = Bench::TimingEnabled() ? Bench::NowNs() : int64_t {0};
 	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
 	                                                &pipeline.pipeline);
+	if (driver_t0 != 0) Bench::SetDriverCreateNs(Bench::NowNs() - driver_t0);
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);

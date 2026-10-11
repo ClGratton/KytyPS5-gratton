@@ -11,6 +11,10 @@
 
 namespace Libs::Graphics {
 
+namespace HW {
+class Context;
+}
+
 struct RenderColorInfo {
 	// Discovery keeps guest image information but can remap the view into a larger cache image.
 	TextureCache::ImageDesc         desc;
@@ -25,6 +29,13 @@ struct RenderColorInfo {
 		        std::max(desc.info.extent.height >> guest_mip_level, 1u)};
 	}
 };
+
+// Everything ResolveRenderColorTarget computes from the registers alone (format, samples, export
+// mapping, view); no image lookup. Returns false when the slot has no color output.
+// Shared with the --pipeline-lookahead prefetch so both build the same pipeline key.
+bool DescribeRenderColorTarget(const HW::Context& hw, RenderColorInfo& target,
+                               uint32_t render_target_slice_offset, uint32_t render_target_slot,
+                               bool ignore_target_mask = false);
 
 } // namespace Libs::Graphics
 

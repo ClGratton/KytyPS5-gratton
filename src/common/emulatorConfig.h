@@ -27,6 +27,22 @@ enum class LogDirection { Silent, Console, File };
 
 enum class PresentMode { Fifo, Mailbox, Immediate };
 
+// What the on-disk driver VkPipelineCache signature is keyed on (see pipelineCache.cpp).
+//   Revision: stock behaviour. The git revision is part of the signature, so every commit drops
+//             the cache, and non-Release / unknown-revision / dirty builds disable it entirely.
+//   Schema:   a schema-version constant plus vendor/device/driverVersion/pipelineCacheUUID. The
+//             cache survives emulator revisions and is also enabled in dev (non-Release, dirty)
+//             builds. Opt-in via --pipeline-cache-key schema.
+enum class PipelineCacheKey { Revision, Schema };
+
+// Where shader translation and Vulkan pipeline creation run (--async-pipelines, shaders.md C1a).
+//   Off:   stock behaviour. Everything is synchronous on the GPU thread.
+//   Stall: a miss submits a self-contained job to the worker pool and the draw/dispatch waits for
+//          it. Same result as Off, but the work runs on a worker (foundation for lookahead).
+//   Skip:  a graphics draw whose program or pipeline is not ready is skipped (KytyPlus
+//          behaviour); compute dispatches always wait.
+enum class AsyncPipelineMode { Off, Stall, Skip };
+
 using Keymap = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
 
@@ -94,6 +110,29 @@ struct ConfigOptions {
 	// Observation-only benchmark instrumentation (see common/benchInstrument.h). Off by default.
 	std::filesystem::path  bench_frames_csv;
 	uint64_t               bench_exit_after_frames     = 0;
+	std::filesystem::path  shader_timing_log;
+	bool                   bench_gpu_trace             = false;
+	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Revision;
+	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
+	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.
+	uint32_t               pipeline_workers            = 0;
+	// --pipeline-lookahead: prefetch pipelines from submitted command buffers (needs
+	// --async-pipelines stall or skip). Default off.
+	bool                   pipeline_lookahead          = false;
+	// --debug-hang-watchdog <seconds>: write a thread/pool/lookahead state report when no frame
+	// was presented for that long (common/hangWatchdog.h). 0 = off.
+	uint32_t               hang_watchdog_seconds       = 0;
+	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
+	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
+	// bit 2 = programs only (do not request pipelines).
+	uint32_t               pipeline_lookahead_kinds    = 3;
+	// --debug-lookahead-verify: the GPU thread recompiles every program a prefetch built before
+	// its first use and compares the SPIR-V; mismatches are logged (finds prefetch inputs that
+	// differ from the real draw's). Slow, debug only.
+	bool                   lookahead_verify            = false;
+	// --debug-texture-gc <true|false>: false disables the texture garbage collector (debug:
+	// tells whether a rendering difference comes from an evicted GPU-only image).
+	bool                   texture_gc_enabled          = true;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -131,6 +170,15 @@ bool                  CommandBufferDumpEnabled();
 std::filesystem::path GetCommandBufferDumpFolder();
 
 bool GraphicsDebugDumpEnabled();
+
+PipelineCacheKey GetPipelineCacheKey();
+AsyncPipelineMode GetAsyncPipelineMode();
+// Resolved worker count (never 0).
+uint32_t          GetPipelineWorkerCount();
+bool              GetPipelineLookahead();
+uint32_t          GetPipelineLookaheadKinds();
+bool              GetLookaheadVerify();
+bool              TextureGcEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

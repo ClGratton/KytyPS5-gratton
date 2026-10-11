@@ -40,12 +40,10 @@ static bool DccAlphaOnMsb(const HW::ColorInfo& info) {
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
-                                              uint32_t         render_target_slice_offset,
-                                              uint32_t rt_slot, bool ignore_target_mask,
-                                              bool exact_format) {
+bool DescribeRenderColorTarget(const HW::Context& hw, RenderColorInfo& r,
+                               uint32_t render_target_slice_offset, uint32_t rt_slot,
+                               bool ignore_target_mask) {
 	KYTY_PROFILER_FUNCTION();
-	const auto& hw = buffer.GetRegisters();
 
 	const auto& rt      = hw.GetRenderTarget(rt_slot);
 	auto        mask    = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
@@ -69,7 +67,7 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 			}
 		}
 
-		return;
+		return false;
 	}
 	const auto samples = render_sample_count(rt.attrib.num_fragments);
 	if (samples == 0 || rt.attrib.num_samples != rt.attrib.num_fragments) {
@@ -253,11 +251,23 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	desc.view_info.base_layer  = view.base_layer;
 	desc.view_info.layer_count = view.layer_count;
 	desc.view_info.usage       = vk::ImageUsageFlagBits::eColorAttachment;
-	auto& texture_cache        = m_context.GetTextureCache();
 	r.guest_mip_level          = rt.view.current_mip_level;
 	r.guest_array_layer        = view.base_layer;
-	r.image_id                 = texture_cache.FindImage(r.desc, exact_format);
 	r.export_mapping           = target_format.export_mapping;
+	return true;
+}
+
+void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
+                                              uint32_t         render_target_slice_offset,
+                                              uint32_t rt_slot, bool ignore_target_mask,
+                                              bool exact_format) {
+	KYTY_PROFILER_FUNCTION();
+	if (!DescribeRenderColorTarget(buffer.GetRegisters(), r, render_target_slice_offset, rt_slot,
+	                               ignore_target_mask)) {
+		return;
+	}
+	auto& texture_cache = m_context.GetTextureCache();
+	r.image_id          = texture_cache.FindImage(r.desc, exact_format);
 	BindRenderTarget(r.image_id);
 }
 

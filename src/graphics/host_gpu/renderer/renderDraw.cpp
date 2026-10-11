@@ -859,17 +859,8 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	return false;
 }
 
-static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
-                           uint32_t color_output_mask, DrawRenderState& state) {
-	auto& ctx    = buffer.GetRegisters();
-	auto& sh_ctx = buffer.GetShaders();
-
-	const auto& vertex_shader_info = sh_ctx.GetVs();
-	const auto& pixel_shader_info  = sh_ctx.GetPs();
-	const auto& shader_regs        = ctx.GetShaderRegisters();
-
-	state.programs      = {};
-	state.ps_input_info = {};
+static std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX>
+BuildTargetExportMapping(const HW::Context& ctx, uint32_t color_output_mask) {
 	std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX>
 	    target_export_mapping {};
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
@@ -881,6 +872,21 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 			        .export_mapping;
 		}
 	}
+	return target_export_mapping;
+}
+
+static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
+                           uint32_t color_output_mask, DrawRenderState& state) {
+	auto& ctx    = buffer.GetRegisters();
+	auto& sh_ctx = buffer.GetShaders();
+
+	const auto& vertex_shader_info = sh_ctx.GetVs();
+	const auto& pixel_shader_info  = sh_ctx.GetPs();
+	const auto& shader_regs        = ctx.GetShaderRegisters();
+
+	state.programs      = {};
+	state.ps_input_info = {};
+	const auto target_export_mapping = BuildTargetExportMapping(ctx, color_output_mask);
 	auto& pipeline_cache = buffer.GetContext().GetPipelineCache();
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
@@ -899,6 +905,11 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	                  (color_output_mask != 0 ||
 	                   PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
 	RefreshShaders(buffer, draw, color_output_mask, state);
+	if (state.programs.pending) {
+		// --async-pipelines skip: a program is still being built on a worker. Nothing has been
+		// resolved or touched yet, so the draw is simply dropped.
+		return false;
+	}
 	uint32_t mrt_mask = 0;
 	if (state.ps_active) {
 		for (const auto& output: state.ps_input_info.stage.program->info.outputs) {
@@ -1158,10 +1169,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
-	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
+	auto* const pipeline_ptr = m_context.GetPipelineCache().GetGraphicsPipeline(
 	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
 	    state.programs);
+	if (pipeline_ptr == nullptr) {
+		// --async-pipelines skip: the pipeline is still being built on a worker. Drop the draw
+		// before any command that depends on it is recorded; the caller resets the bindings.
+		return;
+	}
+	auto& pipeline = *pipeline_ptr;
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
@@ -1440,6 +1457,151 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	DrawIndexBufferSource index_source {};
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
 	ResetBindings();
+}
+
+// --pipeline-lookahead: what ResolvePrimitiveRestart returns, without scanning the indices (a
+// custom restart index that actually occurs makes the real path stop with an error anyway).
+static bool PredictPrimitiveRestart(const HW::Context& ctx, const HW::UserConfig& ucfg,
+                                    uint32_t element_size) {
+	const auto control = ucfg.GetPrimitiveResetControl();
+	if ((control & ~0x3u) != 0 || (control & 0x1u) == 0) {
+		return false;
+	}
+	switch (ucfg.GetPrimType()) {
+		case Prospero::PrimitiveType::kLineStrip:
+		case Prospero::PrimitiveType::kTriFan:
+		case Prospero::PrimitiveType::kTriStrip: break;
+		default: return false;
+	}
+	const auto index_mask  = UINT32_MAX >> ((4 - element_size) * 8);
+	const auto reset_index = ctx.GetPrimitiveResetIndex();
+	if ((control & 0x2u) != 0 && (reset_index & ~index_mask) != 0) {
+		return false;
+	}
+	return (reset_index & index_mask) == index_mask;
+}
+
+// --pipeline-lookahead. Mirrors DrawIndex/DrawAuto -> PrepareDrawRenderState ->
+// ExecutePreparedDraw up to the pipeline lookup, on the lookahead thread, from the shadow
+// processor's registers. Anything it cannot know exactly makes it return without a request.
+bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_ctx,
+                                  const HW::UserConfig& ucfg, const ShadowDraw& draw,
+                                  PrefetchDrawStatus& status) {
+	auto& cache = m_context.GetPipelineCache();
+	status      = PrefetchDrawStatus::Skipped;
+	cache.Lookahead().gfx_seen.fetch_add(1, std::memory_order_relaxed);
+	struct SkipCounter {
+		PipelineCache::LookaheadCounters& counters;
+		const PrefetchDrawStatus&         status;
+		~SkipCounter() {
+			if (status != PrefetchDrawStatus::Requested) {
+				counters.gfx_skipped.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+	} skip_counter {cache.Lookahead(), status};
+	const auto skip = [&](PipelineCache::LookaheadCounters::Skip reason) {
+		cache.Lookahead().skip[reason].fetch_add(1, std::memory_order_relaxed);
+		return false;
+	};
+	using Skip = PipelineCache::LookaheadCounters;
+	if (draw.index_count == 0 || draw.instance_count == 0) {
+		return skip(Skip::SkipZeroCount);
+	}
+	// Draws the real path turns into something else.
+	const auto color_mode = ctx.GetColorControl().mode;
+	if (color_mode == static_cast<uint8_t>(CbColorMode::EliminateFastClear) ||
+	    color_mode == static_cast<uint8_t>(CbColorMode::FmaskDecompress) ||
+	    color_mode == static_cast<uint8_t>(CbColorMode::DccDecompress) ||
+	    color_mode == static_cast<uint8_t>(CbColorMode::Resolve)) {
+		return skip(Skip::SkipColorMode);
+	}
+	bool depth_copy   = false;
+	bool stencil_copy = false;
+	DepthStencilCopyPlan(ctx, depth_copy, stencil_copy);
+	if (depth_copy || stencil_copy || ctx.GetRenderControl().copy_depth_to_color) {
+		return skip(Skip::SkipDepthCopy);
+	}
+	if (!DrawHasValidVertexShader(sh_ctx)) {
+		return skip(Skip::SkipNoVertexShader);
+	}
+	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
+	if (!GetDrawTopology(ucfg, topology)) {
+		return skip(Skip::SkipTopology);
+	}
+	bool restart = false;
+	if (draw.indexed) {
+		uint32_t element_size = 0;
+		switch (static_cast<Prospero::IndexType>(draw.index_type_and_size)) {
+			case Prospero::IndexType::kIndex16: element_size = 2; break;
+			case Prospero::IndexType::kIndex32: element_size = 4; break;
+			case Prospero::IndexType::kIndex8: element_size = 1; break;
+			default: return skip(Skip::SkipIndexType);
+		}
+		restart = PredictPrimitiveRestart(ctx, ucfg, element_size);
+	}
+
+	DrawRenderState state {};
+	const auto& shader_regs       = ctx.GetShaderRegisters();
+	const auto  color_output_mask = DrawColorOutputMask(ctx);
+	state.ps_active = sh_ctx.GetPs().ps_regs.data_addr != 0 &&
+	                  (color_output_mask != 0 ||
+	                   PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
+	const auto target_export_mapping = BuildTargetExportMapping(ctx, color_output_mask);
+	state.programs = cache.PrefetchGraphicsPrograms(
+	    sh_ctx.GetVs(), sh_ctx.GetPs(), shader_regs, ctx, ucfg, target_export_mapping,
+	    state.ps_active, state.vertex_info, state.ps_input_info);
+	if (state.programs.pending || !state.programs.vertex[0] ||
+	    (state.ps_active && !state.programs.pixel)) {
+		status = PrefetchDrawStatus::NoPrograms;
+		return skip(Skip::SkipPrograms);
+	}
+
+	uint32_t mrt_mask = 0;
+	if (state.ps_active) {
+		for (const auto& output: state.ps_input_info.stage.program->info.outputs) {
+			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt) {
+				mrt_mask |= 1u << output.location;
+			}
+		}
+	}
+	mrt_mask &= color_output_mask;
+	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+		if ((mrt_mask & (1u << slot)) != 0) {
+			auto& info = state.color_info[state.color_count];
+			if (DescribeRenderColorTarget(ctx, info, 0, slot)) {
+				// The draw path would look the image up here; the key needs only that one exists.
+				info.image_id = ImageId {0};
+				state.color_count++;
+			}
+		}
+	}
+	if (DescribeRenderDepthTarget(m_context.GetGraphics(), ctx, state.depth_info)) {
+		state.depth_info.image_id = ImageId {0};
+	}
+	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
+		return skip(Skip::SkipNoTarget);
+	}
+	if (!draw.indexed) {
+		const bool rect_list = Prospero::IsRectList(ucfg.GetPrimType());
+		if (rect_list && state.vertex_info[0].buffers_num == 0 &&
+		    state.vertex_info[0].stage.program->param_export_mask == 0 &&
+		    state.ps_input_info.input_num != 0) {
+			return skip(Skip::SkipRectNoExport);
+		}
+	}
+	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
+	if (mesh_active && state.vertex_info[0].mesh.primitives_per_group == 0) {
+		return skip(Skip::SkipMesh);
+	}
+
+	const auto vertex_stages =
+	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
+	cache.PrefetchGraphicsPipeline(std::span {state.color_info, state.color_count},
+	                               state.depth_info, vertex_stages, ctx, ucfg,
+	                               state.ps_active ? &state.ps_input_info : nullptr, topology,
+	                               restart, state.programs);
+	status = PrefetchDrawStatus::Requested;
+	return true;
 }
 
 bool RenderExecutor::ResolveColorTargets(CommandBuffer& buffer, uint32_t render_target_slice_offset) {
