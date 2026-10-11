@@ -672,6 +672,12 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
 	set_tests_properties(graphics_pipeline_rasterization_async_skip PROPERTIES
 		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=skip")
+	# The lookahead's prefetch must derive the same pipeline key as the draw (stall mode, the
+	# pipeline is requested through PrefetchGraphicsPipeline before the draw asks for it).
+	add_test(NAME graphics_pipeline_prefetch_key
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(graphics_pipeline_prefetch_key PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=stall;KYTY_TEST_PREFETCH_KEY=1")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME virtual_memory_allocation
@@ -684,6 +690,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --stream-buffer-only)
 	add_test(NAME gpu_command_lane
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-command-lane-only)
+	add_test(NAME lookahead_shadow_processor
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --shadow-only)
 	add_test(NAME pm4_context_state
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --context-state-only)
 	add_test(NAME gpu_tiler

@@ -16137,6 +16137,28 @@ public:
       // --async-pipelines skip (KYTY_TEST_ASYNC_PIPELINES=skip): nullptr means "still being
       // built on a worker"; retry like the next frame's draw would.
       PipelineCache::Pipeline *selected = nullptr;
+      // KYTY_TEST_PREFETCH_KEY (with KYTY_TEST_ASYNC_PIPELINES=stall): request the pipeline through
+      // the lookahead's PrefetchGraphicsPipeline first, with the inputs the lookahead has (the
+      // render targets exist only as descriptions, image id 0). The draw below must then find
+      // that pipeline (same key), not create a second one: a key derived differently by the
+      // prefetch path would show up as a "gfx_miss".
+      const bool check_prefetch_key = std::getenv("KYTY_TEST_PREFETCH_KEY") != nullptr;
+      auto &lookahead_counters = context.GetPipelineCache().Lookahead();
+      const auto misses_before = lookahead_counters.gfx_miss.load();
+      const auto requested_before = lookahead_counters.gfx_requested.load();
+      const auto already_before = lookahead_counters.gfx_already.load();
+      if (check_prefetch_key) {
+        auto prefetch_color = color;
+        auto prefetch_depth = depth;
+        prefetch_color.image_id = ImageId{0};
+        if (prefetch_depth.image_id) {
+          prefetch_depth.image_id = ImageId{0};
+        }
+        context.GetPipelineCache().PrefetchGraphicsPipeline(
+            std::span{&prefetch_color, 1u}, prefetch_depth, std::span{&vertex, 1u},
+            registers, user_config, &pixel, topology, false,
+            PipelineCache::GraphicsPrograms{{vertex_shader}, pixel_shader});
+      }
       for (uint32_t attempt = 0; attempt < 20000 && selected == nullptr; attempt++) {
         selected = context.GetPipelineCache().GetGraphicsPipeline(
             std::span{&color, 1u}, depth, std::span{&vertex, 1u}, scheduler.Current(), &pixel,
@@ -16148,6 +16170,14 @@ public:
       }
       Require(name, "polygon mode pipeline", selected != nullptr,
               "pipeline was not ready after 20 s");
+      if (check_prefetch_key) {
+        Require(name, "prefetch key equals draw key",
+                lookahead_counters.gfx_miss.load() == misses_before &&
+                    lookahead_counters.gfx_requested.load() + lookahead_counters.gfx_already.load() ==
+                        requested_before + already_before + 1,
+                "the draw did not find the pipeline the lookahead prefetch built: the "
+                "prefetch path derives a different pipeline key");
+      }
       return *selected;
     };
     auto &filled = pipeline(true, 2, 2);
@@ -41556,6 +41586,137 @@ void CheckPm4SyntheticOcclusionCounterDump(RenderContext &renderer) {
   std::printf("[host]    %-32s ok\n", "Pm4SyntheticOcclusionCounterDump");
 }
 
+
+// --pipeline-lookahead: the shadow CommandProcessor decodes streams the GPU has not run yet. It
+// must report draws and dispatches without side effects, never fault on unreadable guest
+// conditions, and never decode unboundedly (docs/lookahead-notes.md, "spin guard").
+namespace {
+struct RecordingShadowSink final : ShadowSink {
+  std::vector<ShadowDraw> draws;
+  std::vector<ShadowDispatch> dispatches;
+  void OnDraw(CommandProcessor &, const ShadowDraw &draw) override {
+    draws.push_back(draw);
+  }
+  void OnDispatch(CommandProcessor &, const ShadowDispatch &dispatch) override {
+    dispatches.push_back(dispatch);
+  }
+};
+
+struct ShadowRun {
+  Pm4ProcessResult result;
+  bool abandoned;
+  std::string reason;
+  double seconds;
+};
+
+ShadowRun RunShadow(RenderContext &renderer, RecordingShadowSink &sink,
+                    std::span<const uint32_t> commands) {
+  CommandProcessor processor(renderer, 0);
+  processor.SetShadowSink(&sink);
+  processor.Reset();
+  Pm4Execution execution;
+  const auto begin = std::chrono::steady_clock::now();
+  ShadowRun run{};
+  run.result = processor.Process(execution, commands);
+  run.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                               begin).count();
+  run.abandoned = execution.Abandoned();
+  run.reason = execution.AbandonReason() != nullptr ? execution.AbandonReason() : "";
+  return run;
+}
+} // namespace
+
+void CheckShadowCommandProcessor(RenderContext &renderer) {
+  constexpr const char *name = "ShadowCommandProcessor";
+  GraphicsInitJmpTables();
+
+  // 1. Draws and dispatches are reported with their arguments; the stream completes.
+  {
+    RecordingShadowSink sink;
+    const std::array<uint32_t, 10> commands{
+        KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, Pm4::R_ZERO), 36u, 2u,
+        KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, Pm4::R_ZERO), 4u, 5u, 6u, 0x21u,
+        0x80000000u, 0x80000000u};
+    const auto run = RunShadow(renderer, sink, commands);
+    Require(name, "decode completes",
+            run.result == Pm4ProcessResult::Complete && !run.abandoned,
+            "a plain draw + dispatch stream was not decoded to the end");
+    Require(name, "draw reported",
+            sink.draws.size() == 1 && !sink.draws[0].indexed &&
+                !sink.draws[0].indirect && sink.draws[0].index_count == 36,
+            "DRAW_INDEX_AUTO did not reach the sink with its vertex count");
+    Require(name, "dispatch reported",
+            sink.dispatches.size() == 1 && sink.dispatches[0].x == 4 &&
+                sink.dispatches[0].y == 5 && sink.dispatches[0].z == 6 &&
+                sink.dispatches[0].mode == 0x21u && !sink.dispatches[0].indirect,
+            "DISPATCH_DIRECT did not reach the sink with its group counts");
+  }
+
+  // 2. COND_EXEC reads its condition through the bounds-checked reader: an address that is not
+  // mapped abandons the stream instead of faulting the host.
+  {
+    RecordingShadowSink sink;
+    const std::array<uint32_t, 11> commands{
+        KYTY_PM4(5, Pm4::IT_COND_EXEC, Pm4::R_ZERO), 0x1000u, 0u, 0u, 1u,
+        KYTY_PM4(3, Pm4::IT_DRAW_INDEX_AUTO, Pm4::R_ZERO), 3u, 2u,
+        0x80000000u, 0x80000000u, 0x80000000u};
+    const auto run = RunShadow(renderer, sink, commands);
+    Require(name, "unreadable COND_EXEC condition",
+            run.abandoned && run.reason.find("COND_EXEC") != std::string::npos &&
+                sink.draws.empty(),
+            "an unmapped COND_EXEC condition address did not abandon the shadow stream");
+  }
+
+  // 3. The 14-dword conditional branch packet: same rule for its compare address.
+  {
+    RecordingShadowSink sink;
+    static const std::array<uint32_t, 4> then_buffer{0x80000000u, 0x80000000u,
+                                                     0x80000000u, 0x80000000u};
+    const auto then_address = reinterpret_cast<uint64_t>(then_buffer.data());
+    const std::array<uint32_t, 16> commands{
+        KYTY_PM4(14, Pm4::IT_INDIRECT_BUFFER, Pm4::R_ZERO),
+        1u,                      // mode 1, function 0 (always)
+        0x2000u, 0u,             // compare address (unmapped)
+        0u, 0u,                  // mask
+        0u, 0u,                  // reference
+        static_cast<uint32_t>(then_address), static_cast<uint32_t>(then_address >> 32u),
+        4u,                      // then size
+        0u, 0u, 0u,              // else
+        0x80000000u, 0x80000000u};
+    const auto run = RunShadow(renderer, sink, commands);
+    Require(name, "unreadable branch condition",
+            run.abandoned && run.reason.find("branch") != std::string::npos,
+            "an unmapped branch compare address did not abandon the shadow stream");
+  }
+
+  // 4. A chain of indirect buffers that points at itself never ends in the shadow (nothing
+  // writes the memory the real stream waits on): the jump budget stops it, quickly.
+  {
+    RecordingShadowSink sink;
+    static std::array<uint32_t, 4> loop{};
+    const auto address = reinterpret_cast<uint64_t>(loop.data());
+    loop = {KYTY_PM4(4, Pm4::IT_INDIRECT_BUFFER, Pm4::R_ZERO),
+            static_cast<uint32_t>(address), static_cast<uint32_t>(address >> 32u),
+            4u | (1u << 20u)};
+    const auto run = RunShadow(renderer, sink, loop);
+    Require(name, "indirect buffer jump budget",
+            run.abandoned && run.reason.find("jumps") != std::string::npos &&
+                run.seconds < 5.0,
+            "a self-referencing indirect buffer chain was not stopped by the jump budget");
+  }
+
+  // 5. A stream longer than the packet budget is cut off, not decoded forever.
+  {
+    RecordingShadowSink sink;
+    std::vector<uint32_t> filler(4'100'000u, 0x80000000u);
+    const auto run = RunShadow(renderer, sink, filler);
+    Require(name, "packet budget",
+            run.abandoned && run.reason.find("packet") != std::string::npos,
+            "a stream of more than the packet budget was not cut off");
+  }
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckPm4Predication(RenderContext &renderer) {
   constexpr const char *name = "Pm4Predication";
   constexpr uint64_t ready = 1ull << 63u;
@@ -43914,6 +44075,11 @@ int main(int argc, char **argv) {
     CheckPm4DepthControlHighBits(vulkan.RuntimeRenderer());
     CheckPm4DepthRenderOverride(vulkan.RuntimeRenderer());
     CheckPm4ContextStateOperations(vulkan.RuntimeRenderer());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--shadow-only") == 0) {
+    VulkanHarness vulkan;
+    CheckShadowCommandProcessor(vulkan.RuntimeRenderer());
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--pm4-wait-only") == 0) {
