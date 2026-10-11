@@ -77,6 +77,10 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	                                     ? VkMemoryPropertyFlags {}
 	                                     : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
+	// With VK_EXT_memory_priority, device-local buffers (storage/vertex/index data) stay
+	// resident (1.0); staging, readback and stream buffers are cheap to evict (0.2).
+	allocation_info.priority = usage == MemoryUsage::DeviceLocal ? 1.0f : 0.2f;
+
 	VmaAllocationInfo allocation_result {};
 	VkBuffer          native_buffer = VK_NULL_HANDLE;
 	const auto        result        = static_cast<vk::Result>(vmaCreateBuffer(

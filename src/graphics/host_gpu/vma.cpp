@@ -20,6 +20,8 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cinttypes>
 
 namespace Libs::Graphics {
@@ -42,6 +44,9 @@ bool GraphicContext::CreateAllocator() {
 	info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 	if (memory_budget_ext_enabled) {
 		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+	}
+	if (memory_priority_enabled) {
+		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
 	}
 
 	const auto result = static_cast<vk::Result>(vmaCreateAllocator(&info, &allocator));
@@ -74,6 +79,35 @@ void GraphicContext::LogMemoryBudget() const {
 		     i, static_cast<uint64_t>(budgets[i].usage), static_cast<uint64_t>(budgets[i].budget),
 		     static_cast<uint64_t>(budgets[i].statistics.allocationBytes),
 		     static_cast<uint64_t>(budgets[i].statistics.blockBytes));
+	}
+}
+
+void GraphicContext::LogMemoryBudgetPeriodic() const {
+	if (allocator == nullptr || !memory_budget_ext_enabled) {
+		return;
+	}
+	static std::atomic<int64_t> last_ms {0};
+	const auto                  now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                           std::chrono::steady_clock::now().time_since_epoch())
+	                           .count();
+	auto previous = last_ms.load(std::memory_order_relaxed);
+	if (now_ms - previous < 5000 ||
+	    !last_ms.compare_exchange_strong(previous, now_ms, std::memory_order_relaxed)) {
+		return;
+	}
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
+	vmaGetHeapBudgets(allocator, budgets);
+	for (uint32_t i = 0; i < physical_device_memory_properties.memoryHeapCount; i++) {
+		if (!(physical_device_memory_properties.memoryHeaps[i].flags &
+		      vk::MemoryHeapFlagBits::eDeviceLocal)) {
+			continue;
+		}
+		LOGF("VRAM heap %u: usage=%" PRIu64 " MiB, budget=%" PRIu64 " MiB, allocated=%" PRIu64
+		     " MiB, blocks=%" PRIu64 " MiB\n",
+		     i, static_cast<uint64_t>(budgets[i].usage) >> 20,
+		     static_cast<uint64_t>(budgets[i].budget) >> 20,
+		     static_cast<uint64_t>(budgets[i].statistics.allocationBytes) >> 20,
+		     static_cast<uint64_t>(budgets[i].statistics.blockBytes) >> 20);
 	}
 }
 
@@ -134,13 +168,47 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 
 	VmaAllocationCreateInfo alloc_info {};
 	alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	if (memory_priority_enabled) {
+		// Render targets, depth targets and storage images are rewritten every frame: keep
+		// them resident (priority 1.0). Sampled-only textures can be re-uploaded: 0.5.
+		// VMA only applies a priority to dedicated allocations, so keep the hot classes dedicated.
+		const auto hot = vk::ImageUsageFlagBits::eColorAttachment |
+		                 vk::ImageUsageFlagBits::eDepthStencilAttachment |
+		                 vk::ImageUsageFlagBits::eStorage;
+		if (image_info.usage & hot) {
+			alloc_info.priority = 1.0f;
+			alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+		} else {
+			alloc_info.priority = 0.5f;
+		}
+	}
 
 	vk::Image::CType native_image = VK_NULL_HANDLE;
-	const auto        result       = static_cast<vk::Result>(
+	auto             result       = static_cast<vk::Result>(
 	    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
 	                   &alloc_info, &native_image, &image.allocation, nullptr));
+	if (result != vk::Result::eSuccess && pageable_memory_enabled) {
+		// Last resort with VRAM paging on: let the image land in any compatible memory type
+		// (system memory) instead of failing the whole emulator.
+		LOGF("VRAM paging: image allocation failed (%s) extent=%ux%ux%u format=%d levels=%u; "
+		     "retrying without DEVICE_LOCAL\n",
+		     vk::to_string(result).c_str(), image_info.extent.width, image_info.extent.height,
+		     image_info.extent.depth, static_cast<int>(image_info.format), image_info.mipLevels);
+		LogMemoryBudget();
+		alloc_info.requiredFlags  = 0;
+		alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		native_image              = VK_NULL_HANDLE;
+		image.allocation          = nullptr;
+		result                    = static_cast<vk::Result>(vmaCreateImage(
+            allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &alloc_info,
+            &native_image, &image.allocation, nullptr));
+		LOGF("VRAM paging: retry result: %s\n", vk::to_string(result).c_str());
+	}
 	image.image = native_image;
 	if (result != vk::Result::eSuccess) {
+		LOGF("vmaCreateImage failed: %s extent=%ux%ux%u format=%d levels=%u\n",
+		     vk::to_string(result).c_str(), image_info.extent.width, image_info.extent.height,
+		     image_info.extent.depth, static_cast<int>(image_info.format), image_info.mipLevels);
 		LogMemoryBudget();
 		return false;
 	}

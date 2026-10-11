@@ -172,6 +172,10 @@ bool SkipNoticeScreen() {
 	return g_config->skip_notice_screen;
 }
 
+bool VramPagingEnabled() {
+	return g_config->vram_paging;
+}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled() {
 	return g_config->red_zone_protection_enabled;

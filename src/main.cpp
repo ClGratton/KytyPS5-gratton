@@ -96,6 +96,11 @@ static void PrintUsage() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	::printf("  --redzone                            Protect the guest SysV red zone.\n");
 #endif
+	::printf(
+	    "  --vram-paging <on|off>               Use VK_EXT_memory_priority and\n"
+	    "                                      VK_EXT_pageable_device_local_memory so the driver\n"
+	    "                                      pages low-priority VRAM out instead of failing.\n"
+	    "                                      Default: off.\n");
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
 }
@@ -445,6 +450,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--trophy-notifications") {
 			if (!ParseBool(value, options.config.trophy_enabled)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--vram-paging") {
+			if (!ParseBool(value, options.config.vram_paging)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

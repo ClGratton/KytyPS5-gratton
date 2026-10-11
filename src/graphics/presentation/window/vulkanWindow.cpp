@@ -492,7 +492,27 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		image_atomic_int64.pNext = supported_features2.pNext;
 		supported_features2.pNext = &image_atomic_int64;
 	}
+	const bool memory_priority_extension =
+	    HasExtension(device_extensions, VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+	const bool pageable_extension =
+	    memory_priority_extension &&
+	    HasExtension(device_extensions, VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+	vk::PhysicalDeviceMemoryPriorityFeaturesEXT supported_memory_priority {};
+	if (memory_priority_extension) {
+		supported_memory_priority.pNext = supported_features2.pNext;
+		supported_features2.pNext       = &supported_memory_priority;
+	}
+	vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT supported_pageable {};
+	if (pageable_extension) {
+		supported_pageable.pNext  = supported_features2.pNext;
+		supported_features2.pNext = &supported_pageable;
+	}
 	physical_device.getFeatures2(&supported_features2);
+	graphics.memory_priority_enabled =
+	    memory_priority_extension && supported_memory_priority.memoryPriority == VK_TRUE;
+	graphics.pageable_memory_enabled =
+	    graphics.memory_priority_enabled && pageable_extension &&
+	    supported_pageable.pageableDeviceLocalMemory == VK_TRUE;
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
@@ -651,6 +671,23 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	if (graphics.depth_color_copy_enabled) {
 		maintenance8.pNext = const_cast<void*>(create_info.pNext);
 		create_info.pNext = &maintenance8;
+	}
+	vk::PhysicalDeviceMemoryPriorityFeaturesEXT memory_priority_features {};
+	vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT pageable_features {};
+	if (graphics.memory_priority_enabled) {
+		memory_priority_features.memoryPriority = VK_TRUE;
+		memory_priority_features.pNext          = const_cast<void*>(create_info.pNext);
+		create_info.pNext                       = &memory_priority_features;
+	}
+	if (graphics.pageable_memory_enabled) {
+		pageable_features.pageableDeviceLocalMemory = VK_TRUE;
+		pageable_features.pNext                     = const_cast<void*>(create_info.pNext);
+		create_info.pNext                           = &pageable_features;
+	}
+	if (Config::VramPagingEnabled()) {
+		LOGF("VRAM paging: memoryPriority=%s pageableDeviceLocalMemory=%s\n",
+		     graphics.memory_priority_enabled ? "enabled" : "unavailable",
+		     graphics.pageable_memory_enabled ? "enabled" : "unavailable");
 	}
 	create_info.pQueueCreateInfos       = &queue_create_info;
 	create_info.queueCreateInfoCount    = 1;
@@ -1014,6 +1051,24 @@ void WindowContext::CreateVulkan() {
 		if (HasExtension(available_extensions, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 			graphic_ctx.memory_budget_ext_enabled = true;
+		}
+		if (Config::VramPagingEnabled()) {
+			const bool has_priority =
+			    HasExtension(available_extensions, VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+			const bool has_pageable =
+			    HasExtension(available_extensions, VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+			LOGF("VRAM paging requested: VK_EXT_memory_priority=%s "
+			     "VK_EXT_pageable_device_local_memory=%s VK_EXT_memory_budget=%s\n",
+			     has_priority ? "yes" : "no", has_pageable ? "yes" : "no",
+			     graphic_ctx.memory_budget_ext_enabled ? "yes" : "no");
+			// Pageable memory is only meaningful with priorities (the driver chooses what to
+			// page out by priority), so it requires both extensions.
+			if (has_priority) {
+				device_extensions.push_back(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+				if (has_pageable) {
+					device_extensions.push_back(VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+				}
+			}
 		}
 		for (const auto* extension: {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
 		                             VK_KHR_MAINTENANCE_8_EXTENSION_NAME,
