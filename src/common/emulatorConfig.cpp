@@ -1,6 +1,7 @@
 #include "common/emulatorConfig.h"
 
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 
 #include <algorithm>
 #include <memory>
@@ -25,6 +26,11 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(!IsConfiguredUserIdValid(cfg.user_id));
 
 	*g_config = cfg;
+
+	Bench::Configure({
+	    .frames_csv        = cfg.bench_frames_csv,
+	    .exit_after_frames = cfg.bench_exit_after_frames,
+	});
 }
 
 uint32_t GetScreenWidth() {
