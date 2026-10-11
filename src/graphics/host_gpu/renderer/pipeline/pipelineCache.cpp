@@ -643,6 +643,7 @@ struct PipelineCache::ProgramCache {
 		// Lookahead thread (--pipeline-lookahead): materialize privately, never skip, wait for
 		// jobs without accounting GPU-thread waits, never fall back to synchronous compilation.
 		bool prefetch = false;
+		LookaheadCounters* counters = nullptr; // prefetch only
 	};
 
 	void PrintShaderCounts() {
@@ -723,6 +724,8 @@ struct PipelineCache::ProgramCache {
 					return permutation->handle;
 				}
 				if (!materialized) {
+					async->counters->skip[LookaheadCounters::SkipMaterializeFailed].fetch_add(
+					    1, std::memory_order_relaxed);
 					return {};
 				}
 			} else if (auto* permutation = entry->FindPermutation(runtime, push_data_cursor,
@@ -933,6 +936,8 @@ struct PipelineCache::ProgramCache {
 			plan_ns = miss_sw.Lap();
 			if (prefetch) {
 				if (!entry->MaterializePrivate(runtime, specialization)) {
+					async->counters->skip[LookaheadCounters::SkipMaterializeFailed].fetch_add(
+					    1, std::memory_order_relaxed);
 					return {};
 				}
 			} else {
@@ -1076,9 +1081,20 @@ void PipelineCache::ShutdownAsync() {
 		    l.gfx_skipped.load(), l.gfx_requested.load(), l.gfx_already.load(),
 		    l.gfx_hit_ready.load(), l.gfx_hit_inflight.load(), l.gfx_miss.load(),
 		    l.programs_requested.load());
-		PipelineCacheLog("Pipeline lookahead: {}", summary);
+		std::string skips;
+		for (uint32_t i = 0; i < LookaheadCounters::SkipCount; i++) {
+			skips += fmt::format(";skip_{}={}", LookaheadCounters::SkipName(i), l.skip[i].load());
+		}
+		PipelineCacheLog("Pipeline lookahead: {}{}", summary, skips);
+		if (m_lookahead_thread_summary) {
+			PipelineCacheLog("Pipeline lookahead thread: {}", m_lookahead_thread_summary());
+		}
 		if (Bench::TimingEnabled()) {
-			Bench::LogTiming("summary_lookahead", 0, Bench::NowNs(), 0, false, summary);
+			Bench::LogTiming("summary_lookahead", 0, Bench::NowNs(), 0, false, summary + skips);
+			if (m_lookahead_thread_summary) {
+				Bench::LogTiming("summary_lookahead_thread", 0, Bench::NowNs(), 0, false,
+				                 m_lookahead_thread_summary());
+			}
 		}
 	}
 }
@@ -1444,6 +1460,8 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 	} else {
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 		if (prefetch && Common::Speculation::TakeFailure()) {
+			m_lookahead.skip[LookaheadCounters::SkipPrepareFailed].fetch_add(
+			    1, std::memory_order_relaxed);
 			return {};
 		}
 	}
@@ -1517,7 +1535,8 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 	ProgramCache::AsyncContext async {
 	    .pool       = AsyncPool(),
 	    .allow_skip = !prefetch && m_async_mode == Config::AsyncPipelineMode::Skip,
-	    .prefetch   = prefetch};
+	    .prefetch   = prefetch,
+	    .counters   = &m_lookahead};
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor, &async);
 		if (async.pending) {
@@ -1553,6 +1572,20 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	return m_program_cache->Get(params, input_info, push_data_cursor, &async);
 }
 
+// GPU thread: a draw/dispatch is about to use `pipeline`. The first use of a pipeline that a
+// prefetch job built is a prediction hit ("in flight" when the draw had to wait for the job).
+void PipelineCache::NoteDrawUse(Pipeline& pipeline, bool graphics, bool joined_in_flight) {
+	if (!pipeline.prefetched || pipeline.claimed) {
+		return;
+	}
+	pipeline.claimed = true;
+	auto& counter    = graphics ? (joined_in_flight ? m_lookahead.gfx_hit_inflight
+	                                                 : m_lookahead.gfx_hit_ready)
+	                            : (joined_in_flight ? m_lookahead.cs_hit_inflight
+	                                                 : m_lookahead.cs_hit_ready);
+	counter.fetch_add(1, std::memory_order_relaxed);
+}
+
 void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
                                     const HW::ShaderRegisters& sh, uint32_t mode) {
 	std::shared_lock gate(m_prefetch_gate);
@@ -1574,7 +1607,8 @@ void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
 	input_info.dispatch_thread_dimensions = (mode & (1u << 5u)) != 0;
 	const auto params                     = PrepareProgram(regs, sh, input_info);
 	uint32_t   push_data_cursor           = 0;
-	ProgramCache::AsyncContext async {.pool = pool, .allow_skip = false, .prefetch = true};
+	ProgramCache::AsyncContext async {
+	    .pool = pool, .allow_skip = false, .prefetch = true, .counters = &m_lookahead};
 	const auto program = m_program_cache->Get(params, input_info, push_data_cursor, &async);
 	if (!program) {
 		m_lookahead.cs_skipped.fetch_add(1, std::memory_order_relaxed);
@@ -1783,10 +1817,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	const auto& static_params  = key.static_params;
 
 	if (auto* found = FindGraphicsPipeline(key)) {
-		if (found->prefetched && !found->claimed) {
-			found->claimed = true;
-			m_lookahead.gfx_hit_ready.fetch_add(1, std::memory_order_relaxed);
-		}
+		NoteDrawUse(*found, true, false);
 		return found;
 	}
 
@@ -1796,17 +1827,12 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	if (auto* pool = AsyncPool()) {
 		const bool                may_skip = m_async_mode == Config::AsyncPipelineMode::Skip;
 		std::shared_ptr<AsyncJob> job      = m_graphics_jobs.Find(key, may_skip);
-		if (job != nullptr && job->ClaimByDraw()) {
-			m_lookahead.gfx_hit_inflight.fetch_add(1, std::memory_order_relaxed);
-		}
+		bool joined_prefetch = job != nullptr && job->IsPrefetched();
 		if (job == nullptr) {
 			// Not in flight. It may have been published since the lookup above: a worker
 			// publishes before it unregisters.
 			if (auto* published = FindGraphicsPipeline(key)) {
-				if (published->prefetched && !published->claimed) {
-					published->claimed = true;
-					m_lookahead.gfx_hit_ready.fetch_add(1, std::memory_order_relaxed);
-				}
+				NoteDrawUse(*published, true, false);
 				return published;
 			}
 			auto fresh = std::make_shared<GraphicsPipelineJob>(*this, key,
@@ -1830,9 +1856,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 					fresh->CountSkippedDraw();
 				}
 			} else {
-				if (job->ClaimByDraw()) {
-					m_lookahead.gfx_hit_inflight.fetch_add(1, std::memory_order_relaxed);
-				}
+				joined_prefetch = job->IsPrefetched();
 				if (may_skip) {
 					job->CountSkippedDraw();
 				}
@@ -1845,6 +1869,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 			}
 			if (pool->WaitFor(*job)) {
 				if (auto* published = FindGraphicsPipeline(key)) {
+					NoteDrawUse(*published, true, joined_prefetch);
 					return published;
 				}
 			}
@@ -1949,25 +1974,17 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	EXIT_IF(!compute_program);
 
 	if (auto* found = FindComputePipeline(compute_program.id)) {
-		if (found->prefetched && !found->claimed) {
-			found->claimed = true;
-			m_lookahead.cs_hit_ready.fetch_add(1, std::memory_order_relaxed);
-		}
+		NoteDrawUse(*found, false, false);
 		return *found;
 	}
 
 	// --async-pipelines: compute dispatches are never skipped, they wait for the worker.
 	if (auto* pool = AsyncPool()) {
 		std::shared_ptr<AsyncJob> job = m_compute_jobs.Find(compute_program.id);
-		if (job != nullptr && job->ClaimByDraw()) {
-			m_lookahead.cs_hit_inflight.fetch_add(1, std::memory_order_relaxed);
-		}
+		bool                      joined_prefetch = job != nullptr && job->IsPrefetched();
 		if (job == nullptr) {
 			if (auto* published = FindComputePipeline(compute_program.id)) {
-				if (published->prefetched && !published->claimed) {
-					published->claimed = true;
-					m_lookahead.cs_hit_ready.fetch_add(1, std::memory_order_relaxed);
-				}
+				NoteDrawUse(*published, false, false);
 				return *published;
 			}
 			auto fresh = std::make_shared<ComputePipelineJob>(*this, compute_program.id);
@@ -1978,8 +1995,8 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 			job                 = m_compute_jobs.Insert(compute_program.id, fresh, inserted);
 			if (inserted) {
 				m_lookahead.cs_miss.fetch_add(1, std::memory_order_relaxed);
-			} else if (job->ClaimByDraw()) {
-				m_lookahead.cs_hit_inflight.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				joined_prefetch = job->IsPrefetched();
 			}
 			if (inserted && !pool->Submit(fresh, true)) {
 				m_compute_jobs.Erase(compute_program.id);
@@ -1988,6 +2005,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 		}
 		if (job != nullptr && pool->WaitFor(*job)) {
 			if (auto* published = FindComputePipeline(compute_program.id)) {
+				NoteDrawUse(*published, false, joined_prefetch);
 				return *published;
 			}
 		}

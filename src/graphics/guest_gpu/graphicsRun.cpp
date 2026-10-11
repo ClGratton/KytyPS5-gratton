@@ -68,6 +68,9 @@ GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	m_gfx_cp->Reset();
 	if (Config::GetPipelineLookahead()) {
 		m_lookahead = std::make_unique<PipelineLookahead>(renderer);
+		auto* lookahead = m_lookahead.get();
+		renderer.GetPipelineCache().SetLookaheadThreadSummary(
+		    [lookahead] { return lookahead->SummaryText(); });
 	}
 	m_thread = std::jthread(ThreadRun, this);
 }

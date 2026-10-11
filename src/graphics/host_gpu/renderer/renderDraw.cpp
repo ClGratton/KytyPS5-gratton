@@ -1425,8 +1425,13 @@ bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_c
 			}
 		}
 	} skip_counter {cache.Lookahead(), status};
-	if (draw.index_count == 0 || draw.instance_count == 0) {
+	const auto skip = [&](PipelineCache::LookaheadCounters::Skip reason) {
+		cache.Lookahead().skip[reason].fetch_add(1, std::memory_order_relaxed);
 		return false;
+	};
+	using Skip = PipelineCache::LookaheadCounters;
+	if (draw.index_count == 0 || draw.instance_count == 0) {
+		return skip(Skip::SkipZeroCount);
 	}
 	// Draws the real path turns into something else.
 	const auto color_mode = ctx.GetColorControl().mode;
@@ -1434,17 +1439,20 @@ bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_c
 	    color_mode == static_cast<uint8_t>(CbColorMode::FmaskDecompress) ||
 	    color_mode == static_cast<uint8_t>(CbColorMode::DccDecompress) ||
 	    color_mode == static_cast<uint8_t>(CbColorMode::Resolve)) {
-		return false;
+		return skip(Skip::SkipColorMode);
 	}
 	bool depth_copy   = false;
 	bool stencil_copy = false;
 	DepthStencilCopyPlan(ctx, depth_copy, stencil_copy);
-	if (depth_copy || stencil_copy || !DrawHasValidVertexShader(sh_ctx)) {
-		return false;
+	if (depth_copy || stencil_copy) {
+		return skip(Skip::SkipDepthCopy);
+	}
+	if (!DrawHasValidVertexShader(sh_ctx)) {
+		return skip(Skip::SkipNoVertexShader);
 	}
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
 	if (!GetDrawTopology(ucfg, topology)) {
-		return false;
+		return skip(Skip::SkipTopology);
 	}
 	bool restart = false;
 	if (draw.indexed) {
@@ -1453,7 +1461,7 @@ bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_c
 			case Prospero::IndexType::kIndex16: element_size = 2; break;
 			case Prospero::IndexType::kIndex32: element_size = 4; break;
 			case Prospero::IndexType::kIndex8: element_size = 1; break;
-			default: return false;
+			default: return skip(Skip::SkipIndexType);
 		}
 		restart = PredictPrimitiveRestart(ctx, ucfg, element_size);
 	}
@@ -1471,7 +1479,7 @@ bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_c
 	if (state.programs.pending || !state.programs.vertex[0] ||
 	    (state.ps_active && !state.programs.pixel)) {
 		status = PrefetchDrawStatus::NoPrograms;
-		return false;
+		return skip(Skip::SkipPrograms);
 	}
 
 	uint32_t mrt_mask = 0;
@@ -1497,19 +1505,19 @@ bool RenderExecutor::PrefetchDraw(const HW::Context& ctx, const HW::Shader& sh_c
 		state.depth_info.image_id = ImageId {0};
 	}
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
-		return false;
+		return skip(Skip::SkipNoTarget);
 	}
 	if (!draw.indexed) {
 		const bool rect_list = Prospero::IsRectList(ucfg.GetPrimType());
 		if (rect_list && state.vertex_info[0].buffers_num == 0 &&
 		    state.vertex_info[0].stage.program->param_export_mask == 0 &&
 		    state.ps_input_info.input_num != 0) {
-			return false;
+			return skip(Skip::SkipRectNoExport);
 		}
 	}
 	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
 	if (mesh_active && state.vertex_info[0].mesh.primitives_per_group == 0) {
-		return false;
+		return skip(Skip::SkipMesh);
 	}
 
 	const auto vertex_stages =

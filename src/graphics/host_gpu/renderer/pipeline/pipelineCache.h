@@ -12,6 +12,8 @@
 #include <atomic>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
+#include <string>
 #include <memory>
 #include <shared_mutex>
 #include <span>
@@ -200,8 +202,26 @@ public:
 		std::atomic<uint64_t> gfx_hit_inflight {0};
 		std::atomic<uint64_t> gfx_miss {0};
 		std::atomic<uint64_t> programs_requested {0}; // program jobs created by prefetch Get()
+		// Why a prefetch request was dropped (graphics draws, then program lookups).
+		enum Skip : uint32_t {
+			SkipZeroCount, SkipColorMode, SkipDepthCopy, SkipNoVertexShader, SkipTopology,
+			SkipIndexType, SkipPrograms, SkipNoTarget, SkipRectNoExport, SkipMesh,
+			SkipPrepareFailed, SkipMaterializeFailed, SkipCount
+		};
+		std::atomic<uint64_t> skip[SkipCount] {};
+		static constexpr const char* SkipName(uint32_t reason) {
+			constexpr const char* names[] = {"zero_count", "color_mode", "depth_copy",
+			                                 "no_vertex_shader", "topology", "index_type",
+			                                 "programs", "no_target", "rect_no_export", "mesh",
+			                                 "prepare_failed", "materialize_failed"};
+			return reason < SkipCount ? names[reason] : "?";
+		}
 	};
 	[[nodiscard]] LookaheadCounters& Lookahead() { return m_lookahead; }
+	// Printed with the lookahead counters when the pool stops (the lookahead thread's own stats).
+	void SetLookaheadThreadSummary(std::function<std::string()> summary) {
+		m_lookahead_thread_summary = std::move(summary);
+	}
 	// Compute: `mode` is the DISPATCH_DIRECT initiator.
 	void PrefetchCompute(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
 	                     uint32_t mode);
@@ -243,6 +263,7 @@ private:
 	    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
 	    bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
 	    ShaderPixelInputInfo& pixel_info, bool prefetch);
+	void NoteDrawUse(Pipeline& pipeline, bool graphics, bool joined_in_flight);
 	GraphicsPipelineKey BuildGraphicsKey(std::span<const RenderColorInfo>       colors,
 	                                     const RenderDepthInfo&                 depth,
 	                                     std::span<const ShaderVertexInputInfo> vertex_info,
@@ -271,6 +292,7 @@ private:
 	InFlightRegistry<uint64_t>                                     m_compute_jobs;
 
 	LookaheadCounters m_lookahead;
+	std::function<std::string()> m_lookahead_thread_summary;
 	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
 	// (or starts) while the pool and the registries are torn down.
 	std::shared_mutex m_prefetch_gate;
