@@ -3,6 +3,7 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/logging/log.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
@@ -14,6 +15,9 @@
 #include <tuple>
 #include <vector>
 #include <vk_mem_alloc.h>
+
+// VRAM diagnostics are always printed (LOGF is silent unless the log is enabled).
+#define VRAM_LOG(...) ::Log::WriteToConsoleAndLog(::fmt::sprintf(__VA_ARGS__))
 
 namespace Libs::Graphics {
 

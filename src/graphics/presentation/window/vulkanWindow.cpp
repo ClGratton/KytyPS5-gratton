@@ -685,7 +685,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		create_info.pNext                           = &pageable_features;
 	}
 	if (Config::VramPagingEnabled()) {
-		LOGF("VRAM paging: memoryPriority=%s pageableDeviceLocalMemory=%s\n",
+		VRAM_LOG("VRAM paging: memoryPriority=%s pageableDeviceLocalMemory=%s\n",
 		     graphics.memory_priority_enabled ? "enabled" : "unavailable",
 		     graphics.pageable_memory_enabled ? "enabled" : "unavailable");
 	}
@@ -1057,7 +1057,7 @@ void WindowContext::CreateVulkan() {
 			    HasExtension(available_extensions, VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
 			const bool has_pageable =
 			    HasExtension(available_extensions, VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
-			LOGF("VRAM paging requested: VK_EXT_memory_priority=%s "
+			VRAM_LOG("VRAM paging requested: VK_EXT_memory_priority=%s "
 			     "VK_EXT_pageable_device_local_memory=%s VK_EXT_memory_budget=%s\n",
 			     has_priority ? "yes" : "no", has_pageable ? "yes" : "no",
 			     graphic_ctx.memory_budget_ext_enabled ? "yes" : "no");

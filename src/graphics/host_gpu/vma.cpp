@@ -53,7 +53,7 @@ bool GraphicContext::CreateAllocator() {
 
 	const auto result = static_cast<vk::Result>(vmaCreateAllocator(&info, &allocator));
 	if (result != vk::Result::eSuccess) {
-		LOGF("vmaCreateAllocator failed: %s\n", vk::to_string(result).c_str());
+		VRAM_LOG("vmaCreateAllocator failed: %s\n", vk::to_string(result).c_str());
 		return false;
 	}
 	return true;
@@ -77,7 +77,7 @@ void GraphicContext::LogMemoryBudget() const {
 	VmaBudget   budgets[VK_MAX_MEMORY_HEAPS] {};
 	vmaGetHeapBudgets(allocator, budgets);
 	for (uint32_t i = 0; i < properties.memoryHeapCount; i++) {
-		LOGF("VMA heap %u: usage=%" PRIu64 ", budget=%" PRIu64 ", allocation=%" PRIu64
+		VRAM_LOG("VMA heap %u: usage=%" PRIu64 ", budget=%" PRIu64 ", allocation=%" PRIu64
 		     ", blocks=%" PRIu64 "\n",
 		     i, static_cast<uint64_t>(budgets[i].usage), static_cast<uint64_t>(budgets[i].budget),
 		     static_cast<uint64_t>(budgets[i].statistics.allocationBytes),
@@ -105,7 +105,7 @@ void GraphicContext::LogMemoryBudgetPeriodic() const {
 		      vk::MemoryHeapFlagBits::eDeviceLocal)) {
 			continue;
 		}
-		LOGF("VRAM heap %u: usage=%" PRIu64 " MiB, budget=%" PRIu64 " MiB, allocated=%" PRIu64
+		VRAM_LOG("VRAM heap %u: usage=%" PRIu64 " MiB, budget=%" PRIu64 " MiB, allocated=%" PRIu64
 		     " MiB, blocks=%" PRIu64 " MiB\n",
 		     i, static_cast<uint64_t>(budgets[i].usage) >> 20,
 		     static_cast<uint64_t>(budgets[i].budget) >> 20,
@@ -120,7 +120,7 @@ void GraphicContext::LogMemoryBudgetPeriodic() const {
 		split += fmt::format(" {}={}MiB({})", names[i], vram_bytes[i].load() >> 20,
 		                     vram_count[i].load());
 	}
-	LOGF("VRAM split:%s ballast=%" PRIu64 "MiB\n", split.c_str(), ballast_bytes >> 20);
+	VRAM_LOG("VRAM split:%s ballast=%" PRIu64 "MiB\n", split.c_str(), ballast_bytes >> 20);
 }
 
 uint64_t GraphicContext::GetDeviceMemoryUsage() const {
@@ -219,7 +219,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
 	                   &alloc_info, &native_image, &image.allocation, nullptr));
 	if (result != vk::Result::eSuccess) {
-		LOGF("Image allocation failed: %s extent=%ux%ux%u format=%d layers=%u levels=%u\n",
+		VRAM_LOG("Image allocation failed: %s extent=%ux%ux%u format=%d layers=%u levels=%u\n",
 		     vk::to_string(result).c_str(), image_info.extent.width, image_info.extent.height,
 		     image_info.extent.depth, static_cast<int>(image_info.format), image_info.arrayLayers,
 		     image_info.mipLevels);
@@ -235,13 +235,13 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 			result           = static_cast<vk::Result>(vmaCreateImage(
                 allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
                 &alloc_info, &native_image, &image.allocation, nullptr));
-			LOGF("Image allocation retry after reclaim: %s\n", vk::to_string(result).c_str());
+			VRAM_LOG("Image allocation retry after reclaim: %s\n", vk::to_string(result).c_str());
 		}
 	}
 	if (result != vk::Result::eSuccess && pageable_memory_enabled) {
 		// Last resort with VRAM paging on: let the image land in any compatible memory type
 		// (system memory) instead of failing the whole emulator.
-		LOGF("VRAM paging: retrying image allocation without DEVICE_LOCAL\n");
+		VRAM_LOG("VRAM paging: retrying image allocation without DEVICE_LOCAL\n");
 		alloc_info.requiredFlags  = 0;
 		alloc_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 		native_image              = VK_NULL_HANDLE;
@@ -249,7 +249,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		result                    = static_cast<vk::Result>(vmaCreateImage(
             allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &alloc_info,
             &native_image, &image.allocation, nullptr));
-		LOGF("VRAM paging: retry result: %s\n", vk::to_string(result).c_str());
+		VRAM_LOG("VRAM paging: retry result: %s\n", vk::to_string(result).c_str());
 	}
 	image.image = native_image;
 	if (result != vk::Result::eSuccess) {
@@ -312,7 +312,7 @@ bool GraphicContext::AllocateBallast(uint64_t mebibytes) {
 		    static_cast<vk::Result>(vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &buffer,
 		                                             &allocation, nullptr));
 		if (result != vk::Result::eSuccess) {
-			LOGF("VRAM ballast: allocation failed after %" PRIu64 " MiB: %s\n",
+			VRAM_LOG("VRAM ballast: allocation failed after %" PRIu64 " MiB: %s\n",
 			     ballast_bytes >> 20, vk::to_string(result).c_str());
 			return false;
 		}
@@ -320,7 +320,7 @@ bool GraphicContext::AllocateBallast(uint64_t mebibytes) {
 		ballast_bytes += this_mb << 20;
 		left -= this_mb;
 	}
-	LOGF("VRAM ballast: holding %" PRIu64 " MiB of device-local memory\n", ballast_bytes >> 20);
+	VRAM_LOG("VRAM ballast: holding %" PRIu64 " MiB of device-local memory\n", ballast_bytes >> 20);
 	return true;
 }
 

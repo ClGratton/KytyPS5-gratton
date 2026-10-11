@@ -143,7 +143,7 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 		m_critical_gc_memory = Config::GcTextureCriticalMb() * MiB;
 	}
 	if (m_graphics.CanReportMemoryUsage()) {
-		LOGF("Texture GC thresholds: trigger=%" PRIu64 " MiB pressure=%" PRIu64
+		VRAM_LOG("Texture GC thresholds: trigger=%" PRIu64 " MiB pressure=%" PRIu64
 		     " MiB critical=%" PRIu64 " MiB\n",
 		     m_trigger_gc_memory / MiB, m_pressure_gc_memory / MiB, m_critical_gc_memory / MiB);
 	}
@@ -1978,7 +1978,7 @@ void TextureCache::ReclaimMemory() {
 		FreeImage(id);
 		freed++;
 	}
-	LOGF("Texture cache reclaim: freed %zu images (%" PRIu64 " MiB accounted)\n", freed,
+	VRAM_LOG("Texture cache reclaim: freed %zu images (%" PRIu64 " MiB accounted)\n", freed,
 	     bytes >> 20);
 	// Deferred deletions are released once the GPU is done with the current work.
 	const auto tick_now = m_scheduler.CurrentTick();
