@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -64,6 +65,7 @@ public:
 		std::atomic<int64_t>  busy_ns {0};
 	};
 	[[nodiscard]] const Stats& GetStats() const { return m_stats; }
+	[[nodiscard]] std::string  SummaryText() const;
 
 private:
 	void Run();

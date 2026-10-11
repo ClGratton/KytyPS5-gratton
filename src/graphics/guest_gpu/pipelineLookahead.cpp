@@ -71,15 +71,14 @@ void PipelineLookahead::Stop() {
 	} else {
 		m_thread.detach();
 	}
-	const auto summary = fmt::format(
+}
+
+std::string PipelineLookahead::SummaryText() const {
+	return fmt::format(
 	    "items={};items_late={};draws={};dispatches={};max_queue={};busy_ms={};aborted={}",
 	    m_stats.items.load(), m_stats.items_late.load(), m_stats.draws.load(),
 	    m_stats.dispatches.load(), m_stats.max_queue.load(), m_stats.busy_ns.load() / 1000000,
 	    Common::Speculation::Aborted() ? 1 : 0);
-	std::printf("Pipeline lookahead thread: %s\n", summary.c_str());
-	if (Bench::TimingEnabled()) {
-		Bench::LogTiming("summary_lookahead_thread", 0, Bench::NowNs(), 0, false, summary);
-	}
 }
 
 CommandProcessor& PipelineLookahead::Shadow(uint32_t queue_id) {
