@@ -148,3 +148,55 @@ zero wasted requests). `shader_recompiler_compute_async_stall` and the graphics 
 5. **Not covered.** `--async-pipelines skip` + lookahead (should drop far fewer draws than skip alone since 96% of pipelines are ready; not measured), tessellation
    (not prefetched), a second (warm-cache) run, Vulkan validation layers, more than one title, `--pipeline-workers` other than 8, long routes (the VRAM-exhaustion exit at ~165 s of the pinned base is unrelated).
 6. **Not hidden.** Anything needed less than one frame after the guest produced it and costing seconds (boot burst, the 28-32 s burst). See Step 1 options.
+
+## Port to gratton-main (branch `gratton-shaders`, 2026-10-11)
+
+Base `gratton-main` = upstream 984cfce + PR #1365. Worktree `kyty/wt-shaders`, build dir `kyty/build/shaders` (ccache, `-j8`).
+The phase 1 commits were cherry-picked from the original `phase1` branch (it is based on 16a7fe6, five upstream commits behind gratton-main, so it applied
+without a single conflict and already contains the S_SWAP_PC call-source handling that the `-581` port had to drop). Phase 2 and lookahead come from the `-581` branches.
+
+Conflicts and how they were resolved:
+
+| where | cause | resolution |
+|---|---|---|
+| `ProgramCache::Get` / `SourceEntry` (pipelineCache.cpp) | upstream added S_SWAP_PC call sources (`call_source`, `FindPermutation<HasCalls>`, `function_code`) and dropped `skip_dispatch` | async jobs only handle plain programs; call-source programs (known or new) stay on the synchronous GPU-thread path, the lookahead leaves them alone; `skip_dispatch` bits removed |
+| `CompilePermutation`, `Publish` | new `function_code` / `has_calls` parameters | jobs pass `{}` / `false` |
+| `emulatorConfig.h`, `main.cpp` | new upstream flags next to ours | kept both |
+| `graphicsRun.cpp` indirect draws | upstream rewrote `DrawIndirect` on top of `DrawIndirectMulti` (+ register patching) | shadow guard moved into `DrawIndirectMulti`; `DispatchIndirect` trace row kept |
+| `depthRenderTarget.cpp` | upstream depth-to-color copy checks | kept upstream checks, `MakeDepthTargetDesc(graphics, z)` of the shared builder |
+| `pipelineCache.cpp` `BuildGraphicsKey` | depth bounds are now dynamic state, `static_params.depth_bounds_*` is gone | dropped our copy of those three lines |
+| `GetGraphicsProgramsImpl` | upstream `pixel_info.parameter_mode` chain | prefetch failure check first, then upstream chain |
+| tests | two upstream-added cases call `GetGraphicsPrograms` without the skip-mode retry | wrapped in `RetryWhilePending` |
+| semantic (no textual conflict) | `output.index` -> `output.location` for MRT slots; `copy_depth_to_color` draws; compute input info gained `lds_storage` / `async_compute` / `workgroup_counts` | prefetch follows all three (`lds_storage` is not in the program key but changes the compiled shader) |
+
+`ctest -j2`: 57 / 57 (gratton-main itself has 55 `add_test` entries; the 3 extra are `async_pipeline`, `shader_recompiler_compute_async_stall`, `graphics_pipeline_rasterization_async_skip`, minus one upstream-only difference in the count).
+
+## Hang investigation (session `bench/sessions/A`, run `bench/runs/20261011T175635Z-playA`)
+
+Facts from the saved artifacts: binary `4510e26` (`phase2-581/kyty_emulator`), `--async-pipelines stall --pipeline-lookahead true`, warm driver cache copied from `fps-stall-la`, physical pad. `title_fps.csv`:
+frame counter stuck at 2858 from 19:58:39 until the run was killed 19:59:10 (about 117 s after start, 41 fps before the stall). No new "Shaders:" progress lines after 19:57:45. The emulator's RSS was 5.9 GB while the system
+was swapping (9 GB swap in use). `stderr.log` empty, no core. A scripted warm run of the same binary (`hangrepro-old`, route intro150v2, 200 s, 9000 frames) did not hang, so it is not deterministic.
+
+ptrace is not allowed, so reasoning plus instrumentation. Candidate causes checked in the code:
+
+1. **Registered but never submitted job (confirmed bug, fixed).** `PipelineCache::PrefetchCompute` and `PrefetchGraphicsPipeline` did `Insert` into the in-flight registry, re-checked "already published?" and, if
+   so, `Erase`d the job again without submitting or finishing it. The GPU thread's draw path does `Find()` on the same registry and `WaitFor()` on whatever it gets; a job found in that window was never queued and never
+   finished, so the GPU thread blocked forever (frame counter frozen, no CPU use on that thread; the game threads then spin waiting for their GPU labels, which is the "one thread at 100 %" the user saw). The window is narrow
+   (the GPU thread must ask for the same key between the lookahead's `Insert` and `Erase`) but a warm driver cache makes pipeline creation take milliseconds, which is exactly what makes "published between the checks"
+   likely. Fix: a registered job is always submitted; `Execute()` of a pipeline job returns at once when the pipeline is already published; `AsyncPipelineCompiler::Submit` refuses a job by cancelling it (so any waiter wakes
+   with `false`). Unit test `TestRejectedSubmitReleasesWaiter`.
+2. **Unbounded shadow decode (hardened).** The shadow CommandProcessor runs the real PM4 decoder on streams the GPU has not executed. `COND_EXEC` and the 14-dword INDIRECT_BUFFER "branch" packet read their condition from
+   live guest memory; a loop whose exit depends on GPU-written memory never ends in the shadow (nothing ever writes it), and an INDIRECT_BUFFER chain can point at itself. The decode loop had no bound. Added a per-stream
+   budget (4M packets, 100k indirect jumps, 500 ms of *thread CPU time*, so a legitimate wait for a program job does not count), an "abandon" path that drops the rest of the stream and resets the shadow state, and bounds-checked
+   reads of the two conditions in shadow mode (they dereferenced raw guest pointers). Never triggered in the gameplay runs after the CPU-time change (`abandoned=0`). A first version used wall time and falsely fired on
+   waits for program jobs.
+3. **Lookahead queue growth (hardened).** If the lookahead falls behind, every submission was still copied and queued. Now capped (256 items / 4.5 M dwords), oldest dropped, counted (`dropped=`).
+4. Not found: lock inversion (entry mutex, registries, pool mutex, prefetch gate are never nested the other way), self-join at exit, lost wake-ups in `AsyncJob::Wait` / `Finish`.
+
+`--debug-hang-watchdog <s>` (common/hangWatchdog.*): when no frame is presented for `s` seconds it writes `_hang_watchdog.txt` / stderr with, for every thread, name, state, CPU % over a 1 s sample, kernel wait channel and the
+phase tag the thread published (`gpu_submission`, `job_wait`, `worker_job`, `lookahead_item`/`_draw`/`_dispatch`, `entry_lock_*`), the worker pool (queue, queued jobs, what each worker runs and for how long), the three
+in-flight registries (state, submitted?, prefetched?, age) and the lookahead thread (queue, current item, stats), plus raw native backtraces (signal based) of busy threads. All providers use try-locks so the report works while
+the thing it describes is deadlocked. It never fired in the 15+ lookahead runs of this session (15 s threshold).
+
+Root cause statement: the registered-but-never-submitted window (1) is the only code path found that can freeze the GPU thread indefinitely; it was not reproduced (the race is too narrow to hit on demand), so the link to the
+user's freeze is by code reading, not by observation.
