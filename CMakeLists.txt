@@ -626,6 +626,12 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	# --async-pipelines stall through the real PipelineCache: the whole suite with every program
+	# and pipeline built on a worker.
+	add_test(NAME shader_recompiler_compute_async_stall
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_async_stall PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=stall")
 
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)

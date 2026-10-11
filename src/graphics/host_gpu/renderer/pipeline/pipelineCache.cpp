@@ -33,6 +33,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
@@ -156,6 +157,33 @@ const char* StageShortName(ShaderType stage) {
 		case ShaderType::Compute: return "cs";
 		default: return "unknown";
 	}
+}
+
+// Hash of a resource specialization, computed once at capture (on the GPU thread) so job keys
+// never re-walk the vectors. Equality is still ResourceSpecialization::operator==.
+std::size_t HashSpecialization(const ShaderRecompiler::IR::ResourceSpecialization& spec) {
+	auto mix = [](std::size_t& hash, std::size_t value) {
+		hash ^= value + static_cast<std::size_t>(0x9e3779b97f4a7c15ull) + (hash << 6u) + (hash >> 2u);
+	};
+	std::size_t hash = spec.buffers.size() * 31u + spec.images.size();
+	for (const auto& buffer: spec.buffers) {
+		mix(hash, buffer.packed_stride);
+		mix(hash, static_cast<std::size_t>(buffer.descriptor_format));
+		mix(hash, buffer.descriptor_swizzle);
+		mix(hash, buffer.zero_stride_oob ? 1u : 0u);
+	}
+	for (const auto& image: spec.images) {
+		mix(hash, static_cast<std::size_t>(image.numeric_class));
+		mix(hash, static_cast<std::size_t>(image.dimension));
+		mix(hash, image.mip_count);
+		mix(hash, static_cast<std::size_t>(image.conversion_format));
+		mix(hash, image.shader_swizzle);
+		mix(hash, image.indirect_root);
+		mix(hash, image.indirect_mapping_offset);
+		mix(hash, image.indirect_search_iterations);
+		mix(hash, (image.cube ? 1u : 0u) | (image.fmask ? 2u : 0u));
+	}
+	return hash;
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
@@ -337,6 +365,14 @@ struct PipelineCache::ProgramCache {
 			return &permutations.emplace_back(std::move(compiled));
 		}
 
+		// Looks for an already-published permutation without touching guest memory. Used by the
+		// async path to close the window between "not in flight" and "published".
+		Permutation* FindPublished(uint32_t push_data_cursor,
+		                           const ShaderRecompiler::IR::ResourceSpecialization& wanted) {
+			std::shared_lock lock(mutex);
+			return FindExistingLocked(push_data_cursor, wanted);
+		}
+
 		const bool                                   skip_dispatch;
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
@@ -419,9 +455,158 @@ struct PipelineCache::ProgramCache {
 		};
 	}
 
+	// ---- --async-pipelines: program jobs -----------------------------------------------------
+	//
+	// A program job translates (when the GPU thread has not already) and compiles one shader
+	// permutation on a worker and publishes it into its SourceEntry. Everything it needs is
+	// captured by value on the GPU thread: guest code bytes, user_data, back_code, wave_size,
+	// the stage input info, the resolved ResourceSpecialization (hashed at capture) and the push
+	// data cursor. MaterializeResources (guest memory reads) and the ResourcePlan scratch stay on
+	// the GPU thread; the worker never touches `entry->resource_plan` or `entry->resources`.
+
+	// Identity of a permutation request: the program, the materialized specialization and the
+	// push-data cursor the layout is allocated at.
+	struct ProgramJobKey {
+		ProgramKey                                   program;
+		std::size_t                                  spec_hash = 0;
+		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		uint32_t                                     push_data_cursor = 0;
+
+		bool operator==(const ProgramJobKey& other) const {
+			return spec_hash == other.spec_hash && push_data_cursor == other.push_data_cursor &&
+			       program == other.program && specialization == other.specialization;
+		}
+	};
+
+	struct ProgramJobKeyHash {
+		std::size_t operator()(const ProgramJobKey& key) const {
+			std::size_t hash = ProgramKeyHash {}(key.program);
+			PipelineKeyHash::Mix(hash, key.spec_hash);
+			PipelineKeyHash::Mix(hash, key.push_data_cursor);
+			return hash;
+		}
+	};
+
+	struct ProgramJob final: AsyncJob {
+		ProgramJob(ProgramCache& owner, SourceEntry* source, ProgramJobKey job_key,
+		           uint64_t key_hash)
+		    : AsyncJob(Kind::Program, key_hash), cache(owner), entry(source),
+		      key(std::move(job_key)) {}
+
+		void Execute() override {
+			const bool timing = Bench::TimingEnabled();
+			Stopwatch  sw;
+			ShaderRecompiler::CompileOptions options;
+			options.stage          = stage;
+			options.shader_hash    = shader_hash;
+			options.user_data      = user_data;
+			options.back_code      = back_code;
+			options.dump_ir        = dump_ir;
+			options.early_dump     = dump_ir;
+			options.dump_label     = label;
+			options.wave_size      = wave_size;
+			options.user_data_base = user_data_base;
+			if (vertex_info) {
+				options.input_info.vertex = &*vertex_info;
+			} else if (pixel_info) {
+				options.input_info.pixel = &*pixel_info;
+			} else {
+				options.input_info.compute = &*compute_info;
+			}
+			int64_t                           frontend = frontend_ns;
+			int64_t                           backend_ns = 0, module_ns = 0;
+			ShaderRecompiler::TranslateResult translated;
+			if (pre_translated) {
+				translated = std::move(*pre_translated);
+				pre_translated.reset();
+			} else {
+				translated = ShaderRecompiler::TranslateProgram(code, options);
+				frontend   = sw.Lap();
+				EXIT_IF(translated.skip_dispatch);
+			}
+			auto compiled = cache.CompilePermutation(
+			    stage_name, options, std::move(translated), key.specialization,
+			    key.push_data_cursor, timing ? &backend_ns : nullptr, timing ? &module_ns : nullptr);
+			bool dup = false;
+			auto* const published = entry->Publish(compiled, key.push_data_cursor, dup);
+			if (dup) {
+				cache.device.destroyShaderModule(compiled.handle.module, nullptr);
+			} else {
+				cache.stage_permutation_counts[static_cast<size_t>(stage)].fetch_add(
+				    1, std::memory_order_relaxed);
+			}
+			result    = published;
+			duplicate = dup;
+			if (timing) {
+				const auto translate_ns = frontend + plan_ns + backend_ns + module_ns;
+				AddTimingRow(
+				    "program_translate", program_key_hash, t_capture_ns, translate_ns,
+				    fmt::format("stage={};shader_hash={:016x};shader_id={};new_source={};"
+				                "reused_permutation={};prepare_ns=0;frontend_ns={};plan_ns={};"
+				                "materialize_ns={};backend_ns={};module_ns={};code_dwords={}",
+				                StageShortName(stage), shader_hash, published->handle.id,
+				                new_source ? 1 : 0, dup ? 1 : 0, frontend, plan_ns, materialize_ns,
+				                backend_ns, module_ns, code_dwords));
+			}
+			cache.PrintShaderCounts();
+			// Publish first, unregister last: "not registered" must imply "published".
+			cache.program_jobs.Erase(key);
+		}
+
+		void Cancel() override { cache.program_jobs.Erase(key); }
+
+		ProgramCache& cache;
+		SourceEntry*  entry;
+		ProgramJobKey key;
+
+		// Captured inputs.
+		ShaderType            stage          = ShaderType::Unknown;
+		const char*           label          = nullptr;
+		const char*           stage_name     = nullptr;
+		uint64_t              shader_hash    = 0;
+		uint32_t              wave_size      = 64;
+		uint32_t              user_data_base = 0;
+		bool                  dump_ir        = false;
+		std::vector<uint32_t> code;      // empty when the GPU thread already translated
+		std::vector<uint32_t> back_code;
+		std::vector<uint32_t> user_data;
+		std::optional<ShaderVertexInputInfo>             vertex_info;
+		std::optional<ShaderPixelInputInfo>              pixel_info;
+		std::optional<ShaderComputeInputInfo>            compute_info;
+		std::optional<ShaderRecompiler::TranslateResult> pre_translated;
+
+		// Capture-side numbers for the program_translate timing row.
+		bool     new_source        = false;
+		int64_t  frontend_ns       = 0;
+		int64_t  plan_ns           = 0;
+		int64_t  materialize_ns    = 0;
+		int64_t  t_capture_ns      = 0;
+		uint64_t code_dwords       = 0;
+		uint64_t program_key_hash  = 0;
+
+		// Result, valid after a successful Wait().
+		Permutation* result    = nullptr;
+		bool         duplicate = false;
+	};
+
+	struct AsyncContext {
+		AsyncPipelineCompiler* pool = nullptr;
+	};
+
+	void PrintShaderCounts() {
+		// Guest geometry shaders are compiled through the host mesh stage.
+		const auto count = [this](ShaderType type) {
+			return stage_permutation_counts[static_cast<size_t>(type)].load(std::memory_order_relaxed);
+		};
+		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu | LS %zu | HS %zu | TES %zu\n",
+		            count(ShaderType::Vertex), count(ShaderType::Pixel), count(ShaderType::Compute),
+		            count(ShaderType::Mesh), count(ShaderType::Local),
+		            count(ShaderType::TessellationControl), count(ShaderType::TessellationEvaluation));
+	}
+
 	template <typename InputInfo>
 	ShaderProgram Get(const ShaderParams& params, InputInfo& input_info,
-	                  uint32_t& push_data_cursor) {
+	                  uint32_t& push_data_cursor, AsyncContext* async = nullptr) {
 		ShaderType stage;
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			stage = input_info.logical_stage;
@@ -484,6 +669,37 @@ struct PipelineCache::ProgramCache {
 			}
 		}
 
+		// --async-pipelines. `pool` is null in Off mode (and once the pool has been shut down), in
+		// which case everything below is exactly the stock synchronous path.
+		AsyncPipelineCompiler* const pool =
+		    (async != nullptr && async->pool != nullptr && async->pool->Running()) ? async->pool
+		                                                                           : nullptr;
+		// Uses a permutation another thread (or an earlier request) published for this draw.
+		const auto use_published = [&](Permutation& permutation, bool miss_report) {
+			input_info.stage = {.program = &permutation.program, .resources = &entry->resources};
+			permutation.program.bindings.AdvancePushData(push_data_cursor);
+			report_steps(miss_report);
+			return permutation.handle;
+		};
+		ProgramJobKey job_key;
+		if (pool != nullptr && entry != nullptr) {
+			// Known source, new permutation: is it already being built?
+			job_key.program          = lookup_key;
+			job_key.specialization   = specialization;
+			job_key.spec_hash        = HashSpecialization(specialization);
+			job_key.push_data_cursor = push_data_cursor;
+			if (auto in_flight = program_jobs.Find(job_key)) {
+				if (pool->WaitFor(*in_flight)) {
+					if (auto* result = std::static_pointer_cast<ProgramJob>(in_flight)->result) {
+						return use_published(*result, true);
+					}
+				}
+				// Cancelled by a shutdown: fall back to the synchronous path below.
+			} else if (auto* published = entry->FindPublished(push_data_cursor, specialization)) {
+				return use_published(*published, true);
+			}
+		}
+
 		Stopwatch miss_sw;
 		int64_t   prepare_ns = 0, frontend_ns = 0, plan_ns = 0, backend_ns = 0, module_ns = 0;
 		const bool new_source = entry == nullptr;
@@ -529,7 +745,61 @@ struct PipelineCache::ProgramCache {
 			options.wave_size = input_info.wave_size;
 		}
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
-		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
+
+		// Captures a job: every input the worker needs, by value.
+		const auto make_job = [&](bool pre_translated) {
+			auto job = std::make_shared<ProgramJob>(*this, entry, job_key,
+			                                        static_cast<uint64_t>(ProgramKeyHash {}(lookup_key)));
+			job->stage          = stage;
+			job->label          = label;
+			job->stage_name     = stage_name;
+			job->shader_hash    = params.hash;
+			job->wave_size      = options.wave_size;
+			job->user_data_base = options.user_data_base;
+			job->dump_ir        = options.dump_ir;
+			job->user_data.assign(user_data.begin(), user_data.end());
+			job->back_code.assign(params.back_code.begin(), params.back_code.end());
+			if (!pre_translated) {
+				job->code.assign(params.code.begin(), params.code.end());
+			}
+			if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+				job->vertex_info = input_info;
+			} else if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+				job->pixel_info = input_info;
+			} else {
+				job->compute_info = input_info;
+			}
+			job->new_source        = new_source;
+			job->code_dwords       = params.code.size();
+			job->program_key_hash  = program_key_hash;
+			job->t_capture_ns      = miss_sw.Start();
+			return job;
+		};
+		// Registers and queues `job`, then waits for it. Returns the published permutation, or
+		// nullptr when the caller must continue synchronously.
+		const auto run_job = [&](const std::shared_ptr<ProgramJob>& job) -> Permutation* {
+			bool inserted = false;
+			auto registered = program_jobs.Insert(job_key, job, inserted);
+			if (inserted && !pool->Submit(job)) {
+				program_jobs.Erase(job_key);
+				return nullptr;
+			}
+			if (pool->WaitFor(*registered)) {
+				return std::static_pointer_cast<ProgramJob>(registered)->result;
+			}
+			return nullptr;
+		};
+
+		ShaderRecompiler::TranslateResult translated;
+		if (pool != nullptr && entry != nullptr) {
+			// Known source: the worker translates from the copied code bytes and compiles.
+			const auto job = make_job(false);
+			if (auto* result = run_job(job)) {
+				return use_published(*result, true);
+			}
+			// Pool stopped or job cancelled: stock path below translates and compiles here.
+		}
+		translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		prepare_ns = 0; // no separate source-preparation step at this base (no S_SWAP_PC linking)
 		frontend_ns = miss_sw.Lap();
 		if (translated.skip_dispatch) {
@@ -558,6 +828,30 @@ struct PipelineCache::ProgramCache {
 			plan_ns = miss_sw.Lap();
 			specialization = entry->Materialize(runtime, &materialize_time);
 			miss_sw.Lap();
+			if (pool != nullptr) {
+				// New source: the GPU thread has translated (the resource plan comes out of the
+				// translation) and materialized; the worker compiles the translated program.
+				job_key.program          = lookup_key;
+				job_key.specialization   = specialization;
+				job_key.spec_hash        = HashSpecialization(specialization);
+				job_key.push_data_cursor = push_data_cursor;
+				const auto job = make_job(true);
+				job->frontend_ns    = frontend_ns;
+				job->plan_ns        = plan_ns;
+				job->materialize_ns = materialize_time.dur;
+				job->pre_translated = std::move(translated);
+				if (auto* result = run_job(job)) {
+					return use_published(*result, true);
+				}
+				// Pool stopped or job cancelled: take the translated program back and continue
+				// synchronously.
+				if (job->pre_translated) {
+					translated = std::move(*job->pre_translated);
+					job->pre_translated.reset();
+				} else {
+					EXIT("async program job lost its translated program\n");
+				}
+			}
 		}
 		auto compiled = CompilePermutation(
 		    stage_name, options, std::move(translated), std::move(specialization), push_data_cursor,
@@ -576,14 +870,7 @@ struct PipelineCache::ProgramCache {
 		log_translate(duplicate, permutation.handle.id);
 		report_steps(true);
 
-		// Guest geometry shaders are compiled through the host mesh stage.
-		const auto count = [this](ShaderType type) {
-			return stage_permutation_counts[static_cast<size_t>(type)].load(std::memory_order_relaxed);
-		};
-		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu | LS %zu | HS %zu | TES %zu\n",
-		            count(ShaderType::Vertex), count(ShaderType::Pixel), count(ShaderType::Compute),
-		            count(ShaderType::Mesh), count(ShaderType::Local),
-		            count(ShaderType::TessellationControl), count(ShaderType::TessellationEvaluation));
+		PrintShaderCounts();
 		return permutation.handle;
 	}
 
@@ -613,6 +900,8 @@ struct PipelineCache::ProgramCache {
 
 	std::mutex                                                  programs_mutex;
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
+	// In-flight --async-pipelines program jobs, keyed by (program, specialization, push cursor).
+	InFlightRegistry<ProgramJobKey, ProgramJobKeyHash>          program_jobs;
 	vk::Device                                                  device;
 	std::atomic<uint64_t>                                       next_shader_id {0};
 	// Number of published permutations per logical stage, kept incrementally so the "Shaders:"
@@ -622,13 +911,94 @@ struct PipelineCache::ProgramCache {
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
-    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)) {
+    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)),
+      m_async_mode(Config::GetAsyncPipelineMode()) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	InitializeDriverCache();
+	if (m_async_mode != Config::AsyncPipelineMode::Off) {
+		const auto workers = Config::GetPipelineWorkerCount();
+		m_async            = std::make_unique<AsyncPipelineCompiler>(m_async_mode, workers);
+		PipelineCacheLog("Async pipelines: mode={} workers={}", AsyncModeName(m_async_mode),
+		                 m_async->WorkerCount());
+	}
+}
+
+AsyncPipelineCompiler* PipelineCache::AsyncPool() {
+	return m_async != nullptr && m_async->Running() ? m_async.get() : nullptr;
+}
+
+void PipelineCache::ShutdownAsync() {
+	if (m_async == nullptr || !m_async->Running()) {
+		return; // off, or already stopped
+	}
+	// Workers must be gone before the driver VkPipelineCache is read and destroyed (Save()),
+	// before the Vulkan device is destroyed and before Config::Shutdown(). Queued jobs are
+	// cancelled, running ones finish (and publish). Callers holding the render context lock
+	// (Save() from WindowRun) cannot race with a draw waiting on a job.
+	m_async->Shutdown();
+	m_program_cache->program_jobs.Clear();
+	m_graphics_jobs.Clear();
+	m_compute_jobs.Clear();
+	PipelineCacheLog("Async pipelines: stopped ({})", m_async->Summary());
+	m_async->LogSummary();
+}
+
+PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const GraphicsPipelineKey& key) {
+	std::shared_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	if (m_async_mode != Config::AsyncPipelineMode::Off) {
+		lock.lock();
+	}
+	const auto iter = m_graphics_pipelines.find(key);
+	return iter != m_graphics_pipelines.end() ? iter->second.get() : nullptr;
+}
+
+PipelineCache::Pipeline* PipelineCache::FindComputePipeline(uint64_t program_id) {
+	std::shared_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	if (m_async_mode != Config::AsyncPipelineMode::Off) {
+		lock.lock();
+	}
+	const auto iter = m_compute_pipelines.find(program_id);
+	return iter != m_compute_pipelines.end() ? iter->second.get() : nullptr;
+}
+
+PipelineCache::Pipeline* PipelineCache::PublishGraphicsPipeline(const GraphicsPipelineKey& key,
+                                                                std::unique_ptr<Pipeline>& pipeline,
+                                                                bool& inserted) {
+	std::unique_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	if (m_async_mode != Config::AsyncPipelineMode::Off) {
+		lock.lock();
+	}
+	auto [iter, was_inserted] = m_graphics_pipelines.try_emplace(key, nullptr);
+	inserted                  = was_inserted;
+	if (was_inserted) {
+		iter->second = std::move(pipeline);
+	}
+	return iter->second.get();
+}
+
+PipelineCache::Pipeline* PipelineCache::PublishComputePipeline(uint64_t program_id,
+                                                               std::unique_ptr<Pipeline>& pipeline,
+                                                               bool& inserted) {
+	std::unique_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	if (m_async_mode != Config::AsyncPipelineMode::Off) {
+		lock.lock();
+	}
+	auto [iter, was_inserted] = m_compute_pipelines.try_emplace(program_id, nullptr);
+	inserted                  = was_inserted;
+	if (was_inserted) {
+		iter->second = std::move(pipeline);
+	}
+	return iter->second.get();
+}
+
+void PipelineCache::DestroyPipeline(Pipeline& pipeline) {
+	m_graphics.device.destroyPipeline(pipeline.pipeline, nullptr);
+	m_graphics.device.destroyPipelineLayout(pipeline.pipeline_layout, nullptr);
+	m_graphics.device.destroyDescriptorSetLayout(pipeline.descriptor_set_layout, nullptr);
 }
 
 PipelineCache::~PipelineCache() {
-	Save();
+	Save(); // also stops the async workers
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& [key, pipeline]: pipelines) {
 			(void)key;
@@ -756,6 +1126,8 @@ void PipelineCache::InitializeDriverCache() {
 }
 
 void PipelineCache::Save() {
+	// Join the workers first: they use m_driver_cache, and it is destroyed below.
+	ShutdownAsync();
 	if (m_driver_cache == nullptr) {
 		return;
 	}
@@ -812,6 +1184,87 @@ void PipelineCache::Save() {
 	m_graphics.device.destroyPipelineCache(m_driver_cache, nullptr);
 	m_driver_cache = nullptr;
 }
+
+// ---- --async-pipelines: pipeline jobs ----------------------------------------------------------
+//
+// A pipeline job runs CreatePipelineInternal (descriptor/pipeline layouts + vkCreate*Pipelines on
+// the shared driver VkPipelineCache, which is created without EXTERNALLY_SYNCHRONIZED) on a worker
+// and publishes the result into the pipeline map. All inputs are copies taken on the GPU thread.
+
+struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
+	GraphicsPipelineJob(PipelineCache& owner, GraphicsPipelineKey job_key, uint64_t key_hash)
+	    : AsyncJob(Kind::Graphics, key_hash), cache(owner), key(std::move(job_key)) {}
+
+	void Execute() override {
+		auto cached = std::make_unique<Pipeline>();
+		LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
+		Stopwatch create_sw;
+		CreatePipelineInternal(cache.m_graphics, *cached, key.rendering, key.vertex_input,
+		                       vertex_info, ps_input_info ? &*ps_input_info : nullptr, programs,
+		                       key.static_params, driver_cache);
+		if (create_sw.On()) {
+			const auto create_ns = create_sw.Elapsed();
+			AddTimingRow("pipeline_create_gfx", KeyHash(), create_sw.Start(), create_ns,
+			             fmt::format("vs_id={};ps_id={};tess={};driver_cache={};driver_ns={}", vs_id,
+			                         ps_id, programs.VertexStageCount() == 3 ? 1 : 0,
+			                         driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs()));
+		}
+		LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
+		EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
+		EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
+		bool inserted = false;
+		cache.PublishGraphicsPipeline(key, cached, inserted);
+		if (!inserted) {
+			cache.DestroyPipeline(*cached); // an equal pipeline was published first
+		}
+		// Publish first, unregister last: "not registered" must imply "published".
+		cache.m_graphics_jobs.Erase(key);
+	}
+
+	void Cancel() override { cache.m_graphics_jobs.Erase(key); }
+
+	PipelineCache&                     cache;
+	GraphicsPipelineKey                key;
+	std::vector<ShaderVertexInputInfo> vertex_info;
+	std::optional<ShaderPixelInputInfo> ps_input_info;
+	GraphicsPrograms                   programs;
+	vk::PipelineCache                  driver_cache = nullptr;
+	uint64_t                           vs_id        = 0;
+	uint64_t                           ps_id        = 0;
+};
+
+struct PipelineCache::ComputePipelineJob final: AsyncJob {
+	ComputePipelineJob(PipelineCache& owner, uint64_t id)
+	    : AsyncJob(Kind::Compute, id), cache(owner), program_id(id) {}
+
+	void Execute() override {
+		auto      cached = std::make_unique<Pipeline>();
+		Stopwatch create_sw;
+		CreatePipelineInternal(cache.m_graphics, *cached, input_info, module, driver_cache);
+		if (create_sw.On()) {
+			const auto create_ns = create_sw.Elapsed();
+			AddTimingRow("pipeline_create_cs", program_id, create_sw.Start(), create_ns,
+			             fmt::format("cs_id={};driver_cache={};driver_ns={}", program_id,
+			                         driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs()));
+		}
+		EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
+		EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
+		bool inserted = false;
+		cache.PublishComputePipeline(program_id, cached, inserted);
+		if (!inserted) {
+			cache.DestroyPipeline(*cached);
+		}
+		cache.m_compute_jobs.Erase(program_id);
+	}
+
+	void Cancel() override { cache.m_compute_jobs.Erase(program_id); }
+
+	PipelineCache&         cache;
+	uint64_t               program_id;
+	ShaderComputeInputInfo input_info;
+	vk::ShaderModule       module       = nullptr;
+	vk::PipelineCache      driver_cache = nullptr;
+};
 
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
@@ -889,11 +1342,14 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
 	GraphicsPrograms  result;
+	// Off mode: `async.pool` is null and every Get() below is the stock synchronous call.
+	ProgramCache::AsyncContext async {.pool = AsyncPool()};
 	if (pixel_active) {
-		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
+		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor, &async);
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
-		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
+		result.vertex[i] =
+		    m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor, &async);
 	}
 	return result;
 }
@@ -904,7 +1360,8 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
 	uint32_t          push_data_cursor = 0;
-	return m_program_cache->Get(params, input_info, push_data_cursor);
+	ProgramCache::AsyncContext async {.pool = AsyncPool()};
+	return m_program_cache->Get(params, input_info, push_data_cursor, &async);
 }
 
 bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other) const noexcept {
@@ -1063,8 +1520,46 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 		}
 	}
 
-	if (auto iter = m_graphics_pipelines.find(key); iter != m_graphics_pipelines.end()) {
-		return *iter->second;
+	if (auto* found = FindGraphicsPipeline(key)) {
+		return *found;
+	}
+
+	// --async-pipelines: build the pipeline on a worker. A job captures the key, the vertex/pixel
+	// input info (by value), the compiled program handles and the driver cache handle; the
+	// stages' CompiledShaderInfo pointers it carries point at published, immutable permutations.
+	if (auto* pool = AsyncPool()) {
+		std::shared_ptr<AsyncJob> job = m_graphics_jobs.Find(key);
+		if (job == nullptr) {
+			// Not in flight. It may have been published since the lookup above: a worker
+			// publishes before it unregisters.
+			if (auto* published = FindGraphicsPipeline(key)) {
+				return *published;
+			}
+			auto fresh = std::make_shared<GraphicsPipelineJob>(*this, key,
+			                                                   GraphicsPipelineKeyHash {}(key));
+			fresh->vertex_info.assign(vertex_info.begin(), vertex_info.end());
+			if (ps_input_info != nullptr) {
+				fresh->ps_input_info = *ps_input_info;
+			}
+			fresh->programs     = programs;
+			fresh->driver_cache = m_driver_cache;
+			fresh->vs_id        = vs_id;
+			fresh->ps_id        = ps_id;
+			bool inserted       = false;
+			job                 = m_graphics_jobs.Insert(key, fresh, inserted);
+			if (inserted && !pool->Submit(fresh)) {
+				m_graphics_jobs.Erase(key);
+				job = nullptr;
+			}
+		}
+		if (job != nullptr) {
+			if (pool->WaitFor(*job)) {
+				if (auto* published = FindGraphicsPipeline(key)) {
+					return *published;
+				}
+			}
+			// Cancelled by a shutdown: build it here.
+		}
 	}
 
 	if (graphics_debug_dump_enabled()) {
@@ -1097,10 +1592,11 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
 
-	auto [iter, inserted] = m_graphics_pipelines.emplace(std::move(key), std::move(cached));
+	bool inserted = false;
+	auto* const published = PublishGraphicsPipeline(key, cached, inserted);
 	EXIT_IF(!inserted);
 
-	return *iter->second;
+	return *published;
 }
 
 PipelineCache::Pipeline&
@@ -1110,9 +1606,34 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 
 	EXIT_IF(!compute_program);
 
-	if (auto iter = m_compute_pipelines.find(compute_program.id);
-	    iter != m_compute_pipelines.end()) {
-		return *iter->second;
+	if (auto* found = FindComputePipeline(compute_program.id)) {
+		return *found;
+	}
+
+	// --async-pipelines: compute dispatches are never skipped, they wait for the worker.
+	if (auto* pool = AsyncPool()) {
+		std::shared_ptr<AsyncJob> job = m_compute_jobs.Find(compute_program.id);
+		if (job == nullptr) {
+			if (auto* published = FindComputePipeline(compute_program.id)) {
+				return *published;
+			}
+			auto fresh = std::make_shared<ComputePipelineJob>(*this, compute_program.id);
+			fresh->input_info   = input_info;
+			fresh->module       = compute_program.module;
+			fresh->driver_cache = m_driver_cache;
+			bool inserted       = false;
+			job                 = m_compute_jobs.Insert(compute_program.id, fresh, inserted);
+			if (inserted && !pool->Submit(fresh)) {
+				m_compute_jobs.Erase(compute_program.id);
+				job = nullptr;
+			}
+		}
+		if (job != nullptr && pool->WaitFor(*job)) {
+			if (auto* published = FindComputePipeline(compute_program.id)) {
+				return *published;
+			}
+		}
+		// Cancelled by a shutdown: build it here.
 	}
 
 	if (graphics_debug_dump_enabled()) {
@@ -1133,9 +1654,10 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
 
-	auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(cached));
+	bool inserted = false;
+	auto* const published = PublishComputePipeline(compute_program.id, cached, inserted);
 	EXIT_IF(!inserted);
 
-	return *iter->second;
+	return *published;
 }
 } // namespace Libs::Graphics
