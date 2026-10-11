@@ -133,6 +133,12 @@ void Configure(const Options& options) {
 		std::atexit(FlushAtExit);
 		std::at_quick_exit(FlushAtExit);
 	}
+	if (!options.dump_pipelines.empty()) {
+		std::filesystem::create_directories(options.dump_pipelines / "spv");
+		std::filesystem::create_directories(options.dump_pipelines / "pipelines");
+		std::filesystem::create_directories(options.dump_pipelines / "compute");
+	}
+	detail::g_dump_pipelines_enabled.store(!options.dump_pipelines.empty(), std::memory_order_relaxed);
 	detail::g_frames_enabled.store(frames, std::memory_order_relaxed);
 	detail::g_timing_enabled.store(timing, std::memory_order_relaxed);
 }
@@ -154,6 +160,12 @@ bool RecordPresent(uint64_t frame_idx) {
 		FlushFramesLocked(state);
 	}
 	return false;
+}
+
+std::filesystem::path DumpPipelinesDir() {
+	auto&           state = GetState();
+	std::lock_guard lock(state.mutex);
+	return state.options.dump_pipelines;
 }
 
 int64_t NowNs() noexcept {

@@ -22,6 +22,8 @@ struct Options {
 	// creation (misses only) and per slow MaterializeResources, plus
 	// aggregate rows for the fast (hit) path. See docs/phase1-notes.md for the row format.
 	std::filesystem::path shader_timing_log;
+	// --dump-pipelines <dir> (D2 spike, see graphics/host_gpu/renderer/pipeline/pipelineDump.h).
+	std::filesystem::path dump_pipelines;
 };
 
 // Called once from Config::Load(). Replaces any previous state (the buffer is flushed first).
@@ -34,6 +36,16 @@ inline std::atomic<bool> g_frames_enabled {false};
 [[nodiscard]] inline bool FramesEnabled() noexcept {
 	return detail::g_frames_enabled.load(std::memory_order_relaxed);
 }
+
+namespace detail {
+inline std::atomic<bool> g_dump_pipelines_enabled {false};
+} // namespace detail
+
+[[nodiscard]] inline bool DumpPipelinesEnabled() noexcept {
+	return detail::g_dump_pipelines_enabled.load(std::memory_order_relaxed);
+}
+// Directory given to --dump-pipelines (valid when DumpPipelinesEnabled()).
+[[nodiscard]] std::filesystem::path DumpPipelinesDir();
 
 // Records one presented frame. `frame_idx` is the 1-based number of frames presented so far
 // (the value of presented_frames after the increment). The timestamp is std::chrono::steady_clock

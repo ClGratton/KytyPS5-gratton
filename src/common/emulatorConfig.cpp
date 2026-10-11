@@ -2,7 +2,6 @@
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
-#include "graphics/host_gpu/renderer/pipeline/pipelineDump.h"
 
 #include <algorithm>
 #include <memory>
@@ -32,8 +31,8 @@ void Load(const ConfigOptions& cfg) {
 	    .frames_csv        = cfg.bench_frames_csv,
 	    .exit_after_frames = cfg.bench_exit_after_frames,
 	    .shader_timing_log = cfg.shader_timing_log,
+	    .dump_pipelines    = cfg.dump_pipelines,
 	});
-	Libs::Graphics::PipelineDump::Configure(cfg.dump_pipelines);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {

@@ -12,9 +12,9 @@
 // The standalone tools/gpl-bench program replays these files. Nothing here runs unless the flag
 // is given (one relaxed atomic load at the call sites).
 
+#include "common/benchInstrument.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
-#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <span>
@@ -23,16 +23,10 @@
 
 namespace Libs::Graphics::PipelineDump {
 
-namespace detail {
-inline std::atomic<bool> g_enabled {false};
-} // namespace detail
-
+// The directory comes from Bench::Options::dump_pipelines (--dump-pipelines).
 [[nodiscard]] inline bool Enabled() noexcept {
-	return detail::g_enabled.load(std::memory_order_relaxed);
+	return Bench::DumpPipelinesEnabled();
 }
-
-// Called once from Config::Load(). An empty path disables the dump.
-void Configure(const std::filesystem::path& dir);
 
 void WriteSpirv(uint64_t shader_id, std::span<const uint32_t> code, const char* stage_name,
                 uint64_t shader_hash);

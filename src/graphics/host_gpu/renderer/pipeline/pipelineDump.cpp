@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineDump.h"
 
+#include "common/benchInstrument.h"
+
 #include <cstdio>
 #include <fmt/format.h>
 #include <mutex>
@@ -18,6 +20,9 @@ struct State {
 
 State& GetState() {
 	static State* state = new State; // leaked on purpose: used from quick_exit paths
+	if (state->dir.empty()) {
+		state->dir = Bench::DumpPipelinesDir();
+	}
 	return *state;
 }
 
@@ -62,20 +67,6 @@ std::string BindingsJson(std::span<const vk::DescriptorSetLayoutBinding> binding
 }
 
 } // namespace
-
-void Configure(const std::filesystem::path& dir) {
-	auto&           state = GetState();
-	std::lock_guard lock(state.mutex);
-	state.dir = dir;
-	if (dir.empty()) {
-		detail::g_enabled.store(false, std::memory_order_relaxed);
-		return;
-	}
-	std::filesystem::create_directories(dir / "spv");
-	std::filesystem::create_directories(dir / "pipelines");
-	std::filesystem::create_directories(dir / "compute");
-	detail::g_enabled.store(true, std::memory_order_relaxed);
-}
 
 void WriteSpirv(uint64_t shader_id, std::span<const uint32_t> code, const char* stage_name,
                 uint64_t shader_hash) {
