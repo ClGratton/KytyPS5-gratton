@@ -197,7 +197,6 @@ public:
 		std::atomic<uint64_t> gfx_hit_ready {0};
 		std::atomic<uint64_t> gfx_hit_inflight {0};
 		std::atomic<uint64_t> gfx_miss {0};
-		std::atomic<uint64_t> programs_requested {0}; // program jobs created by prefetch Get()
 		// Why a prefetch request was dropped (graphics draws, then program lookups).
 		enum Skip : uint32_t {
 			SkipZeroCount, SkipColorMode, SkipDepthCopy, SkipNoVertexShader, SkipTopology,

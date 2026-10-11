@@ -1216,12 +1216,11 @@ void PipelineCache::ShutdownAsync() {
 		const auto  summary = fmt::format(
 		    "cs_seen={};cs_skipped={};cs_requested={};cs_already={};cs_hit_ready={};"
 		    "cs_hit_inflight={};cs_miss={};gfx_seen={};gfx_skipped={};gfx_requested={};"
-		    "gfx_already={};gfx_hit_ready={};gfx_hit_inflight={};gfx_miss={};programs_requested={}",
+		    "gfx_already={};gfx_hit_ready={};gfx_hit_inflight={};gfx_miss={}",
 		    l.cs_seen.load(), l.cs_skipped.load(), l.cs_requested.load(), l.cs_already.load(),
 		    l.cs_hit_ready.load(), l.cs_hit_inflight.load(), l.cs_miss.load(), l.gfx_seen.load(),
 		    l.gfx_skipped.load(), l.gfx_requested.load(), l.gfx_already.load(),
-		    l.gfx_hit_ready.load(), l.gfx_hit_inflight.load(), l.gfx_miss.load(),
-		    l.programs_requested.load());
+		    l.gfx_hit_ready.load(), l.gfx_hit_inflight.load(), l.gfx_miss.load());
 		std::string skips;
 		for (uint32_t i = 0; i < LookaheadCounters::SkipCount; i++) {
 			skips += fmt::format(";skip_{}={}", LookaheadCounters::SkipName(i), l.skip[i].load());
