@@ -127,6 +127,10 @@ public:
 		std::array<ShaderProgram, 3> vertex;
 		ShaderProgram pixel;
 
+		// --async-pipelines skip: a program was not ready, nothing else in here is valid and
+		// the draw must be skipped.
+		bool pending = false;
+
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
 
@@ -141,7 +145,9 @@ public:
 	                                const HW::ShaderRegisters&   sh,
 	                                ShaderComputeInputInfo&      input_info);
 
-	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
+	// Returns nullptr only with --async-pipelines skip, when the pipeline is still being built:
+	// the caller must skip the draw.
+	Pipeline* GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,
 	                              std::span<const ShaderVertexInputInfo> vertex_info,
 	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,

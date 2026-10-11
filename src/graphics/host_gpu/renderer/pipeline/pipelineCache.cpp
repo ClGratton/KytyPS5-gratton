@@ -590,7 +590,9 @@ struct PipelineCache::ProgramCache {
 	};
 
 	struct AsyncContext {
-		AsyncPipelineCompiler* pool = nullptr;
+		AsyncPipelineCompiler* pool       = nullptr;
+		bool                   allow_skip = false; // graphics only; compute always waits
+		bool                   pending    = false; // out: skipped, program not ready
 	};
 
 	void PrintShaderCounts() {
@@ -674,12 +676,18 @@ struct PipelineCache::ProgramCache {
 		AsyncPipelineCompiler* const pool =
 		    (async != nullptr && async->pool != nullptr && async->pool->Running()) ? async->pool
 		                                                                           : nullptr;
+		const bool may_skip = pool != nullptr && async->allow_skip && stage != ShaderType::Compute;
 		// Uses a permutation another thread (or an earlier request) published for this draw.
 		const auto use_published = [&](Permutation& permutation, bool miss_report) {
 			input_info.stage = {.program = &permutation.program, .resources = &entry->resources};
 			permutation.program.bindings.AdvancePushData(push_data_cursor);
 			report_steps(miss_report);
 			return permutation.handle;
+		};
+		const auto note_skip = [&] {
+			pool->Stats().skipped_program_draws.fetch_add(1, std::memory_order_relaxed);
+			async->pending = true;
+			report_steps(false);
 		};
 		ProgramJobKey job_key;
 		if (pool != nullptr && entry != nullptr) {
@@ -688,7 +696,11 @@ struct PipelineCache::ProgramCache {
 			job_key.specialization   = specialization;
 			job_key.spec_hash        = HashSpecialization(specialization);
 			job_key.push_data_cursor = push_data_cursor;
-			if (auto in_flight = program_jobs.Find(job_key)) {
+			if (auto in_flight = program_jobs.Find(job_key, may_skip)) {
+				if (may_skip) {
+					note_skip();
+					return {};
+				}
 				if (pool->WaitFor(*in_flight)) {
 					if (auto* result = std::static_pointer_cast<ProgramJob>(in_flight)->result) {
 						return use_published(*result, true);
@@ -775,13 +787,24 @@ struct PipelineCache::ProgramCache {
 			job->t_capture_ns      = miss_sw.Start();
 			return job;
 		};
-		// Registers and queues `job`, then waits for it. Returns the published permutation, or
-		// nullptr when the caller must continue synchronously.
-		const auto run_job = [&](const std::shared_ptr<ProgramJob>& job) -> Permutation* {
+		// Registers and queues `job`, then skips (graphics, skip mode) or waits for it. Returns
+		// the published permutation, or nullptr when the caller must continue synchronously;
+		// `skipped` tells the caller to give up on the draw.
+		const auto run_job = [&](const std::shared_ptr<ProgramJob>& job, bool& skipped) -> Permutation* {
+			skipped = false;
 			bool inserted = false;
 			auto registered = program_jobs.Insert(job_key, job, inserted);
-			if (inserted && !pool->Submit(job)) {
-				program_jobs.Erase(job_key);
+			if (inserted) {
+				if (!pool->Submit(job)) {
+					program_jobs.Erase(job_key);
+					return nullptr;
+				}
+				if (may_skip) job->CountSkippedDraw();
+			} else if (may_skip) {
+				registered->CountSkippedDraw();
+			}
+			if (may_skip) {
+				skipped = true;
 				return nullptr;
 			}
 			if (pool->WaitFor(*registered)) {
@@ -794,8 +817,13 @@ struct PipelineCache::ProgramCache {
 		if (pool != nullptr && entry != nullptr) {
 			// Known source: the worker translates from the copied code bytes and compiles.
 			const auto job = make_job(false);
-			if (auto* result = run_job(job)) {
+			bool skipped = false;
+			if (auto* result = run_job(job, skipped)) {
 				return use_published(*result, true);
+			}
+			if (skipped) {
+				note_skip();
+				return {};
 			}
 			// Pool stopped or job cancelled: stock path below translates and compiles here.
 		}
@@ -840,8 +868,13 @@ struct PipelineCache::ProgramCache {
 				job->plan_ns        = plan_ns;
 				job->materialize_ns = materialize_time.dur;
 				job->pre_translated = std::move(translated);
-				if (auto* result = run_job(job)) {
+				bool skipped = false;
+				if (auto* result = run_job(job, skipped)) {
 					return use_published(*result, true);
+				}
+				if (skipped) {
+					note_skip();
+					return {};
 				}
 				// Pool stopped or job cancelled: take the translated program back and continue
 				// synchronously.
@@ -1342,14 +1375,25 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
 	GraphicsPrograms  result;
-	// Off mode: `async.pool` is null and every Get() below is the stock synchronous call.
-	ProgramCache::AsyncContext async {.pool = AsyncPool()};
+	// Off mode: `async.pool` is null and every Get() below is the stock synchronous call. In skip
+	// mode a stage whose program is not ready stops the whole lookup: the stages after it cannot
+	// be captured because their push-data start depends on the earlier stages' compiled layouts.
+	ProgramCache::AsyncContext async {.pool = AsyncPool(),
+	                                  .allow_skip = m_async_mode == Config::AsyncPipelineMode::Skip};
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor, &async);
+		if (async.pending) {
+			result.pending = true;
+			return result;
+		}
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
 		result.vertex[i] =
 		    m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor, &async);
+		if (async.pending) {
+			result.pending = true;
+			return result;
+		}
 	}
 	return result;
 }
@@ -1360,7 +1404,8 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
 	uint32_t          push_data_cursor = 0;
-	ProgramCache::AsyncContext async {.pool = AsyncPool()};
+	// Compute dispatches are never skipped: the dispatch waits for the worker (stall and skip).
+	ProgramCache::AsyncContext async {.pool = AsyncPool(), .allow_skip = false};
 	return m_program_cache->Get(params, input_info, push_data_cursor, &async);
 }
 
@@ -1368,7 +1413,7 @@ bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other)
 	return std::memcmp(this, &other, sizeof(*this)) == 0;
 }
 
-PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
+PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
     std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
     std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
@@ -1521,19 +1566,20 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	}
 
 	if (auto* found = FindGraphicsPipeline(key)) {
-		return *found;
+		return found;
 	}
 
 	// --async-pipelines: build the pipeline on a worker. A job captures the key, the vertex/pixel
 	// input info (by value), the compiled program handles and the driver cache handle; the
 	// stages' CompiledShaderInfo pointers it carries point at published, immutable permutations.
 	if (auto* pool = AsyncPool()) {
-		std::shared_ptr<AsyncJob> job = m_graphics_jobs.Find(key);
+		const bool                may_skip = m_async_mode == Config::AsyncPipelineMode::Skip;
+		std::shared_ptr<AsyncJob> job      = m_graphics_jobs.Find(key, may_skip);
 		if (job == nullptr) {
 			// Not in flight. It may have been published since the lookup above: a worker
 			// publishes before it unregisters.
 			if (auto* published = FindGraphicsPipeline(key)) {
-				return *published;
+				return published;
 			}
 			auto fresh = std::make_shared<GraphicsPipelineJob>(*this, key,
 			                                                   GraphicsPipelineKeyHash {}(key));
@@ -1547,15 +1593,25 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 			fresh->ps_id        = ps_id;
 			bool inserted       = false;
 			job                 = m_graphics_jobs.Insert(key, fresh, inserted);
-			if (inserted && !pool->Submit(fresh)) {
-				m_graphics_jobs.Erase(key);
-				job = nullptr;
+			if (inserted) {
+				if (!pool->Submit(fresh)) {
+					m_graphics_jobs.Erase(key);
+					job = nullptr;
+				} else if (may_skip) {
+					fresh->CountSkippedDraw();
+				}
+			} else if (may_skip) {
+				job->CountSkippedDraw();
 			}
 		}
 		if (job != nullptr) {
+			if (may_skip) {
+				pool->Stats().skipped_pipeline_draws.fetch_add(1, std::memory_order_relaxed);
+				return nullptr; // the caller skips this draw
+			}
 			if (pool->WaitFor(*job)) {
 				if (auto* published = FindGraphicsPipeline(key)) {
-					return *published;
+					return published;
 				}
 			}
 			// Cancelled by a shutdown: build it here.
@@ -1596,7 +1652,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	auto* const published = PublishGraphicsPipeline(key, cached, inserted);
 	EXIT_IF(!inserted);
 
-	return *published;
+	return published;
 }
 
 PipelineCache::Pipeline&

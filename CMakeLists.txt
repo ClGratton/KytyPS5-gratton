@@ -626,13 +626,17 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
-	# --async-pipelines stall through the real PipelineCache: the whole suite with every program
-	# and pipeline built on a worker.
+	# --async-pipelines through the real PipelineCache: the whole suite with every program and
+	# pipeline built on a worker (stall), and the graphics pipeline check with draws that retry
+	# until the worker has published the pipeline (skip; compute dispatches wait either way).
 	add_test(NAME shader_recompiler_compute_async_stall
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	set_tests_properties(shader_recompiler_compute_async_stall PROPERTIES
 		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=stall")
-
+	add_test(NAME graphics_pipeline_rasterization_async_skip
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(graphics_pipeline_rasterization_async_skip PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=skip")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME virtual_memory_allocation
