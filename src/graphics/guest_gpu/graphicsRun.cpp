@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
+#include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -524,8 +525,10 @@ void GuestGpu::ThreadRun(void* data) {
 	KYTY_PROFILER_THREAD("kyGpu");
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
+	Common::GpuPhase::AttachGpuThread();
 
 	for (;;) {
+		Common::GpuPhase::Poll();
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
 		bool                         has_submission = false;
@@ -535,6 +538,7 @@ void GuestGpu::ThreadRun(void* data) {
 			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
+				Common::GpuPhase::Scope gpu_phase_idle(Common::GpuPhase::Phase::Idle);
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
 			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -557,6 +561,7 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
+					Common::GpuPhase::Scope gpu_phase_idle(Common::GpuPhase::Phase::Idle);
 					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
@@ -575,6 +580,7 @@ void GuestGpu::ThreadRun(void* data) {
 			}
 		}
 		if (should_stop) {
+			Common::GpuPhase::Finish();
 			gpu->m_gfx_cp->BufferWait();
 			g_gpu_state  = nullptr;
 			g_gpu_thread = false;
@@ -727,6 +733,7 @@ bool GuestGpu::ProcessImpl(Submission& submission) {
 Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
                                            std::span<const uint32_t> commands) {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Process");
+	Common::GpuPhase::Scope gpu_phase_pm4(Common::GpuPhase::Phase::Pm4);
 	EXIT_IF(g_current_execution != nullptr);
 	EXIT_IF(commands.size() > UINT32_MAX);
 	if (execution.m_buffer_stack.empty() && !commands.empty()) {
@@ -897,6 +904,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			     total_dw - remaining_dw, packet_header);
 		}
 
+		Common::GpuPhase::PacketScope gpu_phase_packet(opcode);
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 		EXIT_IF(packet_dw > remaining_dw);

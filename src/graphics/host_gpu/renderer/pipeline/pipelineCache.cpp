@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
+#include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
 #include "common/speculation.h"
 #include "common/emulatorConfig.h"
@@ -1634,6 +1635,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info) {
+	Common::GpuPhase::Scope gpu_phase_pipeline(Common::GpuPhase::Phase::Pipeline);
 	return GetGraphicsProgramsImpl(vertex_regs, pixel_regs, sh, context, user_config,
 	                               target_export_mapping, pixel_active, vertex_info, pixel_info,
 	                               false);
@@ -1791,6 +1793,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                const HW::ShaderRegisters&   sh,
                                                ShaderComputeInputInfo&      input_info) {
+	Common::GpuPhase::Scope gpu_phase_pipeline(Common::GpuPhase::Phase::Pipeline);
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
@@ -2071,6 +2074,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
     bool primitive_restart_enable, const GraphicsPrograms& programs) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
+	Common::GpuPhase::Scope gpu_phase_pipeline(Common::GpuPhase::Phase::Pipeline);
 
 	const auto  key = BuildGraphicsKey(colors, depth, vertex_info, command.GetRegisters(),
 	                                   command.GetUserConfig(), ps_input_info, topology,
@@ -2237,6 +2241,7 @@ PipelineCache::Pipeline&
 PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
                                   const ShaderProgram&          compute_program) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
+	Common::GpuPhase::Scope gpu_phase_pipeline(Common::GpuPhase::Phase::Pipeline);
 
 	EXIT_IF(!compute_program);
 

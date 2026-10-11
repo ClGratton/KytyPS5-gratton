@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/benchInstrument.h"
+#include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -1003,6 +1004,7 @@ void Presenter::Impl::Present() {
 		const auto presented =
 		    window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed) + 1;
 		Common::Hang::NoteProgress();
+		Common::GpuPhase::NoteFrame();
 		if (Bench::FramesEnabled() && Bench::RecordPresent(presented)) {
 			// --bench-exit-after-frames: take the normal clean-exit path (same as closing the
 			// window): the main loop sees SDL_EVENT_QUIT, saves the pipeline cache, then

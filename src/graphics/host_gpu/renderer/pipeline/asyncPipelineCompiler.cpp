@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
 
 #include "common/benchInstrument.h"
+#include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
 
 #include <algorithm>
@@ -192,6 +193,7 @@ bool AsyncPipelineCompiler::WaitFor(AsyncJob& job) {
 		Promote(job);
 	}
 	const auto before = job.WaitNs();
+	Common::GpuPhase::Scope gpu_phase_job(Common::GpuPhase::Phase::PipelineJob);
 	const bool ok     = job.Wait();
 	m_stats.gpu_waits.fetch_add(1, std::memory_order_relaxed);
 	m_stats.gpu_wait_ns.fetch_add(job.WaitNs() - before, std::memory_order_relaxed);

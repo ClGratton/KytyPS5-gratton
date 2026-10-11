@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/gpuPhaseStats.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -714,6 +715,7 @@ void RenderExecutor::ResetBindings() {
 
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
+	Common::GpuPhase::Scope gpu_phase_srt(Common::GpuPhase::Phase::Srt);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;
@@ -749,6 +751,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 }
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
+	Common::GpuPhase::Scope gpu_phase_srt(Common::GpuPhase::Phase::Srt);
 	KYTY_PROFILER_FUNCTION();
 	auto& cache = m_context.GetBufferCache();
 	for (auto* stage: stages) {
@@ -799,6 +802,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 }
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program   = *prepared.runtime->program;
@@ -832,6 +836,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 }
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program  = *prepared.runtime->program;
@@ -917,6 +922,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
 	auto   vk_buffer        = buffer.Handle();
 	size_t image_descriptor_count = 0;
 	size_t write_count      = 0;

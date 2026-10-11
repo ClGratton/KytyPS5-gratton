@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include "common/gpuPhaseStats.h"
 #include "common/profiler.h"
 
 #include "common/assert.h"
@@ -178,12 +179,14 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::FlushAndWait() {
+	Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainFlush);
 	const auto tick = Submit();
 	m_master.Wait(tick);
 	BeginNext();
 }
 
 void CommandScheduler::Finish() {
+	Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainFinish);
 	CheckActive();
 	if (!m_command.IsInvalid()) {
 		Submit();
@@ -196,6 +199,7 @@ void CommandScheduler::Finish() {
 void CommandScheduler::Wait(uint64_t tick) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
+		Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
 		CheckActive();
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
 		// Current(). The wrapper stays stable while its pooled Vulkan buffer is retired. Deferred
@@ -204,7 +208,8 @@ void CommandScheduler::Wait(uint64_t tick) {
 		EXIT_IF(submitted_tick != tick);
 		m_master.Wait(tick);
 		BeginNext();
-	} else {
+	} else if (!m_master.IsFree(tick)) {
+		Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
 		m_master.Wait(tick);
 	}
 }
@@ -342,6 +347,8 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 }
 
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
+	Common::GpuPhase::Scope gpu_phase_submit(Common::GpuPhase::Phase::Submit);
+	Common::GpuPhase::NoteSubmit();
 	EXIT_IF(m_command.IsInvalid());
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
