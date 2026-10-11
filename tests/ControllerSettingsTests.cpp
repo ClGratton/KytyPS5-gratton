@@ -87,6 +87,7 @@ bool SetVibration(int, uint8_t large_motor, uint8_t small_motor, uint32_t durati
 	haptics.push_back({large_motor, small_motor, duration_ms});
 	return haptics_handles_rumble;
 }
+void SetSpeakerOptions(bool, uint32_t, bool) {}
 void Shutdown() {}
 } // namespace Libs::Controller::DualSenseHaptics
 

@@ -3,6 +3,7 @@
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "libs/dualSenseBluetooth.h"
+#include "libs/dualSenseSpeakerSink.h"
 
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -21,6 +22,7 @@ struct Stream {
 	DualSenseBluetooth::Stream* bluetooth  = nullptr;
 	SDL_AudioDeviceID           device     = 0;
 	uint64_t                    next_check = 0;
+	float                       sink_gain = 1.0f; // Last OS sink gain applied (smoothed).
 	std::vector<float>          buffer;
 };
 
@@ -35,6 +37,13 @@ uint8_t            g_large_motor = 0, g_small_motor = 0;
 uint64_t           g_rumble_until = 0, g_haptics_until = 0;
 int                g_speaker_controller = -1;
 std::map<int, int> g_speaker_streams;
+bool               g_speaker_enabled = true;
+uint32_t           g_speaker_volume  = 15; // Raw hardware level, 0-100.
+bool               g_speaker_os_sink = false;
+
+uint8_t SpeakerHardwareVolume() { // 100 (0x64) is the Linux driver's level, kept as the maximum.
+	return static_cast<uint8_t>(g_speaker_volume);
+}
 
 void ApplyRumble(bool force = false) { // Caller holds g_mutex; no calls into Audio or Controller.
 	SDL_LockJoysticks();
@@ -71,9 +80,9 @@ bool RouteSpeaker(int controller, bool speaker) { // Caller holds g_mutex.
 	if (speaker) {
 		report[0] |= 0x20; // Speaker volume valid
 		report[1]  = 0x80; // Audio control 2 valid
-		report[5]  = 0x64; // Speaker volume
+		report[5]  = SpeakerHardwareVolume(); // Speaker volume
 		report[7]  = 0x30; // Output path: right channel to the speaker, headphones muted
-		report[37] = 0x02; // Speaker preamp +6 dB
+		report[37] = 0x00; // Speaker preamp 0 dB (the Linux driver's +6 dB is far too loud)
 	}
 	bool routed = false;
 	SDL_LockJoysticks();
@@ -247,6 +256,9 @@ void RefreshDevice(Stream* stream, int controller, bool wireless) {
 		stream->bluetooth = bluetooth;
 		if (!wireless) {
 			LOGF("DualSenseHaptics: playing on '%s'\n", SDL_GetAudioDeviceName(device));
+		} else if (stream->speaker && g_speaker_os_sink) {
+			// A USB DualSense already has an OS audio device; only Bluetooth needs this.
+			DualSenseSpeakerSink::Ensure();
 		}
 	} else {
 		DualSenseBluetooth::Close(bluetooth);
@@ -296,7 +308,7 @@ uint64_t QueueUsbAudio(Stream* stream, uint32_t frames) {
 } // namespace
 
 Stream* Open(uint32_t freq, bool speaker) {
-	if (freq == 0 || !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+	if (freq == 0 || (speaker && !g_speaker_enabled) || !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
 		return nullptr;
 	}
 	return new Stream {.freq = freq, .speaker = speaker};
@@ -350,6 +362,16 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 	const uint32_t output_channels = wireless ? 2 : 4;
 	const uint32_t channel_offset  = wireless || stream->speaker ? 0 : 2;
 	stream->buffer.assign(static_cast<size_t>(frames) * output_channels, 0.0f);
+	// Over Bluetooth, the OS sink's volume/mute. The OS gain changes
+	// linearly across the block so a slider drag does not click.
+	float sink_from = 1.0f, sink_to = 1.0f;
+	if (stream->speaker) {
+		if (wireless && g_speaker_os_sink && DualSenseSpeakerSink::Active()) {
+			sink_from = stream->sink_gain;
+			sink_to   = DualSenseSpeakerSink::Gain();
+		}
+		stream->sink_gain = sink_to;
+	}
 	bool audible = false;
 	for (uint32_t frame = 0; frame < frames; frame++) {
 		for (uint32_t ch = 0; ch < 2; ch++) {
@@ -358,6 +380,9 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 			float      value  = is_float ? static_cast<const float*>(data)[index]
 			                             : static_cast<const int16_t*>(data)[index] / 32768.0f;
 			value *= volume[src_ch] / 32768.0f * gain * (gains != nullptr ? gains[src_ch] : 1.0f);
+			if (stream->speaker) {
+				value *= sink_from + (sink_to - sink_from) * (frame + 1) / static_cast<float>(frames);
+			}
 			// USB places the speaker in front and the actuators in back; Bluetooth takes stereo.
 			stream->buffer[static_cast<size_t>(frame) * output_channels + ch + channel_offset] =
 			    value;
@@ -399,8 +424,16 @@ bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor, uint
 	return true;
 }
 
+void SetSpeakerOptions(bool enabled, uint32_t volume_percent, bool os_sink) {
+	Common::LockGuard lock(g_mutex);
+	g_speaker_enabled = enabled;
+	g_speaker_volume  = std::min<uint32_t>(volume_percent, 100);
+	g_speaker_os_sink = os_sink;
+}
+
 void Shutdown() {
 	DualSenseBluetooth::Shutdown();
+	DualSenseSpeakerSink::Shutdown();
 	Common::LockGuard lock(g_mutex);
 	SelectController(-1);
 	SelectSpeaker(-1);

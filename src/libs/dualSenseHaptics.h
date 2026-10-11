@@ -22,6 +22,12 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
 // Returns false for other gamepad types, which retain the normal rumble path.
 bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor,
                   uint32_t duration_ms = 0xffff);
+// DualSense speaker setup. Disabled, speaker ports are not opened (Open returns null), so the game
+// audio plays on the normal output and the controller is never routed. volume_percent is the raw
+// hardware speaker volume of the route report (0-100, default 15; the Linux driver uses 100) with
+// a 0 dB preamp; vibration ports are not affected. os_sink exposes a Bluetooth pad's speaker as a Linux sound-server volume control
+// (see DualSenseSpeakerSink). Set before the first speaker stream is queued.
+void SetSpeakerOptions(bool enabled, uint32_t volume_percent, bool os_sink);
 // Also restores the headphone routing.
 void Shutdown();
 
