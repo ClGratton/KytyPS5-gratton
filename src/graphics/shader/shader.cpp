@@ -72,10 +72,16 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {
 	EXIT_IF(g_shader_map == nullptr);
 
-	std::scoped_lock lock(g_shader_map_mutex);
-
-	if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
-		return iter->second;
+	{
+		std::scoped_lock lock(g_shader_map_mutex);
+		if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
+			return iter->second;
+		}
+	}
+	if (Common::Speculation::Active()) {
+		// A lookahead guess at a stale register value: not fatal, and the mutex is released.
+		Common::Speculation::NoteFailure();
+		return {};
 	}
 
 	EXIT("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
@@ -733,6 +739,9 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
                             const HW::UserConfig& user_config, ShaderVertexInputInfo& info) {
 	const auto& sh     = context.GetShaderRegisters();
 	const auto [data, hash] = ShaderGetMappedData(regs.es_regs.data_addr, "ShaderGetInputInfoVS():");
+	if (Common::Speculation::HasFailure()) {
+		return {};
+	}
 	const bool merged = (context.GetShaderStages() & 0x20u) != 0;
 	// GS_EN controls amplification, not whether an NGG shader uses a workgroup.
 	const bool native_ngg = !merged && data.type == Prospero::ShaderBinaryType::kGs &&
@@ -881,6 +890,9 @@ ShaderParams PrepareProgram(
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
     ShaderPixelInputInfo&                               ps_info) {
 	const auto [data, hash] = ShaderGetMappedData(regs.ps_regs.data_addr, "ShaderGetInputInfoPS():");
+	if (Common::Speculation::HasFailure()) {
+		return {};
+	}
 	ShaderGetStaticInputInfoPS(regs, sh, target_export_mapping, data, ps_info);
 	return GetShaderParams(
 	    regs.ps_regs.data_addr, hash,
@@ -890,6 +902,9 @@ ShaderParams PrepareProgram(
 ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
                             ShaderComputeInputInfo& info) {
 	const auto [data, hash] = ShaderGetMappedData(regs.cs_regs.data_addr, "ShaderGetInputInfoCS():");
+	if (Common::Speculation::HasFailure()) {
+		return {};
+	}
 	ShaderGetStaticInputInfoCS(regs, sh, data, info);
 	return GetShaderParams(
 	    regs.cs_regs.data_addr, hash,

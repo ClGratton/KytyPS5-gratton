@@ -28,6 +28,7 @@ void               Leave() noexcept;
 // request. Only meaningful on a thread where Active() is true.
 void               NoteFailure() noexcept;
 [[nodiscard]] bool TakeFailure() noexcept;
+[[nodiscard]] bool HasFailure() noexcept;
 
 // Set by Abort(); the lookahead producers check it and stop queueing work.
 [[nodiscard]] bool Aborted() noexcept;

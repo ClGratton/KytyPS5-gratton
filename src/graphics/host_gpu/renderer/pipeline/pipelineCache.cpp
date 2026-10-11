@@ -1628,6 +1628,11 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		if (prefetch && Common::Speculation::TakeFailure()) {
+			m_lookahead.skip[LookaheadCounters::SkipPrepareFailed].fetch_add(
+			    1, std::memory_order_relaxed);
+			return {};
+		}
 		if (!mesh_active && !tess_active && Prospero::IsRectList(user_config.GetPrimType())) {
 			pixel_info.parameter_mode = ShaderPixelParameterMode::Rectangle;
 		} else if (context.GetModeControl().provoking_vtx_last) {
@@ -1766,6 +1771,12 @@ void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
 	input_info.host_subgroup_size         = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	input_info.dispatch_thread_dimensions = (mode & (1u << 5u)) != 0;
 	const auto params                     = PrepareProgram(regs, sh, input_info);
+	if (Common::Speculation::TakeFailure()) {
+		m_lookahead.cs_skipped.fetch_add(1, std::memory_order_relaxed);
+		m_lookahead.skip[LookaheadCounters::SkipPrepareFailed].fetch_add(
+		    1, std::memory_order_relaxed);
+		return;
+	}
 	uint32_t   push_data_cursor           = 0;
 	ProgramCache::AsyncContext async {
 	    .pool = pool, .allow_skip = false, .prefetch = true, .counters = &m_lookahead};
