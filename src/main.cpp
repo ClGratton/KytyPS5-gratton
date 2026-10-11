@@ -119,6 +119,9 @@ static void PrintUsage() {
 	         "                                       --async-pipelines stall|skip). Default: false.\n");
 	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
 	         "                                       Default: min(8, hardware threads / 2).\n");
+	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
+	         "                                       write a thread / worker pool / lookahead report to\n"
+	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -517,6 +520,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--debug-hang-watchdog") {
+			uint64_t seconds = 0;
+			if (!ParseUint64(value, seconds) || seconds > 3600) {
+				::printf("invalid watchdog seconds (expected 0-3600): %s\n", value.c_str());
+				return false;
+			}
+			options.config.hang_watchdog_seconds = static_cast<uint32_t>(seconds);
 		} else if (arg == "--pipeline-workers") {
 			uint64_t workers = 0;
 			if (!ParseUint64(value, workers) || workers == 0 || workers > 64) {

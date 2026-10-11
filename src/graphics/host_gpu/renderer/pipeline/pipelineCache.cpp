@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
+#include "common/hangWatchdog.h"
 #include "common/speculation.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -402,7 +403,8 @@ struct PipelineCache::ProgramCache {
 		// specialization so callers can compile against exactly what was materialized.
 		ShaderRecompiler::IR::ResourceSpecialization
 		Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime, StepTime* materialize_time) {
-			std::unique_lock lock(mutex);
+			std::unique_lock lock(mutex, std::defer_lock);
+			LockEntry(lock, "entry_lock_gpu");
 			MaterializeLocked(runtime, materialize_time);
 			return specialization;
 		}
@@ -413,7 +415,8 @@ struct PipelineCache::ProgramCache {
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t push_data_cursor, StepTime* materialize_time,
 		                             ShaderRecompiler::IR::ResourceSpecialization* specialization_out) {
-			std::unique_lock lock(mutex);
+			std::unique_lock lock(mutex, std::defer_lock);
+			LockEntry(lock, "entry_lock_gpu");
 			MaterializeLocked(runtime, materialize_time);
 			Permutation* found = nullptr;
 			if constexpr (HasCalls) {
@@ -440,8 +443,10 @@ struct PipelineCache::ProgramCache {
 		                             uint32_t                                push_data_cursor,
 		                             ShaderRecompiler::IR::ResourceSpecialization& specialization_out,
 		                             bool&                                   materialized) {
-			std::unique_lock lock(mutex);
+			std::unique_lock lock(mutex, std::defer_lock);
+			LockEntry(lock, "entry_lock_lookahead");
 			Common::Speculation::HeldLock held(&mutex);
+			Common::Hang::Phase phase("lookahead_materialize");
 			ShaderRecompiler::IR::ResourceSnapshot snapshot;
 			materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
 			                                                       specialization_out);
@@ -453,8 +458,10 @@ struct PipelineCache::ProgramCache {
 
 		bool MaterializePrivate(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                        ShaderRecompiler::IR::ResourceSpecialization& specialization_out) {
-			std::unique_lock lock(mutex);
+			std::unique_lock lock(mutex, std::defer_lock);
+			LockEntry(lock, "entry_lock_lookahead");
 			Common::Speculation::HeldLock held(&mutex);
+			Common::Hang::Phase phase("lookahead_materialize");
 			ShaderRecompiler::IR::ResourceSnapshot snapshot;
 			return ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
 			                                                  specialization_out);
@@ -493,6 +500,12 @@ struct PipelineCache::ProgramCache {
 		mutable std::shared_mutex                    mutex;
 
 	private:
+		// Takes the entry lock, publishing "waiting for the entry lock" for the hang watchdog.
+		void LockEntry(std::unique_lock<std::shared_mutex>& lock, const char* what) {
+			Common::Hang::Phase phase(what);
+			lock.lock();
+		}
+
 		void MaterializeLocked(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                       StepTime*                                materialize_time) {
 			Stopwatch  materialize_sw;
@@ -1186,6 +1199,14 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		m_async            = std::make_unique<AsyncPipelineCompiler>(m_async_mode, workers);
 		PipelineCacheLog("Async pipelines: mode={} workers={}", AsyncModeName(m_async_mode),
 		                 m_async->WorkerCount());
+		if (Common::Hang::Enabled()) {
+			Common::Hang::RegisterProvider("pipeline_pool", [this] {
+				return m_async->DebugState() + " | program_jobs: " +
+				       m_program_cache->program_jobs.Describe() + " | graphics_jobs: " +
+				       m_graphics_jobs.Describe() + " | compute_jobs: " +
+				       m_compute_jobs.Describe();
+			});
+		}
 	}
 }
 
@@ -1206,6 +1227,7 @@ void PipelineCache::ShutdownAsync() {
 	// before the Vulkan device is destroyed and before Config::Shutdown(). Queued jobs are
 	// cancelled, running ones finish (and publish). Callers holding the render context lock
 	// (Save() from WindowRun) cannot race with a draw waiting on a job.
+	Common::Hang::UnregisterProvider("pipeline_pool");
 	m_async->Shutdown();
 	m_program_cache->program_jobs.Clear();
 	m_graphics_jobs.Clear();
@@ -1493,6 +1515,11 @@ struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 	    : AsyncJob(Kind::Graphics, key_hash), cache(owner), key(std::move(job_key)) {}
 
 	void Execute() override {
+		if (cache.FindGraphicsPipeline(key) != nullptr) {
+			// Published while this (prefetch) request was being registered: nothing to build.
+			cache.m_graphics_jobs.Erase(key);
+			return;
+		}
 		auto cached = std::make_unique<Pipeline>();
 		cached->prefetched = IsPrefetched();
 		LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
@@ -1536,6 +1563,10 @@ struct PipelineCache::ComputePipelineJob final: AsyncJob {
 	    : AsyncJob(Kind::Compute, id), cache(owner), program_id(id) {}
 
 	void Execute() override {
+		if (cache.FindComputePipeline(program_id) != nullptr) {
+			cache.m_compute_jobs.Erase(program_id); // see GraphicsPipelineJob::Execute
+			return;
+		}
 		auto      cached = std::make_unique<Pipeline>();
 		cached->prefetched = IsPrefetched();
 		Stopwatch create_sw;
@@ -1800,11 +1831,9 @@ void PipelineCache::PrefetchCompute(const HW::ComputeShaderInfo& regs,
 		m_lookahead.cs_already.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
-	if (FindComputePipeline(program.id) != nullptr) { // published between the checks above
-		m_compute_jobs.Erase(program.id);
-		m_lookahead.cs_already.fetch_add(1, std::memory_order_relaxed);
-		return;
-	}
+	// A registered job is always submitted: the GPU thread may already have found it in the
+	// registry and be waiting on it, so it must not be retracted without finishing. If the pipeline
+	// got published meanwhile the job notices at the start of Execute() and does nothing.
 	if (!pool->Submit(fresh)) {
 		m_compute_jobs.Erase(program.id);
 		return;
@@ -2142,11 +2171,7 @@ void PipelineCache::PrefetchGraphicsPipeline(std::span<const RenderColorInfo> co
 		m_lookahead.gfx_already.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
-	if (FindGraphicsPipeline(key) != nullptr) { // published between the checks above
-		m_graphics_jobs.Erase(key);
-		m_lookahead.gfx_already.fetch_add(1, std::memory_order_relaxed);
-		return;
-	}
+	// See PrefetchCompute: a registered job is always submitted.
 	if (!pool->Submit(fresh)) {
 		m_graphics_jobs.Erase(key);
 		return;

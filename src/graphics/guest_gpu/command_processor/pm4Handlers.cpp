@@ -1441,7 +1441,17 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 	EXIT_NOT_IMPLEMENTED(addr == 0);
 	EXIT_NOT_IMPLEMENTED(payload_dw + exec_count >= dw);
 
-	if (*reinterpret_cast<const volatile uint32_t*>(addr) == 0) {
+	uint32_t condition = 0;
+	if (cp.IsShadow()) {
+		// Speculative decode: the address comes from a stream the GPU has not run yet.
+		if (!LibKernel::Memory::TryReadBacking(addr, &condition, sizeof(condition))) {
+			cp.AbandonShadow("unreadable COND_EXEC condition");
+			return payload_dw;
+		}
+	} else {
+		condition = *reinterpret_cast<const volatile uint32_t*>(addr);
+	}
+	if (condition == 0) {
 		return payload_dw + exec_count;
 	}
 
@@ -1475,7 +1485,17 @@ KYTY_CP_OP_PARSER(CpOpBranch) {
 	EXIT_NOT_IMPLEMENTED(function > 6);
 	EXIT_NOT_IMPLEMENTED(then_buffer == nullptr || then_num_dw == 0);
 
-	const bool take_then = TestWaitRegMemValue(*compare_addr, reference, mask, function);
+	uint64_t compare_value = 0;
+	if (cp.IsShadow()) {
+		if (!LibKernel::Memory::TryReadBacking(reinterpret_cast<uint64_t>(compare_addr),
+		                                       &compare_value, sizeof(compare_value))) {
+			cp.AbandonShadow("unreadable branch condition");
+			return payload_dw;
+		}
+	} else {
+		compare_value = *compare_addr;
+	}
+	const bool take_then = TestWaitRegMemValue(compare_value, reference, mask, function);
 	LOGF("\t branch: take=%u then=0x%016" PRIx64 "/%" PRIu32 " else=0x%016" PRIx64 "/%" PRIu32 "\n",
 	     take_then ? 1u : 0u, reinterpret_cast<uint64_t>(then_buffer), then_num_dw,
 	     reinterpret_cast<uint64_t>(else_buffer), else_num_dw);

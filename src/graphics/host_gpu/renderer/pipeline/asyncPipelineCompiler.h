@@ -43,7 +43,7 @@ public:
 	enum class Kind { Program, Graphics, Compute };
 	enum class State { Queued, Running, Done, Cancelled };
 
-	AsyncJob(Kind kind, uint64_t key_hash): m_kind(kind), m_key_hash(key_hash) {}
+	AsyncJob(Kind kind, uint64_t key_hash);
 	virtual ~AsyncJob();
 	AsyncJob(const AsyncJob&)            = delete;
 	AsyncJob& operator=(const AsyncJob&) = delete;
@@ -79,6 +79,9 @@ public:
 	}
 	void                   CountSkippedDraw() { m_skipped.fetch_add(1, std::memory_order_relaxed); }
 
+	// --debug-hang-watchdog: one-line description (kind, state, queued/submitted, age).
+	[[nodiscard]] std::string DebugString() const;
+
 	// Timing rows recorded while the job runs (worker thread only, before Execute() returns).
 	// They are written when the job is destroyed, after the GPU thread's waits and skips are
 	// final, with `mode`, `queue_ns`, `wait_ns` and `skipped` appended to `detail`.
@@ -108,6 +111,8 @@ private:
 	std::atomic<uint32_t>     m_skipped {0};
 	std::atomic<bool>         m_prefetched {false};
 	std::atomic<bool>         m_claimed {false};
+	std::atomic<bool>         m_submitted {false}; // Submit() accepted it (debug only)
+	int64_t                   m_created_ns = 0;
 	int64_t                   m_submit_ns = 0;
 	int64_t                   m_start_ns  = 0;
 	int64_t                   m_end_ns    = 0;
@@ -177,6 +182,24 @@ public:
 		return m_jobs.size();
 	}
 
+	// Debug (watchdog thread): never blocks, so it still works when a thread holds the lock.
+	[[nodiscard]] std::string Describe(size_t max_jobs = 12) {
+		std::unique_lock lock(m_mutex, std::try_to_lock);
+		if (!lock.owns_lock()) {
+			return "registry locked";
+		}
+		std::string text = "size=" + std::to_string(m_jobs.size());
+		size_t      shown = 0;
+		for (const auto& [key, job]: m_jobs) {
+			if (shown++ >= max_jobs) {
+				text += " ...";
+				break;
+			}
+			text += " {" + job->DebugString() + "}";
+		}
+		return text;
+	}
+
 private:
 	std::mutex                                                      m_mutex;
 	std::unordered_map<Key, std::shared_ptr<AsyncJob>, Hash, Equal> m_jobs;
@@ -221,6 +244,8 @@ public:
 	// One-line summary (also written as a summary_async timing row when timing is on).
 	[[nodiscard]] std::string Summary() const;
 	void                      LogSummary();
+	// --debug-hang-watchdog: queue depth, queued/running jobs. Never blocks.
+	[[nodiscard]] std::string DebugState();
 
 private:
 	void WorkerLoop(uint32_t index);
@@ -236,6 +261,14 @@ private:
 	std::vector<std::thread>               m_workers;
 	std::atomic<bool>                      m_stopping {false};
 	bool                                   m_summary_logged = false;
+	// What each worker is running (debug only): job kind (+1, 0 = idle), key hash, start time.
+	struct WorkerState {
+		std::atomic<int>      kind {0};
+		std::atomic<uint64_t> key {0};
+		std::atomic<int64_t>  start_ns {0};
+		std::atomic<bool>     prefetched {false};
+	};
+	std::unique_ptr<WorkerState[]>         m_worker_state;
 };
 
 } // namespace Libs::Graphics

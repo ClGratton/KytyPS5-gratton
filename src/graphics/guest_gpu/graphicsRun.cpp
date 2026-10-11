@@ -754,8 +754,28 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 	                                        : Pm4ProcessResult::Blocked;
 }
 
+void CommandProcessor::AbandonShadow(const char* reason) {
+	EXIT_IF(g_current_execution == nullptr);
+	if (!g_current_execution->m_abandoned) {
+		g_current_execution->m_abandoned       = true;
+		g_current_execution->m_abandon_reason = reason;
+	}
+}
+
+namespace {
+// Shadow decode budget per stream (all rounds of one item): packets, indirect-buffer jumps and
+// wall time. Real command buffers are far below these (a 42k-dword buffer is at most 42k packets).
+constexpr uint64_t kShadowMaxPackets = 4'000'000;
+constexpr uint64_t kShadowMaxJumps   = 100'000;
+constexpr int64_t  kShadowMaxNs      = 500'000'000;
+} // namespace
+
 void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain) {
 	EXIT_IF(g_current_execution == nullptr);
+	if (IsShadow() && ++g_current_execution->m_jumps > kShadowMaxJumps) {
+		AbandonShadow("indirect buffer jumps");
+		return;
+	}
 	EXIT_IF(!g_current_execution->m_next_buffer.empty());
 	g_current_execution->m_next_buffer = commands;
 	g_current_execution->m_chain       = chain;
@@ -768,6 +788,25 @@ void CommandProcessor::SuspendPm4() {
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	while (!execution.m_buffer_stack.empty()) {
+		if (IsShadow()) {
+			// Spin guard: never let a speculative decode run unbounded.
+			if (execution.m_start_ns == 0) {
+				execution.m_start_ns = Bench::NowNs();
+			}
+			if (!execution.m_abandoned) {
+				if (++execution.m_steps > kShadowMaxPackets) {
+					AbandonShadow("packet budget");
+				} else if ((execution.m_steps & 0x3ffu) == 0 &&
+				           Bench::NowNs() - execution.m_start_ns > kShadowMaxNs) {
+					AbandonShadow("time budget");
+				}
+			}
+			if (execution.m_abandoned) {
+				execution.m_buffer_stack.clear();
+				execution.m_next_buffer = {};
+				return;
+			}
+		}
 		if (g_gpu_state != nullptr) {
 			g_gpu_state->ProcessCommands();
 		}

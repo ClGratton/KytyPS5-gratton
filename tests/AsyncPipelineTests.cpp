@@ -361,6 +361,30 @@ void TestUrgentSubmitAndPromote() {
 
 } // namespace
 
+// A job registered in the in-flight registry, found by the GPU thread and then rejected by
+// Submit() (pool shut down in between) must release its waiter instead of leaving it blocked
+// forever (the lookahead's "registered but never submitted" window).
+void TestRejectedSubmitReleasesWaiter() {
+	AsyncPipelineCompiler pool(Config::AsyncPipelineMode::Stall, 1);
+	TestJob::Registry     registry;
+	auto                  job = std::make_shared<TestJob>(&registry, 5, nullptr);
+	bool                  inserted = false;
+	registry.Insert(5, job, inserted);
+	Check(inserted, "registered");
+	std::atomic<int> waiter_result {-1};
+	auto             found = registry.Find(5);
+	Check(found != nullptr, "waiter finds the registered job");
+	std::thread waiter([&] { waiter_result.store(pool.WaitFor(*found) ? 1 : 0); });
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	Check(waiter_result.load() == -1, "waiter blocks on the not yet submitted job");
+	pool.Shutdown();
+	Check(!pool.Submit(job), "submit after shutdown is refused");
+	Check(WaitUntil([&] { return waiter_result.load() != -1; }), "waiter released by the refusal");
+	waiter.join();
+	Check(waiter_result.load() == 0, "waiter sees a cancelled job");
+	Check(registry.Size() == 0, "refused job unregistered");
+}
+
 int main() {
 	TestJobsRunOnWorkersConcurrently();
 	TestDedupeSharesOneJob();
@@ -368,6 +392,7 @@ int main() {
 	TestManyJobsAllRunOnce();
 	TestShutdownCancelsQueuedAndJoinsRunning();
 	TestUrgentSubmitAndPromote();
+	TestRejectedSubmitReleasesWaiter();
 	std::printf("AsyncPipelineTests: all cases passed\n");
 	return 0;
 }

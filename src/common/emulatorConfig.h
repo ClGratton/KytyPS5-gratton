@@ -107,6 +107,9 @@ struct ConfigOptions {
 	// --pipeline-lookahead: prefetch pipelines from submitted command buffers (needs
 	// --async-pipelines stall or skip). Default off.
 	bool                   pipeline_lookahead          = false;
+	// --debug-hang-watchdog <seconds>: write a thread/pool/lookahead state report when no frame
+	// was presented for that long (common/hangWatchdog.h). 0 = off.
+	uint32_t               hang_watchdog_seconds       = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif

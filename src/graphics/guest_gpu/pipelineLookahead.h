@@ -63,6 +63,8 @@ public:
 		std::atomic<uint64_t> draws {0};
 		std::atomic<uint64_t> max_queue {0};
 		std::atomic<int64_t>  busy_ns {0};
+		std::atomic<uint64_t> items_abandoned {0}; // decode budget / unreadable condition hit
+		std::atomic<uint64_t> items_dropped {0};   // queue full: oldest item dropped
 	};
 	[[nodiscard]] const Stats& GetStats() const { return m_stats; }
 	[[nodiscard]] std::string  SummaryText() const;
@@ -71,6 +73,9 @@ private:
 	void Run();
 	void Process(Item& item);
 	CommandProcessor& Shadow(uint32_t queue_id);
+	// --debug-hang-watchdog provider: queue depth and what the thread is doing right now.
+	std::string DebugState();
+	void        RunStream(CommandProcessor& cp, std::span<const uint32_t> commands);
 
 	RenderContext&                      m_renderer;
 	std::mutex                          m_mutex;
@@ -83,6 +88,10 @@ private:
 	// Valid only on the lookahead thread while an item is processed.
 	uint64_t                            m_current_seq  = 0;
 	bool                                m_current_late = false;
+	std::atomic<int64_t>                m_item_start_ns {0};  // 0 = idle
+	std::atomic<uint64_t>               m_item_dwords {0};
+	std::atomic<uint32_t>               m_item_kind {0};
+	std::atomic<uint64_t>               m_queued_dwords {0};
 	Stats                               m_stats;
 	std::thread                         m_thread;
 };

@@ -33,6 +33,10 @@ struct IndirectDrawRegisters {
 class Pm4Execution {
 public:
 	[[nodiscard]] bool MadeProgress() const noexcept { return m_made_progress; }
+	// Shadow mode only: the decode budget ran out or a condition could not be read, so the rest
+	// of the stream was dropped (docs/lookahead-notes.md, "spin guard").
+	[[nodiscard]] bool Abandoned() const noexcept { return m_abandoned; }
+	[[nodiscard]] const char* AbandonReason() const noexcept { return m_abandon_reason; }
 
 private:
 	friend class CommandProcessor;
@@ -47,6 +51,13 @@ private:
 	bool                      m_chain         = false;
 	bool                      m_suspended     = false;
 	bool                      m_made_progress = false;
+	// Shadow-mode decode budget (a stream whose branches depend on GPU-written memory can loop
+	// forever when nothing ever writes that memory).
+	uint64_t                  m_steps         = 0;
+	uint64_t                  m_jumps         = 0;
+	int64_t                   m_start_ns      = 0;
+	bool                      m_abandoned     = false;
+	const char*               m_abandon_reason = nullptr;
 };
 
 class CommandProcessor;
@@ -158,6 +169,8 @@ public:
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain);
+	// Shadow mode: stop decoding the current stream (unreadable condition, budget).
+	void             AbandonShadow(const char* reason);
 
 	void SetFlip(const FlipInfo& flip) { m_flip = flip; }
 
