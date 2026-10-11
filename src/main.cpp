@@ -119,6 +119,8 @@ static void PrintUsage() {
 	         "                                       --async-pipelines stall|skip). Default: false.\n");
 	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
 	         "                                       Default: min(8, hardware threads / 2).\n");
+	::printf("  --debug-texture-gc <true|false>      Debug: false disables the texture garbage collector.\n"
+	         "                                       Default: true.\n");
 	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
 	         "                                       its first use and compare the SPIR-V. Default: false.\n");
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
@@ -522,6 +524,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--pipeline-lookahead") {
 			if (!ParseBool(value, options.config.pipeline_lookahead)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-texture-gc") {
+			if (!ParseBool(value, options.config.texture_gc_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

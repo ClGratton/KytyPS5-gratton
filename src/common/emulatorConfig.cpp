@@ -51,6 +51,10 @@ bool GetPipelineLookahead() {
 	return g_config->pipeline_lookahead && g_config->async_pipelines != AsyncPipelineMode::Off;
 }
 
+bool TextureGcEnabled() {
+	return g_config->texture_gc_enabled;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

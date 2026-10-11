@@ -118,6 +118,9 @@ struct ConfigOptions {
 	// its first use and compares the SPIR-V; mismatches are logged (finds prefetch inputs that
 	// differ from the real draw's). Slow, debug only.
 	bool                   lookahead_verify            = false;
+	// --debug-texture-gc <true|false>: false disables the texture garbage collector (debug:
+	// tells whether a rendering difference comes from an evicted GPU-only image).
+	bool                   texture_gc_enabled          = true;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -163,6 +166,7 @@ uint32_t          GetPipelineWorkerCount();
 bool              GetPipelineLookahead();
 uint32_t          GetPipelineLookaheadKinds();
 bool              GetLookaheadVerify();
+bool              TextureGcEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();
