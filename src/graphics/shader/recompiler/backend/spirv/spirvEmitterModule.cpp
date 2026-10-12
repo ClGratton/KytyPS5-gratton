@@ -240,6 +240,20 @@ void DefineDescriptors(EmitterState& state) {
 		bindings.dispatch_thread_dword = bindings.memory_offset_dword;
 		bindings.memory_offset_dword += 3u;
 	}
+	bindings.dynamic_dwords = bindings.dynamic_image_base = 0;
+	if (info.generic) {
+		// The fields a generic variant reads at run time follow the memory offsets: one dword per
+		// live buffer, then one per image that needs any (the host fills them for each dispatch).
+		uint32_t image_words = 0;
+		for (const auto& image: info.images) {
+			if (image.dynamic_slot != IR::ImageResource::NoDynamicSlot) {
+				image_words = std::max(image_words, image.dynamic_slot + 1u);
+			}
+		}
+		bindings.dynamic_dword      = bindings.memory_offset_dword + (buffer_count + 3u) / 4u;
+		bindings.dynamic_image_base = buffer_count;
+		bindings.dynamic_dwords     = buffer_count + image_words;
+	}
 	bindings.push_data_start_dword =
 	    IR::PushData::StartFor(bindings.push_data_start_dword, bindings.ShaderDataDwords());
 	counts[static_cast<size_t>(Kind::ShaderData)] =

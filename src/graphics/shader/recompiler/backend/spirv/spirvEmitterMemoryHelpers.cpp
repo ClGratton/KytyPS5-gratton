@@ -118,6 +118,43 @@ void EmitMemoryOffsets(EmitterState& state) {
 	}
 }
 
+void EmitDynamicWords(EmitterState& state) {
+	const auto& bindings = state.program.bindings;
+	state.dynamic_words.assign(bindings.dynamic_dwords, 0u);
+	for (uint32_t i = 0; i < bindings.dynamic_dwords; ++i) {
+		state.dynamic_words[i] = EmitShaderDataDwordLoad(state, bindings.dynamic_dword + i);
+	}
+}
+
+uint32_t DynamicBufferWord(EmitterState& state, uint32_t resource) {
+	if (resource >= state.program.info.buffers.size()) {
+		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Buffers, resource,
+		                             "buffer specialization is missing");
+	}
+	const auto index = state.program.info.buffers[resource].descriptor_index;
+	if (!state.program.info.generic || index == UINT32_MAX || index >= state.dynamic_words.size()) {
+		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Buffers, resource,
+		                             "generic buffer word is missing");
+	}
+	return state.dynamic_words[index];
+}
+
+uint32_t DynamicImageWord(EmitterState& state, uint32_t resource) {
+	const auto& images = state.program.info.images;
+	if (resource >= images.size()) {
+		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Samplers, resource,
+		                             "image specialization is missing");
+	}
+	const auto slot = images[resource].dynamic_slot;
+	const auto word = state.program.bindings.dynamic_image_base + slot;
+	if (!state.program.info.generic || slot == IR::ImageResource::NoDynamicSlot ||
+	    word >= state.dynamic_words.size()) {
+		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Samplers, resource,
+		                             "generic image word is missing");
+	}
+	return state.dynamic_words[word];
+}
+
 bool FunctionLdsIsWrapped(const EmitterState& state) {
 	const auto& info = state.program.info;
 	return info.function_lds && !info.function_lds_unbounded &&

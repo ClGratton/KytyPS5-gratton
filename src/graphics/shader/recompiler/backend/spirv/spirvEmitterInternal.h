@@ -112,6 +112,8 @@ struct EmitterState {
 	uint32_t                                         lane_half               = 0;
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> memory_byte_offsets {};
+	// Generic variants: the dynamic section of the shader data, loaded once at function entry.
+	std::vector<uint32_t>                            dynamic_words;
 	// Storage-buffer accesses left to robustBufferAccess2 (--spirv-robust-bounds).
 	RobustBufferPolicy                               robust_buffers {};
 	uint32_t                                         bda_pagetable_variable  = 0;
@@ -431,6 +433,10 @@ uint32_t StorageBufferPackedStride(const EmitterState& state, const IR::MemoryIn
 Prospero::BufferFormat StorageBufferFormat(const EmitterState& state, const IR::MemoryInfo& mem);
 
 void EmitMemoryOffsets(EmitterState& state);
+void EmitDynamicWords(EmitterState& state);
+/// The run-time word of a buffer / image of a generic variant (ids loaded by EmitDynamicWords).
+uint32_t DynamicBufferWord(EmitterState& state, uint32_t resource);
+uint32_t DynamicImageWord(EmitterState& state, uint32_t resource);
 
 uint32_t LdsDwordCount(const EmitterState& state);
 void EnsureLdsStorage(EmitterState& state);

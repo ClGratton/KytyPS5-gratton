@@ -141,22 +141,48 @@ uint32_t CubeLayer(EmitterState& state, uint32_t value) {
 	return result;
 }
 
+// How a sampled image's face coordinates are read: a descriptor that names a cube maps the guest's
+// face/layer coordinates onto the host's array layers. A generic variant takes the flag from its
+// dynamic word, the specialized one from the descriptor it was built for.
+struct CubeMode {
+	bool     constant = false;
+	uint32_t dynamic  = 0; // id of a bool, 0 = use `constant`
+};
+
+CubeMode CubeFor(ValueEmitContext& ctx, uint32_t resource) {
+	auto&       state = ctx.state;
+	const auto& image = state.program.info.images.at(resource);
+	if (!state.program.info.generic || image.dynamic_slot == IR::ImageResource::NoDynamicSlot ||
+	    image.class_root != IR::ImageResource::NoClassRoot) {
+		return {image.cube, 0u};
+	}
+	return {false, Binary(state, spv::OpINotEqual, TypeBool(state),
+	                      Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+	                             DynamicImageWord(state, resource),
+	                             ConstantU32(state, IR::GenericImageCubeBit)),
+	                      ConstantU32(state, 0u))};
+}
+
 uint32_t CoordF32(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const IR::Inst& address,
-                  uint32_t first, uint32_t components, bool cube = false) {
+                  uint32_t first, uint32_t components, CubeMode cube = {}) {
 	auto x = AddressF32(ctx, mem, address, first);
 	if (components == 1u) return x;
 	auto y = mem.image_address_components > first + 1u ? AddressF32(ctx, mem, address, first + 1u)
 	                                                   : ZeroF32(ctx.state);
-	if (cube) {
-		x = CubeAxis(ctx.state, x);
-		y = CubeAxis(ctx.state, y);
+	const auto face = [&](uint32_t plain, uint32_t cubed) {
+		return cube.dynamic != 0u ? Select(ctx.state, TypeF32(ctx.state), cube.dynamic, cubed, plain)
+		                          : cubed;
+	};
+	if (cube.constant || cube.dynamic != 0u) {
+		x = face(x, CubeAxis(ctx.state, x));
+		y = face(y, CubeAxis(ctx.state, y));
 	}
 	const auto result = ctx.state.builder.AllocateId();
 	if (components == 3u) {
 		auto z = mem.image_address_components > first + 2u
 		             ? AddressF32(ctx, mem, address, first + 2u)
 		             : ZeroF32(ctx.state);
-		if (cube) z = CubeLayer(ctx.state, z);
+		if (cube.constant || cube.dynamic != 0u) z = face(z, CubeLayer(ctx.state, z));
 		ctx.state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(ctx.state, 3),
 		                              result, x, y, z);
 	} else {
@@ -285,10 +311,10 @@ uint32_t ResultVector(ValueEmitContext& ctx, uint32_t value,
 }
 
 uint32_t QueryDimensions(ValueEmitContext& ctx, const IR::MemoryInfo& mem,
-                         const IR::Inst& address) {
-	const auto  dimension = ctx.state.program.info.images.at(mem.resource).dimension;
+                         const IR::Inst& address, uint32_t resource) {
+	const auto  dimension = ctx.state.program.info.images.at(resource).dimension;
 	const auto& info      = ImageDimensionInfoFor(dimension);
-	const auto  image     = LoadImageDescriptor(ctx.state, mem.resource);
+	const auto  image     = LoadImageDescriptor(ctx.state, resource);
 	const auto  size      = ctx.state.builder.AllocateId();
 	if (info.multisampled != 0u) {
 		ctx.state.builder.AddFunction(spv::OpImageQuerySize,
@@ -574,26 +600,55 @@ uint32_t PackImageTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32
 	return result;
 }
 
-uint32_t StoreTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t data, bool integer) {
-	const auto swizzle = ctx.state.program.info.images[mem.resource].shader_swizzle;
-	uint32_t   values[4] {};
-	const auto dmask = mem.dmask != 0u ? mem.dmask : 1u;
-	for (uint32_t component = 0; component < 4u; component++) {
-		const auto source = InverseSwizzle(swizzle, component);
-		uint32_t   raw    = ConstantU32(ctx.state, 0);
-		if (source < 4u && ((dmask >> source) & 1u) != 0u) {
-			const auto packed_index = DmaskComponentIndex(dmask, source);
-			raw                     = ctx.state.builder.AllocateId();
-			ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), raw, data,
-			                              mem.data_bits == 16u ? packed_index / 2u : packed_index);
-			if (mem.data_bits == 16u) {
-				if ((packed_index & 1u) != 0u) {
-					raw = Binary(ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), raw,
-					             ConstantU32(ctx.state, 16u));
-				}
-				raw = Binary(ctx.state, spv::OpBitwiseAnd, TypeU32(ctx.state), raw,
-				             ConstantU32(ctx.state, 0xffffu));
+uint32_t StoreTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t data, bool integer,
+                    uint32_t resource) {
+	const auto& image   = ctx.state.program.info.images[resource];
+	const auto  dmask   = mem.dmask != 0u ? mem.dmask : 1u;
+	// The raw dword (or half) of source component `source` of the data, as the guest registers hold it.
+	const auto raw_source = [&](uint32_t source) {
+		if (source >= 4u || ((dmask >> source) & 1u) == 0u) return ConstantU32(ctx.state, 0);
+		const auto packed_index = DmaskComponentIndex(dmask, source);
+		auto raw = ctx.state.builder.AllocateId();
+		ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), raw, data,
+		                              mem.data_bits == 16u ? packed_index / 2u : packed_index);
+		if (mem.data_bits == 16u) {
+			if ((packed_index & 1u) != 0u) {
+				raw = Binary(ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), raw,
+				             ConstantU32(ctx.state, 16u));
 			}
+			raw = Binary(ctx.state, spv::OpBitwiseAnd, TypeU32(ctx.state), raw,
+			             ConstantU32(ctx.state, 0xffffu));
+		}
+		return raw;
+	};
+	uint32_t values[4] {};
+	const bool dynamic = ctx.state.program.info.generic &&
+	                     image.dynamic_slot != IR::ImageResource::NoDynamicSlot;
+	uint32_t dynamic_swizzle = 0;
+	uint32_t raw_by_source[4] {};
+	if (dynamic) {
+		// Every source component can land in any texel component, so all of them are read.
+		dynamic_swizzle = EmitBitFieldUExtract(
+		    ctx.state, DynamicImageWord(ctx.state, resource),
+		    ConstantU32(ctx.state, IR::GenericImageSwizzleShift), ConstantU32(ctx.state, 12u));
+		for (uint32_t source = 0; source < 4u; source++) raw_by_source[source] = raw_source(source);
+	}
+	for (uint32_t component = 0; component < 4u; component++) {
+		uint32_t raw = ConstantU32(ctx.state, 0);
+		if (dynamic) {
+			// InverseSwizzle: the first source whose selector names this component supplies it (a
+			// source outside the data mask supplies zero). Folded from the last source to the first.
+			for (uint32_t source = 4u; source-- > 0u;) {
+				const auto selector = EmitBitFieldUExtract(
+				    ctx.state, dynamic_swizzle, ConstantU32(ctx.state, source * 3u),
+				    ConstantU32(ctx.state, 3u));
+				const auto named = Binary(ctx.state, spv::OpIEqual, TypeBool(ctx.state), selector,
+				                          ConstantU32(ctx.state, 4u + component));
+				raw = Select(ctx.state, TypeU32(ctx.state), named, raw_by_source[source], raw);
+			}
+		} else {
+			const auto source = InverseSwizzle(image.shader_swizzle, component);
+			if (source < 4u && ((dmask >> source) & 1u) != 0u) raw = raw_source(source);
 		}
 		values[component] = integer ? raw
 		                    : mem.data_bits == 16u
@@ -692,6 +747,27 @@ uint32_t EmitImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t r
 	                             result_type, EmitRun);
 }
 
+// An image of a generic variant whose numeric class the instruction does not name: the same image
+// exists once per class (class_resources, in class order) and the shader runs the access for the
+// class the host stored in the image's dynamic word. Each member is a separate binding with its own
+// static type; the other members hold empty descriptors that are never read.
+template <typename Emit>
+auto EmitGroupedImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t result_type,
+                            const Emit& emit) {
+	auto&       state   = ctx.state;
+	const auto& mem     = ctx.Memory(inst);
+	const auto& image   = state.program.info.images.at(mem.resource);
+	const auto& members = image.class_resources;
+	if (members.size() < 2u || members.size() > 3u || image.class_root != mem.resource) {
+		ctx.Fail(inst, "has an invalid numeric-class group");
+	}
+	const auto selected = EmitBitFieldUExtract(
+	    state, DynamicImageWord(state, mem.resource),
+	    ConstantU32(state, IR::GenericImageClassShift), ConstantU32(state, 2u));
+	return EmitIndexSwitch(state, selected, static_cast<uint32_t>(members.size()), result_type,
+	                       [&](uint32_t ordinal) { return emit(members[ordinal]); });
+}
+
 } // namespace
 
 void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -705,7 +781,14 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto* address = ctx.ImageAddress(inst.Arg(image_info.needs_sampler ? 2 : 1));
 	if (op == IR::ValueOpcode::ImageQueryDimensions) {
 		state.builder.RequireCapability(spv::CapabilityImageQuery);
-		ctx.Define(inst, QueryDimensions(ctx, mem, *address));
+		if (image.class_root == mem.resource) {
+			ctx.Define(inst, EmitGroupedImageAccess(ctx, inst, TypeU32Vector(state, 4),
+			                                        [&](uint32_t resource) {
+				                                        return QueryDimensions(ctx, mem, *address, resource);
+			                                        }));
+			return;
+		}
+		ctx.Define(inst, QueryDimensions(ctx, mem, *address, mem.resource));
 		return;
 	}
 	if (op == IR::ValueOpcode::ImageQueryLod) {
@@ -717,7 +800,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		state.builder.AddFunction(
 		    spv::OpImageQueryLod, TypeF32Vector(state, 2), lod, sampled,
 		    CoordF32(ctx, mem, *address, 0, ImageDimensionInfoFor(dimension).spatial_components,
-		             image.cube));
+		             CubeFor(ctx, mem.resource)));
 		uint32_t values[4] = {ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0),
 		                      ConstantU32(state, 0)};
 		for (uint32_t index = 0; index < 2u; index++) {
@@ -735,49 +818,69 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (op == IR::ValueOpcode::ImageRead) {
 		const auto numeric_class = image.numeric_class;
 		const auto condition = ctx.Arg(inst, 2);
+		const bool grouped   = image.class_root == mem.resource;
+		const auto Fetch = [&](uint32_t resource, uint32_t array_index) {
+			const auto& candidate = state.program.info.images[resource];
+			const auto dimension = candidate.dimension;
+			const auto& dimension_info = ImageDimensionInfoFor(dimension);
+			const auto descriptor = LoadImageDescriptor(state, resource, 0u, array_index);
+			const auto fetched = state.builder.AllocateId();
+			const auto coord = CoordU32(ctx, mem, *address, dimension);
+			if (dimension_info.multisampled != 0u) {
+				state.builder.AddFunction(
+				    spv::OpImageFetch, ImageVectorType(state, candidate.numeric_class, 4), fetched,
+				    descriptor, coord, spv::ImageOperandsSampleMask,
+				    AddressU32(ctx, mem, *address, dimension_info.coordinate_components));
+			} else {
+				state.builder.AddFunction(
+				    spv::OpImageFetch, ImageVectorType(state, candidate.numeric_class, 4), fetched,
+				    descriptor, coord, spv::ImageOperandsLodMask,
+				    LodU32(ctx, mem, *address, mem.image_dimension));
+			}
+			return fetched;
+		};
 		ctx.Define(
 		    inst,
 		    EmitValueOrDefaultIfCondition(
 		        state, condition, TypeU32Vector(state, 4), ConstantU32CompositeZero(state, 4),
 		        [&]() {
+			        if (grouped) {
+				        // Every member reads in its own class and returns the guest's raw bits,
+				        // the common type the members' results are joined in.
+				        return EmitGroupedImageAccess(
+				            ctx, inst, TypeU32Vector(state, 4), [&](uint32_t resource) {
+					            return ResultVector(
+					                ctx, Fetch(resource, 0u),
+					                state.program.info.images[resource].numeric_class, false, mem);
+				            });
+			        }
 			        const auto color = EmitImageAccess(
-			            ctx, inst, ImageVectorType(state, numeric_class, 4),
-			            [&](uint32_t resource, uint32_t array_index) {
-				        const auto& candidate = state.program.info.images[resource];
-				        const auto dimension = candidate.dimension;
-				        const auto& dimension_info = ImageDimensionInfoFor(dimension);
-				        const auto descriptor = LoadImageDescriptor(state, resource, 0u, array_index);
-				        const auto fetched = state.builder.AllocateId();
-				        const auto coord = CoordU32(ctx, mem, *address, dimension);
-				        if (dimension_info.multisampled != 0u) {
-					        state.builder.AddFunction(
-					            spv::OpImageFetch, ImageVectorType(state, candidate.numeric_class, 4), fetched,
-					            descriptor, coord, spv::ImageOperandsSampleMask,
-					            AddressU32(ctx, mem, *address, dimension_info.coordinate_components));
-				        } else {
-					        state.builder.AddFunction(
-					            spv::OpImageFetch, ImageVectorType(state, candidate.numeric_class, 4), fetched,
-					            descriptor, coord, spv::ImageOperandsLodMask,
-					            LodU32(ctx, mem, *address, mem.image_dimension));
-				        }
-				        return fetched;
-			            });
+			            ctx, inst, ImageVectorType(state, numeric_class, 4), Fetch);
 			        return ResultVector(ctx, UnpackImageTexel(ctx, mem, color), numeric_class,
 			                            false, mem);
 		        }));
 		return;
 	}
 	if (op == IR::ValueOpcode::ImageWrite) {
-		const bool uint_image = image.numeric_class == Prospero::TextureNumericClass::Uint;
 		const auto dimension  = image.dimension;
 		EmitIfCondition(state, ctx.Arg(inst, 3), [&]() {
-			const auto mip_lod =
-			    state.program.info.images[mem.resource].mip_mode == IR::ImageMipMode::Dynamic
-			        ? LodU32(ctx, mem, *address, dimension)
-			        : 0u;
-			const auto coord = CoordU32(ctx, mem, *address, dimension);
-			const auto texel = StoreTexel(ctx, mem, ctx.Arg(inst, 2), uint_image);
-			EmitStorageImageWrite(state, mem.resource, mip_lod, coord, texel);
+			const auto Write = [&](uint32_t resource) {
+				const bool uint_image =
+				    state.program.info.images[resource].numeric_class ==
+				    Prospero::TextureNumericClass::Uint;
+				const auto mip_lod =
+				    state.program.info.images[resource].mip_mode == IR::ImageMipMode::Dynamic
+				        ? LodU32(ctx, mem, *address, dimension)
+				        : 0u;
+				const auto coord = CoordU32(ctx, mem, *address, dimension);
+				const auto texel = StoreTexel(ctx, mem, ctx.Arg(inst, 2), uint_image, resource);
+				EmitStorageImageWrite(state, resource, mip_lod, coord, texel);
+			};
+			if (image.class_root == mem.resource) {
+				EmitGroupedImageAccess(ctx, inst, 0u, [&](uint32_t resource) { Write(resource); });
+			} else {
+				Write(mem.resource);
+			}
 		});
 		return;
 	}
@@ -808,7 +911,8 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 					return;
 				}
 				const auto coord = CoordF32(ctx, mem, *address, layout.coord,
-				                            dimension_info.coordinate_components, image.cube);
+				                            dimension_info.coordinate_components,
+				                            CubeFor(ctx, mem.resource));
 				const auto sample = EmitOneDimensionalGatherLz(ctx, mem, coord, numeric_class);
 				ctx.Define(inst, ResultVector(ctx, UnpackImageGather(ctx, mem, sample),
 				                              numeric_class, false, mem, true));
@@ -835,7 +939,8 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				const auto dimension = candidate.dimension;
 				const auto coord = CoordF32(
 				    ctx, mem, *address, layout.coord,
-				    ImageDimensionInfoFor(dimension).coordinate_components, candidate.cube);
+				    ImageDimensionInfoFor(dimension).coordinate_components,
+				    CubeFor(ctx, resource));
 				uint32_t operand_mask = 0;
 				uint32_t offset = 0;
 				if (HasFlag(mem, Decoder::ImageSampleFlagGatherHorizontal)) {
@@ -931,7 +1036,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			const auto coord =
 			    CoordF32(ctx, mem, *address, layout.coord,
 			             ImageDimensionInfoFor(candidate.dimension).coordinate_components,
-			             candidate.cube);
+			             CubeFor(ctx, resource));
 			const auto sampled = MakeSampledImage(state, resource, sampler_id, 0u, array_index,
 			                                      sampler_index != 0u);
 			const auto sample = state.builder.AllocateId();

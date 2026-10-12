@@ -83,6 +83,22 @@ uint32_t BufferLane(EmitterState& state) {
 
 uint32_t BufferByteAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
 	auto&      state  = ctx.state;
+	if (state.program.info.generic) {
+		// Generic variant: stride, swizzle and index stride come from the descriptor, through the
+		// dynamic section of the shader data. The arithmetic is the one the constants fold from.
+		const auto word = DynamicBufferWord(state, mem.resource);
+		const auto stride = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
+		    state, word, ConstantU32(state, 0u), ConstantU32(state, 14u));
+		const auto index_stride = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
+		    state, word, ConstantU32(state, 16u), ConstantU32(state, 2u));
+		const auto swizzle = Binary(
+		    state, spv::OpINotEqual, TypeBool(state),
+		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), word, ConstantU32(state, 1u << 14u)),
+		    ConstantU32(state, 0u));
+		return CalculateBufferAddress(state, ctx.Arg(inst, 1), ctx.Arg(inst, 2), ctx.Arg(inst, 3),
+		                              mem.offset, stride, swizzle, index_stride)
+		    .byte;
+	}
 	const auto packed = StorageBufferPackedStride(state, mem);
 	const auto stride = packed & 0x3fffu;
 	auto       index  = ctx.Arg(inst, 1);
@@ -1382,8 +1398,45 @@ uint32_t EmitReadConst(ValueEmitContext& ctx, const IR::Inst& inst) {
 	return EmitNative<spv::OpLoad, IR::Type::U32>(state, pointer);
 }
 
+// The specialized path replaces a read of a buffer with a zero stride and out-of-bounds mode 0 by
+// zeros (every vector read is out of bounds), before emission. A generic variant does not know the
+// descriptor, so the same zeros are selected at run time.
+static uint32_t GenericZeroStrideOob(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+                              uint32_t value) {
+	auto& state = ctx.state;
+	if (!state.program.info.generic || mem.kind != IR::ResourceKind::Buffer ||
+	    IR::BufferAccessOf(inst.GetOpcode()) != IR::BufferAccess::Read) {
+		return value;
+	}
+	if (mem.formatted && !mem.typed) {
+		ctx.Fail(inst, "reads an untyped formatted buffer in a generic variant");
+	}
+	uint32_t components = 1u;
+	switch (inst.GetType()) {
+		case IR::Type::U32x2: components = 2u; break;
+		case IR::Type::U32x3: components = 3u; break;
+		case IR::Type::U32x4: components = 4u; break;
+		default: break;
+	}
+	const auto zero_oob = Binary(
+	    state, spv::OpINotEqual, TypeBool(state),
+	    Binary(state, spv::OpBitwiseAnd, TypeU32(state), DynamicBufferWord(state, mem.resource),
+	           ConstantU32(state, IR::GenericBufferZeroOobBit)),
+	    ConstantU32(state, 0u));
+	const auto zero = ConstantU32(state, 0u);
+	if (components == 1u) return Select(state, TypeU32(state), zero_oob, zero, value);
+	std::array<uint32_t, 4> parts {};
+	for (uint32_t component = 0; component < components; ++component) {
+		const auto extracted = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), extracted, value, component);
+		parts[component] = Select(state, TypeU32(state), zero_oob, zero, extracted);
+	}
+	return ConstructU32Composite(state, components, parts);
+}
+
 void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto mem = ctx.Memory(inst);
+	const auto original = mem;
 	if (mem.planning_only) return;
 	if (mem.kind == IR::ResourceKind::IndirectBuffer) {
 		ctx.Define(inst, LoadIndirectScalarBuffer(ctx, inst));
@@ -1407,15 +1460,18 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 		// storage buffer range, so clamping keeps every huge index out of bounds. The vector paths
 		// cannot reach it: their dword index is a 32-bit byte address shifted right by 2.
 		const auto clamped = EmitUMin32(state, element, ConstantU32(state, 0x3fffffffu));
-		ctx.Define(inst, EmitNative<spv::OpLoad, IR::Type::U32>(
-		                     state, EmitMemoryElementPointer(state, access, clamped)));
+		ctx.Define(inst, GenericZeroStrideOob(
+		                     ctx, inst, original,
+		                     EmitNative<spv::OpLoad, IR::Type::U32>(
+		                         state, EmitMemoryElementPointer(state, access, clamped))));
 		return;
 	}
 	const auto condition = EmitMemoryElementInBounds(state, access, element);
-	ctx.Define(inst, EmitValueOrZeroIfCondition(state, condition, [&]() {
-		           return EmitNative<spv::OpLoad, IR::Type::U32>(
-		               state, EmitMemoryElementPointer(state, access, element));
-	           }));
+	ctx.Define(inst, GenericZeroStrideOob(
+	                     ctx, inst, original, EmitValueOrZeroIfCondition(state, condition, [&]() {
+		                     return EmitNative<spv::OpLoad, IR::Type::U32>(
+		                         state, EmitMemoryElementPointer(state, access, element));
+	                     })));
 }
 
 void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -1448,7 +1504,7 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 		value = LoadSubword(ctx, inst, mem, 16, false);
 	else
 		value = LoadWord(ctx, inst, mem);
-	ctx.Define(inst, value);
+	ctx.Define(inst, GenericZeroStrideOob(ctx, inst, mem, value));
 }
 
 void EmitStoreMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
