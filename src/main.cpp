@@ -179,6 +179,9 @@ static void PrintUsage() {
 	         "                                       cause, slowest PM4 packets) and write\n"
 	         "                                       _gpu_phase.csv. For shares, never an fps baseline.\n"
 	         "                                       Default: 0 (off).\n");
+	::printf("  --debug-gpu-pc-sample <hz>           Sample the GPU thread's instruction pointer (CPU-time clock)\n"
+	         "                                       and write _gpu_pc_samples.txt with each --gpu-phase-stats\n"
+	         "                                       report. Linux only. Default: 0 (off).\n");
 	::printf("  --gc-clock <runs|frames>             Age the texture and buffer caches in collector runs\n"
 	         "                                       (one per guest submission, stock) or in presented\n"
 	         "                                       frames. Default: runs.\n");
@@ -764,6 +767,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.gpu_phase_stats_s = static_cast<uint32_t>(seconds);
+		} else if (arg == "--debug-gpu-pc-sample") {
+			uint64_t hz = 0;
+			if (!ParseUint64(value, hz) || hz > 10000) {
+				::printf("invalid pc sample rate (expected 0-10000 Hz): %s\n", value.c_str());
+				return false;
+			}
+			options.config.gpu_pc_sample_hz = static_cast<uint32_t>(hz);
 		} else if (arg == "--gc-clock") {
 			if (Common::EqualNoCase(value, "runs")) {
 				options.config.gc_clock_frames = false;

@@ -1,4 +1,5 @@
 #include "common/gpuPhaseStats.h"
+#include "common/pcSampler.h"
 #include "graphics/shader/recompiler/ir/passes/MaterializeProbe.h"
 
 #include "common/logging/log.h"
@@ -337,6 +338,7 @@ void AttachGpuThread() {
 		std::fputs(header.c_str(), state->csv);
 		std::fflush(state->csv);
 	}
+	PcSampler::StartOnThisThread();
 	t_report = state;
 	Libs::Graphics::ShaderRecompiler::IR::MaterializeProbe::g_enabled.store(
 	    state->phases, std::memory_order_relaxed);
@@ -564,6 +566,7 @@ void Report(detail::ThreadState& s, bool final_report) {
 		s.window_packet_count = s.packet_count;
 	}
 	::Log::WriteToConsoleAndLog(line);
+	PcSampler::WriteReport();
 
 	if (s.csv != nullptr) {
 		std::string row = fmt::format("{:.1f},{:.3f},{},{},{},{},{},{}", t_s, wall_ns / 1e9, frames,

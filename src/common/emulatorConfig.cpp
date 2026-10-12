@@ -4,6 +4,7 @@
 #include "common/benchInstrument.h"
 #include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
+#include "common/pcSampler.h"
 
 #include <algorithm>
 #include <memory>
@@ -33,6 +34,7 @@ void Load(const ConfigOptions& cfg) {
 	*g_config = cfg;
 
 	Common::Hang::Start(cfg.hang_watchdog_seconds);
+	Common::PcSampler::Configure(cfg.gpu_pc_sample_hz);
 	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s != 0 ? cfg.gpu_phase_stats_s
 	                                                           : cfg.submit_stats_s,
 	                            cfg.gpu_phase_stats_s != 0);
