@@ -5158,6 +5158,46 @@ void TestNewShaderRecompilerCapturedVopcSdwaCmpxLeU16() {
         "V_CMPX_LE_U16 accepted an unsupported DPP encoding");
 }
 
+void TestNewShaderRecompilerCapturedVopcSdwaCmpxGeU16() {
+  using namespace ShaderRecompiler;
+
+  // The 0xbe sibling of the captured V_CMPX_LE_U16 (Ghost of Tsushima): 0xbb was missing, and so
+  // was the last of the family.
+  const uint32_t shader[] = {
+      0x7d7d02f9u, 0x8606001bu, // v_cmpx_le_u16 (SDWA)
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::VOPC &&
+            decoded.opcode == Decoder::Opcode::V_CMPX_GE_U16 &&
+            decoded.opcode_id == 0xbeu && decoded.word_count == 2u &&
+            decoded.raw[0] == shader[0] && decoded.raw[1] == shader[1] &&
+            decoded.dst.kind == Decoder::OperandKind::ExecLo &&
+            decoded.src_count == 2u,
+        "decoder rejected captured SDWA V_CMPX_GE_U16 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "captured SDWA V_CMPX_GE_U16 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Pixel));
+  Check((result.decoded_dump.find("V_CMPX_GE_U16 exec_lo") != std::string::npos),
+        "captured SDWA V_CMPX_GE_U16 is missing from decoded dump");
+  CheckSpirvBinaryValidates(result.spirv);
+
+  const uint32_t compact[] = {0x7d7c0300u};
+  Decoder::DecodeInstruction(compact, 0u, decoded);
+  Check(decoded.opcode == Decoder::Opcode::V_CMPX_GE_U16 &&
+            decoded.dst.kind == Decoder::OperandKind::ExecLo,
+        "compact V_CMPX_GE_U16 does not decode to an EXEC compare");
+  const uint32_t dpp[] = {EncodeVopc(0xbeu, 250u, 1u), EncodeVop2Dpp(0u)};
+  Decoder::DecodeInstruction(dpp, 0u, decoded);
+  Check(decoded.opcode == Decoder::Opcode::UNSUPPORTED &&
+            (decoded.unsupported_reason.find("VOPC DPP modifier is not supported for opcode") != std::string::npos),
+        "V_CMPX_GE_U16 accepted an unsupported DPP encoding");
+}
+
 void TestNewShaderRecompilerIrLookupMissFailsExplicitly() {
   namespace Decoder = ShaderRecompiler::Decoder;
   namespace CFG = ShaderRecompiler::CFG;
@@ -15821,6 +15861,7 @@ int main() {
   TestVopcCmpxClassF16Decoder();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLeU16();
+  TestNewShaderRecompilerCapturedVopcSdwaCmpxGeU16();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerInteger64CompareEncodings();
   TestDecoderRejectsTruncatedInstructions();
