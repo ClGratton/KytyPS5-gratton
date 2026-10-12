@@ -720,6 +720,8 @@ if(BUILD_TESTING)
 		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=skip")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
+	add_test(NAME guest_stack_exit
+		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests> --guest-stack-exit-only)
 	add_test(NAME virtual_memory_allocation
 		COMMAND $<TARGET_FILE:virtual_memory_allocation_tests>)
 	add_test(NAME guest_red_zone_patcher
