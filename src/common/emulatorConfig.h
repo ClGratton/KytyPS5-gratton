@@ -291,6 +291,8 @@ struct ConfigOptions {
 	// rendering family and wait only for the work that wrote the data. Default off.
 	bool                   readback_queue              = false;
 	std::filesystem::path  bench_render_csv;
+	// --debug-skip-log <path>: one row per dropped / waiting graphics draw (see benchInstrument.h).
+	std::filesystem::path  debug_skip_log;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif

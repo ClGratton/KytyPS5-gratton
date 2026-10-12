@@ -1160,6 +1160,7 @@ struct PipelineCache::ProgramCache {
 		AsyncPipelineCompiler* pool       = nullptr;
 		bool                   allow_skip = false; // graphics only; compute always waits
 		bool                   pending    = false; // out: skipped, program not ready
+		bool                   waited     = false; // out: the GPU thread waited for a program job
 		// Lookahead thread (--pipeline-lookahead): materialize privately, never skip, wait for
 		// jobs without accounting GPU-thread waits, never fall back to synchronous compilation.
 		bool prefetch = false;
@@ -1498,6 +1499,7 @@ struct PipelineCache::ProgramCache {
 			return permutation.handle;
 		};
 		const auto wait_job = [&](AsyncJob& job) {
+			if (!prefetch) async->waited = true;
 			return prefetch ? job.Wait() : pool->WaitFor(job);
 		};
 		const auto note_skip = [&] {
@@ -3250,6 +3252,9 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 		}
 	}
 	result.may_skip = !prefetch && allow_skip;
+	result.safety_kept = !prefetch && m_async_mode == Config::AsyncPipelineMode::Skip && !allow_skip;
+	result.vs_hash     = vertex_params[0].hash;
+	result.ps_hash     = pixel_active ? pixel_params.hash : 0;
 	ProgramCache::AsyncContext async {
 	    .pool       = AsyncPool(),
 	    .allow_skip = allow_skip,
@@ -3259,6 +3264,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor, &async);
 		if (async.pending) {
 			result.pending = true;
+			result.program_waited = async.waited;
 			return result;
 		}
 		if (prefetch && !result.pixel) {
@@ -3276,6 +3282,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 			return {};
 		}
 	}
+	result.program_waited = async.waited;
 	return result;
 }
 
@@ -3657,6 +3664,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 				pool->Stats().skipped_pipeline_draws.fetch_add(1, std::memory_order_relaxed);
 				return nullptr; // the caller skips this draw
 			}
+			programs.pipeline_waited = true;
 			if (pool->WaitFor(*job)) {
 				if (auto* published = FindGraphicsPipeline(key)) {
 					NoteDrawUse(*published, true, joined_prefetch || joined_load);

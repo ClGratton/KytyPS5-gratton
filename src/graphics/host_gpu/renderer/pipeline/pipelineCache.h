@@ -169,6 +169,13 @@ public:
 		// --async-pipelines skip: false when a shader of the draw writes memory later frames read
 		// (DrawSkipSafety.h); such a draw waits for its pipeline instead of being skipped.
 		bool may_skip = true;
+		// --debug-skip-log: skip mode, and the store-safety rule forces this draw to wait; the
+		// shader hashes of the draw; whether a program / the pipeline had to be waited for.
+		bool     safety_kept     = false;
+		bool     program_waited  = false;
+		mutable bool pipeline_waited = false;
+		uint64_t vs_hash         = 0;
+		uint64_t ps_hash         = 0;
 
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};

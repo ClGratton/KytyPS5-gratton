@@ -44,6 +44,7 @@ void Load(const ConfigOptions& cfg) {
 	    .shader_timing_log = cfg.shader_timing_log,
 	    .gpu_trace         = cfg.bench_gpu_trace,
 	    .render_csv        = cfg.bench_render_csv,
+	    .skip_log          = cfg.debug_skip_log,
 	});
 }
 

@@ -887,6 +887,7 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
 		default: break;
 	}
+	Bench::NoteGuestFlip();
 	if (Bench::RenderEnabled()) {
 		Bench::RecordGuestFlip(info.extent.width, info.extent.height);
 	}
@@ -1015,6 +1016,7 @@ void Presenter::Impl::Present() {
 		    window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed) + 1;
 		Common::Hang::NoteProgress();
 		Common::GpuPhase::NoteFrame();
+		Bench::NotePresentedFrame(presented);
 		if (Bench::FramesEnabled() && Bench::RecordPresent(presented)) {
 			// --bench-exit-after-frames: take the normal clean-exit path (same as closing the
 			// window): the main loop sees SDL_EVENT_QUIT, saves the pipeline cache, then

@@ -2,6 +2,7 @@
 #include "graphics/host_gpu/renderer/gpuOps.h"
 
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/common.h"
 #include "common/gpuPhaseStats.h"
 #include "common/indirectDrawPolicy.h"
@@ -911,6 +912,45 @@ BuildTargetExportMapping(const HW::Context& ctx, uint32_t color_output_mask) {
 	return target_export_mapping;
 }
 
+// --debug-skip-log: one row per dropped / waiting draw. Targets come from the registers, so the row
+// is the same wherever in the draw path it is written (before any image lookup).
+static void LogAsyncDrawEvent(const char* event, const CommandBuffer& buffer,
+                              const DrawCallInfo& draw,
+                              const PipelineCache::GraphicsPrograms& programs) {
+	const auto& ctx   = buffer.GetRegisters();
+	char        targets[512];
+	size_t      len = 0;
+	const auto  mask = DrawColorOutputMask(ctx);
+	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX && len < 400; slot++) {
+		const auto& rt = ctx.GetRenderTarget(slot);
+		if ((mask & (1u << slot)) != 0 && rt.base.addr != 0) {
+			len += static_cast<size_t>(std::snprintf(
+			    targets + len, sizeof(targets) - len, "c%u=0x%llx/f%u ", slot,
+			    static_cast<unsigned long long>(rt.base.addr),
+			    static_cast<unsigned>(rt.info.format)));
+		}
+	}
+	const auto& z  = ctx.GetDepthRenderTarget();
+	const auto& dc = ctx.GetDepthControl();
+	if (dc.z_enable && dc.z_write_enable && z.z_write_base_addr != 0) {
+		len += static_cast<size_t>(std::snprintf(targets + len, sizeof(targets) - len, "z=0x%llx ",
+		                                         static_cast<unsigned long long>(z.z_write_base_addr)));
+	}
+	if (len == 0) {
+		std::snprintf(targets, sizeof(targets), "none");
+	} else if (targets[len - 1] == ' ') {
+		targets[len - 1] = 0;
+	}
+	char row[768];
+	const bool skipped = event[0] == 's';
+	// rule: "kept" = skip mode, the store-safety rule made this draw wait instead of being skipped.
+	std::snprintf(row, sizeof(row), "%s,%016llx,%016llx,%s,%s,%s", event,
+	              static_cast<unsigned long long>(programs.vs_hash),
+	              static_cast<unsigned long long>(programs.ps_hash),
+	              skipped ? "none" : (programs.safety_kept ? "kept" : "none"), draw.Name(), targets);
+	Bench::LogSkipRow(row);
+}
+
 static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
                            uint32_t color_output_mask, DrawRenderState& state) {
 	auto& ctx    = buffer.GetRegisters();
@@ -944,7 +984,11 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (state.programs.pending) {
 		// --async-pipelines skip: a program is still being built on a worker. Nothing has been
 		// resolved or touched yet, so the draw is simply dropped.
+		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_program", buffer, draw, state.programs);
 		return false;
+	}
+	if (Bench::SkipLogEnabled() && state.programs.program_waited) {
+		LogAsyncDrawEvent("wait_program", buffer, draw, state.programs);
 	}
 	uint32_t mrt_mask = 0;
 	if (state.ps_active) {
@@ -1267,7 +1311,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (pipeline_ptr == nullptr) {
 		// --async-pipelines skip: the pipeline is still being built on a worker. Drop the draw
 		// before any command that depends on it is recorded; the caller resets the bindings.
+		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_pipeline", buffer, draw, state.programs);
 		return;
+	}
+	if (Bench::SkipLogEnabled() && state.programs.pipeline_waited) {
+		LogAsyncDrawEvent("wait_pipeline", buffer, draw, state.programs);
 	}
 	auto& pipeline = *pipeline_ptr;
 	vk::ImageAspectFlags feedback_aspects;
