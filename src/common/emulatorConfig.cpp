@@ -92,6 +92,10 @@ bool CleanGuestReadsEnabled() {
 	return g_config->clean_guest_reads;
 }
 
+bool ReadbackQueueEnabled() {
+	return g_config->readback_queue;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

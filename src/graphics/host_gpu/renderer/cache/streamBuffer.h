@@ -73,6 +73,9 @@ public:
 	bool   is_deleted   = false;
 	int    stream_score = 0;
 	size_t lru_id       = 0;
+	// Scheduler tick current when GPU writes to this buffer were last recorded (or when it was
+	// created: a merge copies GPU data into it). A readback waits for it (--readback-queue).
+	uint64_t last_gpu_write_tick = 0;
 
 protected:
 	[[nodiscard]] GraphicContext&   Graphics() const noexcept { return *m_graphics; }

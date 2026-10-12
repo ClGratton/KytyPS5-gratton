@@ -172,6 +172,9 @@ struct ConfigOptions {
 	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
 	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
 	bool                   clean_guest_reads           = false;
+	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
+	// rendering family and wait only for the work that wrote the data. Default off.
+	bool                   readback_queue              = false;
 	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
@@ -230,6 +233,7 @@ uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
 bool              CleanGuestReadsEnabled();
+bool              ReadbackQueueEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

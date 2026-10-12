@@ -128,7 +128,10 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	m_gpu->SendCommandSync(unmap);
 }
 
-void RenderContext::PrepareBda() {
+void RenderContext::PrepareBda(bool address_writes) {
+	if (address_writes) {
+		m_buffer_cache.NoteAddressWrites();
+	}
 	if (!m_bda_logged) {
 		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");
 		m_bda_logged = true;

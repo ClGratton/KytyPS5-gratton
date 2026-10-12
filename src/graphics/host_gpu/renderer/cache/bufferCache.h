@@ -97,6 +97,9 @@ public:
 	// exactly those bytes: none is GPU-modified, and no GPU-modified image overlaps. Otherwise false
 	// and nothing is read. Never faults and never waits for the GPU. GPU thread only.
 	[[nodiscard]] bool TryReadCleanBytes(uint64_t vaddr, void* data, uint64_t size);
+	// A shader that may store through raw addresses into any buffer was recorded in the current
+	// command buffer (so a second-queue readback must wait for it).
+	void NoteAddressWrites() noexcept;
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
@@ -149,6 +152,16 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	// --readback-queue: copy on the second queue after a timeline wait on the producer's tick.
+	[[nodiscard]] bool ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,
+	                                         const std::vector<vk::BufferCopy>& copies,
+	                                         uint64_t total_size, const Buffer& download,
+	                                         uint64_t offset);
+	uint64_t        m_address_write_tick = 0;
+	vk::CommandPool m_readback_pool      = nullptr;
+	vk::CommandBuffer m_readback_command = nullptr;
+	vk::Semaphore   m_readback_semaphore = nullptr; // timeline, signaled by readback submits
+	uint64_t        m_readback_value     = 0;
 	std::mutex                                        m_known_fills_mutex;
 	KnownFills                                        m_known_fills;
 	void ForgetKnownFills(uint64_t vaddr, uint64_t size);

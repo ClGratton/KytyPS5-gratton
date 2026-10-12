@@ -182,6 +182,9 @@ static void PrintUsage() {
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
 	         "                                       the guest backing without faulting when none of the bytes\n"
 	         "                                       is GPU-written (no drain). Default: false.\n");
+	::printf("  --readback-queue <true|false>        Synchronous GPU->guest buffer readbacks copy on a second\n"
+	         "                                       queue of the rendering family and wait only for the\n"
+	         "                                       work that wrote the data. Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -731,6 +734,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--clean-guest-reads") {
 			if (!ParseBool(value, options.config.clean_guest_reads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--readback-queue") {
+			if (!ParseBool(value, options.config.readback_queue)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

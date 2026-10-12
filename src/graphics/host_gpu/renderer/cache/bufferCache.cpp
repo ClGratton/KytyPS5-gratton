@@ -2,6 +2,7 @@
 #include "common/gpuPhaseStats.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/readbackPlan.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -174,6 +175,23 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		copy.dstOffset += offset;
 	}
 
+	if constexpr (!async) {
+		if (m_graphics.readback_queue != nullptr && Config::ReadbackQueueEnabled()) {
+			[[maybe_unused]] const auto first_address = buffer_address + copies.front().srcOffset;
+			Common::GpuPhase::NoteReadback(first_address, total_size);
+			if (ReadbackOnSecondQueue(buffer, buffer.last_gpu_write_tick, copies, total_size,
+			                          download, offset)) {
+				(temporary ? *temporary : m_download_buffer).Invalidate(offset, total_size);
+				for (const auto& copy: copies) {
+					Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
+					                                      mapped + (copy.dstOffset - offset),
+					                                      copy.size);
+				}
+				return true;
+			}
+		}
+	}
+
 	auto& command = m_scheduler.Current();
 	command.EndRendering();
 	const auto              native = command.Handle();
@@ -222,6 +240,108 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	return true;
 }
 
+void BufferCache::NoteAddressWrites() noexcept {
+	m_address_write_tick = m_scheduler.CurrentTick();
+}
+
+bool BufferCache::ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,
+                                        const std::vector<vk::BufferCopy>& copies,
+                                        uint64_t total_size, const Buffer& download,
+                                        uint64_t offset) {
+	const auto device = m_graphics.device;
+	if (m_readback_pool == nullptr) {
+		vk::CommandPoolCreateInfo pool_info {};
+		pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+		pool_info.queueFamilyIndex = m_graphics.queue_family;
+		if (device.createCommandPool(&pool_info, nullptr, &m_readback_pool) != vk::Result::eSuccess) {
+			return false;
+		}
+		vk::CommandBufferAllocateInfo alloc_info {};
+		alloc_info.commandPool        = m_readback_pool;
+		alloc_info.level              = vk::CommandBufferLevel::ePrimary;
+		alloc_info.commandBufferCount = 1;
+		if (device.allocateCommandBuffers(&alloc_info, &m_readback_command) !=
+		    vk::Result::eSuccess) {
+			return false;
+		}
+		vk::SemaphoreTypeCreateInfo type_info {};
+		type_info.semaphoreType = vk::SemaphoreType::eTimeline;
+		vk::SemaphoreCreateInfo semaphore_info {};
+		semaphore_info.pNext = &type_info;
+		if (device.createSemaphore(&semaphore_info, nullptr, &m_readback_semaphore) !=
+		    vk::Result::eSuccess) {
+			return false;
+		}
+	}
+
+	// The copy waits for the tick of the work that wrote the data, not for everything queued
+	// since. If that work is still in the open command buffer, submit it first (no wait).
+	Common::GpuPhase::NoteDrainFull(false);
+	Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
+	const auto plan = PlanReadback(buffer_tick, m_address_write_tick, m_scheduler.CurrentTick());
+	if (plan.flush_first) {
+		m_scheduler.Flush();
+	}
+
+	const auto command = m_readback_command;
+	command.reset({});
+	vk::CommandBufferBeginInfo begin_info {};
+	begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+	EXIT_IF(command.begin(&begin_info) != vk::Result::eSuccess);
+	command.copyBuffer(buffer.Handle(), download.Handle(), static_cast<uint32_t>(copies.size()),
+	                   copies.data());
+	vk::BufferMemoryBarrier after {};
+	after.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask       = vk::AccessFlagBits::eHostRead;
+	after.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	after.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	after.buffer              = download.Handle();
+	after.offset              = offset;
+	after.size                = total_size;
+	command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost,
+	                        {}, 0, nullptr, 1, &after, 0, nullptr);
+	EXIT_IF(command.end() != vk::Result::eSuccess);
+
+	const uint64_t               signal_value   = ++m_readback_value;
+	const vk::Semaphore          wait_semaphore = m_scheduler.GetMasterSemaphore().Handle();
+	const uint64_t               wait_value     = plan.wait_tick;
+	const vk::PipelineStageFlags wait_stage     = vk::PipelineStageFlagBits::eTransfer;
+	vk::TimelineSemaphoreSubmitInfo timeline_info {};
+	timeline_info.signalSemaphoreValueCount = 1;
+	timeline_info.pSignalSemaphoreValues    = &signal_value;
+	vk::SubmitInfo submit_info {};
+	submit_info.pNext                = &timeline_info;
+	submit_info.commandBufferCount   = 1;
+	submit_info.pCommandBuffers      = &command;
+	submit_info.signalSemaphoreCount = 1;
+	submit_info.pSignalSemaphores    = &m_readback_semaphore;
+	if (wait_value != 0) {
+		timeline_info.waitSemaphoreValueCount = 1;
+		timeline_info.pWaitSemaphoreValues    = &wait_value;
+		submit_info.waitSemaphoreCount        = 1;
+		submit_info.pWaitSemaphores           = &wait_semaphore;
+		submit_info.pWaitDstStageMask         = &wait_stage;
+	}
+	{
+		Common::LockGuard lock(m_graphics.readback_queue_mutex);
+		const auto        result = m_graphics.readback_queue.submit(1, &submit_info, nullptr);
+		if (result != vk::Result::eSuccess) {
+			EXIT("BufferCache: readback submit failed: %s\n", vk::to_string(result).c_str());
+		}
+	}
+	vk::SemaphoreWaitInfo wait_info {};
+	wait_info.semaphoreCount = 1;
+	wait_info.pSemaphores    = &m_readback_semaphore;
+	wait_info.pValues        = &signal_value;
+	const auto wait_result   = device.waitSemaphores(&wait_info, UINT64_MAX);
+	if (wait_result != vk::Result::eSuccess) {
+		EXIT("BufferCache: readback wait failed: %s\n", vk::to_string(wait_result).c_str());
+	}
+	// Guest-memory completions queued for earlier ticks must land before this one does.
+	m_scheduler.WaitPriorityOperations(plan.wait_tick);
+	return true;
+}
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
@@ -263,6 +383,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (m_readback_semaphore != nullptr) {
+		m_graphics.device.destroySemaphore(m_readback_semaphore, nullptr);
+	}
+	if (m_readback_pool != nullptr) {
+		m_graphics.device.destroyCommandPool(m_readback_pool, nullptr);
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -459,6 +585,9 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 	SetVulkanObjectNameF(m_graphics.device, buffer.Handle(),
 	                     "Kyty.GameBuffer[guest=0x{:016x} size=0x{:x}]", overlap.begin,
 	                     overlap.end - overlap.begin);
+	// Merging copies the old buffers' contents, GPU-written ranges included, in the open command
+	// buffer: that is the producer a readback of the new buffer has to wait for.
+	m_slot_buffers[id].last_gpu_write_tick = m_scheduler.CurrentTick();
 	for (auto it = overlap.first; it != overlap.last;) {
 		const auto old_id = (it++)->second;
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
@@ -570,6 +699,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
+		buffer.last_gpu_write_tick = m_scheduler.CurrentTick();
 		ForgetKnownFills(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
