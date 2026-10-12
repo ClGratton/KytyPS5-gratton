@@ -744,6 +744,7 @@ static vk::Sampler NativeSampler(RenderContext&                       context,
 
 static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
                                              std::span<const uint32_t> data) {
+	Common::GpuPhase::Scope gpu_phase_upload(Common::GpuPhase::Phase::DescUpload);
 	EXIT_IF(data.empty());
 	auto& command_buffer = context.GetCommandScheduler().Current();
 	EXIT_IF(command_buffer.IsInvalid());
@@ -878,7 +879,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 }
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
-	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::DescBuffers);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program   = *prepared.runtime->program;
@@ -912,7 +913,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 }
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
-	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::DescImages);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program  = *prepared.runtime->program;
@@ -928,6 +929,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
 			}
+			Common::GpuPhase::Scope gpu_phase_resolve(Common::GpuPhase::Phase::DescResolve);
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
@@ -947,10 +949,12 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				desc.view_info.level_count = 1;
 				// The shader selects the mip after applying the guest minimum LOD.
 				desc.view_info.min_lod = 0;
+				Common::GpuPhase::Scope gpu_phase_find(Common::GpuPhase::Phase::DescFindTexture);
 				binding.mip_views.push_back(texture_cache.FindTexture(binding.image_id, desc));
 			}
 			binding.image_view = binding.mip_views.front();
 		} else {
+			Common::GpuPhase::Scope gpu_phase_find(Common::GpuPhase::Phase::DescFindTexture);
 			binding.image_view = texture_cache.FindTexture(binding.image_id, binding.desc);
 		}
 		auto&      image   = texture_cache.GetImage(binding.image_id);
@@ -1002,7 +1006,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
-	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::DescCommit);
 	auto   vk_buffer        = buffer.Handle();
 	size_t image_descriptor_count = 0;
 	size_t write_count      = 0;
@@ -1124,6 +1128,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					         static_cast<unsigned long long>(image.info.data.address), count);
 				}
 			}
+			Common::GpuPhase::Scope gpu_phase_transit(Common::GpuPhase::Phase::DescTransit);
 			if (image.info.data.Empty()) {
 				image.Transit(vk::ImageLayout::eGeneral,
 				              storage ? vk::AccessFlagBits2::eShaderRead |
@@ -1162,6 +1167,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				              vk::AccessFlagBits2::eShaderRead, range, vk_buffer);
 			}
 			binding.layout = image.backing.state.layout;
+			gpu_phase_transit.End();
 		}
 
 		std::array<size_t, ShaderRecompiler::IR::ImageBindingCount> image_starts {};
@@ -1249,13 +1255,13 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	}
 
 	if (has_push_data) {
-		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0, sizeof(push_data),
 		                        push_data.dwords.data());
 	}
 
 	if (!m_descriptor_writes.empty()) {
-		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
 			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,

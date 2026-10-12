@@ -49,6 +49,19 @@ enum class Phase : uint8_t {
 	PipeEntryLock,   // waiting for a program source entry's lock (cheap unless a worker holds it)
 	PipeSrtRead,     // guest-memory reads made by the SRT walk (inside pipe_materialize)
 	PipePermSearch,  // scanning a program's permutations for the one that fits the specialization
+	// Sub-phases of the descriptor work. `Descriptors` itself is no longer scoped: the three
+	// functions (RebindBuffers, RebindImages, CommitBindings) each have a remainder phase, and the
+	// costly calls inside them their own. The old "descriptors" share is the sum of all Desc* phases
+	// (the report prints it as `descriptors_total`).
+	DescBuffers,     // RebindBuffers: its own code (buffer views, memory offsets, packing)
+	DescUpload,      // RebindBuffers: stream-buffer uploads of the flattened SRT and shader data
+	DescImages,      // RebindImages: its own code (rebind decision, view clears, mip loop)
+	DescResolve,     // RebindImages: ResolveTexture + BindImage (texture-cache image lookup)
+	DescFindTexture, // RebindImages: TextureCache::FindTexture (image view lookup/creation)
+	DescCommit,      // CommitBindings: its own code (hazard checks, descriptor write building)
+	DescTransit,     // CommitBindings: Image::Transit (layout transitions, barriers excluded: VkCmd)
+	DescPush,        // CommitBindings: push constants and the push-descriptor / descriptor-set update
+	SrtPlanShadow,   // --srt-plan-shadow: lookup, validity check and comparison of a plan on kyGpu
 	Count
 };
 
