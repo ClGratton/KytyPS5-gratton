@@ -737,7 +737,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			std::printf("\n");
 		}
 		std::fflush(stdout);
-		Common::HleTrace::Dump(stdout, 64, 12, &LocateAddressText);
+		Common::HleTrace::Dump(stdout, 96, 400, &LocateAddressText);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",

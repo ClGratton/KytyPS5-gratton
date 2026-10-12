@@ -12,6 +12,8 @@
 #include <string>
 #include <thread>
 
+#include <pthread.h>
+
 #if defined(__linux__) && defined(__x86_64__)
 
 namespace {
@@ -44,10 +46,10 @@ int WithNote(const char* path) {
 	return Common::HleTrace::Ret(-2);
 }
 
-std::string Capture(unsigned own, unsigned other) {
+std::string Capture(unsigned own, unsigned merged) {
 	FILE* f = std::tmpfile();
 	Check(f != nullptr, "tmpfile");
-	Common::HleTrace::Dump(f, own, other, nullptr);
+	Common::HleTrace::Dump(f, own, merged, nullptr);
 	std::rewind(f);
 	std::string text;
 	char        buf[512];
@@ -89,22 +91,25 @@ int main() {
 	Check(text.find("WithNote(") != std::string::npos && text.find("= -2") != std::string::npos,
 	      "result recorded");
 	Check(text.find("\"/app0/data/level.lvx\"") != std::string::npos, "note recorded");
-	Check(text.find("[faulting]") != std::string::npos, "the calling thread is marked");
+	Check(text.find("-- faulting thread") != std::string::npos, "the calling thread has its own block");
 
-	// Another thread's calls are in its own ring, shown after the caller's.
+	// Another thread's calls are in its own ring and show up on the merged timeline by thread name.
 	std::thread other([&] {
+		pthread_setname_np(pthread_self(), "OtherWorker");
 		for (int i = 0; i < 1000; i++) {
 			(void)dbl(1.0, i);
 		}
 	});
 	other.join();
-	const auto both = Capture(2, 3);
-	size_t     headers = 0;
-	for (size_t pos = both.find("-- thread"); pos != std::string::npos;
-	     pos = both.find("-- thread", pos + 1)) {
-		headers++;
-	}
-	Check(headers == 2, "one block per thread that made calls");
+	const auto both = Capture(2, 5);
+	Check(both.find("-- all other threads, merged, last 5 of") != std::string::npos,
+	      "merged timeline limited to the requested size");
+	Check(both.find("[OtherWorker") != std::string::npos, "calls of other threads carry their name");
+
+	// Calls that would flood the rings stay bound directly.
+	const auto noisy = Common::HleTrace::Wrap("LibKernel::PthreadMutexLock/9UK1vLZQft4",
+	                                          reinterpret_cast<uint64_t>(&SumMany));
+	Check(noisy == reinterpret_cast<uint64_t>(&SumMany), "mutex calls are not traced");
 
 	// The ring keeps the most recent calls: 1000 calls on one thread leave a bounded window.
 	Check(Common::HleTrace::CallCount() >= 1003, "all calls counted");

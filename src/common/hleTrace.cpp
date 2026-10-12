@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string>
 
 #if defined(__linux__) && defined(__x86_64__)
 #define KYTY_HLE_TRACE_SUPPORTED 1
@@ -34,7 +35,7 @@ struct Record {
 static_assert(offsetof(Record, target) == 8);
 
 constexpr int64_t  NO_RESULT     = INT64_MIN;
-constexpr unsigned RING_ENTRIES  = 256; // power of two
+constexpr unsigned RING_ENTRIES  = 1024; // power of two
 constexpr unsigned MAX_RINGS     = 2048;
 constexpr size_t   NOTE_CAPACITY = 60;
 
@@ -225,8 +226,37 @@ void detail::NoteResultStringSlow(int64_t result, const char* text) noexcept {
 	}
 }
 
+// Calls the guest makes hundreds of thousands of times per second would push everything else out
+// of the rings within a millisecond. They stay bound directly. KYTY_HLE_TRACE_SKIP replaces the
+// list (comma-separated substrings of the function name; empty = trace everything).
+static bool IsNoise(const char* name) noexcept {
+	static const char* const defaults = "PthreadMutexLock,PthreadMutexUnlock,PthreadMutexTrylock,"
+	                                    "Getthreadid,PthreadSelf,PthreadGetspecific,"
+	                                    "PthreadSetspecific,KernelGetProcessTime,KernelReadTsc,"
+	                                    "KernelGetTscFrequency,KernelClockGettime";
+	const char* list = std::getenv("KYTY_HLE_TRACE_SKIP");
+	if (list == nullptr) {
+		list = defaults;
+	}
+	while (*list != '\0') {
+		const char*  end = std::strchr(list, ',');
+		const size_t len = end != nullptr ? static_cast<size_t>(end - list) : std::strlen(list);
+		if (len > 0) {
+			const std::string needle(list, len);
+			if (std::strstr(name, needle.c_str()) != nullptr) {
+				return true;
+			}
+		}
+		if (end == nullptr) {
+			break;
+		}
+		list = end + 1;
+	}
+	return false;
+}
+
 uint64_t Wrap(const char* name, uint64_t target) {
-	if (!detail::g_enabled || target == 0) {
+	if (!detail::g_enabled || target == 0 || IsNoise(name)) {
 		return target;
 	}
 	if (g_start_ns == 0) {
@@ -267,62 +297,83 @@ uint64_t CallCount() noexcept {
 
 namespace {
 
-void PrintRing(FILE* out, const Ring* ring, unsigned count, uint64_t now_ns, bool is_current,
-               LocateFn locate) noexcept {
-	const auto head = ring->head.load(std::memory_order_acquire);
-	if (head == 0) {
-		return;
+constexpr unsigned MERGE_CAPACITY = 8192;
+struct MergedEntry {
+	Entry       entry;
+	const Ring* ring;
+};
+MergedEntry g_merged[MERGE_CAPACITY]; // fault-time scratch: no allocation while crashing
+
+void PrintEntry(FILE* out, const Entry& e, const char* thread, uint64_t now_ns,
+                LocateFn locate) noexcept {
+	char where[96] = {};
+	if (locate != nullptr && e.caller != 0) {
+		locate(e.caller, where, sizeof(where));
 	}
-	const auto available = std::min<uint64_t>(head, RING_ENTRIES);
-	const auto n         = std::min<uint64_t>(count, available);
-	std::fprintf(out, "-- thread %s%s: %" PRIu64 " HLE calls, last %" PRIu64 " (ms = before the dump) --\n",
-	             ring->name[0] != '\0' ? ring->name : "(unnamed)", is_current ? " [faulting]" : "",
-	             head, n);
-	for (uint64_t i = head - n; i < head; i++) {
-		const Entry e = ring->entries[i & (RING_ENTRIES - 1)]; // copy: the owner may still write
-		char          where[96] = {};
-		if (locate != nullptr && e.caller != 0) {
-			locate(e.caller, where, sizeof(where));
-		}
-		std::fprintf(out, "  %8.1f ms  %s(0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ")",
-		             -static_cast<double>(now_ns - std::min(now_ns, e.ns)) / 1.0e6,
-		             e.record != nullptr ? e.record->name : "?", e.arg[0], e.arg[1], e.arg[2],
-		             e.arg[3]);
-		if (e.result != NO_RESULT) {
-			std::fprintf(out, " = %" PRId64 " (0x%" PRIx64 ")", e.result,
-			             static_cast<uint64_t>(e.result));
-		} else {
-			std::fprintf(out, " = ?");
-		}
-		if (e.note[0] != '\0') {
-			std::fprintf(out, "  \"%.60s\"", e.note);
-		}
-		if (where[0] != '\0') {
-			std::fprintf(out, "  from%s", where);
-		}
-		std::fprintf(out, "\n");
+	std::fprintf(out, "  %9.1f ms ", -static_cast<double>(now_ns - std::min(now_ns, e.ns)) / 1.0e6);
+	if (thread != nullptr) {
+		std::fprintf(out, " [%-16.16s]", thread);
 	}
+	std::fprintf(out, " %s(0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ")",
+	             e.record != nullptr ? e.record->name : "?", e.arg[0], e.arg[1], e.arg[2],
+	             e.arg[3]);
+	if (e.result != NO_RESULT) {
+		std::fprintf(out, " = %" PRId64 " (0x%" PRIx64 ")", e.result,
+		             static_cast<uint64_t>(e.result));
+	}
+	if (e.note[0] != '\0') {
+		std::fprintf(out, "  \"%.60s\"", e.note);
+	}
+	if (where[0] != '\0') {
+		std::fprintf(out, "  from%s", where);
+	}
+	std::fprintf(out, "\n");
 }
 
 } // namespace
 
-void Dump(FILE* out, unsigned own_entries, unsigned other_entries, LocateFn locate) noexcept {
+void Dump(FILE* out, unsigned own_entries, unsigned merged_entries, LocateFn locate) noexcept {
 	if (!detail::g_enabled || out == nullptr) {
 		return;
 	}
 	const auto now = NowNs();
 	std::fprintf(out, "--- HLE call trace (--debug-hle-trace), %" PRIu64 " calls recorded ---\n",
 	             g_call_count.load(std::memory_order_relaxed));
+
 	const Ring* own = t_ring;
 	if (own != nullptr) {
-		PrintRing(out, own, own_entries, now, true, locate);
-	}
-	const auto count = std::min<uint32_t>(g_ring_count.load(std::memory_order_acquire), MAX_RINGS);
-	for (uint32_t i = 0; i < count; i++) {
-		const Ring* ring = g_rings[i].load(std::memory_order_acquire);
-		if (ring != nullptr && ring != own) {
-			PrintRing(out, ring, other_entries, now, false, locate);
+		const auto head = own->head.load(std::memory_order_acquire);
+		const auto n    = std::min<uint64_t>({head, RING_ENTRIES, own_entries});
+		std::fprintf(out, "-- faulting thread %s: last %" PRIu64 " of %" PRIu64 " traced calls --\n",
+		             own->name, n, head);
+		for (uint64_t i = head - n; i < head; i++) {
+			PrintEntry(out, own->entries[i & (RING_ENTRIES - 1)], nullptr, now, locate);
 		}
+	}
+
+	// Every other thread's recent calls on one timeline.
+	const auto rings = std::min<uint32_t>(g_ring_count.load(std::memory_order_acquire), MAX_RINGS);
+	unsigned   used  = 0;
+	for (uint32_t r = 0; r < rings && used < MERGE_CAPACITY; r++) {
+		const Ring* ring = g_rings[r].load(std::memory_order_acquire);
+		if (ring == nullptr || ring == own) {
+			continue;
+		}
+		const auto head = ring->head.load(std::memory_order_acquire);
+		const auto n    = std::min<uint64_t>({head, RING_ENTRIES, MERGE_CAPACITY - used});
+		for (uint64_t i = head - n; i < head; i++) {
+			g_merged[used].entry = ring->entries[i & (RING_ENTRIES - 1)];
+			g_merged[used].ring  = ring;
+			used++;
+		}
+	}
+	std::sort(g_merged, g_merged + used,
+	          [](const MergedEntry& a, const MergedEntry& b) { return a.entry.ns < b.entry.ns; });
+	const unsigned first = used > merged_entries ? used - merged_entries : 0;
+	std::fprintf(out, "-- all other threads, merged, last %u of %u buffered calls --\n", used - first,
+	             used);
+	for (unsigned i = first; i < used; i++) {
+		PrintEntry(out, g_merged[i].entry, g_merged[i].ring->name, now, locate);
 	}
 	std::fflush(out);
 }

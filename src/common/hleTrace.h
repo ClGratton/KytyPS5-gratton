@@ -79,10 +79,10 @@ inline T Ret(T value) noexcept {
 // or nothing; supplied by the loader so this file does not depend on it.
 using LocateFn = void (*)(uint64_t address, char* out, size_t size);
 
-// Writes the calling thread's last `own_entries` calls and the last `other_entries` calls of every
-// other thread that made one (most recent last). Safe to call from a fault handler: it takes no
-// locks and allocates nothing (a thread registering at that moment is skipped).
-void Dump(FILE* out, unsigned own_entries, unsigned other_entries, LocateFn locate) noexcept;
+// Writes the calling thread's last `own_entries` calls, then the last `merged_entries` calls of
+// all other threads on one timeline (most recent last). Safe to call from a fault handler: it takes
+// no locks and allocates nothing (a thread registering at that moment is skipped).
+void Dump(FILE* out, unsigned own_entries, unsigned merged_entries, LocateFn locate) noexcept;
 
 // Number of HLE calls recorded so far (all threads); 0 when off.
 [[nodiscard]] uint64_t CallCount() noexcept;
