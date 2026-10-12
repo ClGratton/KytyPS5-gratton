@@ -69,7 +69,7 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 	gpu_time_scale_percent = s.value("gpu_time_scale_percent", 100).toInt();
 	KYTY_CFG_GET(gpu_timestamps);
 	if (EnumToText(gpu_timestamps).isEmpty()) {
-		gpu_timestamps = GpuTimestamps::Legacy;
+		gpu_timestamps = GpuTimestamps::Gpu;
 	}
 	console_language = s.value("console_language", console_language).toInt();
 	if (console_language < 0 || console_language > MAX_CONSOLE_LANGUAGE) {

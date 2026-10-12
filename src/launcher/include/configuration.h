@@ -135,7 +135,7 @@ public:
 	int                    fps_limit                   = 0;
 	// Dynamic-resolution bias in percent (emulator --gpu-time-scale x 100); 100 = off.
 	int                    gpu_time_scale_percent      = 100;
-	GpuTimestamps          gpu_timestamps              = GpuTimestamps::Legacy;
+	GpuTimestamps          gpu_timestamps              = GpuTimestamps::Gpu;
 	int                    console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;

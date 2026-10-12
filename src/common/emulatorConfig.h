@@ -43,8 +43,9 @@ enum class PipelineCacheKey { Revision, Schema };
 //          behaviour); compute dispatches always wait.
 enum class AsyncPipelineMode { Off, Stall, Skip };
 // Where the 64-bit GPU timestamps a guest reads (EVENT_WRITE_EOP / COPY_DATA clock sources) come
-// from: Legacy = the clock when the emulator parses the packet, Gpu = the host GPU's own timestamp
-// of that point in the command stream, mapped onto the guest GPU clock.
+// from: Legacy = the clock when the emulator parses the packet, Gpu (default) = the host GPU's own
+// timestamp of that point in the command stream, mapped onto the guest GPU clock. Gpu falls back to
+// the parse-time value when the device cannot calibrate timestamps (logged once).
 enum class GpuTimestampMode { Legacy, Gpu };
 
 constexpr double MIN_GPU_TIME_SCALE = 0.1;
@@ -88,7 +89,9 @@ struct ConfigOptions {
 	bool                   vr_enabled                  = false;
 	bool                   amd_cpu_enabled             = false;
 	uint32_t               vblank_frequency            = 60;
-	GpuTimestampMode       gpu_timestamps              = GpuTimestampMode::Legacy;
+	// Default Gpu: guest-visible GPU time follows the host GPU's own execution (accurate emulation);
+	// --gpu-timestamps legacy restores the command-processor clock. docs/defaults.md.
+	GpuTimestampMode       gpu_timestamps              = GpuTimestampMode::Gpu;
 	// Multiplier on the GPU durations a guest observes (1.0 = off); see --gpu-time-scale.
 	double                 gpu_time_scale              = 1.0;
 	// Presented frames per second cap (0 = off); see --fps-limit.

@@ -29,6 +29,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/gpuTimestamps.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
@@ -2237,6 +2238,118 @@ public:
     RenderExecutorTestAccess::DestroyDescriptorPipelines(
         context.GetRenderExecutor(), std::span {&pipeline, 1u});
     std::printf("[host]    %-32s ok\n", name);
+  }
+
+  // The default (--gpu-timestamps gpu): a guest GPU timestamp starts as the parse-time clock and
+  // is rewritten with the host GPU's own timestamp of that point once the command buffer has
+  // executed. The rewritten value stays between the parse time and the time the buffer completed.
+  // A device without calibrated timestamps keeps the parse-time value (the logged fallback).
+  void CheckGuestGpuTimestamps() {
+    constexpr const char *name = "GuestGpuTimestamps";
+    constexpr uintptr_t base = 0x0000000205000000ull;
+    constexpr uint64_t allocation_size = 0x10000;
+    constexpr uint64_t stale = 0x0123456789abcdefull;
+    Require(name, "default mode",
+            Config::GetGpuTimestampMode() == Config::GpuTimestampMode::Gpu,
+            "the harness config must start from the default timestamp mode");
+
+    EnsureRuntimeContext();
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_size, 0, &direct_offset) == 0,
+            "timestamp direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_size) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "timestamp fixed direct-memory mapping failed");
+
+    // The command buffer reaches the scheduler through its own context, so the test must record
+    // on that context's scheduler (a free-standing CommandScheduler would never run the rewrite).
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+
+    const auto sample = [&](uint64_t offset, u32 size, GpuTimestamps::Point point) {
+      auto *dst = reinterpret_cast<void *>(base + offset);
+      std::memcpy(dst, &stale, sizeof(stale));
+      const auto value =
+          GpuTimestamps::SampleGuestClock(scheduler.Current(), dst, size, point);
+      // The command processor stores the parse-time value itself.
+      std::memcpy(dst, &value, size);
+      return value;
+    };
+    const auto before = Sync::ReadReferenceClock();
+    const auto parsed64 = sample(0x0, 8, GpuTimestamps::Point::BottomOfPipe);
+    const auto parsed_top = sample(0x10, 8, GpuTimestamps::Point::TopOfPipe);
+    const auto parsed32 = sample(0x20, 4, GpuTimestamps::Point::BottomOfPipe);
+    scheduler.Finish();
+    scheduler.DrainPriorityOperations();
+    const auto after = Sync::ReadReferenceClock();
+
+    uint64_t value64 = 0;
+    uint64_t value_top = 0;
+    uint32_t value32 = 0;
+    std::memcpy(&value64, reinterpret_cast<void *>(base + 0x0), sizeof(value64));
+    std::memcpy(&value_top, reinterpret_cast<void *>(base + 0x10), sizeof(value_top));
+    std::memcpy(&value32, reinterpret_cast<void *>(base + 0x20), sizeof(value32));
+    Require(name, "parse time", parsed64 >= before && parsed64 <= after &&
+                parsed_top >= parsed64,
+            "the immediate value is not the reference clock at parse time");
+    const auto within = [&](uint64_t value) {
+      // Allow a little slack for the calibration (one device tick plus clock deviation).
+      constexpr uint64_t slack = 5000; // 50 us on the 100 MHz reference clock
+      return value + slack >= before && value <= after + slack;
+    };
+    constexpr uint64_t slack32 = 5000;
+    const auto window32 = static_cast<uint32_t>(after - before + 2 * slack32);
+    Require(name, "rewritten values in range",
+            within(value64) && within(value_top) &&
+                static_cast<uint32_t>(value32 - static_cast<uint32_t>(before - slack32)) <=
+                    window32,
+            "a GPU timestamp is outside the window the command buffer ran in");
+    if (m_timestamps_supported) {
+      Require(name, "top before bottom of pipe", value_top <= value64 + 5000,
+              "a top-of-pipe timestamp is later than the bottom-of-pipe one recorded before it");
+      Require(name, "gpu value differs from parse time",
+              value64 != parsed64 || value_top != parsed_top,
+              "the GPU timestamps never replaced the parse-time values");
+    } else {
+      Require(name, "legacy fallback", value64 == parsed64 && value_top == parsed_top,
+              "without calibrated timestamps the parse-time value must stay");
+    }
+
+    // The explicit opt-out never touches the guest value.
+    Config::ConfigOptions legacy;
+    legacy.gpu_timestamps = Config::GpuTimestampMode::Legacy;
+    Config::Load(legacy);
+    scheduler.Begin(registers, user_config, shaders);
+    const auto legacy_value = sample(0x40, 8, GpuTimestamps::Point::BottomOfPipe);
+    scheduler.Finish();
+    scheduler.DrainPriorityOperations();
+    uint64_t legacy_after = 0;
+    std::memcpy(&legacy_after, reinterpret_cast<void *>(base + 0x40), sizeof(legacy_after));
+    Require(name, "legacy keeps parse time", legacy_after == legacy_value,
+            "--gpu-timestamps legacy rewrote the guest timestamp");
+    Config::Load(Config::ConfigOptions{});
+
+    Require(name, "unmap",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "timestamp memory unmap failed");
+    Require(name, "release",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "timestamp direct-memory release failed");
+    std::printf("[host]    %-32s ok (%s)\n", name,
+                m_timestamps_supported ? "gpu" : "fallback");
   }
 
   void CheckSchedulerTimeline() {
@@ -18582,6 +18695,9 @@ public:
 
 private:
   bool m_rasterization_supported = true;
+  // VK_EXT_calibrated_timestamps + hostQueryReset: the host GPU timestamps behind
+  // --gpu-timestamps gpu (the emulator default).
+  bool m_timestamps_supported = false;
   u32   m_skipped_cases          = 0;
 
   RenderContext &Renderer() {
@@ -18616,6 +18732,8 @@ private:
     m_runtime_context.queue_family = m_queue_family;
     m_runtime_context.queue = m_queue;
     m_runtime_context.shader_image_int64_atomics_enabled = true;
+    m_runtime_context.host_query_reset_enabled = m_timestamps_supported;
+    m_runtime_context.calibrated_timestamps_enabled = m_timestamps_supported;
     m_runtime_context.attachment_feedback_loop_enabled = m_rasterization_supported;
     m_runtime_context.provoking_vertex_last_enabled = m_rasterization_supported;
     const vk::PhysicalDeviceImageFormatInfo2 block_texel_view_info{
@@ -18830,6 +18948,20 @@ private:
     auto device_features11 = WindowContext::RequiredVulkan11Features();
     auto device_features12 = WindowContext::RequiredVulkan12Features();
     device_features12.shaderSharedInt64Atomics = true;
+    u32 device_extension_count = 0;
+    (void)m_physical_device.enumerateDeviceExtensionProperties(
+        nullptr, &device_extension_count, nullptr);
+    std::vector<vk::ExtensionProperties> available_extensions(device_extension_count);
+    (void)m_physical_device.enumerateDeviceExtensionProperties(
+        nullptr, &device_extension_count, available_extensions.data());
+    m_timestamps_supported =
+        available_features12.hostQueryReset == true &&
+        std::any_of(available_extensions.begin(), available_extensions.end(),
+                    [](const vk::ExtensionProperties &extension) {
+                      return std::strcmp(extension.extensionName,
+                                         VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0;
+                    });
+    device_features12.hostQueryReset = m_timestamps_supported;
     vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR workgroup_layout{};
     workgroup_layout.workgroupMemoryExplicitLayout = true;
     device_features12.pNext = &device_features11;
@@ -18895,6 +19027,9 @@ private:
         VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
         VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,
         VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME};
+    if (m_timestamps_supported) {
+      device_extensions.push_back(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    }
     if (m_rasterization_supported) {
       device_extensions.push_back(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
       device_extensions.push_back(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
@@ -43900,6 +44035,11 @@ int main(int argc, char **argv) {
     CheckReferenceClockScale();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--gpu-timestamps-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckGuestGpuTimestamps();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--scheduler-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckSchedulerTimeline();
@@ -44476,6 +44616,7 @@ int main(int argc, char **argv) {
   CheckWave64WholeWaveResults();
   CheckPs5GameExampleImageClearRuntimeShape();
   vulkan.CheckSchedulerTimeline();
+  vulkan.CheckGuestGpuTimestamps();
   vulkan.CheckHostImageAllocation();
   vulkan.CheckDescriptorHeapLargeSet();
   vulkan.CheckGpuMappedRangeLifecycle();

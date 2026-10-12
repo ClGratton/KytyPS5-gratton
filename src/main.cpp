@@ -80,7 +80,7 @@ static void PrintUsage() {
 	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
 	::printf("  --gpu-timestamps <legacy|gpu>        Source of the GPU timestamps a game reads: the clock\n"
 	         "                                       when a packet is parsed (legacy), or the host GPU's\n"
-	         "                                       own timestamp of that point (gpu). Default: legacy.\n");
+	         "                                       own timestamp of that point (gpu). Default: gpu.\n");
 	::printf("  --gpu-time-scale <0.1-16>            Multiply the GPU durations a game observes. Games with\n"
 	         "                                       dynamic resolution render lower above 1.0 and higher\n"
 	         "                                       below it. Default: 1.0.\n");

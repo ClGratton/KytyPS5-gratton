@@ -496,6 +496,12 @@ add_executable(gc_clock_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(gc_clock_tests PRIVATE ${inc_headers})
 
+add_executable(config_defaults_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ConfigDefaultsTests.cpp"
+)
+target_link_libraries(config_defaults_tests common)
+target_include_directories(config_defaults_tests PRIVATE ${inc_headers})
+
 add_executable(buffer_gc_gate_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/BufferGcGateTests.cpp"
 )
@@ -709,6 +715,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_unoptimized_first_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --pipelines-unoptimized-first maybe)
 	set_tests_properties(emulator_unoptimized_first_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_gpu_timestamps_legacy_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --gpu-timestamps legacy)
+	add_test(NAME emulator_gpu_timestamps_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --gpu-timestamps maybe)
+	set_tests_properties(emulator_gpu_timestamps_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
@@ -731,6 +742,7 @@ if(BUILD_TESTING)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
+	add_test(NAME config_defaults COMMAND $<TARGET_FILE:config_defaults_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
@@ -756,6 +768,8 @@ if(BUILD_TESTING)
 	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	add_test(NAME guest_gpu_timestamps
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-timestamps-only)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
@@ -861,6 +875,7 @@ if(BUILD_TESTING)
 		readback_plan_tests
 		gc_clock_tests
 		buffer_gc_gate_tests
+		config_defaults_tests
 		bda_sync_gate_tests
 		sys_file_read_tests
 		async_pipeline_tests

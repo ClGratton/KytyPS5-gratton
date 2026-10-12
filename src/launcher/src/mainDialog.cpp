@@ -262,9 +262,9 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	if (info.gpu_time_scale_percent != 100) {
 		args << "--gpu-time-scale" << QString::number(info.gpu_time_scale_percent / 100.0, 'f', 2);
 	}
-	if (info.gpu_timestamps == Configuration::GpuTimestamps::Gpu) {
-		args << "--gpu-timestamps" << "gpu";
-	}
+	// Always explicit: the emulator default is gpu, and Legacy is a choice that must be passed.
+	args << "--gpu-timestamps"
+	     << (info.gpu_timestamps == Configuration::GpuTimestamps::Gpu ? "gpu" : "legacy");
 	args << "--console-language" << QString::number(info.console_language);
 	args << "--vulkan-validation" << BoolArg(info.vulkan_validation_enabled);
 	args << "--shader-validation" << BoolArg(info.shader_validation_enabled);
