@@ -17,7 +17,7 @@
 // File format (little endian):
 //   "KYTYVAR1" | u32 schema | records...
 //   record = u32 payload_size | payload | u32 fnv1a32(payload)
-//   payload = u8 kind (1 = compute) | fields (see Encode) | optional u32 first_use_ms
+//   payload = u8 kind (1 = compute, 2 = graphics) | fields (see Encode) | optional u32 first_use_ms
 // A record that fails its checksum, has an unknown kind, or is cut short (a crash while appending)
 // ends the readable part of the file; Load() reports how many bytes were good and OpenAppend()
 // truncates the rest, so appends never land behind garbage.
@@ -110,8 +110,49 @@ struct ComputeVariant {
 	[[nodiscard]] uint64_t BinaryKey() const { return BinaryKey(code_hash, code_size_dwords); }
 };
 
+// One shader stage program of a graphics pipeline as a draw used it: the program key (stage, code
+// hash and size, user SGPR count, the static state words BuildStageStaticKey() produced), the push
+// data cursor its layout was allocated at, the specialization, and the stage's input info as raw
+// bytes (`input`, with its runtime pointers cleared; `input_layout` fingerprints the struct it came
+// from, a reader with another layout ignores the record). The input bytes are payload, not identity.
+struct ProgramVariant {
+	uint8_t               stage            = 0; // ShaderType
+	uint64_t              code_hash        = 0;
+	uint32_t              code_size_dwords = 0;
+	uint32_t              user_data_count  = 0;
+	uint32_t              push_data_cursor = 0;
+	std::vector<uint32_t> static_state;
+	SpecRecord            spec;
+	std::vector<uint8_t>  input;
+	uint32_t              input_layout = 0;
+
+	bool operator==(const ProgramVariant& other) const {
+		return stage == other.stage && code_hash == other.code_hash &&
+		       code_size_dwords == other.code_size_dwords && user_data_count == other.user_data_count &&
+		       push_data_cursor == other.push_data_cursor && static_state == other.static_state &&
+		       spec == other.spec;
+	}
+};
+
+// A graphics pipeline: its vertex-side and optional pixel program and the pipeline key (render
+// formats, vertex input, fixed-function state) in a canonical byte encoding of the caller's
+// choosing. The shader ids that the in-memory key holds are process-local and are not stored.
+struct GraphicsVariant {
+	ProgramVariant       vs;
+	ProgramVariant       ps;
+	bool                 has_ps = false;
+	std::vector<uint8_t> key;
+	uint32_t             first_use_ms = ComputeVariant::kUnknownFirstUse;
+
+	bool operator==(const GraphicsVariant& other) const {
+		return has_ps == other.has_ps && vs == other.vs && (!has_ps || ps == other.ps) && key == other.key;
+	}
+};
+
 std::vector<uint8_t> Encode(const ComputeVariant& variant);
+std::vector<uint8_t> Encode(const GraphicsVariant& variant);
 // False for a malformed payload (unknown kind, short or oversized fields).
+bool Decode(std::span<const uint8_t> payload, GraphicsVariant& variant);
 bool Decode(std::span<const uint8_t> payload, ComputeVariant& variant);
 uint32_t Checksum(std::span<const uint8_t> bytes);
 
@@ -146,12 +187,21 @@ public:
 	[[nodiscard]] std::vector<ComputeVariant> Find(uint64_t code_hash, uint32_t code_size_dwords) const;
 	[[nodiscard]] size_t Size() const;
 
+	// Graphics pipelines (same file, same rules).
+	bool Add(const GraphicsVariant& variant);
+	[[nodiscard]] bool   Contains(const GraphicsVariant& variant) const;
+	[[nodiscard]] std::vector<GraphicsVariant> Graphics() const;
+	[[nodiscard]] size_t GraphicsSize() const;
+
 private:
 	bool AddLocked(const ComputeVariant& variant);
+	bool AddLocked(const GraphicsVariant& variant);
+	bool AppendLocked(const std::vector<uint8_t>& payload);
 
 	mutable std::mutex                                           m_mutex;
 	std::unordered_map<uint64_t, std::vector<ComputeVariant>>    m_by_binary;
 	size_t                                                       m_size = 0;
+	std::vector<GraphicsVariant>                                 m_graphics;
 	std::filesystem::path                                        m_path;
 	std::FILE*                                                   m_file = nullptr;
 	size_t                                                       m_good_bytes = 0;

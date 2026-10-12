@@ -210,6 +210,91 @@ void TestSchemaAndGarbage(const std::filesystem::path& dir) {
 	Check(junk_store.OpenAppend(junk) && junk_store.Add(MakeVariant(32, 50, 0, 0)), "garbage is replaced");
 }
 
+GraphicsVariant MakeGraphics(uint64_t vs_hash, uint64_t ps_hash, uint8_t key_byte) {
+	GraphicsVariant g;
+	g.has_ps = true;
+	g.vs.stage            = 1;
+	g.vs.code_hash        = vs_hash;
+	g.vs.code_size_dwords = 400;
+	g.vs.user_data_count  = 14;
+	g.vs.push_data_cursor = 6;
+	g.vs.static_state     = {1, 2, 3, 0xdeadbeefu};
+	g.vs.spec.buffers.push_back({.packed_stride = 32});
+	g.vs.input            = {9, 8, 7, 6, 5};
+	g.vs.input_layout     = 0x1234;
+	g.ps.stage            = 5;
+	g.ps.code_hash        = ps_hash;
+	g.ps.code_size_dwords = 1000;
+	g.ps.user_data_count  = 4;
+	g.ps.static_state     = {7, 7};
+	g.ps.spec.images.push_back({.numeric_class = 1, .dimension = 3, .flags = 0});
+	g.ps.input            = std::vector<uint8_t>(300, 0xab);
+	g.key                 = {key_byte, 1, 2, 3};
+	g.first_use_ms        = 777;
+	return g;
+}
+
+void TestGraphicsRecords(const std::filesystem::path& dir) {
+	const auto g     = MakeGraphics(100, 200, 1);
+	const auto bytes = Encode(g);
+	GraphicsVariant decoded;
+	Check(Decode(bytes, decoded) && decoded == g && decoded.vs.input == g.vs.input &&
+	          decoded.ps.input == g.ps.input && decoded.first_use_ms == 777 &&
+	          decoded.vs.input_layout == 0x1234,
+	      "graphics record round trip");
+	ComputeVariant as_compute;
+	Check(!Decode(bytes, as_compute), "a graphics payload is not a compute record");
+	for (size_t cut = 0; cut < bytes.size(); cut++) {
+		GraphicsVariant partial;
+		const bool ok = Decode(std::span<const uint8_t>(bytes).first(cut), partial);
+		Check(ok == (cut == bytes.size() - 4), "truncated graphics payload rejected");
+	}
+	// Without a pixel program, and a pixel program that is irrelevant when has_ps is false.
+	auto vs_only = g;
+	vs_only.has_ps = false;
+	auto vs_only_other_ps = vs_only;
+	vs_only_other_ps.ps.code_hash = 999;
+	Check(vs_only == vs_only_other_ps && !(vs_only == g), "pixel program counts only when present");
+	GraphicsVariant vs_decoded;
+	Check(Decode(Encode(vs_only), vs_decoded) && vs_decoded == vs_only && !vs_decoded.has_ps,
+	      "vertex-only record");
+	// The input bytes are payload, not identity.
+	auto other_input = g;
+	other_input.vs.input = {1};
+	Check(other_input == g, "input bytes must not be part of the identity");
+
+	const auto path = dir / "graphics.variants";
+	std::filesystem::remove(path);
+	{
+		VariantStore store;
+		store.Load(path);
+		Check(store.OpenAppend(path), "create");
+		Check(store.Add(MakeVariant(5, 50, 0, 0)), "compute record");
+		Check(store.Add(g), "graphics record");
+		Check(!store.Add(other_input), "same graphics variant, other input bytes: duplicate");
+		Check(store.Add(MakeGraphics(100, 200, 2)), "other key: new");
+		Check(store.Add(vs_only), "vertex-only: new");
+		Check(store.Size() == 4 && store.GraphicsSize() == 3, "mixed counts");
+	}
+	VariantStore again;
+	const auto loaded = again.Load(path);
+	Check(loaded.records == 4 && loaded.added == 4 && !loaded.torn_tail, "mixed file reloads");
+	Check(again.Find(5, 50).size() == 1 && again.GraphicsSize() == 3 && again.Contains(g) &&
+	          !again.Contains(MakeGraphics(100, 201, 1)),
+	      "mixed lookup");
+	// A graphics record cut in half is a torn tail and the compute ones stay readable.
+	auto file = ReadAll(path);
+	const auto extra = Encode(MakeGraphics(1, 2, 9));
+	file.push_back(static_cast<uint8_t>(extra.size()));
+	file.push_back(static_cast<uint8_t>(extra.size() >> 8));
+	file.push_back(0);
+	file.push_back(0);
+	file.insert(file.end(), extra.begin(), extra.begin() + 20);
+	WriteAll(path, file);
+	VariantStore torn;
+	Check(torn.Load(path).torn_tail && torn.Size() == 4, "torn graphics record ignored");
+}
+
 } // namespace
 
 int main() {
@@ -221,6 +306,7 @@ int main() {
 	TestTornTail(dir);
 	TestCorruptRecordEndsFile(dir);
 	TestSchemaAndGarbage(dir);
+	TestGraphicsRecords(dir);
 	std::filesystem::remove_all(dir);
 	std::printf("PipelineVariantTests: ok\n");
 	return 0;

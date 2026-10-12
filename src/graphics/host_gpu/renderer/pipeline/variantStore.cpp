@@ -13,6 +13,9 @@ namespace {
 constexpr char     kMagic[8]   = {'K', 'Y', 'T', 'Y', 'V', 'A', 'R', '1'};
 constexpr size_t   kHeaderSize = sizeof(kMagic) + sizeof(uint32_t);
 constexpr uint8_t  kKindCompute = 1;
+constexpr uint8_t  kKindGraphics = 2;
+constexpr uint32_t kMaxStaticWords = 1024;
+constexpr uint32_t kMaxBlob = 1u << 17;
 constexpr uint32_t kMaxPayload  = 1u << 20;
 
 class Writer {
@@ -142,6 +145,121 @@ bool Decode(std::span<const uint8_t> payload, ComputeVariant& variant) {
 	return true;
 }
 
+namespace {
+
+void WriteSpec(Writer& out, const SpecRecord& spec) {
+	out.U32(static_cast<uint32_t>(spec.buffers.size()));
+	for (const auto& b: spec.buffers) {
+		for (const uint32_t value: {b.packed_stride, b.descriptor_format, b.descriptor_swizzle,
+		                            b.zero_stride_oob, b.indirect_root, b.indirect_mapping_offset,
+		                            b.indirect_search_iterations}) {
+			out.U32(value);
+		}
+	}
+	out.U32(static_cast<uint32_t>(spec.images.size()));
+	for (const auto& i: spec.images) {
+		for (const uint32_t value: {i.numeric_class, i.dimension, i.mip_count, i.conversion_format,
+		                            i.shader_swizzle, i.indirect_root, i.indirect_mapping_offset,
+		                            i.indirect_search_iterations, i.flags}) {
+			out.U32(value);
+		}
+	}
+}
+
+bool ReadSpec(Reader& in, SpecRecord& spec) {
+	uint32_t count = 0;
+	if (!in.U32(count) || count > kMaxResources) return false;
+	spec.buffers.resize(count);
+	for (auto& b: spec.buffers) {
+		for (uint32_t* field: {&b.packed_stride, &b.descriptor_format, &b.descriptor_swizzle,
+		                       &b.zero_stride_oob, &b.indirect_root, &b.indirect_mapping_offset,
+		                       &b.indirect_search_iterations}) {
+			if (!in.U32(*field)) return false;
+		}
+	}
+	if (!in.U32(count) || count > kMaxResources) return false;
+	spec.images.resize(count);
+	for (auto& i: spec.images) {
+		for (uint32_t* field: {&i.numeric_class, &i.dimension, &i.mip_count, &i.conversion_format,
+		                       &i.shader_swizzle, &i.indirect_root, &i.indirect_mapping_offset,
+		                       &i.indirect_search_iterations, &i.flags}) {
+			if (!in.U32(*field)) return false;
+		}
+	}
+	return true;
+}
+
+void WriteBytes(Writer& out, const std::vector<uint8_t>& bytes) {
+	out.U32(static_cast<uint32_t>(bytes.size()));
+	for (const auto byte: bytes) out.U8(byte);
+}
+
+bool ReadBytes(Reader& in, std::vector<uint8_t>& bytes) {
+	uint32_t size = 0;
+	if (!in.U32(size) || size > kMaxBlob) return false;
+	bytes.resize(size);
+	for (auto& byte: bytes) {
+		if (!in.U8(byte)) return false;
+	}
+	return true;
+}
+
+void WriteProgram(Writer& out, const ProgramVariant& p) {
+	out.U8(p.stage);
+	out.U64(p.code_hash);
+	out.U32(p.code_size_dwords);
+	out.U32(p.user_data_count);
+	out.U32(p.push_data_cursor);
+	out.U32(static_cast<uint32_t>(p.static_state.size()));
+	for (const auto word: p.static_state) out.U32(word);
+	WriteSpec(out, p.spec);
+	WriteBytes(out, p.input);
+	out.U32(p.input_layout);
+}
+
+bool ReadProgram(Reader& in, ProgramVariant& p) {
+	uint32_t words = 0;
+	if (!in.U8(p.stage) || !in.U64(p.code_hash) || !in.U32(p.code_size_dwords) ||
+	    !in.U32(p.user_data_count) || !in.U32(p.push_data_cursor) || !in.U32(words) ||
+	    words > kMaxStaticWords) {
+		return false;
+	}
+	p.static_state.resize(words);
+	for (auto& word: p.static_state) {
+		if (!in.U32(word)) return false;
+	}
+	return ReadSpec(in, p.spec) && ReadBytes(in, p.input) && in.U32(p.input_layout);
+}
+
+} // namespace
+
+std::vector<uint8_t> Encode(const GraphicsVariant& variant) {
+	Writer out;
+	out.U8(kKindGraphics);
+	out.U8(variant.has_ps ? 1 : 0);
+	WriteProgram(out, variant.vs);
+	if (variant.has_ps) WriteProgram(out, variant.ps);
+	WriteBytes(out, variant.key);
+	out.U32(variant.first_use_ms);
+	return out.Take();
+}
+
+bool Decode(std::span<const uint8_t> payload, GraphicsVariant& variant) {
+	Reader  in(payload);
+	uint8_t kind = 0, has_ps = 0;
+	if (!in.U8(kind) || kind != kKindGraphics || !in.U8(has_ps) || has_ps > 1) return false;
+	GraphicsVariant result;
+	result.has_ps = has_ps != 0;
+	if (!ReadProgram(in, result.vs)) return false;
+	if (result.has_ps && !ReadProgram(in, result.ps)) return false;
+	if (!ReadBytes(in, result.key)) return false;
+	if (!in.AtEnd()) {
+		if (!in.U32(result.first_use_ms) || !in.AtEnd()) return false;
+	}
+	variant = std::move(result);
+	return true;
+}
+
 VariantStore::~VariantStore() {
 	Close();
 }
@@ -160,6 +278,7 @@ VariantStore::LoadResult VariantStore::Load(const std::filesystem::path& path) {
 	std::lock_guard lock(m_mutex);
 	LoadResult      result;
 	m_by_binary.clear();
+	m_graphics.clear();
 	m_size       = 0;
 	m_path       = path;
 	m_good_bytes = 0;
@@ -198,12 +317,19 @@ VariantStore::LoadResult VariantStore::Load(const std::filesystem::path& path) {
 		Reader     sum_reader(std::span<const uint8_t>(data).subspan(pos + 4 + payload_size, 4));
 		uint32_t   sum = 0;
 		(void)sum_reader.U32(sum);
-		ComputeVariant variant;
-		if (sum != Checksum(payload) || !Decode(payload, variant)) {
-			break;
+		bool added = false;
+		if (sum != Checksum(payload)) break;
+		if (payload[0] == kKindGraphics) {
+			GraphicsVariant variant;
+			if (!Decode(payload, variant)) break;
+			added = AddLocked(variant);
+		} else {
+			ComputeVariant variant;
+			if (!Decode(payload, variant)) break;
+			added = AddLocked(variant);
 		}
 		result.records++;
-		if (AddLocked(variant)) result.added++;
+		if (added) result.added++;
 		pos += 4 + payload_size + 4;
 	}
 	result.good_bytes = pos;
@@ -260,27 +386,63 @@ void VariantStore::Close() {
 	}
 }
 
+bool VariantStore::AddLocked(const GraphicsVariant& variant) {
+	if (std::find(m_graphics.begin(), m_graphics.end(), variant) != m_graphics.end()) {
+		return false;
+	}
+	m_graphics.push_back(variant);
+	m_size++;
+	return true;
+}
+
+// One write call per record: a crash leaves at most one torn record at the end.
+bool VariantStore::AppendLocked(const std::vector<uint8_t>& payload) {
+	if (m_file == nullptr) return false;
+	Writer record;
+	record.U32(static_cast<uint32_t>(payload.size()));
+	auto bytes = record.Take();
+	bytes.insert(bytes.end(), payload.begin(), payload.end());
+	Writer sum;
+	sum.U32(Checksum(payload));
+	const auto tail = sum.Take();
+	bytes.insert(bytes.end(), tail.begin(), tail.end());
+	std::fwrite(bytes.data(), 1, bytes.size(), m_file);
+	std::fflush(m_file);
+	m_good_bytes += bytes.size();
+	return true;
+}
+
 bool VariantStore::Add(const ComputeVariant& variant) {
 	std::lock_guard lock(m_mutex);
 	if (!AddLocked(variant)) {
 		return false;
 	}
-	if (m_file != nullptr) {
-		const auto payload = Encode(variant);
-		Writer     record;
-		record.U32(static_cast<uint32_t>(payload.size()));
-		auto bytes = record.Take();
-		bytes.insert(bytes.end(), payload.begin(), payload.end());
-		Writer sum;
-		sum.U32(Checksum(payload));
-		const auto tail = sum.Take();
-		bytes.insert(bytes.end(), tail.begin(), tail.end());
-		// One write call per record: a crash leaves at most one torn record at the end.
-		std::fwrite(bytes.data(), 1, bytes.size(), m_file);
-		std::fflush(m_file);
-		m_good_bytes += bytes.size();
-	}
+	AppendLocked(Encode(variant));
 	return true;
+}
+
+bool VariantStore::Add(const GraphicsVariant& variant) {
+	std::lock_guard lock(m_mutex);
+	if (!AddLocked(variant)) {
+		return false;
+	}
+	AppendLocked(Encode(variant));
+	return true;
+}
+
+bool VariantStore::Contains(const GraphicsVariant& variant) const {
+	std::lock_guard lock(m_mutex);
+	return std::find(m_graphics.begin(), m_graphics.end(), variant) != m_graphics.end();
+}
+
+std::vector<GraphicsVariant> VariantStore::Graphics() const {
+	std::lock_guard lock(m_mutex);
+	return m_graphics;
+}
+
+size_t VariantStore::GraphicsSize() const {
+	std::lock_guard lock(m_mutex);
+	return m_graphics.size();
 }
 
 bool VariantStore::Contains(const ComputeVariant& variant) const {
