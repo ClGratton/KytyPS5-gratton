@@ -58,6 +58,26 @@ struct ImageShape {
 	return estimated_bytes >= DedicatedImageMinBytes && live_dedicated_images < MaxDedicatedImages;
 }
 
+// Memory priority (VK_EXT_memory_priority, used with --vram-paging) and allocation kind per image
+// class. Depth and render targets are rewritten every frame, so they stay resident; sampled
+// textures are the first the driver pages out. VMA only applies a priority to a dedicated
+// allocation, so the two attachment classes always get their own VkDeviceMemory. 0.5 is the
+// Vulkan default priority.
+struct ImagePriorityChoice {
+	float priority  = 0.5f;
+	bool  dedicated = false;
+};
+
+[[nodiscard]] inline ImagePriorityChoice ImagePriority(bool is_depth, bool is_render_target) {
+	if (is_depth) {
+		return {1.0f, true};
+	}
+	if (is_render_target) {
+		return {0.75f, true};
+	}
+	return {0.5f, false};
+}
+
 struct GcThresholds {
 	uint64_t trigger  = 0; // below this the texture GC does nothing
 	uint64_t pressure = 0; // above this it evicts older and more images per tick

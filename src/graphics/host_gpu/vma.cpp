@@ -228,14 +228,10 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		// Depth and render targets are rewritten every frame: keep them resident. VMA only
 		// applies a priority to dedicated allocations, so those get their own VkDeviceMemory.
 		// Sampled textures stay pooled at the default 0.5 and are the first to be paged out.
-		if (is_depth) {
-			alloc_info.priority = 1.0f;
+		const auto choice   = VramPolicy::ImagePriority(is_depth, is_render_target);
+		alloc_info.priority = choice.priority;
+		if (choice.dedicated) {
 			alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-		} else if (is_render_target) {
-			alloc_info.priority = 0.75f;
-			alloc_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-		} else {
-			alloc_info.priority = 0.5f;
 		}
 	}
 

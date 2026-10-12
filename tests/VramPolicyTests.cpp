@@ -49,6 +49,22 @@ void TestDedicatedThreshold() {
 	Check(!UseDedicatedAllocation(0, 0), "empty image is pooled");
 }
 
+void TestImagePriority() {
+	const auto depth   = ImagePriority(true, false);
+	const auto target  = ImagePriority(false, true);
+	const auto texture = ImagePriority(false, false);
+	Check(depth.priority == 1.0f && depth.dedicated, "depth: top priority, own allocation");
+	Check(target.priority == 0.75f && target.dedicated, "render target: high priority, own allocation");
+	Check(texture.priority == 0.5f && !texture.dedicated, "texture: the Vulkan default, pooled");
+	Check(depth.priority > target.priority && target.priority > texture.priority,
+	      "depth is paged out last, textures first");
+	// Depth wins when an image is classified as both.
+	Check(ImagePriority(true, true).priority == 1.0f, "depth beats render target");
+	for (const auto choice: {depth, target, texture}) {
+		Check(choice.priority >= 0.0f && choice.priority <= 1.0f, "priority is in 0..1");
+	}
+}
+
 void TestGcThresholds() {
 	// Pinned values: the 8 GiB and 12 GiB cards the thresholds are tuned against.
 	const auto eight = ComputeGcThresholds(static_cast<int64_t>(8 * GiB));
@@ -147,6 +163,7 @@ void TestAllocationLadder() {
 int main() {
 	TestEstimateImageBytes();
 	TestDedicatedThreshold();
+	TestImagePriority();
 	TestGcThresholds();
 	TestAllocationLadder();
 	std::printf("VramPolicyTests: ok\n");

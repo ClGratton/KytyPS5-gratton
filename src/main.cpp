@@ -120,8 +120,8 @@ static void PrintUsage() {
 	    "                                      VK_EXT_pageable_device_local_memory so the driver\n"
 	    "                                      pages low-priority VRAM out instead of failing.\n"
 	    "                                      Default: off.\n");
-	::printf("  --vram-stats <on|off>                Log VRAM heap usage and its split every 5 s.\n"
-	         "                                      Implied by --vram-paging. Default: off.\n");
+	::printf("  --vram-stats <on|off>                Log VRAM heap usage and its split every 5 s, and each\n"
+	         "                                      pipeline compile time. Default: off.\n");
 	::printf("  --mem-stats <on|off>                 Log guest memory release/unmap/decommit counters and\n"
 	         "                                      how much released memory is still resident, every 5 s\n"
 	         "                                      and on exit. Default: off.\n");

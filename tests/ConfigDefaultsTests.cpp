@@ -89,6 +89,21 @@ void TestPipelineCacheKeyDefault() {
 	      "--pipeline-cache-key revision still opts out");
 }
 
+// --vram-paging used to switch on the VRAM stats log (every 5 s, and each pipeline compile).
+// Stats are diagnostics and have their own flag.
+void TestVramStatsAreIndependentOfPaging() {
+	Config::ConfigOptions options;
+	options.vram_paging = true;
+	options.vram_stats  = false;
+	Apply(options);
+	Check(Config::VramPagingEnabled() && !Config::VramStatsEnabled(),
+	      "paging alone does not turn the stats log on");
+	options.vram_paging = false;
+	options.vram_stats  = true;
+	Apply(options);
+	Check(!Config::VramPagingEnabled() && Config::VramStatsEnabled(), "stats alone work");
+}
+
 } // namespace
 
 int main() {
@@ -97,6 +112,7 @@ int main() {
 	TestGpuTimestampsDefault();
 	TestBufferGcOwnShare();
 	TestPipelineCacheKeyDefault();
+	TestVramStatsAreIndependentOfPaging();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");

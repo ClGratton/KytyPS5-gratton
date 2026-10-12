@@ -294,7 +294,7 @@ bool VramPagingEnabled() {
 }
 
 bool VramStatsEnabled() {
-	return g_config->vram_stats || g_config->vram_paging;
+	return g_config->vram_stats;
 }
 
 bool MemStatsEnabled() {
