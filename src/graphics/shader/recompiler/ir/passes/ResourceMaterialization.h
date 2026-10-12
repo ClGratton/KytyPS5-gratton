@@ -47,6 +47,13 @@ ResourcePlan ExtractResourcePlan(const Program& program);
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 
+// The most likely specialization of a program before any descriptor exists (shader-load
+// precompile): what MaterializeResources would produce if every descriptor were the common
+// default of its class. Returns false when the program cannot be guessed at all: it needs guest
+// memory to specialize, uses bindless tables, or has typed buffers whose format only the
+// descriptor knows. The guess is used for a speculative build and never for drawing.
+bool GuessSpecialization(const ResourcePlan& program, ResourceSpecialization& specialization);
+
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);
 

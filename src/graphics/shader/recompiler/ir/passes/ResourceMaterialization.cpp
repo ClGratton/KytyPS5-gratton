@@ -1236,6 +1236,44 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	return BuildResourceSpecialization(program, snapshot, specialization);
 }
 
+bool GuessSpecialization(const ResourcePlan& program, ResourceSpecialization& specialization) {
+	if (!program.resource_tracking_complete || program.requires_specialization_memory ||
+	    !program.source_reads.empty()) {
+		return false;
+	}
+	specialization.buffers.assign(program.info.buffers.size(), {});
+	for (uint32_t i = 0; i < program.info.buffers.size(); ++i) {
+		const auto& base   = program.info.buffers[i];
+		const auto* source = Source(program, base.source);
+		if (source == nullptr || source->indirect_descriptor.has_value() || base.formatted ||
+		    base.indirect_root != BufferResource::NoIndirectBuffer) {
+			return false;
+		}
+		// A plain byte-addressed buffer with the default out-of-bounds mode: no stride, no format
+		// (what a cleared descriptor gives). Structured buffers keep the stride in their descriptor
+		// and miss; the persisted variants cover those.
+		specialization.buffers[i].zero_stride_oob = true;
+	}
+	specialization.images.assign(program.info.images.size(), {});
+	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
+		const auto& image = program.info.images[i];
+		const auto* source = Source(program, image.source);
+		if (source == nullptr || source->indirect_descriptor.has_value() ||
+		    image.indirect_root != ImageResource::NoIndirectImage ||
+		    image.resource_class == ImageResourceClass::None) {
+			return false;
+		}
+		auto& guess         = specialization.images[i];
+		guess.numeric_class = image.atomic ? Prospero::TextureNumericClass::Uint
+		                                   : Prospero::TextureNumericClass::Float;
+		guess.dimension     = image.dimension == Decoder::ImageDimension::Unknown
+		                          ? Decoder::ImageDimension::Dim2D
+		                          : image.dimension;
+		guess.mip_count     = 1;
+	}
+	return true;
+}
+
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
 	EXIT_IF(!program.resource_tracking_complete || program.shader_info_complete);
 	EXIT_IF(program.info.buffers.size() > specialization.buffers.size() ||

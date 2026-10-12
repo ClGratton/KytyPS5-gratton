@@ -840,6 +840,47 @@ void DbgExit(int) { std::abort(); }
 
 } // namespace Common
 
+// Shader-load precompile: the guess is what a cleared descriptor of each class gives, and programs
+// that cannot be guessed (typed buffers, bindless tables) are refused.
+void TestGuessSpecialization() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  {
+    auto plan = UserDataBufferPlan();
+    ResourceSpecialization guess;
+    Check(GuessSpecialization(plan, guess), "plain buffer program was refused");
+    std::array<uint32_t, 1> user_data{0};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization materialized;
+    Check(MaterializeResources(plan, SrtRuntime{.user_data = user_data}, snapshot, materialized),
+          "cleared descriptor did not materialize");
+    Check(guess == materialized, "guess differs from the cleared-descriptor specialization");
+    plan.info.buffers[0].formatted = true;
+    Check(!GuessSpecialization(plan, guess), "typed buffer was guessed");
+  }
+  {
+    auto program = MixedSamplerProgram();
+    auto &image = program.info.images[0];
+    image.numeric_class = Libs::Graphics::Prospero::TextureNumericClass::Unsupported;
+    image.dimension = Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension::Unknown;
+    auto plan = ExtractResourcePlan(program);
+    ResourceSpecialization guess;
+    Check(GuessSpecialization(plan, guess) && guess.images.size() == 2 && guess.buffers.empty(),
+          "image program was refused");
+    Check(guess.images[0].numeric_class == Libs::Graphics::Prospero::TextureNumericClass::Float &&
+              guess.images[0].dimension ==
+                  Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
+              guess.images[0].mip_count == 1 && !guess.images[0].cube && !guess.images[0].fmask,
+          "unknown image class did not default to a float 2D image");
+    Check(guess.images[1] == guess.images[0], "images with the same class guess differently");
+  }
+  {
+    auto plan = UnbasedFlatPlan();
+    plan.requires_specialization_memory = true;
+    ResourceSpecialization guess;
+    Check(!GuessSpecialization(plan, guess), "a program that reads guest memory was guessed");
+  }
+}
+
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
   TestNativeNestedSrtRefresh();
@@ -854,6 +895,7 @@ int main() {
   TestSharedControlPredicates();
   TestFiniteImageRefreshReusesScalarReads();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
+  TestGuessSpecialization();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }
