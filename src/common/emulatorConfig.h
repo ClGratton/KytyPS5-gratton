@@ -304,6 +304,8 @@ struct ConfigOptions {
 	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
 	// names at the next presented frame (common/runtimeToggles.h). Default off.
 	std::filesystem::path  toggle_control;
+	// --debug-skip-log <path>: one row per dropped / waiting graphics draw (see benchInstrument.h).
+	std::filesystem::path  debug_skip_log;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif

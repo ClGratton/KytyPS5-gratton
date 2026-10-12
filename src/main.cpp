@@ -319,6 +319,10 @@ static void PrintUsage() {
 	         "                                       hang the GPU). 0 = off. Default: 1048576.\n");
 	::printf("  --debug-dump-shader <hex[,hex...]>   Debug: write the SPIR-V and guest binary of these shader\n"
 	         "                                       hashes (see --debug-gpu-ops) to --shader-log-folder.\n");
+	::printf("  --debug-skip-log <path>              Debug: append one row per graphics draw that was dropped\n"
+	         "                                       (--async-pipelines skip) or waited for its program or\n"
+	         "                                       pipeline: frame numbers, shader hashes, render targets,\n"
+	         "                                       and whether the store-safety rule kept the draw. Default: off.\n");
 	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
 	         "                                       render passes since the last flip. Default: off.\n");
 	::printf("  --debug-hle-trace <true|false>       Debug: record the last HLE calls of every guest thread\n"
@@ -1108,6 +1112,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.shader_timing_log = Common::PathFromUtf8(value);
+		} else if (arg == "--debug-skip-log") {
+			if (value.empty()) {
+				::printf("invalid --debug-skip-log path\n");
+				return false;
+			}
+			options.config.debug_skip_log = Common::PathFromUtf8(value);
 		} else if (arg == "--bench-render-csv") {
 			if (value.empty()) {
 				::printf("invalid --bench-render-csv path\n");

@@ -28,6 +28,10 @@ struct Options {
 	// --bench-render-csv <path>: one row per guest flip with the render-pass sizes recorded since
 	// the previous flip, and the size of the buffer that was flipped.
 	std::filesystem::path render_csv;
+	// --debug-skip-log <path>: one CSV row per graphics draw that was dropped (--async-pipelines
+	// skip) or had to wait for a program/pipeline, with the frame numbers, shader hashes and the
+	// render targets it writes. Observation only.
+	std::filesystem::path skip_log;
 };
 
 // Called once from Config::Load(). Replaces any previous state (the buffer is flushed first).
@@ -63,6 +67,27 @@ void RecordRenderPass(uint32_t width, uint32_t height);
 // "flip_idx,t_ns,flip_w,flip_h,sizes" where sizes is "WxH:count;..." ordered by pixel count
 // (largest area first) and resets the group. Call only when RenderEnabled().
 void RecordGuestFlip(uint32_t flip_width, uint32_t flip_height);
+
+// ---- --debug-skip-log ----------------------------------------------------------------------
+namespace detail {
+inline std::atomic<bool>     g_skip_log_enabled {false};
+inline std::atomic<uint64_t> g_presented_frames {0};
+inline std::atomic<uint64_t> g_guest_flips {0};
+} // namespace detail
+
+[[nodiscard]] inline bool SkipLogEnabled() noexcept {
+	return detail::g_skip_log_enabled.load(std::memory_order_relaxed);
+}
+// Frame counters kept for the skip log: host frames presented, guest flips executed.
+inline void NotePresentedFrame(uint64_t presented) noexcept {
+	detail::g_presented_frames.store(presented, std::memory_order_relaxed);
+}
+inline void NoteGuestFlip() noexcept {
+	detail::g_guest_flips.fetch_add(1, std::memory_order_relaxed);
+}
+// Appends "t_ns,presented,flip,<row>" (the caller supplies `row` without a newline) and flushes it
+// to the file. Call only when SkipLogEnabled().
+void LogSkipRow(const std::string& row);
 
 // Writes buffered rows to disk and clears the buffers. Thread-safe, safe at exit. Also emits the
 // aggregate "summary_*" timing rows (values are deltas since the previous Flush).

@@ -46,6 +46,7 @@ struct State {
 	std::map<uint64_t, uint32_t>                         passes;
 	std::vector<std::string>                             render_rows;
 	uint64_t                                             flip_index = 0;
+	std::FILE*                                           skip_file  = nullptr;
 	bool                                                 exit_hooks_registered = false;
 	bool                                                 exit_requested        = false;
 	std::array<HitCounters, static_cast<size_t>(HitSlot::Count)> hits;
@@ -171,6 +172,29 @@ void Configure(const Options& options) {
 		}
 	}
 	detail::g_render_enabled.store(!options.render_csv.empty(), std::memory_order_relaxed);
+	if (state.skip_file != nullptr) {
+		std::fclose(state.skip_file);
+		state.skip_file = nullptr;
+	}
+	detail::g_skip_log_enabled.store(!options.skip_log.empty(), std::memory_order_relaxed);
+}
+
+void LogSkipRow(const std::string& row) {
+	auto&           state = GetState();
+	std::lock_guard lock(state.mutex);
+	if (state.skip_file == nullptr) {
+		state.skip_file = OpenAppend(
+		    state.options.skip_log,
+		    "t_ns,presented,flip,event,vs,ps,rule,draw,targets\n");
+		if (state.skip_file == nullptr) return;
+	}
+	std::fprintf(state.skip_file, "%lld,%llu,%llu,%s\n", static_cast<long long>(NowNs()),
+	             static_cast<unsigned long long>(
+	                 detail::g_presented_frames.load(std::memory_order_relaxed)),
+	             static_cast<unsigned long long>(
+	                 detail::g_guest_flips.load(std::memory_order_relaxed)),
+	             row.c_str());
+	std::fflush(state.skip_file);
 }
 
 void RecordRenderPass(uint32_t width, uint32_t height) {
