@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
+#include <atomic>
 #include <map>
 #include <span>
 #include <utility>
@@ -76,6 +77,10 @@ public:
 	                bool src_gds);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
 	[[nodiscard]] bool IsRegionRegistered(uint64_t vaddr, uint64_t size);
+	// Bumped whenever a buffer is registered or unregistered (K15).
+	[[nodiscard]] uint64_t BufferSetGeneration() const noexcept {
+		return m_buffer_set_generation.load(std::memory_order_acquire);
+	}
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
@@ -141,6 +146,7 @@ private:
 	// Bytes of buffers registered in this cache (m_total_used_memory is replaced by the device total
 	// when the driver reports it). Input of BufferGcGate.
 	uint64_t                                          m_registered_bytes   = 0;
+	std::atomic<uint64_t>                             m_buffer_set_generation {0};
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;

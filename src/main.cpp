@@ -174,6 +174,10 @@ static void PrintUsage() {
 	::printf("  --submit-stats <seconds>             Every N seconds print frames, Vulkan submits per frame\n"
 	         "                                       and the --submit-coalesce counters (no timers; safe\n"
 	         "                                       next to fps measurements). Default: 0 (off).\n");
+	::printf("  --bda-sync-skip <true|false>         Skip the all-buffer synchronization before draws that\n"
+	         "                                       address memory through raw pointers while no page\n"
+	         "                                       became CPU-modified and no buffer or mapping changed\n"
+	         "                                       since the last full pass. Default: false.\n");
 	::printf("  --submit-coalesce <true|false>       Hold back the Vulkan submit of RELEASE_MEM end-of-pipe\n"
 	         "                                       events: submit after --submit-coalesce-max events or\n"
 	         "                                       when the oldest is older than --submit-coalesce-us,\n"
@@ -714,6 +718,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.gc_clock_frames = true;
 			} else {
 				::printf("invalid gc clock (expected runs or frames): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--bda-sync-skip") {
+			if (!ParseBool(value, options.config.bda_sync_skip)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--submit-coalesce") {

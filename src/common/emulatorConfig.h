@@ -161,6 +161,10 @@ struct ConfigOptions {
 	// --submit-coalesce (K13): hold back the submit of RELEASE_MEM end-of-pipe events (up to
 	// submit_coalesce_max events, or an age derived from the vblank period). Default off.
 	bool                   submit_coalesce             = false;
+	// --bda-sync-skip (K15): PrepareBda leaves out its walk over all buffers when no page became
+	// CPU-modified, no buffer was (un)registered and the mapping did not change since the last full
+	// pass (host_gpu/bdaSyncGate.h). Default off.
+	bool                   bda_sync_skip               = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -219,6 +223,7 @@ bool              GetLookaheadVerify();
 bool              TextureGcEnabled();
 bool              TextureGcLog();
 bool              SubmitCoalesceEnabled();
+bool              BdaSyncSkip();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

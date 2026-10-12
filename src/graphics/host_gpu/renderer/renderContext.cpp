@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -8,6 +9,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <fmt/format.h>
 
 namespace Libs::Graphics {
 
@@ -91,6 +93,7 @@ bool RenderContext::IsMapped(uint64_t vaddr, uint64_t size) const noexcept {
 void RenderContext::MapMemory(uint64_t vaddr, uint64_t size) {
 	std::lock_guard lock(m_mapped_ranges_mutex);
 	m_mapped_ranges.Add(vaddr, size);
+	m_mapped_generation++;
 }
 
 void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
@@ -114,6 +117,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		m_texture_cache.UnmapMemory(vaddr, size);
 		std::lock_guard lock(m_mapped_ranges_mutex);
 		m_mapped_ranges.Subtract(vaddr, size);
+		m_mapped_generation++;
 	};
 	// Shutdown still owns the GPU while queued rendering drains, but its command lane no
 	// longer accepts external work. Use the guest GPU's state for the teardown route.
@@ -130,9 +134,23 @@ void RenderContext::PrepareBda() {
 		m_bda_logged = true;
 	}
 	std::shared_lock lock(m_mapped_ranges_mutex);
-	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
-		m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
-	});
+	// Generations are read before the pass, so a change that lands during it is seen next time.
+	const BdaSync::Generations now {BdaSync::g_cpu_dirty_generation.load(std::memory_order_acquire),
+	                                m_buffer_cache.BufferSetGeneration(), m_mapped_generation};
+	if (m_bda_sync_gate.CanSkip(Config::BdaSyncSkip(), now)) {
+		m_bda_skipped++;
+	} else {
+		m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
+			m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
+		});
+		m_bda_sync_gate.RecordFullPass(now);
+		m_bda_full++;
+	}
+	if (((m_bda_full + m_bda_skipped) & 0x3FFF) == 0) {
+		Log::Write(fmt::format("GPU: BDA sync calls={} full={} skipped={} (--bda-sync-skip {})\n",
+		                       m_bda_full + m_bda_skipped, m_bda_full, m_bda_skipped,
+		                       Config::BdaSyncSkip() ? "on" : "off"));
+	}
 	m_fault_process_pending = true;
 }
 

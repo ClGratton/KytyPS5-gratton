@@ -68,6 +68,10 @@ bool GcClockFrames() {
 	return g_config->gc_clock_frames;
 }
 
+bool BdaSyncSkip() {
+	return g_config->bda_sync_skip;
+}
+
 bool SubmitCoalesceEnabled() {
 	return g_config->submit_coalesce;
 }

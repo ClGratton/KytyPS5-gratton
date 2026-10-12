@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/threads.h"
+#include "graphics/host_gpu/bdaSyncGate.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
@@ -82,6 +83,11 @@ private:
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 	bool                      m_fault_process_pending = false;
 	bool                      m_bda_logged = false;
+	// PrepareBda skip gate (K15): the mapped-range generation changes under m_mapped_ranges_mutex.
+	BdaSync::SkipGate         m_bda_sync_gate;
+	uint64_t                  m_mapped_generation = 0;
+	uint64_t                  m_bda_full          = 0;
+	uint64_t                  m_bda_skipped       = 0;
 
 	Common::Mutex                        m_interrupt_mutex;
 	std::vector<InterruptEqRegistration> m_interrupt_eqs;
