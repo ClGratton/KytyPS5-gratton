@@ -16268,7 +16268,7 @@ public:
         registers.SetDepthBoundsMin(pass == 0 ? 0.5f : 0.625f);
         registers.SetDepthBoundsMax(pass == 0 ? 0.5625f : 0.6875f);
         Require(name, "dynamic depth bounds pipeline reuse",
-                pipeline(true, 2, 2).pipeline == filled.pipeline,
+                &pipeline(true, 2, 2) == &filled,
                 "changing depth bounds or their enable state created another pipeline");
         draw(filled);
         const auto bounded_pixels = read_color();
@@ -16284,9 +16284,9 @@ public:
       }
     } else {
       auto &wireframe = pipeline(true, 1, 1);
-      Require(name, "pipeline cache", filled.pipeline != wireframe.pipeline &&
-                  pipeline(true, 2, 2).pipeline == filled.pipeline &&
-                  pipeline(false, 1, 0).pipeline == filled.pipeline,
+      Require(name, "pipeline cache", &filled != &wireframe &&
+                  &pipeline(true, 2, 2) == &filled &&
+                  &pipeline(false, 1, 0) == &filled,
               "polygon mode was lost from the cache key or dormant face modes were applied");
       draw(wireframe);
       const auto line_pixels = read_color();
@@ -16297,9 +16297,9 @@ public:
               "wireframe did not preserve triangle edges while leaving its interior empty");
       auto &last_vertex = pipeline(true, 2, 2, true);
       Require(name, "provoking vertex pipeline cache",
-              last_vertex.pipeline != filled.pipeline &&
-                  pipeline(true, 2, 2, true).pipeline == last_vertex.pipeline &&
-                  pipeline(true, 2, 2).pipeline == filled.pipeline,
+              &last_vertex != &filled &&
+                  &pipeline(true, 2, 2, true) == &last_vertex &&
+                  &pipeline(true, 2, 2) == &filled,
               "first and last provoking vertices did not keep distinct cached pipelines");
       draw(last_vertex);
       const auto last_pixels = read_color();
@@ -16325,21 +16325,21 @@ public:
       };
       auto &disabled_blend = blend_pipeline(false, false);
       Require(name, "effective blend pipeline cache",
-              blend_pipeline(false, true).pipeline == disabled_blend.pipeline &&
-                  blend_pipeline(true, true).pipeline == disabled_blend.pipeline &&
-                  blend_pipeline(false, false, true).pipeline == disabled_blend.pipeline &&
-                  blend_pipeline(true, true, true).pipeline == disabled_blend.pipeline,
+              &blend_pipeline(false, true) == &disabled_blend &&
+                  &blend_pipeline(true, true) == &disabled_blend &&
+                  &blend_pipeline(false, false, true) == &disabled_blend &&
+                  &blend_pipeline(true, true, true) == &disabled_blend,
               "disabled and bypassed blending did not share the same host pipeline");
       auto &enabled_blend = blend_pipeline(true, false);
       Require(name, "enabled blend pipeline cache",
-              enabled_blend.pipeline != disabled_blend.pipeline &&
-                  blend_pipeline(true, false).pipeline == enabled_blend.pipeline,
+              &enabled_blend != &disabled_blend &&
+                  &blend_pipeline(true, false) == &enabled_blend,
               "active blending was lost from the pipeline key or missed its cached pipeline");
       auto dormant_alpha = registers.GetBlendControl(0);
       dormant_alpha.alpha_srcblend = static_cast<uint8_t>(Prospero::BlendFactor::kOne);
       registers.SetBlendControl(0, dormant_alpha);
       Require(name, "dormant alpha blend pipeline cache",
-              pipeline(true, 2, 2).pipeline == enabled_blend.pipeline,
+              &pipeline(true, 2, 2) == &enabled_blend,
               "inactive separate-alpha state recompiled the pipeline");
       draw(enabled_blend);
       const auto blended_pixels = read_color();
@@ -16392,8 +16392,8 @@ public:
         return ReadBuffer(name, stencil_readback, extent * extent / 4);
       };
       const std::array stencil_pipelines{
-          pipeline(true, 2, 2, false, true).pipeline,
-          pipeline(true, 2, 2, false, false).pipeline};
+          &pipeline(true, 2, 2, false, true),
+          &pipeline(true, 2, 2, false, false)};
       const auto check_stencil = [&](const char *label, bool back_face,
                                      uint8_t initial, uint8_t written) {
         vk::ClearValue clear{};
@@ -16403,7 +16403,7 @@ public:
              0, 1, 0, 1}, clear);
         const auto &selected = pipeline(true, 2, 2, false, !back_face);
         Require(name, "dynamic stencil pipeline reuse",
-                selected.pipeline == stencil_pipelines[back_face],
+                &selected == stencil_pipelines[back_face],
                 "stencil enable, operations or references changed the graphics pipeline");
         draw(selected);
         const auto result = read_stencil();
@@ -16652,7 +16652,7 @@ public:
         float alpha;
       };
       uint64_t broadcast_program = 0;
-      vk::Pipeline broadcast_pipeline{};
+      const PipelineCache::Pipeline *broadcast_pipeline = nullptr;
       for (const auto test : {
           AlphaBlendCase{false, Prospero::BlendFactor::kOne, ShaderAlphaBlendSource::SourceAlpha, 0.4f},
           AlphaBlendCase{true, Prospero::BlendFactor::kSrcAlpha, ShaderAlphaBlendSource::SourceAlpha, 0.4f},
@@ -16676,10 +16676,10 @@ public:
         if (test.mode == ShaderAlphaBlendSource::SourceAlpha) {
           Require(name, "equal blend equation cache reuse",
                   broadcast_program == 0 || (programs.pixel.id == broadcast_program &&
-                                              selected.pipeline == broadcast_pipeline),
+                                              &selected == broadcast_pipeline),
                   "equivalent separate alpha state created another shader or pipeline");
           broadcast_program = programs.pixel.id;
-          broadcast_pipeline = selected.pipeline;
+          broadcast_pipeline = &selected;
         }
         constexpr std::array<float, 4> destination{0.3f, 0.3f, 0.1f, 0.2f};
         draw(selected, 3, std::bit_cast<std::array<u32, 4>>(destination));
@@ -38037,16 +38037,17 @@ void CheckUnoptimizedFirstPromotion(VulkanHarness &vulkan) {
     Require(name, "creation", pipeline.pipeline != nullptr,
             "no Vulkan compute pipeline");
     const bool active = cache.UnoptimizedFirstActive();
-    Require(name, "unoptimized flag", pipeline.unoptimized == active,
+    // A trivial shader can finish its background build before the first lookup returns, so the
+    // handle may already be swapped; the counters tell what was created.
+    Require(name, "unoptimized created",
+            cache.UnoptimizedFirst().unoptimized_created == (active ? 1u : 0u) &&
+                (active || !pipeline.unoptimized),
             "the first build must be unoptimized exactly when the mode is active");
     if (!active) {
       std::printf("[gpu]     %-32s ok (mode inactive on this device)\n", name);
     } else {
-      const auto first_handle = pipeline.pipeline;
       const auto layout = pipeline.pipeline_layout;
       const auto set_layout = pipeline.descriptor_set_layout;
-      Require(name, "background build queued", pipeline.optimized != nullptr,
-              "an unoptimized pipeline has no optimized build");
       for (uint32_t attempt = 0; attempt < 120000 && pipeline.unoptimized; attempt++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         (void)cache.GetComputePipeline(input, program); // the lookup promotes a finished build
@@ -38054,16 +38055,16 @@ void CheckUnoptimizedFirstPromotion(VulkanHarness &vulkan) {
       Require(name, "promotion", !pipeline.unoptimized && pipeline.optimized == nullptr,
               "the optimized build was not swapped in within 120 s");
       Require(name, "new handle, same layouts",
-              pipeline.pipeline != nullptr && pipeline.pipeline != first_handle &&
-                  pipeline.pipeline_layout == layout &&
+              pipeline.pipeline != nullptr && pipeline.pipeline_layout == layout &&
                   pipeline.descriptor_set_layout == set_layout,
               "promotion must replace only the VkPipeline");
-      Require(name, "retired handle", retired.size() == 1 && retired[0] == first_handle,
+      Require(name, "retired handle",
+              retired.size() == 1 && retired[0] != nullptr && retired[0] != pipeline.pipeline,
               "the replaced VkPipeline was not handed to the retire handler");
       const auto &counters = cache.UnoptimizedFirst();
       Require(name, "counters",
               counters.unoptimized_created == 1 && counters.swapped == 1 &&
-                  counters.optimized_done == 1,
+                  counters.optimized_done == 1 && counters.retired == 1,
               "unoptimized-first counters do not match one promoted pipeline");
       // A second lookup after the swap is a plain hit.
       Require(name, "stable after swap",
