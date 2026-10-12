@@ -39,6 +39,12 @@ enum class Phase : uint8_t {
 	DrainFlush,  // FlushAndWait
 	DrainFinish, // Finish
 	Gc,          // texture/buffer garbage collection and fault processing
+	// Sub-phases of the pipeline lookup (carved out of Pipeline, so Pipeline keeps the remainder).
+	PipePrepare,     // PrepareProgram: shader map hit, params, static vertex/pixel input info
+	PipeProgramKey,  // ProgramCache::Get: static-state key and the source-entry lookup
+	PipeMaterialize, // ProgramCache::Get: SRT materialization and the permutation search
+	PipeKeyBuild,    // BuildGraphicsKey
+	PipeFind,        // key hash and the pipeline map lookup
 	Count
 };
 
@@ -131,9 +137,12 @@ public:
 			detail::Enter(m_state, phase);
 		}
 	}
-	~Scope() {
+	~Scope() { End(); }
+	// Closes the scope before the end of the block (the destructor then does nothing).
+	void End() noexcept {
 		if (m_state != nullptr) {
 			detail::Exit(m_state, m_phase, m_start);
+			m_state = nullptr;
 		}
 	}
 	Scope(const Scope&)            = delete;

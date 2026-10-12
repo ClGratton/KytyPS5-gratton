@@ -776,6 +776,7 @@ struct PipelineCache::ProgramCache {
 			key.static_state.reserve(MaxStaticKeyWords);
 			return key;
 		}();
+		Common::GpuPhase::Scope gpu_phase_key(Common::GpuPhase::Phase::PipeProgramKey);
 		lookup_key.stage           = stage;
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = params.user_data_count;
@@ -802,6 +803,7 @@ struct PipelineCache::ProgramCache {
 			report("materialize", Bench::HitSlot::Materialize, materialize_time);
 		};
 		SourceEntry* entry = FindEntry(lookup_key);
+		gpu_phase_key.End();
 		const bool prefetch = async != nullptr && async->prefetch;
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
@@ -818,6 +820,8 @@ struct PipelineCache::ProgramCache {
 		Permutation* verify_target = nullptr;
 		if (entry != nullptr) {
 			Permutation* permutation = nullptr;
+			Common::GpuPhase::Scope gpu_phase_materialize(
+			    Common::GpuPhase::Phase::PipeMaterialize);
 			if (prefetch) {
 				// Lookahead thread: call-source (S_SWAP_PC) programs are left to the GPU thread
 				// (refreshing the linked callee reads live guest memory).
@@ -848,6 +852,7 @@ struct PipelineCache::ProgramCache {
 				permutation = entry->FindPermutation<false>(runtime, push_data_cursor, &materialize_time,
 				                                            &specialization);
 			}
+			gpu_phase_materialize.End();
 			if (permutation != nullptr && !prefetch && Config::GetLookaheadVerify() &&
 			    permutation->prefetched && !permutation->verified) {
 				// --debug-lookahead-verify: recompile it here with the real draw's inputs and
@@ -2277,9 +2282,13 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 	Common::GpuPhase::Scope gpu_phase_pipeline(Common::GpuPhase::Phase::Pipeline);
 
-	const auto  key = BuildGraphicsKey(colors, depth, vertex_info, command.GetRegisters(),
-	                                   command.GetUserConfig(), ps_input_info, topology,
-	                                   primitive_restart_enable, programs);
+	GraphicsPipelineKey key;
+	{
+		Common::GpuPhase::Scope gpu_phase_key(Common::GpuPhase::Phase::PipeKeyBuild);
+		key = BuildGraphicsKey(colors, depth, vertex_info, command.GetRegisters(),
+		                       command.GetUserConfig(), ps_input_info, topology,
+		                       primitive_restart_enable, programs);
+	}
 	const bool  ps_active      = ps_input_info != nullptr;
 	const auto  vs_id          = programs.vertex[0].id;
 	const auto  ps_id          = ps_active ? programs.pixel.id : 0;
@@ -2289,7 +2298,12 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	const auto& rendering      = key.rendering;
 	const auto& static_params  = key.static_params;
 
-	if (auto* found = FindGraphicsPipeline(key)) {
+	Pipeline* found = nullptr;
+	{
+		Common::GpuPhase::Scope gpu_phase_find(Common::GpuPhase::Phase::PipeFind);
+		found = FindGraphicsPipeline(key);
+	}
+	if (found != nullptr) {
 		NoteDrawUse(*found, true, false);
 		PromoteOptimized(*found);
 		return found;

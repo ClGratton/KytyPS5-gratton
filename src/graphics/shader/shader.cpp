@@ -787,6 +787,7 @@ void BuildStageStaticKey(const ShaderComputeInputInfo& info, std::vector<uint32_
 
 ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context& context,
                             const HW::UserConfig& user_config, ShaderVertexInputInfo& info) {
+	Common::GpuPhase::Scope gpu_phase_prepare(Common::GpuPhase::Phase::PipePrepare);
 	const auto& sh     = context.GetShaderRegisters();
 	const auto [data, hash] = ShaderGetMappedData(regs.es_regs.data_addr, "ShaderGetInputInfoVS():");
 	if (Common::Speculation::HasFailure()) {
@@ -939,6 +940,7 @@ ShaderParams PrepareProgram(
     const HW::PixelShaderInfo& regs, const HW::ShaderRegisters& sh,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
     ShaderPixelInputInfo&                               ps_info) {
+	Common::GpuPhase::Scope gpu_phase_prepare(Common::GpuPhase::Phase::PipePrepare);
 	const auto [data, hash] = ShaderGetMappedData(regs.ps_regs.data_addr, "ShaderGetInputInfoPS():");
 	if (Common::Speculation::HasFailure()) {
 		return {};
