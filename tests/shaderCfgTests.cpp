@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
 #include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -10060,6 +10061,76 @@ void TestVariantKeyRoundTrip() {
         "variant did not survive encoding");
 }
 
+// Persisted graphics variants: the pipeline key and the stage input infos survive their canonical
+// byte forms, and anything that does not belong to this build is refused.
+void TestGraphicsVariantKeys() {
+  PipelineRenderingState rendering;
+  rendering.color_formats[0] = vk::Format::eB8G8R8A8Unorm;
+  rendering.color_formats[2] = vk::Format::eR16G16B16A16Sfloat;
+  rendering.depth_format = vk::Format::eD32Sfloat;
+  rendering.color_count = 3;
+  PipelineVertexInputState input;
+  input.binding_count = 2;
+  input.attribute_count = 3;
+  input.bindings[0] = {.stride = 32, .instance = false};
+  input.bindings[1] = {.stride = 16, .instance = true};
+  input.attributes[0] = {.offset = 0, .binding = 0};
+  input.attributes[2] = {.offset = 12, .binding = 1};
+  PipelineStaticParameters params;
+  params.topology = vk::PrimitiveTopology::eTriangleList;
+  params.samples = 4;
+  params.color_mask[0] = 0xf;
+  params.blend_enable[0] = true;
+  params.color_srcblend[0] = 5;
+  const auto bytes = EncodePipelineKey(rendering, input, params);
+  PipelineRenderingState r2;
+  PipelineVertexInputState i2;
+  PipelineStaticParameters p2;
+  Check(DecodePipelineKey(bytes, r2, i2, p2) && r2 == rendering && i2 == input && p2 == params,
+        "pipeline key did not survive its canonical form");
+  Check(EncodePipelineKey(r2, i2, p2) == bytes, "pipeline key encoding is not canonical");
+  auto shorter = bytes;
+  shorter.pop_back();
+  Check(!DecodePipelineKey(shorter, r2, i2, p2), "truncated pipeline key accepted");
+  auto zero_samples = bytes;
+  std::memset(zero_samples.data() + zero_samples.size() - sizeof(PipelineStaticParameters), 0,
+              sizeof(PipelineStaticParameters));
+  Check(!DecodePipelineKey(zero_samples, r2, i2, p2), "impossible fixed-function state accepted");
+
+  ShaderVertexInputInfo vertex;
+  vertex.resources_num = 3;
+  vertex.buffers_num = 2;
+  vertex.wave_size = 32;
+  vertex.logical_stage = ShaderType::Vertex;
+  vertex.buffers[1].stride = 48;
+  vertex.stage.program = reinterpret_cast<const ShaderRecompiler::IR::CompiledShaderInfo *>(0x1000);
+  const auto vbytes = EncodeVertexInfo(vertex);
+  ShaderVertexInputInfo vertex2;
+  Check(DecodeVertexInfo(vbytes, VertexInfoLayout(), vertex2) && vertex2.resources_num == 3 &&
+            vertex2.buffers_num == 2 && vertex2.wave_size == 32 && vertex2.buffers[1].stride == 48 &&
+            vertex2.stage.program == nullptr,
+        "vertex input info did not survive");
+  Check(!DecodeVertexInfo(vbytes, VertexInfoLayout() + 1, vertex2), "vertex info of another layout");
+  auto vshort = vbytes;
+  vshort.pop_back();
+  Check(!DecodeVertexInfo(vshort, VertexInfoLayout(), vertex2), "truncated vertex info");
+  vertex.resources_num = 99;
+  Check(!DecodeVertexInfo(EncodeVertexInfo(vertex), VertexInfoLayout(), vertex2),
+        "impossible vertex info accepted");
+
+  ShaderPixelInputInfo pixel;
+  pixel.input_num = 5;
+  pixel.interpolator_settings[3] = 0x77;
+  pixel.ps_early_z = true;
+  pixel.dual_source_blending = true;
+  ShaderPixelInputInfo pixel2;
+  Check(DecodePixelInfo(EncodePixelInfo(pixel), PixelInfoLayout(), pixel2) && pixel2.input_num == 5 &&
+            pixel2.interpolator_settings[3] == 0x77 && pixel2.ps_early_z && pixel2.dual_source_blending,
+        "pixel input info did not survive");
+  Check(!DecodePixelInfo(EncodePixelInfo(pixel), VertexInfoLayout(), pixel2),
+        "pixel info decoded with the vertex layout");
+}
+
 // The shader-load hook rebuilds a compute shader's stage registers from the register list in its
 // AGC header, with the same decoder the PM4 stream uses.
 void TestComputeShaderHeaderRegisters() {
@@ -15883,6 +15954,7 @@ int main() {
   TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic();
   TestShaderIrValidationGate();
   TestVariantKeyRoundTrip();
+  TestGraphicsVariantKeys();
   TestComputeShaderHeaderRegisters();
   TestNewShaderRecompilerPlanningOnlyLoads();
   TestNewShaderRecompilerNativeU64Translation();
