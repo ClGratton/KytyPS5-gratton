@@ -848,12 +848,19 @@ void TestGuessSpecialization() {
     auto plan = UserDataBufferPlan();
     ResourceSpecialization guess;
     Check(GuessSpecialization(plan, guess), "plain buffer program was refused");
+    // A descriptor with the guessed shape (stride 16, OOB mode 0, no format) materializes to
+    // exactly the guess; a raw (stride 0) one does not.
     std::array<uint32_t, 1> user_data{0};
     ResourceSnapshot snapshot;
     ResourceSpecialization materialized;
     Check(MaterializeResources(plan, SrtRuntime{.user_data = user_data}, snapshot, materialized),
           "cleared descriptor did not materialize");
-    Check(guess == materialized, "guess differs from the cleared-descriptor specialization");
+    Check(guess.buffers.size() == 1 && guess.buffers[0].packed_stride == 16 &&
+              !guess.buffers[0].zero_stride_oob &&
+              guess.buffers[0].descriptor_format ==
+                  Libs::Graphics::Prospero::BufferFormat::kInvalid &&
+              guess.buffers[0] != materialized.buffers[0],
+          "guess is a 16-byte structured buffer, not a cleared descriptor");
     plan.info.buffers[0].formatted = true;
     Check(!GuessSpecialization(plan, guess), "typed buffer was guessed");
   }

@@ -1249,10 +1249,12 @@ bool GuessSpecialization(const ResourcePlan& program, ResourceSpecialization& sp
 		    base.indirect_root != BufferResource::NoIndirectBuffer) {
 			return false;
 		}
-		// A plain byte-addressed buffer with the default out-of-bounds mode: no stride, no format
-		// (what a cleared descriptor gives). Structured buffers keep the stride in their descriptor
-		// and miss; the persisted variants cover those.
-		specialization.buffers[i].zero_stride_oob = true;
+		// A structured buffer of float4 elements (stride 16, no swizzle) with the in-bounds
+		// out-of-bounds mode and no format: the commonest shape of an untyped buffer descriptor.
+		// Measured on a real title (docs/shader-load-notes.md): 16-byte elements are 53 % of all
+		// buffer bindings, 4-byte ones 20 %, raw 11 %, and 99.5 % use OOB mode 0. Any other stride
+		// misses; the persisted variants cover those exactly.
+		specialization.buffers[i].packed_stride = 16;
 	}
 	specialization.images.assign(program.info.images.size(), {});
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
