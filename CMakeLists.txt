@@ -484,6 +484,11 @@ add_executable(known_fills_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(known_fills_tests PRIVATE ${inc_headers})
 
+add_executable(readback_plan_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ReadbackPlanTests.cpp"
+)
+target_include_directories(readback_plan_tests PRIVATE ${inc_headers})
+
 add_executable(gc_clock_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GcClockTests.cpp"
 )
@@ -699,6 +704,7 @@ if(BUILD_TESTING)
 	add_test(NAME drain_causes COMMAND $<TARGET_FILE:drain_causes_tests>)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
 	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
+	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
@@ -799,6 +805,7 @@ if(BUILD_TESTING)
 		drain_causes_tests
 		barrier_elision_tests
 		known_fills_tests
+		readback_plan_tests
 		gc_clock_tests
 		sys_file_read_tests
 		async_pipeline_tests
