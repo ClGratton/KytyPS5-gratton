@@ -227,6 +227,8 @@ static void PrintUsage() {
 	         "                                       report, a wait of 5+ s, device loss). checkpoints\n"
 	         "                                       also drops VK_NV_device_diagnostic_checkpoints\n"
 	         "                                       markers. Default: off.\n");
+	::printf("  --debug-dump-shader <hex[,hex...]>   Debug: write the SPIR-V and guest binary of these shader\n"
+	         "                                       hashes (see --debug-gpu-ops) to --shader-log-folder.\n");
 	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
 	         "                                       render passes since the last flip. Default: off.\n");
 }
@@ -875,6 +877,21 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			} else {
 				::printf("invalid --debug-gpu-ops (expected off, ring or checkpoints): %s\n", value.c_str());
 				return false;
+			}
+		} else if (arg == "--debug-dump-shader") {
+			size_t start = 0;
+			while (start <= value.size()) {
+				auto end = value.find(',', start);
+				if (end == std::string::npos) end = value.size();
+				const auto token = value.substr(start, end - start);
+				char*      parsed = nullptr;
+				const auto hash   = std::strtoull(token.c_str(), &parsed, 16);
+				if (token.empty() || parsed == nullptr || *parsed != '\0') {
+					::printf("invalid --debug-dump-shader hash (expected hex): %s\n", token.c_str());
+					return false;
+				}
+				options.config.debug_dump_shaders.push_back(hash);
+				start = end + 1;
 			}
 		} else if (arg == "--pipeline-workers") {
 			uint64_t workers = 0;

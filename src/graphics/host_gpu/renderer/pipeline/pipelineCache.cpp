@@ -234,7 +234,7 @@ bool ReadShaderGuestMemorySpeculative(void*, uint64_t address, std::span<uint32_
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!Config::GraphicsDebugDumpEnabled() && !Config::DebugDumpShaderMatches(shader_hash)) {
 		return;
 	}
 	static std::atomic_int id = 0;
@@ -252,7 +252,7 @@ void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
 
 void DumpShaderOriginal(const char* stage_name, uint64_t shader_hash,
                         std::span<const uint32_t> code) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!Config::GraphicsDebugDumpEnabled() && !Config::DebugDumpShaderMatches(shader_hash)) {
 		return;
 	}
 	EXIT_IF(code.empty());

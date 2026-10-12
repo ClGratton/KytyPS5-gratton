@@ -148,6 +148,9 @@ struct ConfigOptions {
 	// --debug-gpu-ops <off|ring|checkpoints>: 0 off, 1 host-side ring of the last draws and
 	// dispatches (printed when the GPU stops answering), 2 plus VK_NV_device_diagnostic_checkpoints.
 	uint32_t               gpu_ops_mode                = 0;
+	// --debug-dump-shader <hex[,hex...]>: write the SPIR-V and the guest binary of just these shader
+	// hashes (as printed by --debug-gpu-ops) to --shader-log-folder, without --graphics-debug-dump.
+	std::vector<uint64_t>  debug_dump_shaders;
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
 	// bit 2 = programs only (do not request pipelines).
@@ -255,6 +258,7 @@ bool              GetPipelineLookahead();
 bool              GetPipelinesUnoptimizedFirst();
 uint32_t          GetPipelineLookaheadKinds();
 uint32_t          GetGpuOpsMode();
+bool              DebugDumpShaderMatches(uint64_t shader_hash);
 bool              GetLookaheadVerify();
 bool              TextureGcEnabled();
 bool              TextureGcLog();

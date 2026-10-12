@@ -109,6 +109,11 @@ bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }
 
+bool DebugDumpShaderMatches(uint64_t shader_hash) {
+	const auto& list = g_config->debug_dump_shaders;
+	return std::find(list.begin(), list.end(), shader_hash) != list.end();
+}
+
 uint32_t GetGpuOpsMode() {
 	return g_config->gpu_ops_mode;
 }
