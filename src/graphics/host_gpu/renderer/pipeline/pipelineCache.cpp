@@ -201,6 +201,7 @@ std::size_t HashSpecialization(const ShaderRecompiler::IR::ResourceSpecializatio
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
+	Common::GpuPhase::Scope gpu_phase_read(Common::GpuPhase::Phase::PipeSrtRead);
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
@@ -208,6 +209,7 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 }
 
 bool ReadShaderScalarMemory(void*, uint64_t address, std::span<uint32_t> values) {
+	Common::GpuPhase::Scope gpu_phase_read(Common::GpuPhase::Phase::PipeSrtRead);
 	// The walk evaluates loads the shader may never execute, e.g. through a null SRT pointer, so
 	// unmapped guest memory reads as zeros instead of faulting the host.
 	if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
@@ -508,6 +510,7 @@ struct PipelineCache::ProgramCache {
 	private:
 		// Takes the entry lock, publishing "waiting for the entry lock" for the hang watchdog.
 		void LockEntry(std::unique_lock<std::shared_mutex>& lock, const char* what) {
+			Common::GpuPhase::Scope gpu_phase_lock(Common::GpuPhase::Phase::PipeEntryLock);
 			Common::Hang::Phase phase(what);
 			lock.lock();
 		}
@@ -525,6 +528,7 @@ struct PipelineCache::ProgramCache {
 		Permutation* FindExistingLocked(uint32_t push_data_cursor,
 		                                const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                                std::span<const uint32_t> function_code) {
+			Common::GpuPhase::Scope gpu_phase_search(Common::GpuPhase::Phase::PipePermSearch);
 			for (auto& candidate: permutations) {
 				const auto& layout = candidate.program.bindings;
 				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(

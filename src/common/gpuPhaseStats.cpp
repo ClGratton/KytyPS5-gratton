@@ -31,7 +31,8 @@ constexpr size_t kCoalesce  = static_cast<size_t>(Coalesce::Count);
 constexpr std::array<const char*, kPhases> kNames = {
     "idle", "pm4", "draw", "pipeline", "pipeline_job", "srt", "descriptors", "vkcmd", "vkalloc",
     "submit", "drain_tick", "drain_flush", "drain_finish", "gc", "pipe_prepare", "pipe_programkey",
-    "pipe_materialize", "pipe_keybuild", "pipe_find"};
+    "pipe_materialize", "pipe_keybuild", "pipe_find", "pipe_entrylock", "pipe_srtread",
+    "pipe_permsearch"};
 
 // Tracy zone per phase (--profile): named "gpu:<phase>" and emitted only on the GPU thread, so
 // `tracy-csvexport -e -f gpu:` yields the exclusive time per phase of that thread alone.

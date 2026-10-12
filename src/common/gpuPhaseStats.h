@@ -45,6 +45,9 @@ enum class Phase : uint8_t {
 	PipeMaterialize, // ProgramCache::Get: SRT materialization and the permutation search
 	PipeKeyBuild,    // BuildGraphicsKey
 	PipeFind,        // key hash and the pipeline map lookup
+	PipeEntryLock,   // waiting for a program source entry's lock (cheap unless a worker holds it)
+	PipeSrtRead,     // guest-memory reads made by the SRT walk (inside pipe_materialize)
+	PipePermSearch,  // scanning a program's permutations for the one that fits the specialization
 	Count
 };
 
