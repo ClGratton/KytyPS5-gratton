@@ -659,6 +659,32 @@ uint32_t EmitMeshDrawParameter(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (state.program.stage != ShaderType::Mesh || index >= IR::PushData::MeshDrawDwordCount) {
 		ctx.Fail(inst, "invalid mesh draw parameter");
 	}
+	if (MeshDrawRecordByAddress(state)) {
+		// --gpu-indirect-draws: push constant dwords 0 and 1 hold the device address of the draw's
+		// parameter record, so a GPU pass can write the record from indirect draw arguments.
+		const auto push_word = [&](uint32_t word) {
+			const auto word_pointer = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpAccessChain, TypePushConstantElementPointer(state),
+			                          word_pointer, state.push_constant_variable,
+			                          ConstantU32(state, 0), ConstantU32(state, word));
+			const auto value = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, word_pointer);
+			return value;
+		};
+		const auto u64  = TypeU64(state);
+		const auto low  = Unary(state, spv::OpUConvert, u64, push_word(0));
+		const auto high = Binary(state, spv::OpShiftLeftLogical, u64,
+		                         Unary(state, spv::OpUConvert, u64, push_word(1)),
+		                         ConstantU32(state, 32));
+		const auto address =
+		    Binary(state, spv::OpIAdd, u64, Binary(state, spv::OpBitwiseOr, u64, low, high),
+		           Unary(state, spv::OpUConvert, u64, ConstantU32(state, index * 4u)));
+		const auto record_pointer =
+		    Unary(state, spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), address);
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), result, record_pointer,
+		                          spv::MemoryAccessAlignedMask, static_cast<uint32_t>(sizeof(uint32_t)));
+		return result;
+	}
 	const auto pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, TypePushConstantElementPointer(state), pointer,
 	                          state.push_constant_variable, ConstantU32(state, 0),

@@ -89,6 +89,9 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 	uint32_t max_primitives       = 0;
 	uint32_t provoking_vertex     = 0;
 	bool     fast_launch          = false;
+	// --gpu-indirect-draws: the draw parameters are loaded from a record by device address
+	// (push constant dwords 0 and 1) instead of from push constants, so a GPU pass can write them.
+	bool     draw_record_address  = false;
 
 	[[nodiscard]] constexpr uint32_t InputPrimitiveSize() const {
 		switch (static_cast<Prospero::PrimitiveType>(input_primitive)) {

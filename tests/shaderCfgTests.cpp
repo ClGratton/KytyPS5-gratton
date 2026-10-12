@@ -10789,6 +10789,36 @@ void TestMeshExportStorage() {
     Check(private_bytes == (4u * 16u + 4u + 4u * 4u) * (64u / subgroup_size),
           "mesh vertex and primitive exports lost their separate logical-lane storage");
   }
+  {
+    // --gpu-indirect-draws: the draw parameters come from a record whose device address is in
+    // push constant dwords 0 and 1. The module must declare physical addresses, validate, and
+    // load through a physical pointer instead of reading the parameters from push constants.
+    mesh.host_subgroup_size = 64u;
+    mesh.draw_record_address = true;
+    options.back_code = std::span<const uint32_t>{};
+    const auto result = RecompileForTest(std::span<const uint32_t>{monolithic}, options, nullptr,
+                                         nullptr, PushData::MeshDrawDwordCount);
+    CheckSpirvBinaryValidates(result.spirv);
+    Check(SpirvContainsCapability(result.spirv, 5347u),
+          "record-by-address mesh shader lacks PhysicalStorageBufferAddresses");
+    const auto source = DisassembleSpirvBinary(result.spirv);
+    Check(source.find("OpConvertUToPtr") != std::string::npos,
+          "record-by-address mesh shader does not load the draw record through a pointer");
+    Check(SpirvSourceHasInstructionUsing(source, "OpAccessChain", "vsharp %uint_0 %uint_0") &&
+              SpirvSourceHasInstructionUsing(source, "OpAccessChain", "vsharp %uint_0 %uint_1"),
+          "record-by-address mesh shader does not read the record address from dwords 0 and 1");
+    mesh.draw_record_address = false;
+    const auto plain = RecompileForTest(std::span<const uint32_t>{monolithic}, options, nullptr,
+                                        nullptr, PushData::MeshDrawDwordCount);
+    const auto count_of = [](const std::string &text, const char *what) {
+      size_t n = 0;
+      for (auto at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
+      return n;
+    };
+    Check(count_of(source, "OpConvertUToPtr") > count_of(DisassembleSpirvBinary(plain.spirv),
+                                                         "OpConvertUToPtr"),
+          "the flag must add the record pointer loads and the default shader must not have them");
+  }
 }
 
 void TestMergedShaderUserDataSnapshot() {
