@@ -290,6 +290,7 @@ bool SendGamepadEffect(SDL_Gamepad* pad, const void* data, int size) {
 #define SDL_GetGamepads               Fake::GetGamepads
 #define SDL_GetGamepadConnectionState Fake::GetGamepadConnectionState
 #include "libs/dualSenseBluetooth.cpp"
+#include "libs/dualSenseSpeakerSink.cpp"
 #include "libs/dualSenseHaptics.cpp"
 #include "libs/audio.cpp"
 #undef SDL_GetTicks
@@ -358,6 +359,7 @@ struct Fixture {
 		cached_rumble  = {};
 		effects        = {};
 		connected_pads = {1};
+		Haptics::SetSpeakerOptions(true, 15, false);
 		fail_effect = wireless = wireless_pad3 = false;
 		hid_available = fail_hid_write = false;
 		duplicate_hid                  = false;
@@ -473,9 +475,9 @@ void TestSpeaker() {
 	ExpectPcm({0.5f, -0.25f, 0, 0, 1.0f, 0, 0, 0});
 	Check(rumble.large == 100 * 0x101, "speaker audio stopped the rumble");
 	const auto routed = effects[1];
-	Check(routed.size() == 38 && routed[0] == 0xa0 && routed[1] == 0x80 && routed[5] == 0x64 &&
-	          routed[7] == 0x30 && routed[37] == 0x02,
-	      "speaker not routed like the Linux driver");
+	Check(routed.size() == 38 && routed[0] == 0xa0 && routed[1] == 0x80 && routed[5] == 15 &&
+	          routed[7] == 0x30 && routed[37] == 0x00,
+	      "speaker not routed at the quiet default level with a 0 dB preamp");
 	Check(Haptics::Queue(speaker.get(), 1, stereo.data(), 2, 2, true, unity.data()) ==
 	          2 * 1000000 / 48000,
 	      "queued speaker playback time is wrong");
@@ -1231,6 +1233,111 @@ void TestAudioVibrationGain() {
 	}
 }
 
+void TestSpeakerVolume() {
+	{
+		Fixture f;
+		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+		Haptics::SetSpeakerOptions(true, 100, false);
+		auto                       speaker = Open(true);
+		const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
+		Queue(speaker, stereo.data());
+		ExpectPcm({0.5f, -0.25f, 0, 0, 1.0f, 0, 0, 0});
+		Check(effects[1][5] == 0x64 && effects[1][37] == 0x00, "full level is not the maximum");
+	}
+	{
+		Fixture f;
+		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+		Haptics::SetSpeakerOptions(true, 25, false);
+		auto speaker = Open(true);
+		auto haptics = Open(false);
+		const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
+		Queue(speaker, stereo.data());
+		Check(effects[1][5] == 0x19, "quarter level is not a quarter of the hardware volume");
+		ExpectPcm({0.5f, -0.25f, 0, 0, 1.0f, 0, 0, 0}); // The level is hardware only.
+		// Vibration ports are not affected.
+		Queue(haptics, stereo.data());
+		ExpectPcm({0, 0, 0.5f, -0.25f, 0, 0, 1.0f, 0});
+	}
+	{
+		Fixture f;
+		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+		Haptics::SetSpeakerOptions(true, 0, false);
+		auto speaker = Open(true);
+		const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
+		Queue(speaker, stereo.data());
+		Check(effects[1][5] == 0x00, "zero level is not muted in hardware");
+	}
+	{
+		Fixture f;
+		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+		Haptics::SetSpeakerOptions(false, 15, false);
+		Check(Haptics::Open(48000, true) == nullptr, "disabled pad speaker still opened");
+		auto haptics = Open(false);
+		Check(effects[1].empty(), "pad speaker off routed the controller");
+	}
+}
+
+void TestSpeakerSinkParsing() {
+	namespace Sink     = Libs::Controller::DualSenseSpeakerSink;
+	const std::string text =
+	    "Sink #7\n\tName: other\n\tMute: yes\n\tVolume: front-left: 1000 / 2% / -60 dB\n"
+	    "Sink #15026\n\tState: SUSPENDED\n\tName: kyty_dualsense_speaker\n\tMute: no\n"
+	    "\tVolume: front-left: 32768 /  50% / -18.06 dB,   front-right: 32768 /  50% / -18.06 dB\n"
+	    "\t        balance 0.00\n\tBase Volume: 65536 / 100% / 0.00 dB\n"
+	    "Sink #99\n\tName: after\n\tMute: no\n\tVolume: front-left: 65536 / 100%\n";
+	auto info = Sink::ParseSink(text);
+	Check(info.found && info.index == 15026 && std::abs(info.gain - 0.125f) < 1e-4f,
+	      "sink volume is not read on the cubic scale");
+	auto muted = text;
+	muted.replace(muted.find("Mute: no"), 8, "Mute: yes");
+	Check(Sink::ParseSink(muted).gain == 0.0f, "sink mute is ignored");
+	Check(!Sink::ParseSink("Sink #1\n\tName: other\n").found, "missing sink was found");
+}
+
+// Opt-in (KYTY_TEST_PULSE=1): creates the real sink on the running PipeWire/PulseAudio server.
+void TestSpeakerSinkLive() {
+	if (std::getenv("KYTY_TEST_PULSE") == nullptr) {
+		return;
+	}
+	namespace Sink = Libs::Controller::DualSenseSpeakerSink;
+	auto wait_for  = [](auto&& condition) { // Returns the wait in ms, or -1 on timeout.
+		const auto start = std::chrono::steady_clock::now();
+		while (!condition()) {
+			if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
+				return -1.0;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+		    .count();
+	};
+	Sink::Ensure();
+	Check(wait_for([] { return Sink::Active(); }) >= 0, "sink was not created");
+	Check(std::abs(Sink::Gain() - 1.0f) < 1e-4f, "new sink does not start at unity");
+	const auto set = [&](const char* what, const char* value) {
+		const std::string command = std::string("pactl set-sink-") + what +
+		                            " kyty_dualsense_speaker " + value;
+		Check(std::system(command.c_str()) == 0, "pactl failed");
+	};
+	for (const auto& [volume, expected]: {std::pair {"50%", 0.125f}, std::pair {"20%", 0.008f},
+	                                      std::pair {"100%", 1.0f}}) {
+		set("volume", volume);
+		const auto ms = wait_for([&] { return std::abs(Sink::Gain() - expected) < 2e-3f; });
+		std::printf("sink volume %s -> gain %.3f after %.1f ms\n", volume, Sink::Gain(), ms);
+		Check(ms >= 0, "sink volume change was not followed");
+	}
+	set("mute", "1");
+	const auto mute_ms = wait_for([] { return Sink::Gain() == 0.0f; });
+	std::printf("sink mute -> gain 0 after %.1f ms\n", mute_ms);
+	Check(mute_ms >= 0, "sink mute was not followed");
+	set("mute", "0");
+	Check(wait_for([] { return Sink::Gain() > 0.5f; }) >= 0, "sink unmute was not followed");
+	Sink::Shutdown();
+	Check(!Sink::Active(), "sink still active after shutdown");
+	Check(std::system("pactl list short sinks | grep -q kyty_dualsense_speaker") != 0,
+	      "sink was not unloaded");
+}
+
 void TestBluetoothAudioSpeakerRouting() {
 	Fixture f;
 	wireless = hid_available = true;
@@ -1275,6 +1382,9 @@ int main() {
 	TestAudioSpeakerRouting();
 	TestAudioFallbackGain();
 	TestAudioVibrationGain();
+	TestSpeakerVolume();
+	TestSpeakerSinkParsing();
+	TestSpeakerSinkLive();
 	TestBluetoothAudioSpeakerRouting();
 	TestAudioDefaultResumeFailure();
 	TestFormatsAndVolume();

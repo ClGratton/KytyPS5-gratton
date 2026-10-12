@@ -401,6 +401,8 @@ void Initialize() {
 	EXIT_IF(g_controller != nullptr);
 
 	g_controller = new GameController;
+	DualSenseHaptics::SetSpeakerOptions(Config::PadSpeakerEnabled(), Config::GetPadSpeakerVolume(),
+	                                    Config::PadSpeakerOsSinkEnabled());
 	g_controller->Connect(HOST_INPUT_CONTROLLER_ID);
 }
 
