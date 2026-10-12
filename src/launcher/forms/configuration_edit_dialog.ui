@@ -162,6 +162,67 @@
               <property name="toolTip"><string>Graphics device used by the emulator</string></property>
              </widget>
             </item>
+            <item row="8" column="0">
+             <widget class="QLabel" name="label_fps_limit">
+              <property name="text"><string>FPS limit:</string></property>
+             </widget>
+            </item>
+            <item row="8" column="1">
+             <layout class="QHBoxLayout" name="fpsLimitLayout">
+              <item>
+               <widget class="QSlider" name="slider_fps_limit">
+                <property name="toolTip"><string>Present at most this many frames per second. 0 is off. Capped by the vblank frequency; raise that to go above 60.</string></property>
+                <property name="maximum"><number>240</number></property>
+                <property name="singleStep"><number>5</number></property>
+                <property name="pageStep"><number>15</number></property>
+                <property name="value"><number>0</number></property>
+                <property name="orientation"><enum>Qt::Horizontal</enum></property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_fps_limit_value">
+                <property name="minimumSize"><size><width>60</width><height>0</height></size></property>
+                <property name="text"><string>Off</string></property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item row="9" column="0">
+             <widget class="QLabel" name="label_gpu_time_scale">
+              <property name="text"><string>Dynamic resolution bias:</string></property>
+             </widget>
+            </item>
+            <item row="9" column="1">
+             <layout class="QHBoxLayout" name="gpuTimeScaleLayout">
+              <item>
+               <widget class="QSlider" name="slider_gpu_time_scale">
+                <property name="toolTip"><string>Scales the GPU time that a game with dynamic resolution measures. Above 1.00x it renders at a lower internal resolution (faster), below 1.00x higher. It does not force a resolution, and games with a fixed resolution ignore it.</string></property>
+                <property name="minimum"><number>50</number></property>
+                <property name="maximum"><number>400</number></property>
+                <property name="singleStep"><number>5</number></property>
+                <property name="pageStep"><number>25</number></property>
+                <property name="value"><number>100</number></property>
+                <property name="orientation"><enum>Qt::Horizontal</enum></property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_gpu_time_scale_value">
+                <property name="minimumSize"><size><width>60</width><height>0</height></size></property>
+                <property name="text"><string>1.00x (off)</string></property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item row="10" column="0">
+             <widget class="QLabel" name="label_gpu_timestamps">
+              <property name="text"><string>GPU timestamps:</string></property>
+             </widget>
+            </item>
+            <item row="10" column="1">
+             <widget class="QComboBox" name="comboBox_gpu_timestamps">
+              <property name="toolTip"><string>Where the GPU timings a game reads come from: Legacy is the time the emulator processes a command, Gpu is the host GPU's own timestamp. Dynamic-resolution games choose their resolution from these.</string></property>
+             </widget>
+            </item>
             <item row="5" column="1">
              <widget class="QCheckBox" name="checkBox_readback">
               <property name="toolTip"><string>Read back writable linear images</string></property>

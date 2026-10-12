@@ -484,6 +484,15 @@ add_executable(async_pipeline_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(async_pipeline_tests fmt::fmt common)
 target_include_directories(async_pipeline_tests PRIVATE ${inc_headers})
+add_executable(gpu_clock_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GpuClockTests.cpp"
+)
+target_include_directories(gpu_clock_tests PRIVATE ${inc_headers})
+
+add_executable(frame_pacer_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/FramePacerTests.cpp"
+)
+target_include_directories(frame_pacer_tests PRIVATE ${inc_headers})
 
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
@@ -675,6 +684,8 @@ if(BUILD_TESTING)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
+	add_test(NAME gpu_clock COMMAND $<TARGET_FILE:gpu_clock_tests>)
+	add_test(NAME frame_pacer COMMAND $<TARGET_FILE:frame_pacer_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -764,6 +775,8 @@ if(BUILD_TESTING)
 		lru_cache_tests
 		sys_file_read_tests
 		async_pipeline_tests
+		gpu_clock_tests
+		frame_pacer_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests

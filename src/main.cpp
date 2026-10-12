@@ -14,6 +14,8 @@
 #include "kytyGitVersion.h"
 
 #include <charconv>
+#include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <string_view>
@@ -71,6 +73,14 @@ static void PrintUsage() {
 	::printf("  --vr                                 Enable the virtual VR headset.\n");
 	::printf("  --amd-cpu                            Apply AMD CPU instruction patches.\n");
 	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
+	::printf("  --gpu-timestamps <legacy|gpu>        Source of the GPU timestamps a game reads: the clock\n"
+	         "                                       when a packet is parsed (legacy), or the host GPU's\n"
+	         "                                       own timestamp of that point (gpu). Default: legacy.\n");
+	::printf("  --gpu-time-scale <0.1-16>            Multiply the GPU durations a game observes. Games with\n"
+	         "                                       dynamic resolution render lower above 1.0 and higher\n"
+	         "                                       below it. Default: 1.0.\n");
+	::printf("  --fps-limit <0-1000>                 Present at most this many frames per second; 0 is off.\n"
+	         "                                       Capped by --vblank-frequency. Default: 0.\n");
 	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
 	::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
 	::printf("  --gpu-assisted-validation <t|f>      Bounds-check shader accesses on the GPU.\n"
@@ -174,6 +184,8 @@ static void PrintUsage() {
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
+	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
+	         "                                       render passes since the last flip. Default: off.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -210,6 +222,29 @@ static bool ParseEnum(const std::string& value, E& out) {
 	}
 
 	out = enum_value.value();
+	return true;
+}
+
+static bool ParseGpuTimestampMode(const std::string& value, Config::GpuTimestampMode& out) {
+	if (Common::EqualNoCase(value, "legacy")) {
+		out = Config::GpuTimestampMode::Legacy;
+		return true;
+	}
+	if (Common::EqualNoCase(value, "gpu")) {
+		out = Config::GpuTimestampMode::Gpu;
+		return true;
+	}
+	return false;
+}
+
+static bool ParseGpuTimeScale(const std::string& value, double& out) {
+	char*  end    = nullptr;
+	double number = std::strtod(value.c_str(), &end);
+	if (value.empty() || end != value.c_str() + value.size() || !std::isfinite(number) ||
+	    number < Config::MIN_GPU_TIME_SCALE || number > Config::MAX_GPU_TIME_SCALE) {
+		return false;
+	}
+	out = number;
 	return true;
 }
 
@@ -461,6 +496,24 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--vblank-frequency") {
 			if (!ParseUint32(value, options.config.vblank_frequency)) {
 				::printf("invalid vblank frequency: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--gpu-timestamps") {
+			if (!ParseGpuTimestampMode(value, options.config.gpu_timestamps)) {
+				::printf("invalid --gpu-timestamps (legacy or gpu): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--gpu-time-scale") {
+			if (!ParseGpuTimeScale(value, options.config.gpu_time_scale)) {
+				::printf("invalid --gpu-time-scale (%.1f to %.0f): %s\n",
+				         Config::MIN_GPU_TIME_SCALE, Config::MAX_GPU_TIME_SCALE, value.c_str());
+				return false;
+			}
+		} else if (arg == "--fps-limit") {
+			if (!ParseUint32(value, options.config.fps_limit) ||
+			    options.config.fps_limit > Config::MAX_FPS_LIMIT) {
+				::printf("invalid --fps-limit (0 to %u): %s\n", Config::MAX_FPS_LIMIT,
+				         value.c_str());
 				return false;
 			}
 		} else if (arg == "--console-language") {
@@ -729,6 +782,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.shader_timing_log = Common::PathFromUtf8(value);
+		} else if (arg == "--bench-render-csv") {
+			if (value.empty()) {
+				::printf("invalid --bench-render-csv path\n");
+				return false;
+			}
+			options.config.bench_render_csv = Common::PathFromUtf8(value);
 		} else if (arg == "--bench-exit-after-frames") {
 			if (!ParseUint64(value, options.config.bench_exit_after_frames)) {
 				::printf("invalid frame count: %s\n", value.c_str());

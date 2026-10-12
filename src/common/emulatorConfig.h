@@ -42,6 +42,14 @@ enum class PipelineCacheKey { Revision, Schema };
 //   Skip:  a graphics draw whose program or pipeline is not ready is skipped (KytyPlus
 //          behaviour); compute dispatches always wait.
 enum class AsyncPipelineMode { Off, Stall, Skip };
+// Where the 64-bit GPU timestamps a guest reads (EVENT_WRITE_EOP / COPY_DATA clock sources) come
+// from: Legacy = the clock when the emulator parses the packet, Gpu = the host GPU's own timestamp
+// of that point in the command stream, mapped onto the guest GPU clock.
+enum class GpuTimestampMode { Legacy, Gpu };
+
+constexpr double MIN_GPU_TIME_SCALE = 0.1;
+constexpr double MAX_GPU_TIME_SCALE = 16.0;
+constexpr uint32_t MAX_FPS_LIMIT    = 1000;
 
 using Keymap = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
@@ -74,6 +82,11 @@ struct ConfigOptions {
 	bool                   vr_enabled                  = false;
 	bool                   amd_cpu_enabled             = false;
 	uint32_t               vblank_frequency            = 60;
+	GpuTimestampMode       gpu_timestamps              = GpuTimestampMode::Legacy;
+	// Multiplier on the GPU durations a guest observes (1.0 = off); see --gpu-time-scale.
+	double                 gpu_time_scale              = 1.0;
+	// Presented frames per second cap (0 = off); see --fps-limit.
+	uint32_t               fps_limit                   = 0;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
@@ -150,6 +163,7 @@ struct ConfigOptions {
 	uint32_t               submit_coalesce_max         = 16;
 	// 0 = derive from the vblank frequency (period / 8); otherwise microseconds.
 	uint32_t               submit_coalesce_us          = 0;
+	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -175,6 +189,9 @@ bool     HideCursorEnabled();
 bool     VrEnabled();
 bool     AmdCpuEnabled();
 uint32_t GetVblankFrequency();
+GpuTimestampMode GetGpuTimestampMode();
+double   GetGpuTimeScale();
+uint32_t GetFpsLimit();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();
 

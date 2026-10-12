@@ -51,6 +51,9 @@ struct GraphicContext {
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               memory_priority_enabled               = false;
 	bool                               pageable_memory_enabled               = false;
+	// Host GPU timestamps for the guest GPU clock (--gpu-timestamps gpu).
+	bool                               calibrated_timestamps_enabled         = false;
+	bool                               host_query_reset_enabled              = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;

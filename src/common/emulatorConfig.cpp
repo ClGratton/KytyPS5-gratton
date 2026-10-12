@@ -40,6 +40,7 @@ void Load(const ConfigOptions& cfg) {
 	    .exit_after_frames = cfg.bench_exit_after_frames,
 	    .shader_timing_log = cfg.shader_timing_log,
 	    .gpu_trace         = cfg.bench_gpu_trace,
+	    .render_csv        = cfg.bench_render_csv,
 	});
 }
 
@@ -153,6 +154,18 @@ bool AmdCpuEnabled() {
 
 uint32_t GetVblankFrequency() {
 	return std::clamp(g_config->vblank_frequency, 30u, 360u);
+}
+
+GpuTimestampMode GetGpuTimestampMode() {
+	return g_config->gpu_timestamps;
+}
+
+double GetGpuTimeScale() {
+	return std::clamp(g_config->gpu_time_scale, MIN_GPU_TIME_SCALE, MAX_GPU_TIME_SCALE);
+}
+
+uint32_t GetFpsLimit() {
+	return std::min(g_config->fps_limit, MAX_FPS_LIMIT);
 }
 
 uint32_t GetConsoleLanguage() {

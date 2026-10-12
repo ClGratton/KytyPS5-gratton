@@ -517,6 +517,10 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported_features12.shaderSharedInt64Atomics;
+	features12.hostQueryReset           = supported_features12.hostQueryReset;
+	graphics.host_query_reset_enabled   = features12.hostQueryReset == VK_TRUE;
+	graphics.calibrated_timestamps_enabled =
+	    HasExtension(device_extensions, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
 	vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR workgroup_layout {};
 	workgroup_layout.workgroupMemoryExplicitLayout =
 	    supported_workgroup_layout.workgroupMemoryExplicitLayout;
@@ -1071,6 +1075,7 @@ void WindowContext::CreateVulkan() {
 			}
 		}
 		for (const auto* extension: {VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
+		                             VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
 		                             VK_KHR_MAINTENANCE_8_EXTENSION_NAME,
 		                             VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,
 		                             VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME,

@@ -14,6 +14,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pipelineLookahead.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/renderer/gpuTimestamps.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -452,7 +453,9 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 		EXIT("invalid reference-clock copy, dst=0x%016" PRIx64 " size=%u\n", dst_address,
 		     num_bytes);
 	}
-	const auto value = Sync::ReadReferenceClock();
+	const auto value = GpuTimestamps::SampleGuestClock(
+	    CurrentBuffer(), reinterpret_cast<void*>(dst_address), num_bytes,
+	    GpuTimestamps::Point::TopOfPipe);
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
 	if (clock_log_count.fetch_add(1) < 64) {
@@ -1400,7 +1403,9 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 				}
 			} else {
 				if (event_write_source == 0x04) {
-					value = Sync::ReadReferenceClock();
+					value = GpuTimestamps::SampleGuestClock(
+					    command, dst_gpu_addr, sizeof(uint64_t),
+					    GpuTimestamps::Point::BottomOfPipe);
 				}
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
@@ -1643,6 +1648,7 @@ void CommandProcessor::Flip() {
 	auto& command = CurrentBuffer();
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
+	GpuTimestamps::OnGuestFlip(command);
 	Sync::WriteAtEndOfPipeOnlyFlip(m_submit_id, command, m_flip.handle, m_flip.index,
 	                               m_flip.flip_mode, m_flip.flip_arg, request);
 	GetScheduler().Flush();
@@ -1664,6 +1670,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	std::memcpy(dst_gpu_addr, &value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
+	GpuTimestamps::OnGuestFlip(command);
 	Sync::WriteAtEndOfPipeWithFlip32(m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr),
 	                                 value, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                 m_flip.flip_arg, request);
@@ -1692,6 +1699,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	std::memcpy(dst_gpu_addr, &value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
+	GpuTimestamps::OnGuestFlip(command);
 	Sync::WriteAtEndOfPipeWithInterruptWriteBackFlip32(
 	    m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle,
 	    m_flip.index, m_flip.flip_mode, m_flip.flip_arg, request, m_interrupt_event_id);

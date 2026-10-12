@@ -1,5 +1,6 @@
 #include "common/benchInstrument.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <fmt/format.h>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -40,6 +42,10 @@ struct State {
 	Options                                              options;
 	std::vector<FrameRow>                                frames;
 	std::vector<std::string>                             timing_rows;
+	// Render passes of the current guest frame (key = width << 32 | height) and finished rows.
+	std::map<uint64_t, uint32_t>                         passes;
+	std::vector<std::string>                             render_rows;
+	uint64_t                                             flip_index = 0;
 	bool                                                 exit_hooks_registered = false;
 	bool                                                 exit_requested        = false;
 	std::array<HitCounters, static_cast<size_t>(HitSlot::Count)> hits;
@@ -78,6 +84,20 @@ void FlushFramesLocked(State& state) {
 		std::fclose(file);
 	}
 	state.frames.clear();
+}
+
+void FlushRenderLocked(State& state) {
+	if (state.render_rows.empty() || state.options.render_csv.empty()) {
+		state.render_rows.clear();
+		return;
+	}
+	if (std::FILE* file = OpenAppend(state.options.render_csv, "flip_idx,t_ns,flip_w,flip_h,passes\n")) {
+		for (const auto& row: state.render_rows) {
+			std::fputs(row.c_str(), file);
+		}
+		std::fclose(file);
+	}
+	state.render_rows.clear();
 }
 
 constexpr const char* kTimingHeader = "t_ns,kind,key_hash,dur_ns,thread,gpu_thread,detail\n";
@@ -122,6 +142,7 @@ void Configure(const Options& options) {
 	std::lock_guard lock(state.mutex);
 	FlushFramesLocked(state);
 	FlushTimingLocked(state);
+	FlushRenderLocked(state);
 	state.options        = options;
 	state.exit_requested = false;
 	const bool frames    = !options.frames_csv.empty() || options.exit_after_frames != 0;
@@ -139,6 +160,47 @@ void Configure(const Options& options) {
 	detail::g_frames_enabled.store(frames, std::memory_order_relaxed);
 	detail::g_timing_enabled.store(timing, std::memory_order_relaxed);
 	detail::g_trace_enabled.store(options.gpu_trace, std::memory_order_relaxed);
+	state.passes.clear();
+	state.flip_index = 0;
+	if (!options.render_csv.empty()) {
+		state.render_rows.reserve(1u << 14);
+		if (!state.exit_hooks_registered) {
+			state.exit_hooks_registered = true;
+			std::atexit(FlushAtExit);
+			std::at_quick_exit(FlushAtExit);
+		}
+	}
+	detail::g_render_enabled.store(!options.render_csv.empty(), std::memory_order_relaxed);
+}
+
+void RecordRenderPass(uint32_t width, uint32_t height) {
+	auto&           state = GetState();
+	std::lock_guard lock(state.mutex);
+	state.passes[(static_cast<uint64_t>(width) << 32u) | height]++;
+}
+
+void RecordGuestFlip(uint32_t flip_width, uint32_t flip_height) {
+	const auto      t_ns  = NowNs();
+	auto&           state = GetState();
+	std::lock_guard lock(state.mutex);
+	std::vector<std::pair<uint64_t, uint32_t>> sizes(state.passes.begin(), state.passes.end());
+	std::sort(sizes.begin(), sizes.end(), [](const auto& a, const auto& b) {
+		const auto area_a = (a.first >> 32u) * (a.first & 0xffffffffu);
+		const auto area_b = (b.first >> 32u) * (b.first & 0xffffffffu);
+		return area_a != area_b ? area_a > area_b : a.first > b.first;
+	});
+	std::string row = std::to_string(++state.flip_index) + "," + std::to_string(t_ns) + "," +
+	                  std::to_string(flip_width) + "," + std::to_string(flip_height) + ",";
+	for (size_t i = 0; i < sizes.size(); i++) {
+		row += (i == 0 ? "" : ";") + std::to_string(sizes[i].first >> 32u) + "x" +
+		       std::to_string(sizes[i].first & 0xffffffffu) + ":" + std::to_string(sizes[i].second);
+	}
+	row += "\n";
+	state.render_rows.push_back(std::move(row));
+	state.passes.clear();
+	if (state.render_rows.size() >= kPeriodicFlushRows / 8) {
+		FlushRenderLocked(state);
+	}
 }
 
 bool RecordPresent(uint64_t frame_idx) {
@@ -235,6 +297,7 @@ void Flush() {
 	auto&           state = GetState();
 	std::lock_guard lock(state.mutex);
 	FlushFramesLocked(state);
+	FlushRenderLocked(state);
 	if (!state.options.shader_timing_log.empty()) {
 		static constexpr std::array<const char*, static_cast<size_t>(HitSlot::Count)> names = {
 		    "summary_materialize_hit", "summary_swappc_refresh_hit"};

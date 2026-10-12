@@ -256,6 +256,15 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 		args << "--tessellation";
 	}
 	args << "--vblank-frequency" << QString::number(info.vblank_frequency);
+	if (info.fps_limit > 0) {
+		args << "--fps-limit" << QString::number(info.fps_limit);
+	}
+	if (info.gpu_time_scale_percent != 100) {
+		args << "--gpu-time-scale" << QString::number(info.gpu_time_scale_percent / 100.0, 'f', 2);
+	}
+	if (info.gpu_timestamps == Configuration::GpuTimestamps::Gpu) {
+		args << "--gpu-timestamps" << "gpu";
+	}
 	args << "--console-language" << QString::number(info.console_language);
 	args << "--vulkan-validation" << BoolArg(info.vulkan_validation_enabled);
 	args << "--shader-validation" << BoolArg(info.shader_validation_enabled);
