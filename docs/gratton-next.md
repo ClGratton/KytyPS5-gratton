@@ -25,13 +25,13 @@ the command line (`bench/config-play-next.json` in the bench tree).
 | `--elide-barriers` / `--known-fills` / `--clean-guest-reads` | true | drain cuts (K14, K22, K20a): 3 vs 3 at the pin +6.2 % fps (45.4 -> 48.2), no VRAM exit, tests; here tail-45 s fps 48.6 / 48.8 (before: 44.4-46.4) and about 450 of 870 guest barriers a frame elided |
 | `--async-pipelines` | stall | the draw waits for its pipeline on a worker pool; no correctness difference seen (stall-only runs normal) |
 | `--pipeline-lookahead` | true | halves the GPU-thread wait on pipeline jobs (16.9 -> 8.4 s) and removes most first-play stutter; hang path fixed in code (not reproduced in 17+ runs); **the desert "lemon" colour state is not cleared** (about 1 run in 3-4, stock also showed it 1 in 4; 1 of 4 here). Fall back to `false` if the colour bothers you |
-| `--gpu-timestamps` | gpu (`--gpu-time-scale 1.0`) | real GPU timestamps for titles that size resolution from GPU time; neutral on Astro Bot here (fps 44.4 / 46.4 vs legacy 45.0 / 45.2, lemon 0 of 2 vs 1 of 2). An earlier 6 of 7 vs 3 of 8 lemon correlation did not reproduce |
+| `--gpu-timestamps` | gpu (now the default; no flag needed) | real GPU timestamps for titles that size resolution from GPU time; neutral on Astro Bot here (fps 44.4 / 46.4 vs legacy 45.0 / 45.2, lemon 0 of 2 vs 1 of 2). An earlier 6 of 7 vs 3 of 8 lemon correlation did not reproduce |
 | `--pad-speaker-volume` | 15 | already the code default (quiet DualSense speaker); passed explicitly |
 | `--debug-hang-watchdog` | 15 | diagnostics only: reports a stuck frame counter |
-| VRAM | defaults | the reclaim + retry allocation ladder and the LDS shrink are always on; `--vram-paging` stays off (vram.md: not needed to survive, 5.7 vs 4.2 fps at a 7 GB ballast does not justify a default change) |
+| VRAM | defaults | the reclaim + retry allocation ladder and the LDS shrink are always on; `--vram-paging` is now the default (docs/defaults.md: neutral in normal play, 35 vs 17 fps at a forced 5.7 GB budget) |
 
 Left off on purpose: `--pipelines-unoptimized-first` (K33: no gain on NVIDIA 610.57), `--skip-ir-validation` (K29: 0.6 s per run),
-`--readback-queue` (K20: no gain), `--bda-sync-skip` (K15: under 1 % here), `--gc-buffer-own-share` (K42: for 8 GB cards, set 25 there).
+`--readback-queue` (K20: no gain), `--bda-sync-skip` (K15: under 1 % here), `--gc-buffer-own-share` (K42: left at 0, it hurts with paging on, docs/defaults.md).
 
 ## Validation (headless 60 Hz, fresh cache unless noted; binary e4728ccb = all merges, flags above)
 - **Smoke (skip3 to s14), 6 runs over the two builds:** no crash, desert and Astro correct by eye. Final build, 2 runs: tail-45 s fps
