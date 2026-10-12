@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
+#include "common/hleTrace.h"
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
@@ -647,6 +648,28 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+// Text form of a code address as " <module>+0x<offset>", or nothing when it is outside every module.
+static void LocateAddressText(uint64_t address, char* out, size_t size) {
+	auto* linker = Common::Singleton<Loader::RuntimeLinker>::Instance();
+	if (linker == nullptr || size == 0) {
+		return;
+	}
+	if (auto* program = linker->FindProgramByAddr(address)) {
+		std::snprintf(out, size, " %s+0x%" PRIx64,
+		              Common::FilenameWithoutDirectory(
+		                  Common::PathToGenericString(program->file_name)).c_str(),
+		              address - program->base_vaddr);
+	}
+}
+
+static void LocateAddress(uint64_t address, const char* label) {
+	char text[160] = {};
+	LocateAddressText(address, text, sizeof(text));
+	if (text[0] != '\0') {
+		std::printf("%s %016" PRIx64 " =%s\n", label, address, text);
+	}
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -680,6 +703,16 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		std::printf("--- Guest fault context ---\n");
 		std::printf("thread: %s\n", thread_name);
+		{
+			// module + offset of the faulting pc and of the return addresses on the frame-pointer
+			// chain, so the fault can be located in the (decrypted) eboot without a symbol file.
+			LocateAddress(info->exception_address, "pc  ");
+			void* frames[32] = {};
+			const int depth  = WalkGuestStack(info->rbp, info->rsp, frames, 32);
+			for (int i = 0; i < depth; i++) {
+				LocateAddress(reinterpret_cast<uint64_t>(frames[i]), "call");
+			}
+		}
 		std::printf("rax=%016" PRIx64 " rbx=%016" PRIx64 " rcx=%016" PRIx64 " rdx=%016" PRIx64 "\n"
 		            "rsi=%016" PRIx64 " rdi=%016" PRIx64 " rbp=%016" PRIx64 " rsp=%016" PRIx64 "\n"
 		            "r8 =%016" PRIx64 " r9 =%016" PRIx64 " r10=%016" PRIx64 " r11=%016" PRIx64 "\n"
@@ -704,6 +737,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			std::printf("\n");
 		}
 		std::fflush(stdout);
+		Common::HleTrace::Dump(stdout, 64, 12, &LocateAddressText);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",

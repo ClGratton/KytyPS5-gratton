@@ -1,5 +1,6 @@
 #include "kernel/memory.h"
 
+#include "common/hleTrace.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -2387,13 +2388,13 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
                                                    int flags, const char* name) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return MapFlexibleMemory(addr_in_out, len, prot, flags, name);
+	return Common::HleTrace::Ret(MapFlexibleMemory(addr_in_out, len, prot, flags, name));
 }
 
 int KYTY_SYSV_ABI KernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return MapFlexibleMemory(addr_in_out, len, prot, flags, "");
+	return Common::HleTrace::Ret(MapFlexibleMemory(addr_in_out, len, prot, flags, ""));
 }
 
 int KYTY_SYSV_ABI KernelSetPrtAperture(int index, void* addr, size_t len) {
@@ -2621,7 +2622,7 @@ static int UnmapMemory(uint64_t vaddr, size_t len) {
 int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return UnmapMemory(vaddr, len);
+	return Common::HleTrace::Ret(UnmapMemory(vaddr, len));
 }
 
 size_t KYTY_SYSV_ABI KernelGetDirectMemorySize() {
@@ -2954,12 +2955,12 @@ int KYTY_SYSV_ABI KernelReleaseDirectMemory(int64_t start, size_t len) {
 
 	const int validation = ValidateDirectReleaseRange(start, len);
 	if (validation != OK) {
-		return validation;
+		return Common::HleTrace::Ret(validation);
 	}
 	if (len != 0) {
 		(void)ReleaseDirectMemoryInternal(start, len);
 	}
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
@@ -2971,11 +2972,11 @@ int KYTY_SYSV_ABI KernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
 
 	const int validation = ValidateDirectReleaseRange(start, len);
 	if (validation != OK || len == 0) {
-		return validation;
+		return Common::HleTrace::Ret(validation);
 	}
 
 	const int result = ReleaseDirectMemoryInternal(start, len);
-	return result == KERNEL_ERROR_EACCES ? KERNEL_ERROR_ENOENT : result;
+	return Common::HleTrace::Ret(result == KERNEL_ERROR_EACCES ? KERNEL_ERROR_ENOENT : result);
 }
 
 // The ABI entry points and batch operations hold g_memory_operation_mutex.
@@ -3212,14 +3213,14 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
                                         int64_t direct_memory_start, size_t alignment) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "");
+	return Common::HleTrace::Ret(MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, ""));
 }
 
 int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags,
                                          int64_t direct_memory_start, size_t alignment) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "", type);
+	return Common::HleTrace::Ret(MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, "", type));
 }
 
 int MapAutomaticMemory(uint64_t vaddr, size_t size, int type, int prot) {
@@ -3262,14 +3263,14 @@ int KYTY_SYSV_ABI KernelMapNamedDirectMemory(void** addr, size_t len, int prot, 
 	LOGF("\t name = %s\n", name != nullptr ? name : "(null)");
 
 	if (name == nullptr) {
-		return KERNEL_ERROR_EFAULT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFAULT);
 	}
 
 	if (std::strlen(name) >= KERNEL_MAXIMUM_NAME_LENGTH) {
-		return KERNEL_ERROR_ENAMETOOLONG;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENAMETOOLONG);
 	}
 
-	return MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, name);
+	return Common::HleTrace::Ret(MapDirectMemory(addr, len, prot, flags, direct_memory_start, alignment, name));
 }
 
 int KYTY_SYSV_ABI KernelIsAddressSanitizerEnabled() {
@@ -3522,21 +3523,21 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 	constexpr int    GUEST_MAP_NO_OVERWRITE = 0x80;
 
 	if (addr == nullptr || len == 0 || (len & (PAGE_SIZE - 1)) != 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 	if (alignment != 0 && (alignment & (alignment - 1)) != 0 &&
 	    (alignment & (PAGE_SIZE - 1)) != 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	uint64_t out_addr            = 0;
 	bool     range_already_added = false;
 	if ((flags & GUEST_MAP_FIXED) != 0) {
 		if (in_addr == 0 || (in_addr & (PAGE_SIZE - 1)) != 0) {
-			return KERNEL_ERROR_EINVAL;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 		}
 		if ((flags & GUEST_MAP_NO_OVERWRITE) != 0 && g_virtual_ranges->HasOverlap(in_addr, len)) {
-			return KERNEL_ERROR_ENOMEM;
+			return Common::HleTrace::Ret(KERNEL_ERROR_ENOMEM);
 		}
 		if (ReplaceFixedRangeWithReserved(in_addr, len)) {
 			out_addr            = in_addr;
@@ -3551,19 +3552,19 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 	}
 
 	if (out_addr == 0) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOMEM);
 	}
 
 	if (!range_already_added &&
 	    !g_virtual_ranges->Add(out_addr, len, 0, 0, 0, VirtualRangeType::Reserved, "anon")) {
-		return KERNEL_ERROR_EBUSY;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBUSY);
 	}
 
 	*addr = reinterpret_cast<void*>(out_addr);
 
 	LOGF("\t out_addr  = 0x%016" PRIx64 "\n", out_addr);
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
@@ -3663,12 +3664,12 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 	     vaddr, flags, info_size);
 
 	if (info == nullptr || info_size != sizeof(VirtualQueryInfo) || (flags != 0 && flags != 1)) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	VirtualRanges::Range candidate {};
 	if (!g_virtual_ranges->Query(vaddr, flags, &candidate)) {
-		return KERNEL_ERROR_EACCES;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EACCES);
 	}
 
 	std::memset(info, 0, sizeof(VirtualQueryInfo));
@@ -3700,7 +3701,7 @@ int KYTY_SYSV_ABI KernelVirtualQuery(const void* addr, int flags, VirtualQueryIn
 		     static_cast<int>(info->is_direct), info->name);
 	}
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelIsStack(void* addr, void** start, void** end) {
@@ -3958,14 +3959,14 @@ static int ProtectMemory(const void* addr, size_t len, int prot) {
 int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
-	return ProtectMemory(addr, len, prot);
+	return Common::HleTrace::Ret(ProtectMemory(addr, len, prot));
 }
 
 int KYTY_SYSV_ABI KernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
 	PRINT_NAME();
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
 	LOGF("\t type = %d\n", type);
-	return ProtectMemory(addr, len, prot);
+	return Common::HleTrace::Ret(ProtectMemory(addr, len, prot));
 }
 
 int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
@@ -3990,7 +3991,7 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 	};
 
 	if (entries == nullptr || num_entries < 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	int processed = 0;
@@ -4033,7 +4034,7 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 			if (num_entries_out != nullptr) {
 				*num_entries_out = processed;
 			}
-			return result;
+			return Common::HleTrace::Ret(result);
 		}
 	}
 
@@ -4041,13 +4042,13 @@ int KYTY_SYSV_ABI KernelBatchMap2(KernelBatchMapEntry* entries, int num_entries,
 		*num_entries_out = processed;
 	}
 
-	return (processed == num_entries ? OK : KERNEL_ERROR_EINVAL);
+	return Common::HleTrace::Ret((processed == num_entries ? OK : KERNEL_ERROR_EINVAL));
 }
 
 int KYTY_SYSV_ABI KernelBatchMap(KernelBatchMapEntry* entries, int num_entries,
                                  int* num_entries_out) {
 	constexpr int GUEST_MAP_FIXED = 0x10;
-	return KernelBatchMap2(entries, num_entries, num_entries_out, GUEST_MAP_FIXED);
+	return Common::HleTrace::Ret(KernelBatchMap2(entries, num_entries, num_entries_out, GUEST_MAP_FIXED));
 }
 
 static bool IsAligned(uint64_t value, uint64_t alignment) {
@@ -4076,10 +4077,10 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 	    (len & (POOL_PAGE_SIZE - 1u)) != 0 || phys_addr_out == nullptr ||
 	    (alignment != 0 &&
 	     (!std::has_single_bit(alignment) || (alignment & (POOL_PAGE_SIZE - 1u)) != 0))) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 	if (static_cast<uint64_t>(search_end - search_start) < len) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOMEM);
 	}
 
 	const auto effective_alignment = (alignment != 0 ? alignment : POOL_PAGE_SIZE);
@@ -4087,7 +4088,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 	if (!g_physical_memory->Alloc(static_cast<uint64_t>(search_start),
 	                              static_cast<uint64_t>(search_end), len, effective_alignment,
 	                              &phys_addr, 0, PhysicalMemory::AllocationKind::Pooled)) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOMEM);
 	}
 
 	g_pooled_memory->Expand(phys_addr, len);
@@ -4100,7 +4101,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 	     "\t phys_addr    = 0x%016" PRIx64 "\n",
 	     search_start, search_end, static_cast<uint64_t>(len), static_cast<uint64_t>(alignment),
 	     phys_addr);
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelMemoryPoolReserve(void* addr_in, size_t len, size_t alignment, int flags,
@@ -4121,11 +4122,11 @@ int KYTY_SYSV_ABI KernelMemoryPoolReserve(void* addr_in, size_t len, size_t alig
 	constexpr uint64_t POOL_RESERVE_ALIGNMENT = 0x200000;
 
 	if (addr_out == nullptr || len == 0 || !IsAligned(len, POOL_RESERVE_ALIGNMENT)) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 	if (alignment != 0 &&
 	    (!std::has_single_bit(alignment) || !IsAligned(alignment, POOL_RESERVE_ALIGNMENT))) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	void*      out_addr          = addr_in;
@@ -4137,17 +4138,17 @@ int KYTY_SYSV_ABI KernelMemoryPoolReserve(void* addr_in, size_t len, size_t alig
 		if (!g_virtual_ranges->Query(out_vaddr, 0, &reserved_range) ||
 		    reserved_range.start != out_vaddr || reserved_range.size != len ||
 		    !IsReservedRangeType(reserved_range.type)) {
-			return KERNEL_ERROR_EBUSY;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EBUSY);
 		}
 		if (!g_virtual_ranges->ReplaceSpan(out_vaddr, len, VirtualRangeType::Reserved, 0, 0, 0,
 		                                   VirtualRangeType::PoolReserved, reserved_range.name)) {
-			return KERNEL_ERROR_EBUSY;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EBUSY);
 		}
 		*addr_out = out_addr;
 		LOGF("\t out_addr  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(out_addr));
 	}
 
-	return ret;
+	return Common::HleTrace::Ret(ret);
 }
 
 int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int prot, int flags) {
@@ -4168,13 +4169,13 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 
 	if (addr == nullptr || len == 0 || !IsAligned(len, POOL_COMMIT_ALIGNMENT) ||
 	    (prot & PROT_CPU_EXEC) != 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	VirtualMemory::Mode mode     = VirtualMemory::Mode::NoAccess;
 	GpuAccessMode       gpu_mode = GpuAccessMode::NoAccess;
 	if (!DecodeMemoryProtection(prot, &mode, &gpu_mode)) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	const auto vaddr = reinterpret_cast<uint64_t>(addr);
@@ -4183,12 +4184,12 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 	if (!g_virtual_ranges->Query(vaddr, 0, &old_range) ||
 	    old_range.type != VirtualRangeType::PoolReserved ||
 	    len > old_range.size - (vaddr - old_range.start)) {
-		return KERNEL_ERROR_EACCES;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EACCES);
 	}
 
 	std::vector<PooledMemory::Mapping> mappings;
 	if (!g_pooled_memory->Allocate(vaddr, len, gpu_mode, &mappings)) {
-		return KERNEL_ERROR_ENOMEM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOMEM);
 	}
 
 	std::vector<PooledMemory::Mapping> mapped;
@@ -4210,7 +4211,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 			LOGF_COLOR(Log::Color::Red, "\t pool backing map failed: %s\n",
 			           GuestBackingStore::GetFailureReasonName(failure_reason));
 			rollback();
-			return KERNEL_ERROR_ENOMEM;
+			return Common::HleTrace::Ret(KERNEL_ERROR_ENOMEM);
 		}
 		mapped.push_back(mapping);
 	}
@@ -4218,7 +4219,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 	if (!g_virtual_ranges->ReplaceSpan(vaddr, len, VirtualRangeType::PoolReserved, 0, prot, type,
 	                                   VirtualRangeType::Pooled, old_range.name)) {
 		rollback();
-		return KERNEL_ERROR_EBUSY;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBUSY);
 	}
 
 	MapGpuRange(vaddr, len);
@@ -4229,7 +4230,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int p
 
 	g_memory_pool_committed.fetch_add(len, std::memory_order_relaxed);
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
@@ -4295,12 +4296,12 @@ int KYTY_SYSV_ABI KernelMemoryPoolDecommit(void* addr, size_t len, int flags) {
 	constexpr uint64_t POOL_COMMIT_ALIGNMENT = 0x10000;
 
 	if (addr == nullptr || len == 0 || !IsAligned(len, POOL_COMMIT_ALIGNMENT)) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	const auto vaddr = reinterpret_cast<uint64_t>(addr);
 	if (UINT64_MAX - vaddr < len) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 	const auto end  = vaddr + len;
 	auto       scan = vaddr;
@@ -4309,17 +4310,17 @@ int KYTY_SYSV_ABI KernelMemoryPoolDecommit(void* addr, size_t len, int flags) {
 		if (!g_virtual_ranges->Query(scan, 0, &scan_range) ||
 		    (scan_range.type != VirtualRangeType::Pooled &&
 		     scan_range.type != VirtualRangeType::PoolReserved)) {
-			return KERNEL_ERROR_EACCES;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EACCES);
 		}
 		const auto next = std::min(end, scan_range.start + scan_range.size);
 		if (next <= scan) {
-			return KERNEL_ERROR_EACCES;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EACCES);
 		}
 		scan = next;
 	}
 
 	UnmapGpuRange(vaddr, len);
-	return DecommitMemoryPoolRange(vaddr, len);
+	return Common::HleTrace::Ret(DecommitMemoryPoolRange(vaddr, len));
 }
 
 int KYTY_SYSV_ABI KernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entries, int num_entries,
@@ -4329,7 +4330,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entrie
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
 
 	if (entries == nullptr || num_entries < 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	enum MemoryPoolOp {
@@ -4375,7 +4376,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entrie
 	}
 
 	(void)flags;
-	return result;
+	return Common::HleTrace::Ret(result);
 }
 
 int KYTY_SYSV_ABI KernelMemoryPoolGetBlockStats(KernelMemoryPoolBlockStats* output,

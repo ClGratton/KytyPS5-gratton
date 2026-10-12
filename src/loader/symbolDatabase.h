@@ -49,6 +49,9 @@ public:
 
 	void DbgDump(const std::string& folder, const std::string& file_name);
 
+	// --debug-hle-trace: rebinds every function symbol to a recording thunk (common/hleTrace.h).
+	void WrapFunctionsForTrace();
+
 	KYTY_CLASS_NO_COPY(SymbolDatabase);
 
 	static std::string GenerateName(const SymbolResolve& s);

@@ -137,6 +137,10 @@ static void PrintUsage() {
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
+	::printf("  --debug-hle-trace <true|false>       Debug: record the last HLE calls of every guest thread\n"
+	         "                                       (name, first arguments, caller, result for file and\n"
+	         "                                       memory calls) and print them in the fatal fault report.\n"
+	         "                                       Linux x86-64 only. Default: false.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -562,6 +566,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			} else {
 				::printf("invalid lookahead kinds (expected all, graphics, compute or none): %s\n",
 				         value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-hle-trace") {
+			if (!ParseBool(value, options.config.hle_trace)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--debug-hang-watchdog") {

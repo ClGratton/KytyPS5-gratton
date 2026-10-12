@@ -1,5 +1,6 @@
 #include "kernel/fileSystem.h"
 
+#include "common/hleTrace.h"
 #include "common/archive.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -405,9 +406,10 @@ std::filesystem::path GetRealFilename(const std::string& mounted_file_name) {
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 	PRINT_NAME();
+	Common::HleTrace::NoteString(path);
 
 	if (path == nullptr) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	auto flags_u = static_cast<uint32_t>(flags);
@@ -465,23 +467,23 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 		LOGF_COLOR(Log::Color::Green, "\tOpen device: %s, [ok]\n",
 		           Common::PathToString(file->real_name).c_str());
 
-		return descriptor;
+		return Common::HleTrace::Ret(descriptor);
 	}
 
 	file->real_name = g_mount_points->ResolvePath(file->name);
 	if (file->real_name.empty()) {
 		g_files->DeleteDescriptor(descriptor);
-		return KERNEL_ERROR_ENOENT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOENT);
 	}
 	if (Common::IsArchivePath(file->real_name) &&
 	    (rw_mode != Common::File::Mode::Read || trunc || creat)) {
 		g_files->DeleteDescriptor(descriptor);
-		return KERNEL_ERROR_EROFS;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EROFS);
 	}
 
 	if (trunc && rw_mode == Common::File::Mode::Read) {
 		g_files->DeleteDescriptor(descriptor);
-		return KERNEL_ERROR_EACCES;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EACCES);
 	}
 
 	const auto info = Common::File::GetInfo(file->real_name);
@@ -491,13 +493,13 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 	// A missing path opened without O_CREAT is ENOENT
 	if (!creat && !dir_exist && !file_exist) {
 		g_files->DeleteDescriptor(descriptor);
-		return KERNEL_ERROR_ENOENT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOENT);
 	}
 
 	if (directory || dir_exist) {
 		if (!dir_exist) {
 			g_files->DeleteDescriptor(descriptor);
-			return KERNEL_ERROR_ENOTDIR;
+			return Common::HleTrace::Ret(KERNEL_ERROR_ENOTDIR);
 		}
 
 		EXIT_NOT_IMPLEMENTED(!directory && rw_mode != Common::File::Mode::Read);
@@ -520,7 +522,7 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 
 		if (excl && creat && file_exist) {
 			g_files->DeleteDescriptor(descriptor);
-			return KERNEL_ERROR_EEXIST;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EEXIST);
 		}
 
 		if (creat && (!file_exist || trunc)) {
@@ -546,30 +548,30 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 
 		if (!result || file->f.IsInvalid()) {
 			g_files->DeleteDescriptor(descriptor);
-			return KERNEL_ERROR_EACCES;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EACCES);
 		}
 	}
 
 	file->opened = true;
-	return descriptor;
+	return Common::HleTrace::Ret(descriptor);
 }
 
 int KYTY_SYSV_ABI KernelClose(int d) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EPERM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EPERM);
 	}
 
 	if (::Libs::Network::Net::IsSocket(d)) {
 		const auto result = ::Libs::Network::Net::SocketClose(d);
-		return (result == OK ? OK : PosixToKernel(::Libs::Network::NetToPosix(result)));
+		return Common::HleTrace::Ret((result == OK ? OK : PosixToKernel(::Libs::Network::NetToPosix(result))));
 	}
 
 	auto* file = g_files->GetFile(d);
 
 	if (file == nullptr) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	EXIT_IF(!file->opened);
@@ -584,7 +586,7 @@ int KYTY_SYSV_ABI KernelClose(int d) {
 
 	g_files->DeleteDescriptor(d);
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelFcntl(int d, int command, int arg) {
@@ -612,35 +614,35 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EPERM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EPERM);
 	}
 
 	if (buf == nullptr) {
-		return KERNEL_ERROR_EFAULT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFAULT);
 	}
 
 	if (::Libs::Network::Net::IsSocket(d)) {
 		const auto result = ::Libs::Network::Net::Recv(d, buf, nbytes, 0);
-		return (result >= 0 ? result : PosixToKernel(*Posix::GetErrorAddr()));
+		return Common::HleTrace::Ret((result >= 0 ? result : PosixToKernel(*Posix::GetErrorAddr())));
 	}
 
 	auto* file = g_files->GetFile(d);
 
 	if (file == nullptr) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	EXIT_IF(!file->opened);
 
 	if (nbytes > INT_MAX) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 	if (file->directory) {
 		Common::LockGuard lock(file->mutex);
 		const auto        bytes = ReadDirectory(file, buf, nbytes);
 		LOGF("\tRead %" PRIu64 " directory bytes from: %s\n", bytes,
 		     Common::PathToString(file->real_name).c_str());
-		return static_cast<int64_t>(bytes);
+		return Common::HleTrace::Ret(static_cast<int64_t>(bytes));
 	}
 
 	if (file->special == SpecialFile::Random) {
@@ -649,7 +651,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 		LOGF("\tRead %" PRIu64 " random bytes from: %s\n", static_cast<uint64_t>(nbytes),
 		     Common::PathToString(file->real_name).c_str());
 
-		return static_cast<int64_t>(nbytes);
+		return Common::HleTrace::Ret(static_cast<int64_t>(nbytes));
 	}
 
 	file->mutex.Lock();
@@ -667,19 +669,19 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 
 	if (is_invalid) {
 		LOGF("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	LOGF("\tRead %u bytes from: %s\n", bytes_read, Common::PathToString(file->real_name).c_str());
 
-	return bytes_read;
+	return Common::HleTrace::Ret(bytes_read);
 }
 
 int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	PRINT_NAME();
 
 	if (buf == nullptr) {
-		return KERNEL_ERROR_EFAULT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFAULT);
 	}
 
 	if (d == 1 || d == 2) {
@@ -688,25 +690,25 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 		const auto flush_ok = std::fflush(out) == 0;
 
 		if (written != nbytes || !flush_ok) {
-			return KERNEL_ERROR_EIO;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 		}
 
-		return static_cast<int64_t>(written);
+		return Common::HleTrace::Ret(static_cast<int64_t>(written));
 	}
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	if (::Libs::Network::Net::IsSocket(d)) {
 		const auto result = ::Libs::Network::Net::Send(d, buf, nbytes, 0);
-		return (result >= 0 ? result : PosixToKernel(*Posix::GetErrorAddr()));
+		return Common::HleTrace::Ret((result >= 0 ? result : PosixToKernel(*Posix::GetErrorAddr())));
 	}
 
 	auto* file = g_files->GetFile(d);
 
 	if (file == nullptr || !file->opened || !file->writable) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	EXIT_NOT_IMPLEMENTED(file->directory);
@@ -732,33 +734,33 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 
 	if (is_invalid) {
 		LOGF("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	LOGF("\tWrite %u bytes to: %s\n", bytes_written, Common::PathToString(file->real_name).c_str());
 
-	return bytes_written;
+	return Common::HleTrace::Ret(bytes_written);
 }
 
 int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EPERM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EPERM);
 	}
 
 	if (buf == nullptr) {
-		return KERNEL_ERROR_EFAULT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFAULT);
 	}
 
 	if (offset < 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	auto* file = g_files->GetFile(d);
 
 	if (file == nullptr) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	EXIT_NOT_IMPLEMENTED(file->directory);
@@ -773,7 +775,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 		LOGF("\tRead %" PRIu64 " random bytes (pos = %" PRId64 ") from: %s\n",
 		     static_cast<uint64_t>(nbytes), offset, Common::PathToString(file->real_name).c_str());
 
-		return static_cast<int64_t>(nbytes);
+		return Common::HleTrace::Ret(static_cast<int64_t>(nbytes));
 	}
 
 	file->mutex.Lock();
@@ -794,13 +796,13 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 
 	if (is_invalid) {
 		LOGF("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	LOGF("\tRead %u bytes (pos = %" PRId64 ") from: %s\n", bytes_read, offset,
 	     Common::PathToString(file->real_name).c_str());
 
-	return bytes_read;
+	return Common::HleTrace::Ret(bytes_read);
 }
 
 static int ValidateIovecs(const KernelIovec* iov, int iovcnt, int64_t offset,
@@ -836,26 +838,26 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 	size_t                   total = 0;
 	const int                error = ValidateIovecs(iov, iovcnt, offset, &buffers, &total);
 	if (error != OK) {
-		return error;
+		return Common::HleTrace::Ret(error);
 	}
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 	if (::Libs::Network::Net::IsSocket(d)) {
-		return KERNEL_ERROR_ESPIPE;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ESPIPE);
 	}
 	auto* file = g_files->GetFile(d);
 	if (file == nullptr || !file->opened || !file->readable) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	Common::LockGuard lock(file->mutex);
 	if (file->directory) {
-		return KERNEL_ERROR_EISDIR;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EISDIR);
 	}
 	if (total == 0) {
-		return 0;
+		return Common::HleTrace::Ret(0);
 	}
 	if (file->special == SpecialFile::Random) {
 		for (const auto& buffer: buffers) {
@@ -865,16 +867,16 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 				FillRandomBuffer(buffer.iov_base, buffer.iov_len);
 			}
 		}
-		return static_cast<int64_t>(total);
+		return Common::HleTrace::Ret(static_cast<int64_t>(total));
 	}
 	if (file->f.IsInvalid()) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	const auto position  = file->f.Tell();
 	const auto file_size = file->f.Size();
 	if (!file->f.Seek(static_cast<uint64_t>(offset))) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 	auto    remaining  = static_cast<uint64_t>(offset) < file_size ? file_size - offset : 0;
 	int64_t bytes_read = 0;
@@ -896,32 +898,32 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 		}
 	}
 	if (!file->f.Seek(position)) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 	LOGF("\tReadv %" PRId64 " bytes (pos = %" PRId64 ", iovcnt = %d) from: %s\n", bytes_read,
 	     offset, iovcnt, Common::PathToString(file->real_name).c_str());
-	return bytes_read;
+	return Common::HleTrace::Ret(bytes_read);
 }
 
 int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EPERM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EPERM);
 	}
 
 	if (buf == nullptr) {
-		return KERNEL_ERROR_EFAULT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFAULT);
 	}
 
 	if (offset < 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	auto* file = g_files->GetFile(d);
 
 	if (file == nullptr || !file->opened || !file->writable) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	EXIT_NOT_IMPLEMENTED(file->directory);
@@ -947,13 +949,13 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 
 	if (is_invalid) {
 		LOGF("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	LOGF("\tWrite %u bytes (pos = %" PRId64 ") to: %s\n", bytes_written, offset,
 	     Common::PathToString(file->real_name).c_str());
 
-	return bytes_written;
+	return Common::HleTrace::Ret(bytes_written);
 }
 
 int64_t KYTY_SYSV_ABI KernelPwritev(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
@@ -963,40 +965,40 @@ int64_t KYTY_SYSV_ABI KernelPwritev(int d, const KernelIovec* iov, int iovcnt, i
 	size_t                   total = 0;
 	const int                error = ValidateIovecs(iov, iovcnt, offset, &buffers, &total);
 	if (error != OK) {
-		return error;
+		return Common::HleTrace::Ret(error);
 	}
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 	if (::Libs::Network::Net::IsSocket(d)) {
-		return KERNEL_ERROR_ESPIPE;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ESPIPE);
 	}
 	auto* file = g_files->GetFile(d);
 	if (file == nullptr || !file->opened || !file->writable) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 	Common::LockGuard lock(file->mutex);
 	if (file->directory) {
-		return KERNEL_ERROR_EISDIR;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EISDIR);
 	}
 	if (file->special != SpecialFile::None) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 	if (total == 0) {
-		return 0;
+		return Common::HleTrace::Ret(0);
 	}
 	if (file->f.IsInvalid()) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	const auto position = file->f.Tell();
 	const auto target   = (file->append ? file->f.Size() : static_cast<uint64_t>(offset));
 	if (target > static_cast<uint64_t>(INT64_MAX) - total) {
-		return KERNEL_ERROR_EFBIG;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFBIG);
 	}
 	if (!file->f.Seek(target)) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	int64_t bytes_written = 0;
@@ -1014,38 +1016,38 @@ int64_t KYTY_SYSV_ABI KernelPwritev(int d, const KernelIovec* iov, int iovcnt, i
 	const bool flushed  = !file->sync_writes || file->f.Flush();
 	const bool restored = file->f.Seek(position);
 	if (!flushed || !restored) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	LOGF("\tWritev %" PRId64 " bytes (pos = %" PRId64 ", iovcnt = %d) to: %s\n", bytes_written,
 	     offset, iovcnt, Common::PathToString(file->real_name).c_str());
-	return bytes_written;
+	return Common::HleTrace::Ret(bytes_written);
 }
 
 int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	auto* file = g_files->GetFile(d);
 
 	if (file == nullptr) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	EXIT_IF(!file->opened);
 
 	if (file->special != SpecialFile::None) {
-		return KERNEL_ERROR_ESPIPE;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ESPIPE);
 	}
 
 	Common::LockGuard lock(file->mutex);
 
 	if (!file->directory && file->f.IsInvalid()) {
 		LOGF("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	uint64_t base = 0;
@@ -1059,17 +1061,17 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 	uint64_t position = 0;
 	if (offset >= 0) {
 		if (base > static_cast<uint64_t>(INT64_MAX - offset)) {
-			return KERNEL_ERROR_EOVERFLOW;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EOVERFLOW);
 		}
 		position = base + static_cast<uint64_t>(offset);
 	} else {
 		const auto distance = uint64_t {0} - static_cast<uint64_t>(offset);
 		if (base < distance) {
-			return KERNEL_ERROR_EINVAL;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 		}
 		position = base - distance;
 		if (position > INT64_MAX) {
-			return KERNEL_ERROR_EOVERFLOW;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EOVERFLOW);
 		}
 	}
 
@@ -1083,14 +1085,15 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 	LOGF("\tLseek (pos = %" PRIu64 ") to: %s\n", position,
 	     Common::PathToString(file->real_name).c_str());
 
-	return static_cast<int64_t>(position);
+	return Common::HleTrace::Ret(static_cast<int64_t>(position));
 }
 
 int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
 	PRINT_NAME();
+	Common::HleTrace::NoteString(path);
 
 	if (path == nullptr || sb == nullptr) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	LOGF("\t KernelStat: %s\n", path);
@@ -1100,7 +1103,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
 	const auto info = Common::File::GetInfo(real_file_name);
 	if (!info) {
 		LOGF("\t file not found\n");
-		return KERNEL_ERROR_ENOENT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOENT);
 	}
 
 	const bool is_dir = !info->is_file;
@@ -1130,24 +1133,24 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
 	stat.st_birthtim = stat.st_mtim;
 	*sb              = stat;
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb) {
 	PRINT_NAME();
 
 	if (d < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EPERM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EPERM);
 	}
 
 	if (sb == nullptr) {
-		return KERNEL_ERROR_EFAULT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFAULT);
 	}
 
 	auto* file = g_files->GetFile(d);
 
 	if (file == nullptr) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	EXIT_IF(!file->opened);
@@ -1176,7 +1179,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb) {
 
 		if (is_invalid) {
 			LOGF("\tfile is invalid\n");
-			return KERNEL_ERROR_EIO;
+			return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 		}
 
 		stat.st_size    = static_cast<int64_t>(size);
@@ -1194,7 +1197,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb) {
 	stat.st_birthtim = stat.st_mtim;
 	*sb              = stat;
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelFtruncate(int d, int64_t length) {
@@ -1240,25 +1243,26 @@ int KYTY_SYSV_ABI KernelFtruncate(int d, int64_t length) {
 
 int KYTY_SYSV_ABI KernelUnlink(const char* path) {
 	PRINT_NAME();
+	Common::HleTrace::NoteString(path);
 
 	if (path == nullptr) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	auto real_file_name = g_mount_points->ResolvePath(path);
 	if (Common::IsArchivePath(real_file_name)) {
-		return KERNEL_ERROR_EROFS;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EROFS);
 	}
 
 	bool is_dir  = Common::File::IsDirectoryExisting(real_file_name);
 	bool is_file = Common::File::IsFileExisting(real_file_name);
 
 	if (is_dir) {
-		return KERNEL_ERROR_EPERM;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EPERM);
 	}
 
 	if (!is_file) {
-		return KERNEL_ERROR_ENOENT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOENT);
 	}
 
 	auto* open_file = g_files->GetFile(real_file_name);
@@ -1267,19 +1271,20 @@ int KYTY_SYSV_ABI KernelUnlink(const char* path) {
 	                       : Common::File::DeleteFile(real_file_name));
 
 	if (!ok) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	LOGF("\tKernelUnlink: %s\n", path);
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelRename(const char* from, const char* to) {
 	PRINT_NAME();
+	Common::HleTrace::NoteString(from);
 
 	if (from == nullptr || to == nullptr) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	auto from_path = std::string(from);
@@ -1287,11 +1292,11 @@ int KYTY_SYSV_ABI KernelRename(const char* from, const char* to) {
 	auto real_from = g_mount_points->ResolvePath(from_path);
 	auto real_to   = g_mount_points->ResolvePath(to_path);
 	if (Common::IsArchivePath(real_from) || Common::IsArchivePath(real_to)) {
-		return KERNEL_ERROR_EROFS;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EROFS);
 	}
 
 	if (real_to.empty() || !Common::File::IsFileExisting(real_from)) {
-		return KERNEL_ERROR_ENOENT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENOENT);
 	}
 
 	Common::File::CreateDirectories(real_to.parent_path());
@@ -1301,39 +1306,39 @@ int KYTY_SYSV_ABI KernelRename(const char* from, const char* to) {
 	}
 
 	if (!Common::File::RenameFile(real_from, real_to)) {
-		return KERNEL_ERROR_EIO;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
 	LOGF("\tKernelRename: %s -> %s\n", from, to);
 
-	return OK;
+	return Common::HleTrace::Ret(OK);
 }
 
 int KYTY_SYSV_ABI KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
 	PRINT_NAME();
 
 	if (fd < DESCRIPTOR_MIN) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	if (buf == nullptr) {
-		return KERNEL_ERROR_EFAULT;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EFAULT);
 	}
 
 	auto* file = g_files->GetFile(fd);
 
 	if (file == nullptr) {
-		return KERNEL_ERROR_EBADF;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EBADF);
 	}
 
 	if (!file->directory || nbytes < static_cast<int>(DIR_BLOCK_SIZE)) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	EXIT_IF(!file->opened);
 	Common::LockGuard lock(file->mutex);
 	if (file->dents_offset > file->dirents.size() || file->dents_offset % DIR_BLOCK_SIZE != 0) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	LOGF("\t dir    = %s\n"
@@ -1351,7 +1356,7 @@ int KYTY_SYSV_ABI KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* ba
 int KYTY_SYSV_ABI KernelGetdents(int fd, char* buf, int nbytes) {
 	PRINT_NAME();
 
-	return KernelGetdirentries(fd, buf, nbytes, nullptr);
+	return Common::HleTrace::Ret(KernelGetdirentries(fd, buf, nbytes, nullptr));
 }
 
 int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode) {
@@ -1421,11 +1426,11 @@ int KYTY_SYSV_ABI KernelCheckReachability(const char* path) {
 	PRINT_NAME();
 
 	if (path == nullptr) {
-		return KERNEL_ERROR_EINVAL;
+		return Common::HleTrace::Ret(KERNEL_ERROR_EINVAL);
 	}
 
 	if (std::strlen(path) > 255) {
-		return KERNEL_ERROR_ENAMETOOLONG;
+		return Common::HleTrace::Ret(KERNEL_ERROR_ENAMETOOLONG);
 	}
 
 	LOGF("\t KernelCheckReachability: %s\n", path);
@@ -1433,16 +1438,16 @@ int KYTY_SYSV_ABI KernelCheckReachability(const char* path) {
 	std::string mounted_path = std::string(path);
 
 	if (IsRandomDevice(mounted_path)) {
-		return OK;
+		return Common::HleTrace::Ret(OK);
 	}
 
 	auto real_name = g_mount_points->ResolvePath(mounted_path);
 
 	if (Common::File::IsFileExisting(real_name) || Common::File::IsDirectoryExisting(real_name)) {
-		return OK;
+		return Common::HleTrace::Ret(OK);
 	}
 
-	return KERNEL_ERROR_ENOENT;
+	return Common::HleTrace::Ret(KERNEL_ERROR_ENOENT);
 }
 
 } // namespace Libs::LibKernel::FileSystem
