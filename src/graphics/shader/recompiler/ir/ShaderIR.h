@@ -156,6 +156,18 @@ struct ImageResource {
 	uint32_t                      indirect_mapping_offset   = 0;
 	uint32_t                      indirect_search_iterations = 0;
 	std::vector<uint32_t>         indirect_resources;
+	// Generic compute variants (ResourceSpecialization::generic): an image whose numeric class the
+	// instruction does not name (image_load / image_store) is emitted once per class, and the shader
+	// picks the binding at run time. `class_root` is the first member of the group (a member's own
+	// index for the first one), `class_resources` lists the members of the group in class order on the
+	// first one. Members are separate resources, so every binding keeps its single static type.
+	static constexpr uint32_t NoClassRoot = UINT32_MAX;
+	static constexpr uint32_t NoDynamicSlot = UINT32_MAX;
+	uint32_t                      class_root        = NoClassRoot;
+	std::vector<uint32_t>         class_resources;
+	// Dword of the run-time section of the shader data that holds this image's cube flag, class and
+	// swizzle (NoDynamicSlot: none needed).
+	uint32_t                      dynamic_slot      = NoDynamicSlot;
 
 	bool operator==(const ImageResource& other) const = default;
 };
@@ -439,10 +451,18 @@ struct Bindings {
 	uint32_t push_data_start_dword = PushData::NoStart;
 	uint32_t dispatch_thread_dword = PushData::NoStart;
 	uint32_t memory_offset_dword = 0;
+	// Generic variants: the per-dispatch fields follow the memory offsets (docs: generic compute).
+	// One dword per live buffer (its descriptor index), then the images' slots.
+	// The buffers' words are indexed by descriptor index, the images' by dynamic_image_base plus
+	// their ImageResource::dynamic_slot.
+	uint32_t dynamic_dword      = 0;
+	uint32_t dynamic_dwords     = 0;
+	uint32_t dynamic_image_base = 0;
 
 	[[nodiscard]] uint32_t ShaderDataDwords() const {
 		return memory_offset_dword +
-		       (descriptor_counts[static_cast<size_t>(DescriptorBindingKind::Buffers)] + 3u) / 4u;
+		       (descriptor_counts[static_cast<size_t>(DescriptorBindingKind::Buffers)] + 3u) / 4u +
+		       dynamic_dwords;
 	}
 	[[nodiscard]] bool UsesPushData() const {
 		return push_data_start_dword != PushData::NoStart;
@@ -502,6 +522,9 @@ struct ShaderInfo {
 	bool                            shared_int64_atomics          = false;
 	bool                            coherent_buffers              = false;
 	bool                            float64                       = false;
+	// Generic variant: buffer stride, swizzle and out-of-bounds mode, image cube flag, swizzle and
+	// numeric class are read from the dynamic section of the shader data (Bindings::dynamic_dword).
+	bool                            generic                       = false;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };

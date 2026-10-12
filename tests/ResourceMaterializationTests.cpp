@@ -1186,6 +1186,307 @@ void TestGuessSpecialization() {
   }
 }
 
+// ---- generic compute variants -----------------------------------------------------------------
+//
+// A plan with the shapes that matter: a sampled 2D array (instruction names float), an image that is
+// only loaded (three classes), one that is only stored (two), an atomic one (unsigned), and two
+// buffers.
+Libs::Graphics::ShaderRecompiler::IR::Program GenericProgram() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension;
+  using Libs::Graphics::Prospero::TextureNumericClass;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = true;
+  program.resource_tracking_complete = true;
+  AddValueBlock(program);
+  for (uint32_t i = 0; i < 8; i++) {
+    DescriptorSource source;
+    source.dword_count = i < 2 ? 4 : 8;
+    for (uint32_t d = 0; d < source.dword_count; d++) source.dwords[d] = Value(0u);
+    program.descriptor_sources.push_back(source);
+  }
+  for (uint32_t i = 0; i < 2; i++) program.info.buffers.push_back({.source = i});
+  const auto add_image = [&](uint32_t source, ImageResourceClass resource_class,
+                             ImageDimension dimension, bool atomic) {
+    ImageResource image;
+    image.source = source;
+    image.resource_class = resource_class;
+    image.dimension = dimension;
+    image.atomic = atomic;
+    image.written = resource_class == ImageResourceClass::Storage;
+    program.info.images.push_back(image);
+  };
+  add_image(2, ImageResourceClass::Sampled, ImageDimension::Dim2DArray, false); // 0: sampled
+  add_image(3, ImageResourceClass::Sampled, ImageDimension::Dim2D, false);      // 1: load only
+  add_image(4, ImageResourceClass::Storage, ImageDimension::Dim2D, false);      // 2: store only
+  add_image(5, ImageResourceClass::Storage, ImageDimension::Dim2D, true);       // 3: atomic
+  program.info.samplers.push_back({.source = 6});
+  program.info.sampled_pairs.push_back({.image = 0, .sampler = 0});
+  return program;
+}
+
+Libs::Graphics::ShaderRecompiler::IR::ResourceSpecialization
+LiveSpecialization(const Libs::Graphics::ShaderRecompiler::IR::ResourceSpecialization &generic) {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::Prospero::TextureNumericClass;
+  // What the descriptors of a dispatch say: the originals only, with the soft fields filled in.
+  ResourceSpecialization live;
+  live.buffers = {{.packed_stride = 16}, {.packed_stride = 0, .zero_stride_oob = true}};
+  live.images.assign(4, {});
+  for (uint32_t i = 0; i < 4; i++) {
+    live.images[i] = generic.images[i];
+    live.images[i].class_root = ImageResource::NoClassRoot;
+    live.images[i].class_mask = 0;
+  }
+  live.images[0].cube = true;
+  live.images[1].numeric_class = TextureNumericClass::Uint;
+  live.images[2].numeric_class = TextureNumericClass::Float;
+  live.images[2].shader_swizzle = Libs::Graphics::DstSel(6, 5, 4, 7);
+  return live;
+}
+
+void TestGenericSpecialization() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension;
+  using Libs::Graphics::Prospero::TextureNumericClass;
+  constexpr auto kNone = ImageResource::NoClassRoot;
+  auto plan = ExtractResourcePlan(GenericProgram());
+  ResourceSpecialization generic;
+  Check(MakeGenericSpecialization(plan, generic) == GenericRefusal::None, "plan was refused");
+
+  // The key partition: hard fields are kept, soft fields are absent.
+  Check(generic.generic && generic.buffers.size() == 2 && generic.images.size() == 4 + 3,
+        "generic specialization has the wrong shape");
+  for (const auto &buffer : generic.buffers)
+    Check(buffer == ResourceSpecialization::Buffer{},
+          "a buffer carries soft fields in the generic key");
+  Check(generic.images[0].numeric_class == TextureNumericClass::Float &&
+            generic.images[0].dimension == ImageDimension::Dim2DArray &&
+            generic.images[0].class_root == kNone && generic.images[0].class_mask == 0 &&
+            !generic.images[0].cube,
+        "sampling names a float image, the cube flag is soft");
+  Check(generic.images[3].numeric_class == TextureNumericClass::Uint &&
+            generic.images[3].class_root == kNone,
+        "an atomic image is unsigned");
+  // Load-only: float, unsigned, signed. Store-only: float, unsigned (no signed storage view).
+  Check(generic.images[1].class_root == 1 && generic.images[1].class_mask == (2u | 4u | 8u) &&
+            generic.images[2].class_root == 2 && generic.images[2].class_mask == (2u | 4u),
+        "class groups do not cover the right classes");
+  Check(generic.images[4].class_root == 1 && generic.images[4].numeric_class == TextureNumericClass::Uint &&
+            generic.images[5].class_root == 1 && generic.images[5].numeric_class == TextureNumericClass::Sint &&
+            generic.images[6].class_root == 2 && generic.images[6].numeric_class == TextureNumericClass::Uint,
+        "group members follow the originals, grouped by root, in class order");
+  for (size_t i = 0; i < generic.images.size(); i++)
+    Check(generic.images[i].mip_count == 1 && generic.images[i].conversion_format ==
+                                                  Libs::Graphics::Prospero::BufferFormat::kInvalid &&
+              !generic.images[i].fmask &&
+              generic.images[i].indirect_root == ImageResource::NoIndirectImage,
+          "a hard field of a member is not the plain one");
+
+  // The dispatch-time check accepts every soft combination and rejects each hard difference.
+  auto live = LiveSpecialization(generic);
+  Check(MatchGenericSpecialization(generic, live) == GenericMismatch::None,
+        "a dispatch of the same hard signature was refused");
+  {
+    auto other = live;
+    other.buffers[0].packed_stride = 4 | (1u << 14u) | (2u << 16u);
+    other.buffers[1].zero_stride_oob = false;
+    other.buffers[1].descriptor_swizzle = Libs::Graphics::DstSel(7, 6, 5, 4);
+    other.images[0].cube = false;
+    other.images[1].numeric_class = TextureNumericClass::Sint;
+    other.images[2].shader_swizzle = Libs::Graphics::DstSel(4, 5, 6, 7);
+    Check(MatchGenericSpecialization(generic, other) == GenericMismatch::None,
+          "soft fields changed the match");
+  }
+  const auto expect = [&](auto mutate, GenericMismatch want, const char *what) {
+    auto changed = live;
+    mutate(changed);
+    const auto got = MatchGenericSpecialization(generic, changed);
+    if (got != want) {
+      std::fprintf(stderr, "generic mismatch: %s: got %s, expected %s\n", what,
+                   GenericMismatchName(got), GenericMismatchName(want));
+      std::abort();
+    }
+  };
+  expect([](auto &l) { l.buffers.pop_back(); }, GenericMismatch::BufferCount, "buffer count");
+  expect([](auto &l) { l.images.pop_back(); }, GenericMismatch::ImageCount, "image count");
+  expect([](auto &l) { l.buffers[0].indirect_root = 0; }, GenericMismatch::BufferIndirect, "buffer indirect");
+  expect([](auto &l) { l.buffers[0].packed_stride |= 1u << 20u; }, GenericMismatch::BufferAddTid, "add_tid");
+  expect([](auto &l) { l.images[0].indirect_root = 0; }, GenericMismatch::ImageIndirect, "image indirect");
+  expect([](auto &l) { l.images[0].fmask = true; }, GenericMismatch::ImageFmask, "fmask");
+  expect([](auto &l) { l.images[0].dimension = ImageDimension::Dim2D; }, GenericMismatch::ImageDimension, "dimension");
+  expect([](auto &l) { l.images[1].mip_count = 2; }, GenericMismatch::ImageMips, "mips");
+  expect([](auto &l) {
+           l.images[0].conversion_format = Libs::Graphics::Prospero::BufferFormat::k8UScaled;
+         }, GenericMismatch::ImageConversion, "conversion");
+  // A named class is hard: sampling a signed image, an atomic on a float one.
+  expect([](auto &l) { l.images[0].numeric_class = TextureNumericClass::Uint; },
+         GenericMismatch::ImageClass, "sampled class");
+  expect([](auto &l) { l.images[3].numeric_class = TextureNumericClass::Float; },
+         GenericMismatch::ImageClass, "atomic class");
+  // The switch covers what the binding set has: no signed storage image.
+  expect([](auto &l) { l.images[2].numeric_class = TextureNumericClass::Sint; },
+         GenericMismatch::ImageClass, "storage sint");
+  expect([](auto &l) { l.images[1].numeric_class = TextureNumericClass::Unsupported; },
+         GenericMismatch::ImageClass, "unsupported class");
+  Check(MatchGenericSpecialization(live, live) == GenericMismatch::NotGeneric,
+        "a specialized key matched as generic");
+  Check(!(generic == ResourceSpecialization{}) && generic != live,
+        "generic and specialized keys compare equal");
+
+  // The words the shader reads.
+  Check(GenericBufferWord({.packed_stride = 0x24 | (1u << 14u) | (3u << 16u)}) ==
+            (0x24u | (1u << 14u) | (3u << 16u)) &&
+            GenericBufferWord({.packed_stride = 0, .zero_stride_oob = true}) == GenericBufferZeroOobBit,
+        "buffer word");
+  ResourceSpecialization::Image image;
+  image.cube = true;
+  image.numeric_class = TextureNumericClass::Sint;
+  image.shader_swizzle = 0xabc;
+  Check(GenericImageWord(image) == (1u | (2u << 1u) | (0xabcu << 8u)), "image word");
+  Check(GenericClassOrdinal(TextureNumericClass::Float) == 0 &&
+            GenericClassOrdinal(TextureNumericClass::Uint) == 1 &&
+            GenericClassOrdinal(TextureNumericClass::Sint) == 2,
+        "class ordinals");
+
+  // Refusals: what registration cannot know.
+  {
+    auto program = GenericProgram();
+    program.info.buffers[1].indirect_root = 0;
+    ResourceSpecialization out;
+    Check(MakeGenericSpecialization(ExtractResourcePlan(program), out) == GenericRefusal::IndirectBuffer,
+          "indirect buffer was accepted");
+  }
+  {
+    auto program = GenericProgram();
+    program.info.images[2].indirect_root = 2;
+    ResourceSpecialization out;
+    Check(MakeGenericSpecialization(ExtractResourcePlan(program), out) == GenericRefusal::IndirectImage,
+          "indirect image was accepted");
+  }
+  {
+    auto program = GenericProgram();
+    program.info.images[1].dimension = ImageDimension::Unknown;
+    ResourceSpecialization out;
+    Check(MakeGenericSpecialization(ExtractResourcePlan(program), out) == GenericRefusal::ImageDimension,
+          "image without a dimension was accepted");
+  }
+  {
+    // A multisampled image that is written has no storage binding in any class.
+    auto program = GenericProgram();
+    program.info.images[2].dimension = ImageDimension::Dim2DMsaa;
+    ResourceSpecialization out;
+    Check(MakeGenericSpecialization(ExtractResourcePlan(program), out) == GenericRefusal::ImageBinding,
+          "multisampled storage image was accepted");
+  }
+  {
+    auto program = GenericProgram();
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Buffer;
+    memory.resource = 1;
+    memory.formatted = true;
+    memory.typed = false;
+    program.memory_info.push_back(memory);
+    ResourceSpecialization out;
+    Check(MakeGenericSpecialization(ExtractResourcePlan(program), out) == GenericRefusal::FormattedBuffer,
+          "untyped formatted access was accepted");
+    program.memory_info[0].typed = true;
+    Check(MakeGenericSpecialization(ExtractResourcePlan(program), out) == GenericRefusal::None,
+          "a typed formatted access (the format is in the instruction) was refused");
+  }
+  {
+    auto plan = ExtractResourcePlan(GenericProgram());
+    plan.requires_specialization_memory = true;
+    ResourceSpecialization out;
+    Check(MakeGenericSpecialization(plan, out) == GenericRefusal::NeedsGuestMemory,
+          "a program that reads guest memory was accepted");
+    plan.requires_specialization_memory = false;
+    plan.stage = Libs::Graphics::ShaderType::Pixel;
+    Check(MakeGenericSpecialization(plan, out) == GenericRefusal::NotCompute, "pixel stage accepted");
+  }
+
+  // Applying it: the group members exist in class order, the slots are assigned, nothing is
+  // specialized by a descriptor.
+  {
+    auto program = GenericProgram();
+    ApplyResourceSpecialization(program, generic);
+    const auto &info = program.info;
+    Check(info.generic && info.images.size() == 7 && info.buffers.size() == 2,
+          "applied program has the wrong resources");
+    Check(info.images[1].class_resources == std::vector<uint32_t>({1, 4, 5}) &&
+              info.images[2].class_resources == std::vector<uint32_t>({2, 6}) &&
+              info.images[0].class_resources.empty(),
+          "class groups were not built");
+    Check(info.images[4].numeric_class == TextureNumericClass::Uint &&
+              info.images[5].numeric_class == TextureNumericClass::Sint &&
+              info.images[4].resource_class == ImageResourceClass::Sampled &&
+              info.images[6].resource_class == ImageResourceClass::Storage &&
+              info.images[6].class_root == 2,
+          "group members do not copy the original");
+    // Slots: sampled 2D array (cube), both group roots, the stored image (swizzle) - the atomic one
+    // needs none, members need none.
+    Check(info.images[0].dynamic_slot == 0 && info.images[1].dynamic_slot == 1 &&
+              info.images[2].dynamic_slot == 2 && info.images[3].dynamic_slot == ImageResource::NoDynamicSlot &&
+              info.images[4].dynamic_slot == ImageResource::NoDynamicSlot,
+          "dynamic slots");
+    // The members bind in their own class.
+    Check(*DescriptorBindingForImage(info.images[1]) != *DescriptorBindingForImage(info.images[4]) &&
+              *DescriptorBindingForImage(info.images[4]) != *DescriptorBindingForImage(info.images[5]),
+          "group members share a binding");
+    // A specialized application is untouched.
+    auto plain = GenericProgram();
+    ApplyResourceSpecialization(plain, LiveSpecialization(generic));
+    Check(!plain.info.generic && plain.info.images.size() == 4 &&
+              plain.info.images[1].class_root == kNone &&
+              plain.info.images[1].dynamic_slot == ImageResource::NoDynamicSlot,
+          "the specialized path changed");
+  }
+
+  // The binding of a dispatch: descriptors in the program's order, the active class holds the real
+  // one, the other members are empty; the words follow the layout the emitter reads.
+  {
+    auto program = GenericProgram();
+    ApplyResourceSpecialization(program, generic);
+    CompiledShaderInfo compiled;
+    compiled.info = program.info;
+    compiled.info.buffers[0].descriptor_index = 0;
+    compiled.info.buffers[1].descriptor_index = 1;
+    compiled.bindings.dynamic_dwords = 2 + 3;
+    compiled.bindings.dynamic_image_base = 2;
+    ResourceSnapshot snapshot;
+    for (uint32_t i = 0; i < 4; i++) {
+      DescriptorValue value;
+      value.dword_count = 8;
+      value.dwords[0] = 100 + i;
+      snapshot.images.push_back(value);
+    }
+    auto live2 = LiveSpecialization(generic);
+    BuildGenericBinding(compiled, live2, snapshot);
+    Check(snapshot.generic_images.size() == 7, "binding image count");
+    Check(snapshot.generic_images[0].dwords[0] == 100 && snapshot.generic_images[3].dwords[0] == 103,
+          "ordinary images keep their descriptor");
+    // image 1 is unsigned in this dispatch: root (float) and signed member empty, unsigned member real.
+    Check(snapshot.generic_images[1].dwords[0] == 0 && snapshot.generic_images[1].dword_count == 8 &&
+              snapshot.generic_images[4].dwords[0] == 101 && snapshot.generic_images[5].dwords[0] == 0,
+          "the unsigned member of the load-only image holds the descriptor");
+    // image 2 is float: root real, the unsigned member empty.
+    Check(snapshot.generic_images[2].dwords[0] == 102 && snapshot.generic_images[6].dwords[0] == 0,
+          "the float root of the store-only image holds the descriptor");
+    Check(snapshot.generic_data.size() == 5 &&
+              snapshot.generic_data[0] == 16u &&
+              snapshot.generic_data[1] == GenericBufferZeroOobBit &&
+              snapshot.generic_data[2 + 0] == GenericImageWord(live2.images[0]) &&
+              snapshot.generic_data[2 + 1] == GenericImageWord(live2.images[1]) &&
+              snapshot.generic_data[2 + 2] == GenericImageWord(live2.images[2]),
+          "dynamic words");
+    Check((snapshot.generic_data[2] & GenericImageCubeBit) != 0 &&
+              ((snapshot.generic_data[3] >> GenericImageClassShift) & 3u) == 1u &&
+              (snapshot.generic_data[4] >> GenericImageSwizzleShift) == Libs::Graphics::DstSel(6, 5, 4, 7),
+          "cube flag, class ordinal and swizzle in the image words");
+  }
+}
+
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
   TestNativeNestedSrtRefresh();
@@ -1204,6 +1505,7 @@ int main() {
   TestUndefinedImageFormatBindsNullImage();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
   TestGuessSpecialization();
+  TestGenericSpecialization();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

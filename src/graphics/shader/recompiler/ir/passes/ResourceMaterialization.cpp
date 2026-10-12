@@ -1308,6 +1308,232 @@ bool GuessSpecialization(const ResourcePlan& program, ResourceSpecialization& sp
 	return true;
 }
 
+const char* GenericRefusalName(GenericRefusal refusal) {
+	switch (refusal) {
+		case GenericRefusal::None: return "none";
+		case GenericRefusal::Incomplete: return "incomplete";
+		case GenericRefusal::NotCompute: return "not_compute";
+		case GenericRefusal::NeedsGuestMemory: return "needs_guest_memory";
+		case GenericRefusal::IndirectBuffer: return "indirect_buffer";
+		case GenericRefusal::IndirectImage: return "indirect_image";
+		case GenericRefusal::FormattedBuffer: return "formatted_buffer";
+		case GenericRefusal::ImageClass: return "image_class";
+		case GenericRefusal::ImageDimension: return "image_dimension";
+		case GenericRefusal::ImageBinding: return "image_binding";
+		case GenericRefusal::TooManyImages: return "too_many_images";
+		case GenericRefusal::Count: break;
+	}
+	return "?";
+}
+
+const char* GenericMismatchName(GenericMismatch mismatch) {
+	switch (mismatch) {
+		case GenericMismatch::None: return "match";
+		case GenericMismatch::NotGeneric: return "not_generic";
+		case GenericMismatch::BufferCount: return "buffer_count";
+		case GenericMismatch::ImageCount: return "image_count";
+		case GenericMismatch::BufferIndirect: return "buffer_indirect";
+		case GenericMismatch::BufferAddTid: return "buffer_add_tid";
+		case GenericMismatch::ImageIndirect: return "image_indirect";
+		case GenericMismatch::ImageDimension: return "image_dimension";
+		case GenericMismatch::ImageClass: return "image_class";
+		case GenericMismatch::ImageMips: return "image_mips";
+		case GenericMismatch::ImageConversion: return "image_conversion";
+		case GenericMismatch::ImageFmask: return "image_fmask";
+		case GenericMismatch::Count: break;
+	}
+	return "?";
+}
+
+uint32_t GenericClassOrdinal(Prospero::TextureNumericClass numeric_class) {
+	switch (numeric_class) {
+		case Prospero::TextureNumericClass::Uint: return 1u;
+		case Prospero::TextureNumericClass::Sint: return 2u;
+		default: return 0u;
+	}
+}
+
+namespace {
+constexpr std::array<Prospero::TextureNumericClass, 3> kGenericClasses {
+    Prospero::TextureNumericClass::Float, Prospero::TextureNumericClass::Uint,
+    Prospero::TextureNumericClass::Sint};
+}
+
+GenericRefusal MakeGenericSpecialization(const ResourcePlan& plan, ResourceSpecialization& out) {
+	out = {};
+	if (!plan.resource_tracking_complete) return GenericRefusal::Incomplete;
+	if (plan.stage != ShaderType::Compute) return GenericRefusal::NotCompute;
+	if (plan.requires_specialization_memory || !plan.source_reads.empty()) {
+		return GenericRefusal::NeedsGuestMemory;
+	}
+	const auto& info = plan.info;
+
+	// An untyped formatted access takes its element format from the descriptor, which also decides
+	// the width of the storage-buffer view: that is a hard field nothing at registration knows.
+	std::vector<bool> untyped_formatted(info.buffers.size(), false);
+	for (const auto& memory: plan.memory_info) {
+		if (!memory.planning_only &&
+		    (memory.kind == ResourceKind::Buffer || memory.kind == ResourceKind::ScalarBuffer) &&
+		    memory.formatted && !memory.typed && memory.resource < untyped_formatted.size()) {
+			untyped_formatted[memory.resource] = true;
+		}
+	}
+	out.generic = true;
+	out.buffers.assign(info.buffers.size(), {});
+	for (uint32_t i = 0; i < info.buffers.size(); ++i) {
+		const auto& base   = info.buffers[i];
+		const auto* source = Source(plan, base.source);
+		if (source == nullptr || source->indirect_descriptor.has_value() ||
+		    base.indirect_root != BufferResource::NoIndirectBuffer) {
+			return GenericRefusal::IndirectBuffer;
+		}
+		if (untyped_formatted[i]) return GenericRefusal::FormattedBuffer;
+	}
+
+	std::vector<ResourceSpecialization::Image> members;
+	out.images.assign(info.images.size(), {});
+	for (uint32_t i = 0; i < info.images.size(); ++i) {
+		const auto& image  = info.images[i];
+		const auto* source = Source(plan, image.source);
+		if (source == nullptr || source->indirect_descriptor.has_value() ||
+		    image.indirect_root != ImageResource::NoIndirectImage) {
+			return GenericRefusal::IndirectImage;
+		}
+		if (image.resource_class == ImageResourceClass::None) return GenericRefusal::ImageClass;
+		if (image.dimension == Decoder::ImageDimension::Unknown) return GenericRefusal::ImageDimension;
+		auto& spec     = out.images[i];
+		spec.dimension = image.dimension;
+		spec.mip_count = 1;
+		const bool sampled_pair = std::ranges::any_of(
+		    info.sampled_pairs, [&](const auto& pair) { return pair.image == i; });
+		// What the instruction names: sampling reads a float image, an atomic an unsigned one.
+		if (image.atomic) {
+			if (image.resource_class != ImageResourceClass::Storage) return GenericRefusal::ImageClass;
+			spec.numeric_class = Prospero::TextureNumericClass::Uint;
+		} else if (sampled_pair || image.depth_compare) {
+			spec.numeric_class = Prospero::TextureNumericClass::Float;
+		} else {
+			// Load, store and size queries carry no data format: three bindings, picked at run time.
+			// A written image has no signed storage view (a signed 32-bit one is bound unsigned).
+			const uint32_t classes = image.resource_class == ImageResourceClass::Sampled ? 3u : 2u;
+			spec.numeric_class = Prospero::TextureNumericClass::Float;
+			spec.class_root    = i;
+			for (uint32_t c = 0; c < classes; ++c) spec.class_mask |= 1u << static_cast<uint32_t>(kGenericClasses[c]);
+			for (uint32_t c = 1; c < classes; ++c) {
+				ResourceSpecialization::Image member = spec;
+				member.numeric_class = kGenericClasses[c];
+				member.class_mask    = 0;
+				members.push_back(member);
+			}
+		}
+		// The binding of every member has to exist (a storage image has no multisampled form).
+		auto probe = image;
+		probe.dimension     = spec.dimension;
+		probe.numeric_class = spec.numeric_class;
+		if (!DescriptorBindingForImage(probe).has_value()) return GenericRefusal::ImageBinding;
+		if (spec.class_root == i) {
+			for (uint32_t c = 1; c < kGenericClasses.size(); ++c) {
+				if ((spec.class_mask & (1u << static_cast<uint32_t>(kGenericClasses[c]))) == 0u) continue;
+				probe.numeric_class = kGenericClasses[c];
+				if (!DescriptorBindingForImage(probe).has_value()) return GenericRefusal::ImageBinding;
+			}
+		}
+	}
+	// Members follow the originals, grouped by root and in class order.
+	std::vector<ResourceSpecialization::Image> ordered;
+	for (uint32_t i = 0; i < info.images.size(); ++i) {
+		if (out.images[i].class_root != i) continue;
+		for (auto member: members) {
+			if (member.class_root != i) continue;
+			ordered.push_back(member);
+		}
+	}
+	if (info.images.size() + ordered.size() > ShaderInfo::MaxImages) return GenericRefusal::TooManyImages;
+	out.images.insert(out.images.end(), ordered.begin(), ordered.end());
+	return GenericRefusal::None;
+}
+
+GenericMismatch MatchGenericSpecialization(const ResourceSpecialization& generic,
+                                           const ResourceSpecialization& live) {
+	if (!generic.generic || live.generic) return GenericMismatch::NotGeneric;
+	if (live.buffers.size() != generic.buffers.size()) return GenericMismatch::BufferCount;
+	for (const auto& buffer: live.buffers) {
+		if (buffer.indirect_root != BufferResource::NoIndirectBuffer) return GenericMismatch::BufferIndirect;
+		if ((buffer.packed_stride & GenericBufferAddTidBit) != 0u) return GenericMismatch::BufferAddTid;
+	}
+	// The originals come first; the members of a numeric-class group are appended after them.
+	size_t originals = generic.images.size();
+	for (size_t i = 0; i < generic.images.size(); ++i) {
+		const auto root = generic.images[i].class_root;
+		if (root != ImageResource::NoClassRoot && root != i) {
+			originals = i;
+			break;
+		}
+	}
+	if (live.images.size() != originals) return GenericMismatch::ImageCount;
+	for (size_t i = 0; i < originals; ++i) {
+		const auto& want = generic.images[i];
+		const auto& have = live.images[i];
+		if (have.indirect_root != ImageResource::NoIndirectImage) return GenericMismatch::ImageIndirect;
+		if (have.fmask) return GenericMismatch::ImageFmask;
+		if (have.dimension != want.dimension) return GenericMismatch::ImageDimension;
+		if (have.mip_count != want.mip_count) return GenericMismatch::ImageMips;
+		if (have.conversion_format != want.conversion_format) return GenericMismatch::ImageConversion;
+		const auto have_class = static_cast<uint32_t>(have.numeric_class);
+		if (want.class_mask != 0u) {
+			if (have_class >= 32u || ((want.class_mask >> have_class) & 1u) == 0u) {
+				return GenericMismatch::ImageClass;
+			}
+		} else if (have.numeric_class != want.numeric_class) {
+			return GenericMismatch::ImageClass;
+		}
+	}
+	return GenericMismatch::None;
+}
+
+uint32_t GenericBufferWord(const ResourceSpecialization::Buffer& live) {
+	return (live.packed_stride & 0x3ffffu) | (live.zero_stride_oob ? GenericBufferZeroOobBit : 0u);
+}
+
+uint32_t GenericImageWord(const ResourceSpecialization::Image& live) {
+	return (live.cube ? GenericImageCubeBit : 0u) |
+	       (GenericClassOrdinal(live.numeric_class) << GenericImageClassShift) |
+	       ((live.shader_swizzle & 0xfffu) << GenericImageSwizzleShift);
+}
+
+void BuildGenericBinding(const CompiledShaderInfo& program, const ResourceSpecialization& live,
+                         ResourceSnapshot& snapshot) {
+	const auto& info = program.info;
+	EXIT_IF(!info.generic || live.buffers.size() != info.buffers.size());
+	snapshot.generic_data.assign(program.bindings.dynamic_dwords, 0u);
+	for (uint32_t i = 0; i < info.buffers.size(); ++i) {
+		const auto index = info.buffers[i].descriptor_index;
+		if (index == UINT32_MAX) continue;
+		EXIT_IF(index >= snapshot.generic_data.size());
+		snapshot.generic_data[index] = GenericBufferWord(live.buffers[i]);
+	}
+	snapshot.generic_images.resize(info.images.size());
+	for (uint32_t i = 0; i < info.images.size(); ++i) {
+		const auto& image = info.images[i];
+		if (image.class_root == ImageResource::NoClassRoot) {
+			EXIT_IF(i >= snapshot.images.size());
+			snapshot.generic_images[i] = snapshot.images[i];
+		} else {
+			const auto root = image.class_root;
+			EXIT_IF(root >= snapshot.images.size() || root >= live.images.size());
+			const bool active = GenericClassOrdinal(image.numeric_class) ==
+			                    GenericClassOrdinal(live.images[root].numeric_class);
+			snapshot.generic_images[i] = active ? snapshot.images[root]
+			                                    : DescriptorValue {.dword_count = 8u};
+		}
+		if (image.dynamic_slot != ImageResource::NoDynamicSlot) {
+			const auto word = program.bindings.dynamic_image_base + image.dynamic_slot;
+			EXIT_IF(word >= snapshot.generic_data.size() || i >= live.images.size());
+			snapshot.generic_data[word] = GenericImageWord(live.images[i]);
+		}
+	}
+}
+
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
 	EXIT_IF(!program.resource_tracking_complete || program.shader_info_complete);
 	EXIT_IF(program.info.buffers.size() > specialization.buffers.size() ||
@@ -1338,16 +1564,24 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 			buffers[root].indirect_resources.push_back(index);
 		}
 	}
+	program.info.generic = specialization.generic;
 	auto& images = program.info.images;
 	const auto original_image_count = images.size();
 	images.reserve(specialization.images.size());
 	for (uint32_t index = 0; index < specialization.images.size(); index++) {
 		const auto& source = specialization.images[index];
 		if (index >= images.size()) {
-			EXIT_IF(source.indirect_root >= original_image_count);
-			images.push_back(images[source.indirect_root]);
+			// A member of a numeric-class group is the same image in another class; an indirect
+			// candidate is another descriptor of the same slot. Neither is an original.
+			const auto root = source.class_root != ImageResource::NoClassRoot ? source.class_root
+			                                                                 : source.indirect_root;
+			EXIT_IF(root >= original_image_count);
+			images.push_back(images[root]);
 		}
 		auto& image                      = images[index];
+		image.class_root                 = source.class_root;
+		image.class_resources.clear();
+		image.dynamic_slot               = ImageResource::NoDynamicSlot;
 		image.numeric_class              = source.numeric_class;
 		image.dimension                  = source.dimension;
 		image.mip_count                  = source.mip_count;
@@ -1364,6 +1598,28 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		if (root != ImageResource::NoIndirectImage) {
 			EXIT_IF(root >= images.size());
 			images[root].indirect_resources.push_back(index);
+		}
+		const auto class_root = images[index].class_root;
+		if (class_root != ImageResource::NoClassRoot) {
+			EXIT_IF(class_root >= images.size());
+			images[class_root].class_resources.push_back(index);
+		}
+	}
+	if (specialization.generic) {
+		// The originals that read something at run time get a dynamic slot: a numeric-class group
+		// its class, a sampled 2D array its cube flag, a written image its swizzle. DefineDescriptors
+		// places the section after the buffers' words.
+		uint32_t slot = 0;
+		for (uint32_t index = 0; index < original_image_count; index++) {
+			auto& image = images[index];
+			const bool sampled_pair = std::ranges::any_of(
+			    program.info.sampled_pairs, [&](const auto& pair) { return pair.image == index; });
+			const bool needs =
+			    image.class_root != ImageResource::NoClassRoot ||
+			    (image.resource_class == ImageResourceClass::Sampled && sampled_pair &&
+			     image.dimension == Decoder::ImageDimension::Dim2DArray) ||
+			    (image.resource_class == ImageResourceClass::Storage && !image.atomic);
+			image.dynamic_slot = needs ? slot++ : ImageResource::NoDynamicSlot;
 		}
 	}
 

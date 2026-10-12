@@ -37,6 +37,11 @@ struct ResourceSnapshot {
 	std::vector<uint32_t>        user_data;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
+	// A generic variant reads these instead of `images` (same order as its program's images, the
+	// members of a numeric-class group after the originals) plus the dynamic section of the shader
+	// data. Filled by BuildGenericBinding for the dispatch's own descriptors.
+	std::vector<DescriptorValue> generic_images;
+	std::vector<uint32_t>        generic_data;
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
