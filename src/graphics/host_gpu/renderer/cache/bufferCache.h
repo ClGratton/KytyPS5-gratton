@@ -80,12 +80,15 @@ public:
 	// load by address and that GPU passes write. Created on first use (4 MiB).
 	[[nodiscard]] StreamBuffer& GetDrawRecordBuffer();
 	[[nodiscard]] const Buffer* GetGdsBuffer() const noexcept { return &m_gds_buffer; }
-	[[nodiscard]] Buffer* GetBdaPageTableBuffer() noexcept { return &m_bda_pagetable_buffer; }
+	// Both the first registration and the first consumer clear the table, so unowned entries read as zero.
+	[[nodiscard]] Buffer* GetBdaPageTableBuffer();
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
 	                bool src_gds);
+	// DMA between two GDS ranges (offsets into the GDS buffer); they may overlap.
+	void CopyGdsBuffer(uint64_t dst_offset, uint64_t src_offset, uint64_t size);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
 	[[nodiscard]] bool IsRegionRegistered(uint64_t vaddr, uint64_t size);
 	// Bumped whenever a buffer is registered or unregistered (K15).
@@ -118,6 +121,9 @@ public:
 private:
 	friend struct BufferCacheTestAccess;
 
+	// Device memory is not zero-initialized, and a zero entry is what shaders read as unmapped.
+	void EnsureBdaPageTableInitialized();
+
 	bool IsBufferInvalid(BufferId id) const {
 		const auto* buffer = m_slot_buffers.try_get(id);
 		return buffer == nullptr || buffer->is_deleted;
@@ -146,6 +152,7 @@ private:
 	void DeleteBuffer(BufferId id);
 	[[nodiscard]] bool SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size,
 	                                     bool is_written, bool is_texel_buffer);
+	void UploadDirtyRanges(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written);
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
@@ -158,6 +165,7 @@ private:
 	FaultManager                                      m_fault_manager;
 	Buffer                                            m_gds_buffer;
 	Buffer                                            m_bda_pagetable_buffer;
+	bool                                              m_bda_pagetable_initialized = false;
 	Common::SlotVector<Buffer>                        m_slot_buffers;
 	Common::LeastRecentlyUsedCache<BufferId, uint64_t> m_lru_cache;
 	BufferMap                                         m_buffers;

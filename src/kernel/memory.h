@@ -5,6 +5,9 @@
 #include "common/common.h"
 #include "common/virtualMemory.h"
 
+#include <utility>
+#include <vector>
+
 namespace Libs::Graphics {
 class RenderContext;
 enum class PageFaultAccess;
@@ -120,8 +123,22 @@ bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t
 bool                   TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
+// Whether guest mappings cover all of [vaddr, vaddr + size), and the parts they cover (as
+// (address, size), in order): what can be read or written of a range that reaches into memory the
+// guest unmapped.
+[[nodiscard]] bool     IsFullyMapped(uint64_t vaddr, uint64_t size);
+void                   MappedParts(uint64_t vaddr, uint64_t size,
+                                   std::vector<std::pair<uint64_t, uint64_t>>* parts);
+// Writes GPU data into guest memory: backed parts through the backing, private memory (stacks,
+// TLS) at its own address; parts the guest unmapped meanwhile are dropped and logged.
 void                   WriteBacking(uint64_t vaddr, const void* data, uint64_t size) noexcept;
 void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
+// For a fault in a guest range briefly unmapped while the emulator replaced its mapping (MAP_FIXED
+// over a mapping, or a Windows file view split by a partial unmap): waits until it is mapped again
+// and returns the range's id. 0 for any other fault.
+[[nodiscard]] uint64_t WaitForTransientUnmap(uint64_t fault_vaddr) noexcept;
+// Whether such a fault can be retried (false once the same page keeps faulting).
+[[nodiscard]] bool RetryTransientUnmapFault(uint64_t fault_vaddr, uint64_t window) noexcept;
 void                   InstallGpuResources(Graphics::RenderContext* renderer) noexcept;
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 

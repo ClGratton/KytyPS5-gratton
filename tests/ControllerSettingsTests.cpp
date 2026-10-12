@@ -194,6 +194,21 @@ void TestPadPortOwnership() {
 	Shutdown();
 }
 
+void TestDisconnectOfUnknownPadIsIgnored() {
+	// A pad can be removed before its arrival was handled; that must not end the emulator, and
+	// the pads that are connected stay connected.
+	Controller controller;
+	PadData    data {};
+	Disconnect(4242);
+	Connect(7);
+	Disconnect(7);
+	Disconnect(7);
+	SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, true);
+	Check(PadReadState(1, &data) == 0 && data.connected && data.buttons == PAD_BUTTON_CROSS,
+	      "removing an unknown pad disturbed the connected controllers");
+	SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, false);
+}
+
 void TestSettingCycles() {
 	Controller controller;
 	for (auto setting:
@@ -555,6 +570,7 @@ void TestTriggerEffectState() {
 int main() {
 	Config::Initialize();
 	TestPadPortOwnership();
+	TestDisconnectOfUnknownPadIsIgnored();
 	TestSettingCycles();
 	TestGlobalControllerLevels();
 	// Each following test initializes another controller and requires strong defaults.

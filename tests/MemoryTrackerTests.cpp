@@ -602,6 +602,34 @@ void TestGpuDirtyBits() {
   Release(memory);
 }
 
+void TestTakeGpuPagesForCpu() {
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  auto &page_manager = harness.page_manager;
+  const auto page_size = page_manager.GetPageSize();
+  auto *memory = Allocate(page_manager, 2);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+
+  // The guest is about to write pages the GPU owns: the GPU's claim is released and the CPU's
+  // taken in one critical section (as two calls, an upload on another thread could mark a page
+  // GPU-dirty in between and the tracker exited on its invariant).
+  tracker.ForEachUploadRange(
+      address, page_size * 2, true, [](uint64_t, uint64_t) noexcept {},
+      []() noexcept {});
+  Check(tracker.IsRegionGpuModified(address, page_size * 2), "setup: pages are not GPU-owned");
+  tracker.TakeGpuPagesForCpu(address, page_size);
+  Check(!tracker.IsRegionGpuModified(address, page_size) &&
+            tracker.IsRegionCpuModified(address, page_size) &&
+            tracker.IsRegionGpuModified(address + page_size, page_size),
+        "the GPU's pages were not handed to the CPU, or the claim escaped the range");
+  // A page the GPU never owned: the claim must not assert.
+  tracker.TakeGpuPagesForCpu(address, page_size);
+  Check(tracker.IsRegionCpuModified(address, page_size), "repeated claim lost CPU ownership");
+  tracker.UnmarkRegionAsGpuModified(address + page_size, page_size);
+  tracker.UntrackMemory(address, page_size * 2);
+  Release(memory);
+}
+
 void TestExactDirtyIntervalsSharingTrackerPage() {
   TrackerHarness harness;
   auto &tracker = harness.tracker;
@@ -1206,6 +1234,7 @@ int main(int argc, char **argv) {
   TestRangeInvalidation();
   TestGpuReacquisitionAfterInvalidation();
   TestGpuDirtyBits();
+  TestTakeGpuPagesForCpu();
   TestExactDirtyIntervalsSharingTrackerPage();
   TestGpuDownloadProtectionMirrors();
   TestCrossRegionUpload();

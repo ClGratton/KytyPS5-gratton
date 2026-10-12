@@ -949,6 +949,138 @@ void TestFlexibleMemoryReuseIsZeroFilled() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestDirectMemoryReuseIsZeroFilled() {
+	const char*       test    = "DirectMemoryReuseIsZeroFilled";
+	constexpr uint64_t MapSize = SceKernelPageSize * 2;
+	constexpr uint8_t Poison   = 0xa5;
+	const auto        direct   = Libs::LibKernel::Memory::KernelGetDirectMemorySize();
+
+	int64_t source_phys = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            SceKernelDirectMemoryStart, direct, MapSize, SceKernelPageSize, SceKernelMtypeC,
+	            &source_phys),
+	        "KernelAllocateDirectMemory(source)");
+
+	// Direct memory is physical: unmapping keeps the contents, so the bytes stay in the
+	// backing store while the range sits in the physical free list.
+	void* source = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(
+	            &source, MapSize, SceKernelProtCpuRw, 0, source_phys, SceKernelPageSize,
+	            "direct_zero_source"),
+	        "KernelMapNamedDirectMemory(source)");
+	std::memset(source, Poison, MapSize);
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(source), MapSize),
+	        "KernelMunmap(source)");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelCheckedReleaseDirectMemory(source_phys, MapSize),
+	        "KernelCheckedReleaseDirectMemory(source)");
+
+	// Searching from the released address makes the reuse deterministic: the freed range is
+	// the first one the allocator can hand back.
+	int64_t reused_phys = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            source_phys, direct, MapSize, SceKernelPageSize, SceKernelMtypeC, &reused_phys),
+	        "KernelAllocateDirectMemory(reuse)");
+	Check(test, reused_phys == source_phys,
+	      "released direct range was not reused, so the zero-fill went untested");
+
+	void* reused = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(
+	            &reused, MapSize, SceKernelProtCpuRw, 0, reused_phys, SceKernelPageSize,
+	            "direct_zero_reuse"),
+	        "KernelMapNamedDirectMemory(reuse)");
+	const auto* bytes = reinterpret_cast<const uint8_t*>(reused);
+	Check(test,
+	      std::all_of(bytes, bytes + MapSize, [](uint8_t value) { return value == 0; }),
+	      "reused direct backing exposed stale bytes");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(reused), MapSize),
+	        "KernelMunmap(reuse)");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelCheckedReleaseDirectMemory(reused_phys, MapSize),
+	        "KernelCheckedReleaseDirectMemory(reuse)");
+
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestDirectMemoryPartialReuseIsZeroFilled() {
+	const char*        test      = "DirectMemoryPartialReuseIsZeroFilled";
+	constexpr uint64_t StaleSize = SceKernelPageSize;
+	constexpr uint64_t MapSize   = SceKernelPageSize * 3;
+	constexpr uint8_t  Poison    = 0x5c;
+	const auto         direct    = Libs::LibKernel::Memory::KernelGetDirectMemorySize();
+
+	int64_t stale_phys = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            SceKernelDirectMemoryStart, direct, StaleSize, SceKernelPageSize, SceKernelMtypeC,
+	            &stale_phys),
+	        "KernelAllocateDirectMemory(stale)");
+	void* stale = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(
+	            &stale, StaleSize, SceKernelProtCpuRw, 0, stale_phys, SceKernelPageSize,
+	            "direct_partial_stale"),
+	        "KernelMapNamedDirectMemory(stale)");
+	std::memset(stale, Poison, StaleSize);
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(stale), StaleSize),
+	        "KernelMunmap(stale)");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelCheckedReleaseDirectMemory(stale_phys, StaleSize),
+	        "KernelCheckedReleaseDirectMemory(stale)");
+
+	// A larger allocation starting at the released page covers it plus never-used pages. Only
+	// the released page is stale, but every byte handed out must still read as zero.
+	int64_t reused_phys = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            stale_phys, direct, MapSize, SceKernelPageSize, SceKernelMtypeC, &reused_phys),
+	        "KernelAllocateDirectMemory(partial reuse)");
+	Check(test, reused_phys == stale_phys,
+	      "released direct page was not reused, so partial zero-fill went untested");
+	void* reused = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(
+	            &reused, MapSize, SceKernelProtCpuRw, 0, reused_phys, SceKernelPageSize,
+	            "direct_partial_reuse"),
+	        "KernelMapNamedDirectMemory(partial reuse)");
+	const auto* bytes = reinterpret_cast<const uint8_t*>(reused);
+	Check(test,
+	      std::all_of(bytes, bytes + MapSize, [](uint8_t value) { return value == 0; }),
+	      "partially reused direct backing exposed stale bytes");
+
+	// Contents written after allocation are the owner's; a remap must still see them.
+	std::memset(reused, Poison, MapSize);
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(reused), MapSize),
+	        "KernelMunmap(partial reuse)");
+	void* remapped = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(
+	            &remapped, MapSize, SceKernelProtCpuRw, 0, reused_phys, SceKernelPageSize,
+	            "direct_partial_remap"),
+	        "KernelMapNamedDirectMemory(remap)");
+	const auto* remapped_bytes = reinterpret_cast<const uint8_t*>(remapped);
+	Check(test,
+	      std::all_of(remapped_bytes, remapped_bytes + MapSize,
+	                  [](uint8_t value) { return value == Poison; }),
+	      "remapping an allocated direct range lost its contents");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(remapped), MapSize),
+	        "KernelMunmap(remap)");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelCheckedReleaseDirectMemory(reused_phys, MapSize),
+	        "KernelCheckedReleaseDirectMemory(partial reuse)");
+
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestSmallerFlexibleMapReusesReleasedHole() {
 	const char*        test       = "SmallerFlexibleMapReusesReleasedHole";
 	const auto         baseline   = AvailableFlexibleMemory(test);
@@ -958,8 +1090,8 @@ void TestSmallerFlexibleMapReusesReleasedHole() {
 	constexpr int      RuntimeMap = 0x8000;
 
 	// Leave a 0x30000 hole before an allocated backing block. The large mapping must then be
-	// assembled from two flexible-backing extents, matching the allocation that exposed the
-	// PPSA30528 regression.
+	// assembled from two flexible-backing extents, matching an allocation that exposed the
+	// bug this test guards.
 	void* seed_hole = nullptr;
 	CheckOk(test,
 	        Libs::LibKernel::Memory::KernelMapNamedFlexibleMemory(
@@ -1100,6 +1232,64 @@ void TestFragmentedBackingUnmapRollback() {
 	Check(test, AvailableFlexibleMemory(test) == baseline,
 	      "fragmented backing rollback test leaked flexible capacity");
 
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestWriteBackingToPartlyUnmappedAndPrivateMemory() {
+	const char*        test = "WriteBackingToPartlyUnmappedAndPrivateMemory";
+	constexpr uint64_t page = SceKernelPageSize;
+	std::vector<uint8_t> pattern(page * 3);
+	for (size_t i = 0; i < pattern.size(); i++) {
+		pattern[i] = static_cast<uint8_t>(i * 13u + 5u);
+	}
+
+	// GPU results for memory the guest unmapped meanwhile: the mapped parts are written, the rest
+	// is dropped; it must not end the emulator.
+	const auto base = MapNamedFlexible(test, page * 3, SceKernelProtCpuRw, "writeback_partial");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + page, page), "KernelMunmap(middle)");
+	Check(test, !Libs::LibKernel::Memory::IsFullyMapped(base, page * 3) &&
+	                Libs::LibKernel::Memory::IsFullyMapped(base, page),
+	      "IsFullyMapped does not see the hole");
+	std::vector<std::pair<uint64_t, uint64_t>> parts;
+	Libs::LibKernel::Memory::MappedParts(base, page * 3, &parts);
+	Check(test, parts.size() == 2 && parts[0] == std::pair<uint64_t, uint64_t> {base, page} &&
+	                parts[1] == std::pair<uint64_t, uint64_t> {base + page * 2, page},
+	      "MappedParts does not return the two mapped pages");
+	Libs::LibKernel::Memory::WriteBacking(base, pattern.data(), pattern.size());
+	Check(test, std::memcmp(reinterpret_cast<void*>(base), pattern.data(), page) == 0 &&
+	                std::memcmp(reinterpret_cast<void*>(base + page * 2),
+	                            pattern.data() + page * 2, page) == 0,
+	      "the mapped parts did not receive the GPU data");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base, page), "KernelMunmap(left)");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + page * 2, page),
+	        "KernelMunmap(right)");
+
+	// Private memory (stacks, TLS, runtime memory) has no backing view; a game can have the GPU
+	// write a fence or a result into it. It is written at its own address, and keeps its protection.
+	const auto runtime = Libs::LibKernel::Memory::AllocateRuntimeMemory(
+	    0, page * 2, Common::VirtualMemory::Mode::Read, "writeback_runtime");
+	Check(test, runtime != 0, "runtime allocation failed");
+	Libs::LibKernel::Memory::WriteBacking(runtime + 16, pattern.data(), 64);
+	Check(test, Libs::LibKernel::Memory::ProtectGuestMemory(runtime, page,
+	                                                        Common::VirtualMemory::Mode::ReadWrite) &&
+	                std::memcmp(reinterpret_cast<void*>(runtime + 16), pattern.data(), 64) == 0,
+	      "GPU data for private memory was not written");
+	Check(test, Libs::LibKernel::Memory::FreeGuestMemory(runtime, page * 2), "runtime free failed");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestClampRangeSizeOfUnmappedMemoryBindsNothing() {
+	const char*        test = "ClampRangeSizeOfUnmappedMemoryBindsNothing";
+	constexpr uint64_t page = SceKernelPageSize;
+	const auto         base = MapNamedFlexible(test, page * 2, SceKernelProtCpuRw, "clamp_range");
+	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page * 2) == page * 2,
+	      "a mapped range was clamped");
+	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base + page, page * 4) == page,
+	      "a range reaching past the mapping was not clamped to it");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base, page * 2), "KernelMunmap");
+	// A descriptor over released memory: no buffer (0), not an exit.
+	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page) == 0,
+	      "a range at an unmapped address did not return 0");
 	std::printf("[host]    %-48s ok\n", test);
 }
 
@@ -1649,6 +1839,136 @@ void TestPartialUnmapPreservesHostPermissions() {
 #endif
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+DWORD HostProtection(uint64_t vaddr) {
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<const void*>(vaddr), &info, sizeof(info)) == 0 ||
+	    info.State != MEM_COMMIT) {
+		return 0;
+	}
+	return info.Protect;
+}
+
+// Windows splits a file view by unmapping all of it: the survivors are mapped again and must get
+// their own protections back (guest mprotect, GPU write and read tracking).
+void TestPartialUnmapPreservesHostPermissionsWindows() {
+	const char* test = "PartialUnmapPreservesHostPermissions";
+	const auto  base = MapNamedFlexible(test, SceKernelPageSize * 3, SceKernelProtCpuRw,
+	                                    "unmap_host_permissions");
+	using Common::VirtualMemory::Mode;
+	Check(test, Libs::LibKernel::Memory::ProtectGuestHostMemory(base, SceKernelPageSize, Mode::Read),
+	      "could not protect the left survivor from writes");
+	Check(test,
+	      Libs::LibKernel::Memory::ProtectGuestHostMemory(base + SceKernelPageSize * 2,
+	                                                      SceKernelPageSize, Mode::NoAccess),
+	      "could not protect the right survivor from reads");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(base + SceKernelPageSize, SceKernelPageSize),
+	        "KernelMunmap(middle)");
+
+	Check(test, HostProtection(base) == PAGE_READONLY,
+	      "partial unmap removed the left survivor's write protection");
+	Check(test, HostProtection(base + SceKernelPageSize * 2) == PAGE_NOACCESS,
+	      "partial unmap removed the right survivor's read protection");
+
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base, SceKernelPageSize),
+	        "KernelMunmap(left cleanup)");
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMunmap(base + SceKernelPageSize * 2, SceKernelPageSize),
+	        "KernelMunmap(right cleanup)");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+std::atomic<uint64_t> g_transient_unmap_retries {0};
+
+// The part of the runtime linker's fault handler that retries accesses to a replaced mapping.
+LONG CALLBACK TransientUnmapFaultHandler(EXCEPTION_POINTERS* info) {
+	const auto* record = info->ExceptionRecord;
+	if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	const auto address = static_cast<uint64_t>(record->ExceptionInformation[1]);
+	const auto window  = Libs::LibKernel::Memory::WaitForTransientUnmap(address);
+	if (window != 0 && Libs::LibKernel::Memory::RetryTransientUnmapFault(address, window)) {
+		g_transient_unmap_retries.fetch_add(1, std::memory_order_relaxed);
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// On the console, unmapping part of a mapping and MAP_FIXED over a mapping leave the rest of the
+// memory usable by other threads. The emulator briefly unmaps it (Windows view splits, unmap then
+// map for MAP_FIXED); a thread using it meanwhile must not fault for good.
+void TestAccessDuringMappingReplacement() {
+	const char*   test    = "AccessDuringMappingReplacement";
+	constexpr int Pages   = 64;
+	auto*         handler = AddVectoredExceptionHandler(1, TransientUnmapFaultHandler);
+	Check(test, handler != nullptr, "failed to install test exception handler");
+	g_transient_unmap_retries = 0;
+
+	const auto flexible = MapNamedFlexible(test, SceKernelPageSize * Pages, SceKernelProtCpuRw,
+	                                       "transient_split");
+
+	int64_t phys_addr = 0;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+	            0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(), SceKernelPageSize,
+	            SceKernelPageSize, SceKernelMtypeC, &phys_addr),
+	        "KernelAllocateDirectMemory");
+	void* direct_addr = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(&direct_addr, SceKernelPageSize,
+	                                                            SceKernelProtCpuRw, 0, phys_addr,
+	                                                            SceKernelPageSize, "transient_fixed"),
+	        "KernelMapNamedDirectMemory");
+	const auto direct = reinterpret_cast<uint64_t>(direct_addr);
+
+	std::atomic<bool>     stop {false};
+	std::atomic<uint64_t> mismatches {0};
+	std::atomic<uint64_t> accesses {0};
+	std::thread           worker([&] {
+		auto*    kept     = reinterpret_cast<volatile uint64_t*>(flexible);
+		auto*    replaced = reinterpret_cast<volatile uint64_t*>(direct);
+		uint64_t i        = 0;
+		for (; !stop.load(std::memory_order_relaxed); i++) {
+			kept[i % 512]     = i;
+			replaced[i % 512] = i;
+			if (kept[i % 512] != i || replaced[i % 512] != i) {
+				mismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+		accesses = i;
+	});
+
+	// Each unmap is a partial unmap of the view that holds the worker's page.
+	for (int page = Pages - 1; page >= 1; page--) {
+		CheckOk(test,
+		        Libs::LibKernel::Memory::KernelMunmap(flexible + SceKernelPageSize * page,
+		                                              SceKernelPageSize),
+		        "KernelMunmap(split)");
+	}
+	for (int i = 0; i < 256; i++) {
+		void* fixed = direct_addr;
+		CheckOk(test,
+		        Libs::LibKernel::Memory::KernelMapNamedDirectMemory(
+		            &fixed, SceKernelPageSize, SceKernelProtCpuRw, SceKernelMapFixed, phys_addr,
+		            SceKernelPageSize, "transient_fixed"),
+		        "KernelMapNamedDirectMemory(fixed)");
+		Check(test, fixed == direct_addr, "MAP_FIXED moved the mapping");
+	}
+	stop = true;
+	worker.join();
+	RemoveVectoredExceptionHandler(handler);
+
+	Check(test, mismatches == 0, "memory changed while its mapping was replaced");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(flexible, SceKernelPageSize),
+	        "KernelMunmap(flexible cleanup)");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(direct, SceKernelPageSize),
+	        "KernelMunmap(direct cleanup)");
+	CheckOk(test, Libs::LibKernel::Memory::KernelReleaseDirectMemory(phys_addr, SceKernelPageSize),
+	        "KernelReleaseDirectMemory");
+	std::printf("[host]    %-48s ok (%" PRIu64 " accesses, %" PRIu64 " retried)\n", test,
+	            accesses.load(), g_transient_unmap_retries.load());
+}
 void TestWindowsBackingViewPermissions() {
 	const char* test = "WindowsBackingViewPermissions";
 	Check(test, Libs::LibKernel::Memory::TestWindowsBackingViewModes(),
@@ -1952,6 +2272,26 @@ void TestMunmapAcrossAdjacentFlexibleMappings() {
 	ExpectUnmapped(test, base);
 	ExpectUnmapped(test, base + SceKernelPageSize);
 
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestMunmapReservedSpanWithReleasedHole() {
+	const char* test = "MunmapReservedSpanWithReleasedHole";
+	void* reserve = nullptr;
+	CheckOk(test,
+	        Libs::LibKernel::Memory::KernelReserveVirtualRange(&reserve, SceKernelPageSize * 3, 0,
+	                                                           SceKernelPageSize),
+	        "KernelReserveVirtualRange");
+	const auto base = reinterpret_cast<uint64_t>(reserve);
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + SceKernelPageSize, SceKernelPageSize),
+	        "KernelMunmap(middle hole)");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base, SceKernelPageSize * 3),
+	        "KernelMunmap(full span with hole)");
+	ExpectUnmapped(test, base);
+	ExpectUnmapped(test, base + SceKernelPageSize * 2);
+	Check(test,
+	      Libs::LibKernel::Memory::KernelMunmap(base, SceKernelPageSize * 3) == ErrorAccess,
+	      "KernelMunmap accepted an entirely released span");
 	std::printf("[host]    %-48s ok\n", test);
 }
 
@@ -2485,6 +2825,67 @@ void TestFixedDirectReplacementPreservesAccess() {
 	CheckOk(test, KernelMunmap(alias_base, page * 4), "KernelMunmap(alias)");
 	CheckOk(test, KernelReleaseDirectMemory(physical, page * 4), "KernelReleaseDirectMemory");
 	std::printf("[host]    %-48s ok\n", test);
+}
+
+std::atomic<uint64_t> g_transient_unmap_retries {0};
+
+// The part of the runtime linker's fault handler that retries accesses to a replaced mapping.
+void TransientUnmapSignalHandler(int, siginfo_t* info, void*) {
+	const auto address = reinterpret_cast<uint64_t>(info->si_addr);
+	const auto window  = Libs::LibKernel::Memory::WaitForTransientUnmap(address);
+	if (window != 0 && Libs::LibKernel::Memory::RetryTransientUnmapFault(address, window)) {
+		g_transient_unmap_retries.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	signal(SIGSEGV, SIG_DFL); // a real violation: fault again and die
+}
+
+// On the console MAP_FIXED over a mapping is atomic: other threads keep using the memory. A
+// flexible mapping is replaced by unmapping and mapping it again, so a thread using it meanwhile
+// must wait out the gap, not die on an access violation.
+void TestAccessDuringFlexibleReplacement() {
+	using namespace Libs::LibKernel::Memory;
+	const char*        test = "AccessDuringFlexibleReplacement";
+	constexpr uint64_t page = SceKernelPageSize;
+	const auto         base = MapNamedFlexible(test, page, SceKernelProtCpuRw, "transient_flex");
+
+	struct sigaction action {};
+	struct sigaction previous {};
+	action.sa_sigaction = TransientUnmapSignalHandler;
+	action.sa_flags     = SA_SIGINFO | SA_NODEFER;
+	sigemptyset(&action.sa_mask);
+	Check(test, sigaction(SIGSEGV, &action, &previous) == 0, "could not install fault handler");
+	g_transient_unmap_retries = 0;
+
+	std::atomic<bool>     stop {false};
+	std::atomic<uint64_t> accesses {0};
+	std::thread           worker([&] {
+		auto* word = reinterpret_cast<volatile uint64_t*>(base);
+		for (uint64_t i = 0; !stop.load(std::memory_order_relaxed); i++) {
+			word[i % 512] = i;
+			(void)word[(i + 1) % 512];
+			accesses.store(i + 1, std::memory_order_relaxed);
+		}
+	});
+	while (accesses.load(std::memory_order_relaxed) == 0) {
+		std::this_thread::yield(); // the worker is hammering the page before the first replacement
+	}
+
+	for (int i = 0; i < 2000; i++) {
+		void* fixed = reinterpret_cast<void*>(base);
+		CheckOk(test,
+		        KernelMapNamedFlexibleMemory(&fixed, page, SceKernelProtCpuRw, SceKernelMapFixed,
+		                                     "transient_flex"),
+		        "KernelMapNamedFlexibleMemory(fixed)");
+		Check(test, reinterpret_cast<uint64_t>(fixed) == base, "MAP_FIXED moved the mapping");
+	}
+	stop = true;
+	worker.join();
+	sigaction(SIGSEGV, &previous, nullptr);
+
+	CheckOk(test, KernelMunmap(base, page), "KernelMunmap(cleanup)");
+	std::printf("[host]    %-48s ok (%" PRIu64 " accesses, %" PRIu64 " retried)\n", test,
+	            accesses.load(), g_transient_unmap_retries.load());
 }
 #endif
 
@@ -4600,6 +5001,7 @@ int main(int argc, char** argv) {
 #if defined(__linux__)
 	if (argc == 2 && std::strcmp(argv[1], "--fixed-direct-replacement-only") == 0) {
 		RunTest(TestFixedDirectReplacementPreservesAccess);
+		RunTest(TestAccessDuringFlexibleReplacement);
 		return g_failed_tests == 0 ? 0 : 1;
 	}
 #endif
@@ -4654,24 +5056,31 @@ int main(int argc, char** argv) {
 	RunTest(TestFlexibleDmemCompatAndAlignmentFlags);
 	RunTest(TestFlexibleNoCoalescePreservesBoundaries);
 	RunTest(TestFlexibleMemoryReuseIsZeroFilled);
+	RunTest(TestDirectMemoryReuseIsZeroFilled);
+	RunTest(TestDirectMemoryPartialReuseIsZeroFilled);
 	RunTest(TestSmallerFlexibleMapReusesReleasedHole);
 	RunTest(TestGuestStackExitLifecycle);
 	RunTest(TestGuestStackUsesPrivateOwnerMemoryAndCache);
 	RunTest(TestMainEntryUsesGuestStackAndDisablesHostChecks);
 	RunTest(TestFragmentedBackingUnmapRollback);
 	RunTest(TestRuntimeMemoryOwnerLifecycle);
+	RunTest(TestWriteBackingToPartlyUnmappedAndPrivateMemory);
+	RunTest(TestClampRangeSizeOfUnmappedMemoryBindsNothing);
 	RunTest(TestFlexibleMapQueryAndWholeMunmap);
 	RunTest(TestPartialFlexibleMunmapAndFindNext);
 	RunTest(TestReserveMapFixedAndNoOverwrite);
 	RunTest(TestFixedNoOverwriteRejectsReservedRange);
 	RunTest(TestReleasedReserveCanBeReused);
 	RunTest(TestMunmapAcrossAdjacentFlexibleMappings);
+	RunTest(TestMunmapReservedSpanWithReleasedHole);
 	RunTest(TestDirectMapQueryOffsetAndPartialMunmap);
 	RunTest(TestDirectPartialProtectUnmapPreservesNeighbors);
 #if defined(__linux__)
 	RunTest(TestPartialUnmapPreservesHostPermissions);
 #endif
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	RunTest(TestPartialUnmapPreservesHostPermissionsWindows);
+	RunTest(TestAccessDuringMappingReplacement);
 	RunTest(TestWindowsBackingViewPermissions);
 #endif
 	RunTest(TestDirectMappingNamesTypesAndValidation);
@@ -4690,6 +5099,7 @@ int main(int argc, char** argv) {
 	RunTest(TestDirectMapUnmapReusesHostAddress);
 #if defined(__linux__)
 	RunTest(TestFixedDirectReplacementPreservesAccess);
+	RunTest(TestAccessDuringFlexibleReplacement);
 #endif
 	RunTest(TestFixedReserveReplacesPartialDirectMapping);
 	RunTest(TestFixedReserveRollbackConsumesRestoredPlaceholder);

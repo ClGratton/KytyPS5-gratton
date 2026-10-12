@@ -221,10 +221,14 @@ int KYTY_SYSV_ABI PlayGoGetChunkId(int handle, uint16_t* out_chunk_id_list,
 	if (out_entries == nullptr) {
 		return PLAYGO_ERROR_BAD_POINTER;
 	}
-	if (number_of_entries != 0 && out_chunk_id_list == nullptr) {
-		return PLAYGO_ERROR_BAD_POINTER;
-	}
 	ensure_chunks_loaded();
+
+	if (out_chunk_id_list == nullptr) {
+		// The count pass of the two-pass enumerate pattern: a null list asks for the total number
+		// of chunks, whatever capacity the caller passed.
+		*out_entries = g_chunks_num;
+		return OK;
+	}
 
 	const uint32_t entries = std::min(number_of_entries, g_chunks_num);
 	for (uint32_t i = 0; i < entries; i++) {

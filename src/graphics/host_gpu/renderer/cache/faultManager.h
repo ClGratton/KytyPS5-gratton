@@ -23,6 +23,8 @@ public:
 	void                  ProcessFaultBuffer();
 
 private:
+	friend struct FaultManagerTestAccess;
+
 	GraphicContext&                            m_graphics;
 	CommandScheduler&                          m_scheduler;
 	BufferCache&                               m_buffer_cache;

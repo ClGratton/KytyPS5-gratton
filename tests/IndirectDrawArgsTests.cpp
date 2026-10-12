@@ -62,6 +62,7 @@ void TestMeshRecordFollowsCpuPath() {
 	const uint64_t address = 0x0000000912345670ull + 5u * 2u;
 	Check(out.record[4] == static_cast<uint32_t>(address), "record: index address low");
 	Check(out.record[5] == static_cast<uint32_t>(address >> 32u), "record: index address high");
+	Check(out.record[6] == 0, "record: base group of a sliced dispatch is 0 (the GPU clamps instead)");
 	Check((out.command == MeshCommand {3, 3}), "command: 200 triangles at 85 per group, 3 instances");
 }
 

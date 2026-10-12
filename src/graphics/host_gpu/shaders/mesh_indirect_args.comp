@@ -19,7 +19,8 @@ layout(std430, binding = 0) readonly buffer Arguments {
 	uint arguments[];
 };
 
-// Record (6 dwords, padded to 8) followed by the mesh-tasks command (3 dwords).
+// Record (7 dwords, the last the base group of a sliced dispatch = 0, padded to 8) followed by the
+// mesh-tasks command (3 dwords).
 layout(std430, binding = 1) writeonly buffer Output {
 	uint outputs[];
 };

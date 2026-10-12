@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/pipeline/nullPageRead.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheFile.h"
 
@@ -269,7 +270,11 @@ std::string DescribeVariant(const Variants::ComputeVariant& v) {
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	Common::GpuPhase::Scope gpu_phase_read(Common::GpuPhase::Phase::PipeSrtRead);
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
-	// Image synchronization belongs to formatted buffer bindings, not these reads.
+	// Image synchronization belongs to formatted buffer bindings, not these reads. A table pointer
+	// the game left null reads zeros, as on the GPU.
+	if (ReadGuestNullPage(address, values)) {
+		return true;
+	}
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
@@ -296,6 +301,9 @@ const ShaderRecompiler::IR::ResourceSnapshot& PrefetchResources() {
 // guest address off the GPU thread because it needs the GPU thread's view of GPU-dirty ranges;
 // the lookahead accepts a possibly stale answer (a wrong prediction only wastes worker time).
 bool ReadShaderGuestMemorySpeculative(void*, uint64_t address, std::span<uint32_t> values) {
+	if (ReadGuestNullPage(address, values)) {
+		return true;
+	}
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
 }

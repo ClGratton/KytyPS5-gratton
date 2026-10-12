@@ -448,8 +448,14 @@ void GameController::Connect(int id) {
 void GameController::Disconnect(int id) {
 	Common::LockGuard lock(m_mutex);
 
+	// A pad that vanished before its connection was handled (a Bluetooth pad waking up or going
+	// to sleep, a re-enumeration by a remapping layer) is removed without ever having been added:
+	// there is nothing to remove.
 	const auto it = std::find(m_connected_ids.begin(), m_connected_ids.end(), id);
-	EXIT_IF(it == m_connected_ids.end());
+	if (it == m_connected_ids.end()) {
+		LOGF("Controller: removal of pad %d that was never connected ignored\n", id);
+		return;
+	}
 
 	m_connected_ids.erase(it);
 

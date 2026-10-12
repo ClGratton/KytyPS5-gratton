@@ -273,7 +273,8 @@ constexpr VopcOpcodeInfo VOPC_OPCODE_LIST[] = {
     {0xabu, Opcode::V_CMP_LE_U16},         {0xacu, Opcode::V_CMP_GT_U16},
     {0xadu, Opcode::V_CMP_NE_U16},         {0xaeu, Opcode::V_CMP_GE_U16},
     {0xb9u, Opcode::V_CMPX_LT_U16, false}, {0xbau, Opcode::V_CMPX_EQ_U16, false},
-    {0xbcu, Opcode::V_CMPX_GT_U16},        {0xbdu, Opcode::V_CMPX_NE_U16, false},
+    {0xbbu, Opcode::V_CMPX_LE_U16, false}, {0xbcu, Opcode::V_CMPX_GT_U16},
+    {0xbdu, Opcode::V_CMPX_NE_U16, false}, {0xbeu, Opcode::V_CMPX_GE_U16, false},
     {0xc0u, Opcode::V_CMP_F_U32},
     {0xc1u, Opcode::V_CMP_LT_U32},         {0xc2u, Opcode::V_CMP_EQ_U32},
     {0xc3u, Opcode::V_CMP_LE_U32},         {0xc4u, Opcode::V_CMP_GT_U32},
@@ -737,6 +738,9 @@ bool ValidateVop1Sdwa(Instruction& inst, uint32_t opcode, uint32_t modifier) {
 
 void DecodeVop1Sdwa(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                     uint32_t opcode, uint32_t vdst, Instruction& inst) {
+	if (RejectTruncated(inst, pc, Family::VOP1, opcode, code, word_index, 2u)) {
+		return;
+	}
 	const auto modifier  = code[word_index + 1u];
 	const auto src0      = modifier & 0xffu;
 	const auto dst_sel   = (modifier >> 8u) & 0x7u;
@@ -793,6 +797,9 @@ void ApplyDppModifier(Operand& operand, uint32_t modifier, uint32_t encoding) {
 
 void DecodeVop1Dpp(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                    uint32_t opcode, uint32_t vdst, Instruction& inst) {
+	if (RejectTruncated(inst, pc, Family::VOP1, opcode, code, word_index, 2u)) {
+		return;
+	}
 	if (IsVop1Float64Opcode(inst.opcode)) {
 		SetUnsupported(inst, Family::VOP1, opcode, "FP64 instructions do not support DPP");
 		return;
@@ -1157,6 +1164,9 @@ void FinalizeVop2Instruction(std::span<const uint32_t> code, uint32_t word_index
 
 void DecodeVop2Sdwa(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                     uint32_t opcode, uint32_t vdst, uint32_t vsrc1, Instruction& inst) {
+	if (RejectTruncated(inst, pc, Family::VOP2, opcode, code, word_index, 2u)) {
+		return;
+	}
 	const auto modifier = code[word_index + 1u];
 	const auto fields   = DecodeVop2SdwaFields(modifier);
 	SetRawWords(inst, code, word_index, 2);
@@ -1185,6 +1195,9 @@ void DecodeVop2Sdwa(uint32_t pc, std::span<const uint32_t> code, uint32_t word_i
 
 void DecodeVop2Dpp(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                    uint32_t opcode, uint32_t vdst, uint32_t vsrc1, Instruction& inst) {
+	if (RejectTruncated(inst, pc, Family::VOP2, opcode, code, word_index, 2u)) {
+		return;
+	}
 	const auto modifier = code[word_index + 1u];
 	const auto src0     = modifier & 0xffu;
 	SetRawWords(inst, code, word_index, 2);
@@ -1255,6 +1268,9 @@ bool SupportsVopcSdwa(Opcode opcode) {
 
 void DecodeVopcSdwa(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                     uint32_t opcode, uint32_t vsrc1, Instruction& inst) {
+	if (RejectTruncated(inst, pc, Family::VOPC, opcode, code, word_index, 2u)) {
+		return;
+	}
 	const auto modifier = code[word_index + 1u];
 	const auto fields   = DecodeVopcSdwaFields(modifier);
 	SetRawWords(inst, code, word_index, 2);
@@ -1291,6 +1307,9 @@ void DecodeVopcSdwa(uint32_t pc, std::span<const uint32_t> code, uint32_t word_i
 
 void DecodeVopcDpp(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                    uint32_t opcode, uint32_t vsrc1, Instruction& inst) {
+	if (RejectTruncated(inst, pc, Family::VOPC, opcode, code, word_index, 2u)) {
+		return;
+	}
 	const auto modifier = code[word_index + 1u];
 	const auto src0     = modifier & 0xffu;
 	SetRawWords(inst, code, word_index, 2);
@@ -1651,8 +1670,10 @@ bool IsVopcCompareExec(Opcode opcode) {
 		case Opcode::V_CMPX_GE_I16:
 		case Opcode::V_CMPX_LT_U16:
 		case Opcode::V_CMPX_EQ_U16:
+		case Opcode::V_CMPX_LE_U16:
 		case Opcode::V_CMPX_GT_U16:
 		case Opcode::V_CMPX_NE_U16:
+		case Opcode::V_CMPX_GE_U16:
 		case Opcode::V_CMPX_LT_F16:
 		case Opcode::V_CMPX_EQ_F16:
 		case Opcode::V_CMPX_LE_F16:
@@ -1772,8 +1793,11 @@ void DecodeVopc(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 void DecodeVop3(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                 Instruction& inst) {
 	const uint32_t word0  = code[word_index];
-	const uint32_t word1  = code[word_index + 1u];
 	const uint32_t opcode = (word0 >> 16u) & 0x3ffu;
+	if (RejectTruncated(inst, pc, Family::VOP3, opcode, code, word_index, 2u)) {
+		return;
+	}
+	const uint32_t word1  = code[word_index + 1u];
 	const uint32_t vdst   = word0 & 0xffu;
 	const uint32_t sdst   = (word0 >> 8u) & 0x7fu;
 	const uint32_t src0   = word1 & 0x1ffu;
@@ -1924,9 +1948,12 @@ void DecodeVop3(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index
 
 void DecodeVop3p(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
                  Instruction& inst) {
-	const uint32_t word0       = code[word_index];
+	const uint32_t word0  = code[word_index];
+	const uint32_t opcode = (word0 >> 16u) & 0x7fu;
+	if (RejectTruncated(inst, pc, Family::VOP3P, opcode, code, word_index, 2u)) {
+		return;
+	}
 	const uint32_t word1       = code[word_index + 1u];
-	const uint32_t opcode      = (word0 >> 16u) & 0x7fu;
 	const uint32_t vdst        = word0 & 0xffu;
 	const uint32_t neg_hi      = (word0 >> 8u) & 0x7u;
 	const uint32_t op_sel      = (word0 >> 11u) & 0x7u;

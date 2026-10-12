@@ -43,9 +43,10 @@ struct MeshCommand {
 	bool     operator==(const MeshCommand&) const = default;
 };
 
-// Output slot of the pass: the 6 dwords a direct mesh draw pushes (see EmitMeshDrawParameter),
-// padded to 8, then the VkDrawMeshTasksIndirectCommandEXT (groups, instances, 1).
-inline constexpr uint32_t RecordDwords  = 6;
+// Output slot of the pass: the 7 dwords a direct mesh draw pushes (see EmitMeshDrawParameter; the
+// seventh is the base group of a sliced dispatch, always 0 for a GPU-built draw), padded to 8, then
+// the VkDrawMeshTasksIndirectCommandEXT (groups, instances, 1).
+inline constexpr uint32_t RecordDwords  = 7;
 inline constexpr uint32_t CommandWord   = 8;
 inline constexpr uint32_t OutputDwords  = 12;
 inline constexpr uint32_t OutputBytes   = OutputDwords * 4;

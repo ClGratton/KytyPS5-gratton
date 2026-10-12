@@ -248,6 +248,30 @@ void TestWatchAndUnwatch(uint64_t base = 0x0000000200010000ull) {
   Check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
 }
 
+void TestReapplyProtection() {
+  PageManager manager;
+  const auto page_size = manager.GetPageSize();
+  auto *memory = Allocate(page_size * 3);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+
+  manager.UpdatePageWatchers<true>(address, page_size);
+  // A guest mprotect over the watched page and its unwatched neighbours.
+  DWORD old_protection = 0;
+  Check(VirtualProtect(memory, page_size * 2, PAGE_READWRITE,
+                       &old_protection) != 0 &&
+            VirtualProtect(memory + page_size * 2, page_size, PAGE_NOACCESS,
+                           &old_protection) != 0,
+        "guest protection change failed");
+  manager.ReapplyProtection(address, page_size * 3);
+  Check(Protection(memory) == PAGE_READONLY,
+        "reapply did not restore the write watch");
+  Check(IsWritable(memory + page_size) &&
+            Protection(memory + page_size * 2) == PAGE_NOACCESS,
+        "reapply changed the protection of unwatched pages");
+  manager.UpdatePageWatchers<false>(address, page_size);
+  Check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
+}
+
 void TestSharedWatcherCounts() {
   PageManager manager;
   const auto page_size = manager.GetPageSize();
@@ -697,6 +721,7 @@ int main(int argc, char **argv) {
     RunDeathCase(argv[2]);
   }
   TestWatchAndUnwatch();
+  TestReapplyProtection();
   TestWatchAndUnwatch(Libs::LibKernel::Memory::kExtendedMemoryBase);
   TestSharedWatcherCounts();
   TestCrossRegionRange();

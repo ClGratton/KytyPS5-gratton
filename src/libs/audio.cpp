@@ -14,6 +14,8 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cinttypes>
 #include <cstring>
 #include <magic_enum.hpp>
 #include <vector>
@@ -33,6 +35,7 @@ constexpr int AUDIO_OUT_PORT_TYPE_AUX       = 127;
 
 constexpr uint32_t AUDIO_OUT_PARAM_FORMAT_MASK = 0x000000ffu;
 constexpr uint64_t AUDIO_OUT_TARGET_LATENCY_US = 40000;
+constexpr uint64_t AUDIO_OUT_MAX_LATENCY_US    = 100000; // device queue cap for non-blocking output
 
 constexpr int      AUDIO_IN_SILENT_STATE_DEVICE_NONE = 0x1;
 constexpr uint32_t AUDIO_IN_GRAIN_MAX_ASYNC          = 384;
@@ -404,6 +407,26 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		}
 		if (queued < static_cast<int>(prepared_size)) {
 			port->queue_primed = false;
+		}
+	} else {
+		// Non-blocking submissions (AudioOut2 pushes) are paced by the context's simulated queue
+		// and the host clock, not by the device. A device that plays slightly slower than that
+		// clock keeps the surplus queued for good and the sound falls behind the picture the
+		// longer the game runs. The device queue is finite, like the ring of the hardware port it
+		// stands for: past the latency cap the buffer is dropped, loudly counted.
+		const uint64_t bytes_per_frame = prepared_size / std::max(port->samples_num, 1u);
+		const uint64_t max_queued =
+		    bytes_per_frame * port->freq * AUDIO_OUT_MAX_LATENCY_US / 1000000u;
+		if (static_cast<uint64_t>(std::max(SDL_GetAudioStreamQueued(port->stream), 0)) >
+		    max_queued) {
+			static std::atomic<uint64_t> dropped {0};
+			const auto                   count = ++dropped;
+			if (count == 1 || count % 100 == 0) {
+				LOGF("AudioOut: %" PRIu64 " non-blocking buffers dropped (more than %" PRIu64
+				     " ms queued for the device)\n",
+				     count, AUDIO_OUT_MAX_LATENCY_US / 1000u);
+			}
+			return true;
 		}
 	}
 

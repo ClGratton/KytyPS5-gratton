@@ -3,6 +3,7 @@
 #include "common/loopGuard.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/gdsCopyPlan.h"
 #include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
 #include "graphics/host_gpu/renderer/cache/readbackPlan.h"
 
@@ -86,9 +87,24 @@ void BufferCache::Unregister(BufferId id) {
 	ChangeRegister<false>(id);
 }
 
+void BufferCache::EnsureBdaPageTableInitialized() {
+	if (m_bda_pagetable_initialized) {
+		return;
+	}
+	// Recorded before the first table write or read, and ordered by Fill barriers.
+	m_bda_pagetable_buffer.Fill(0, m_bda_pagetable_buffer.Size(), 0);
+	m_bda_pagetable_initialized = true;
+}
+
+Buffer* BufferCache::GetBdaPageTableBuffer() {
+	EnsureBdaPageTableInitialized();
+	return &m_bda_pagetable_buffer;
+}
+
 template <bool insert>
 void BufferCache::ChangeRegister(BufferId id) {
 	m_buffer_set_generation.fetch_add(1, std::memory_order_release); // K15
+	EnsureBdaPageTableInitialized();
 	auto& buffer = m_slot_buffers[id];
 	PageTable::PageRange pages {};
 	EXIT_IF(!(GuestRange {buffer.CpuAddress(), buffer.Size()}.Valid()) ||
@@ -502,10 +518,21 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
 		if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
-			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+			// A write releases the same range below, in the same critical section as its CPU
+			// claim: releasing it here as well would be a second lock acquisition on it, which is
+			// the window this change closes.
+			if (!is_write) {
+				m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+			}
 		}
 		if (is_write) {
-			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
+			// The guest writes these bytes, so whatever the GPU wrote is superseded -- and the
+			// GPU's release and the CPU's claim have to happen under one lock. As two calls, an
+			// upload on the renderer thread can re-mark a page GPU-dirty in between and
+			// RegionManager then exits on "CPU dirty state conflicts with GPU dirty state". This
+			// is also the path a write takes when there is nothing to download: the old code
+			// marked the page CPU-dirty over the GPU's untouched claim.
+			m_memory_tracker.TakeGpuPagesForCpu(vaddr, size);
 		}
 	});
 }
@@ -618,6 +645,29 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,
                                     bool is_texel_buffer) {
+	// Only mapped guest memory is read. Pages the guest unmapped stay CPU-dirty (UnmapMemory
+	// invalidates them) until memory is mapped there again, and an image's range can reach into
+	// them: a texture of a streamed pool whose layers the game released. The kernel's committed
+	// ranges tell (a PRT aperture is mapped for the GPU as a whole, its pages one by one); not
+	// GpuResourceManager's ranges, whose lock PrepareBda holds around this.
+	if (LibKernel::Memory::IsFullyMapped(vaddr, size)) {
+		UploadDirtyRanges(buffer, vaddr, size, is_written);
+	} else {
+		std::vector<std::pair<uint64_t, uint64_t>> parts;
+		LibKernel::Memory::MappedParts(vaddr, size, &parts);
+		for (const auto& [address, bytes]: parts) {
+			UploadDirtyRanges(buffer, address, bytes, is_written);
+		}
+	}
+	if (is_texel_buffer && !is_written) {
+		return SynchronizeBufferFromImage(buffer, vaddr, size);
+	}
+	return false;
+}
+
+// The CPU-dirty pages of a mapped range copied into the buffer (the written ones then GPU-owned).
+void BufferCache::UploadDirtyRanges(Buffer& buffer, uint64_t vaddr, uint64_t size,
+                                    bool is_written) {
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size = 0;
 	vk::Buffer                  source;
@@ -654,10 +704,6 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		                       vk::PipelineStageFlagBits::eAllCommands,
 		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
 	}
-	if (is_texel_buffer && !is_written) {
-		return SynchronizeBufferFromImage(buffer, vaddr, size);
-	}
-	return false;
 }
 
 vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
@@ -666,11 +712,19 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 		return nullptr;
 	}
 
+	// A buffer may cover non-resident pages of a PRT aperture, which read as zero; a host
+	// read there would fault back into the tracker from inside its upload callback.
+	const auto read_guest = [](void* destination, uint64_t address, uint64_t size) {
+		if (!LibKernel::Memory::TryReadBacking(address, destination, size) &&
+		    !LibKernel::Memory::TryReadSparseBacking(address, destination, size)) {
+			std::memcpy(destination, reinterpret_cast<const void*>(address), size);
+		}
+	};
 	auto [mapped, base_offset] = m_staging_buffer.Map(total_size, 4);
 	if (mapped != nullptr) {
 		for (auto& copy: copies) {
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
-			std::memcpy(mapped + copy.srcOffset, reinterpret_cast<const void*>(address), copy.size);
+			read_guest(mapped + copy.srcOffset, address, copy.size);
 			copy.srcOffset += base_offset;
 		}
 		m_staging_buffer.Commit();
@@ -681,8 +735,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	                                         vk::BufferUsageFlagBits::eTransferSrc, total_size);
 	for (const auto& copy: copies) {
 		const auto address = buffer.CpuAddress() + copy.dstOffset;
-		std::memcpy(temporary->Mapped().data() + copy.srcOffset,
-		            reinterpret_cast<const void*>(address), copy.size);
+		read_guest(temporary->Mapped().data() + copy.srcOffset, address, copy.size);
 	}
 	temporary->Flush(0, total_size);
 	const auto handle = temporary->Handle();
@@ -776,6 +829,25 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
 	RecordKnownFill(vaddr, size, value);
+}
+
+void BufferCache::CopyGdsBuffer(uint64_t dst_offset, uint64_t src_offset, uint64_t size) {
+	if (size == 0) {
+		return;
+	}
+	if (((dst_offset | src_offset | size) & 3u) != 0 || dst_offset > m_gds_buffer.Size() ||
+	    size > m_gds_buffer.Size() - dst_offset || src_offset > m_gds_buffer.Size() ||
+	    size > m_gds_buffer.Size() - src_offset) {
+		EXIT("BufferCache: invalid GDS copy range, src=0x%016" PRIx64 " dst=0x%016" PRIx64
+		     " size=0x%016" PRIx64 "\n",
+		     src_offset, dst_offset, size);
+	}
+	// On-chip store-to-store DMA. It runs in GPU order like the other GDS copies, and a range that
+	// overlaps itself is copied in memmove order as non-overlapping regions.
+	auto& command = m_scheduler.Current();
+	for (const auto& chunk: PlanGdsCopy(dst_offset, src_offset, size)) {
+		m_gds_buffer.CopyFrom(command, m_gds_buffer, chunk.source, chunk.destination, chunk.size);
+	}
 }
 
 void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,

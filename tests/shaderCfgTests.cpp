@@ -3122,8 +3122,8 @@ void TestNewShaderRecompilerMoreAluFamilies() {
         "SPIR-V binary does not contain OpFNegate");
   Check(SpirvContainsOpcode(result.spirv, 12),
         "SPIR-V binary does not contain OpExtInst");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16");
+  Check(!SpirvContainsExtInst(result.spirv, 58),
+        "SPIR-V binary contains GLSL.std.450 PackHalf2x16");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16");
   Check(SpirvContainsExtInst(result.spirv, 50),
@@ -3389,8 +3389,8 @@ void TestNewShaderRecompilerVop3pPackedF16() {
         "accumulator");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16 for VOP3P");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16 for VOP3P");
+  Check(!SpirvContainsExtInst(result.spirv, 58),
+        "SPIR-V binary contains GLSL.std.450 PackHalf2x16 for VOP3P");
   Check(SpirvContainsExtInst(result.spirv, 50),
         "SPIR-V binary does not contain GLSL.std.450 Fma for VOP3P");
   Check(
@@ -3478,9 +3478,8 @@ void TestNewShaderRecompilerStagedShaderOps() {
         "SPIR-V binary does not contain OpNot for S_BITSET0_B32");
   Check(SpirvContainsExtInst(result.spirv, 50),
         "SPIR-V binary does not contain GLSL.std.450 Fma for VOP2 F16 FMA ops");
-  Check(SpirvContainsExtInst(result.spirv, 58),
-        "SPIR-V binary does not contain GLSL.std.450 PackHalf2x16 for VOP2 F16 "
-        "FMA ops");
+  Check(!SpirvContainsExtInst(result.spirv, 58),
+        "SPIR-V binary contains GLSL.std.450 PackHalf2x16 for VOP2 F16 FMA ops");
   Check(SpirvContainsExtInst(result.spirv, 62),
         "SPIR-V binary does not contain GLSL.std.450 UnpackHalf2x16 for VOP2 "
         "F16 FMA ops");
@@ -4921,6 +4920,59 @@ void TestNewShaderRecompilerInteger64CompareEncodings() {
   }
 }
 
+void TestDecoderRejectsTruncatedInstructions() {
+  using namespace ShaderRecompiler::Decoder;
+  struct TruncatedCase {
+    Family family;
+    std::vector<uint32_t> words;
+  };
+  const TruncatedCase cases[] = {
+      {Family::MIMG, {0xf0000004u, 0xbf810000u}},
+      {Family::MIMG, {0xf0000002u, 0x00000000u}},
+      {Family::MIMG, {0xf0000006u, 0x00000000u, 0x00000000u, 0x00000000u}},
+      {Family::MIMG, {0xf0000000u}},
+      {Family::VOP3, {0xd5030000u}},
+      {Family::VOP3, {0xd5030000u, 0x000000ffu}},
+      {Family::VOP3P, {0xcc000000u}},
+      {Family::VOP2, {0x020000ffu}},
+      {Family::VOP2, {0x020000f9u}},
+      {Family::VOP2, {0x020000fau}},
+      {Family::VOPC, {0x7c0000ffu}},
+      {Family::VOPC, {0x7c0000f9u}},
+      {Family::VOPC, {0x7c0000fau}},
+      {Family::VOP1, {0x7e0002f9u}},
+      {Family::VOP1, {0x7e0002fau}},
+      {Family::VOP1, {0x7e0002e9u}},
+      {Family::VOP1, {0x7e007cfau}},
+      {Family::SOP1, {0xbe8003ffu}},
+      {Family::SOP2, {0x800000ffu}},
+      {Family::DS, {0xd8000000u}},
+      {Family::FLAT, {0xdc000000u}},
+      {Family::SMEM, {0xf4000000u}},
+      {Family::MUBUF, {0xe0000000u}},
+      {Family::MTBUF, {0xe8000000u}},
+      {Family::EXP, {0xf8000000u}},
+  };
+  for (const auto &test : cases) {
+    Instruction inst;
+    DecodeInstruction(test.words, 0u, inst);
+    Check(inst.opcode == Opcode::UNSUPPORTED && inst.family == test.family &&
+              inst.word_count == test.words.size() &&
+              std::equal(test.words.begin(), test.words.end(), inst.raw) &&
+              inst.unsupported_reason.find("extends past the end of the shader code") !=
+                  std::string::npos,
+          "decoder accepted an instruction that extends past the end of the code");
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+    ExpectFatal(
+        [&] {
+          Program program;
+          DecodeProgram(test.words, program);
+        },
+        "truncated shader code did not stop decoding with an explicit error");
+#endif
+  }
+}
+
 void TestNewShaderRecompilerCapturedVopcSdwaCmpxClass() {
   using namespace ShaderRecompiler;
 
@@ -5069,6 +5121,85 @@ void TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16() {
   Check(decoded.opcode == Decoder::Opcode::UNSUPPORTED &&
             (decoded.unsupported_reason.find("VOPC DPP modifier is not supported for opcode") != std::string::npos),
         "V_CMPX_LT_U16 accepted an unsupported DPP encoding");
+}
+
+void TestNewShaderRecompilerCapturedVopcSdwaCmpxLeU16() {
+  using namespace ShaderRecompiler;
+
+  // Captured from Ghost of Tsushima: VOPC opcode 0xbb was unimplemented.
+  const uint32_t shader[] = {
+      0x7d7702f9u, 0x8606001bu, // v_cmpx_le_u16 (SDWA)
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::VOPC &&
+            decoded.opcode == Decoder::Opcode::V_CMPX_LE_U16 &&
+            decoded.opcode_id == 0xbbu && decoded.word_count == 2u &&
+            decoded.raw[0] == shader[0] && decoded.raw[1] == shader[1] &&
+            decoded.dst.kind == Decoder::OperandKind::ExecLo &&
+            decoded.src_count == 2u,
+        "decoder rejected captured SDWA V_CMPX_LE_U16 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "captured SDWA V_CMPX_LE_U16 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Pixel));
+  Check((result.decoded_dump.find("V_CMPX_LE_U16 exec_lo") != std::string::npos),
+        "captured SDWA V_CMPX_LE_U16 is missing from decoded dump");
+  CheckSpirvBinaryValidates(result.spirv);
+
+  const uint32_t compact[] = {0x7d760300u};
+  Decoder::DecodeInstruction(compact, 0u, decoded);
+  Check(decoded.opcode == Decoder::Opcode::V_CMPX_LE_U16 &&
+            decoded.dst.kind == Decoder::OperandKind::ExecLo,
+        "compact V_CMPX_LE_U16 does not decode to an EXEC compare");
+  const uint32_t dpp[] = {EncodeVopc(0xbbu, 250u, 1u), EncodeVop2Dpp(0u)};
+  Decoder::DecodeInstruction(dpp, 0u, decoded);
+  Check(decoded.opcode == Decoder::Opcode::UNSUPPORTED &&
+            (decoded.unsupported_reason.find("VOPC DPP modifier is not supported for opcode") != std::string::npos),
+        "V_CMPX_LE_U16 accepted an unsupported DPP encoding");
+}
+
+void TestNewShaderRecompilerCapturedVopcSdwaCmpxGeU16() {
+  using namespace ShaderRecompiler;
+
+  // The 0xbe sibling of the captured V_CMPX_LE_U16 (Ghost of Tsushima): 0xbb was missing, and so
+  // was the last of the family.
+  const uint32_t shader[] = {
+      0x7d7d02f9u, 0x8606001bu, // v_cmpx_le_u16 (SDWA)
+      EncodeSopp(0x01),
+  };
+  Decoder::Instruction decoded;
+  Decoder::DecodeInstruction(shader, 0u, decoded);
+  Check(decoded.family == Decoder::Family::VOPC &&
+            decoded.opcode == Decoder::Opcode::V_CMPX_GE_U16 &&
+            decoded.opcode_id == 0xbeu && decoded.word_count == 2u &&
+            decoded.raw[0] == shader[0] && decoded.raw[1] == shader[1] &&
+            decoded.dst.kind == Decoder::OperandKind::ExecLo &&
+            decoded.src_count == 2u,
+        "decoder rejected captured SDWA V_CMPX_GE_U16 fields");
+
+  Decoder::Program program;
+  Decoder::DecodeProgram(shader, program);
+  Check(!CFG::BuildGraph(program).unsupported,
+        "captured SDWA V_CMPX_GE_U16 still fails CFG construction");
+  auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Pixel));
+  Check((result.decoded_dump.find("V_CMPX_GE_U16 exec_lo") != std::string::npos),
+        "captured SDWA V_CMPX_GE_U16 is missing from decoded dump");
+  CheckSpirvBinaryValidates(result.spirv);
+
+  const uint32_t compact[] = {0x7d7c0300u};
+  Decoder::DecodeInstruction(compact, 0u, decoded);
+  Check(decoded.opcode == Decoder::Opcode::V_CMPX_GE_U16 &&
+            decoded.dst.kind == Decoder::OperandKind::ExecLo,
+        "compact V_CMPX_GE_U16 does not decode to an EXEC compare");
+  const uint32_t dpp[] = {EncodeVopc(0xbeu, 250u, 1u), EncodeVop2Dpp(0u)};
+  Decoder::DecodeInstruction(dpp, 0u, decoded);
+  Check(decoded.opcode == Decoder::Opcode::UNSUPPORTED &&
+            (decoded.unsupported_reason.find("VOPC DPP modifier is not supported for opcode") != std::string::npos),
+        "V_CMPX_GE_U16 accepted an unsupported DPP encoding");
 }
 
 void TestNewShaderRecompilerIrLookupMissFailsExplicitly() {
@@ -7188,8 +7319,8 @@ void TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly() {
   user_data[3] = static_cast<uint32_t>(Prospero::BufferFormat::k16_16_16_16Float) << 12u;
   options.user_data = user_data;
   result = RecompileForTest(shader, options);
-  Check((DisassembleSpirvBinary(result.spirv).find("PackHalf2x16") !=
-         std::string::npos),
+  Check(SpirvSourceHasInstructionUsing(DisassembleSpirvBinary(result.spirv), "OpBitwiseOr",
+                                       "%uint_31744"),
         "formatted half-float store did not convert F32 to F16");
   CheckSpirvBinaryValidates(result.spirv);
 }
@@ -11719,6 +11850,7 @@ void TestMeshInputAssembly() {
     uint32_t wave_size = 64;
     bool fast_launch = false;
     uint32_t threads = 256;
+    uint32_t base_group = 0; // the dispatch's base group (sliced draws)
   };
   std::vector<Case> cases = {
       {Prospero::PrimitiveType::kTriList, 14, 177, 14, 2, 2, 0x1002, UINT32_MAX,
@@ -11779,6 +11911,14 @@ void TestMeshInputAssembly() {
        0x41000a20, 0x0a87e000, 96, 97, 98, 0, 43, false, 32, false, 128},
       {Prospero::PrimitiveType::kTriList, 256, 256, 0, 64, 0, 0, 11,
        0x82001520, 0x154ff000, 192, 193, 194, 0, 75, false, 32, false, 256},
+      // A sliced dispatch (base group + local group) must equal the same global group of one
+      // oversized dispatch: these repeat cases 0, 5 and 8 with the group split across the base.
+      {Prospero::PrimitiveType::kTriList, 14, 177, 4, 2, 2, 0x1002, UINT32_MAX,
+       0x40000309, 0x00c09000, 6, 7, 8, 340, 0xabcc, true, 64, false, 256, 10},
+      {Prospero::PrimitiveType::kTriStrip, 5, 8, 0, 1, 0, 0, 11,
+       0x40000305, 0x00c05000, 1, 2, 3, 0, 15, false, 64, false, 256, 1},
+      {Prospero::PrimitiveType::kTriFan, 5, 8, 0, 0, 2, 0x1002, 0,
+       0x40000305, 0x00c05000, 0, 1, 2, 0, 0xabcd, true, 64, false, 256, 1},
   };
   for (const uint32_t wave_size : {32u, 64u}) {
     for (const uint32_t threads : {wave_size, 2u * wave_size}) {
@@ -11819,7 +11959,8 @@ void TestMeshInputAssembly() {
     options.input_info.vertex = &input;
     auto program = Frontend::TranslateProgram(decoded, graph, options);
     const uint32_t draw[] = {test.count, test.base_vertex, 7, test.width,
-                             test.address_low, 0x12};
+                             test.address_low, 0x12, test.base_group};
+    static_assert(std::size(draw) == PushData::MeshDrawDwordCount);
     Inst *load = nullptr;
     for (auto &inst : *program.blocks.front()) {
       if (inst.GetOpcode() == ValueOpcode::MeshDrawParameter) {
@@ -16198,8 +16339,11 @@ int main() {
   TestNewShaderRecompilerCapturedVopcSdwaCmpxClass();
   TestVopcCmpxClassF16Decoder();
   TestNewShaderRecompilerCapturedVopcSdwaCmpxLtU16();
+  TestNewShaderRecompilerCapturedVopcSdwaCmpxLeU16();
+  TestNewShaderRecompilerCapturedVopcSdwaCmpxGeU16();
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerInteger64CompareEncodings();
+  TestDecoderRejectsTruncatedInstructions();
   TestFloatComparisonInputModes();
   TestPsInputCountRegisterDecode();
   TestPixelAncillaryLayerInput();

@@ -1,5 +1,8 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
+#include <atomic>
+#include <cinttypes>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -314,8 +317,11 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	const auto numeric_class = Prospero::SampledTextureNumericClass(format);
 	const bool raw_float_atomic = format == Prospero::BufferFormat::k32Float && uint_resource &&
 	                              resource.atomic && !resource.atomic64;
+	// 32-bit atomics are typed by the opcode: a SINT view is bound as R32_UINT like a UINT one.
+	const bool raw_sint_atomic = format == Prospero::BufferFormat::k32SInt && uint_resource &&
+	                             resource.atomic && !resource.atomic64;
 	const bool format_ok =
-	    raw_sint_storage || raw_float_atomic ||
+	    raw_sint_storage || raw_float_atomic || raw_sint_atomic ||
 	    (numeric_class != Prospero::TextureNumericClass::Unsupported &&
 	     numeric_class != Prospero::TextureNumericClass::Sint &&
 	     uint_resource == (numeric_class == Prospero::TextureNumericClass::Uint) &&
@@ -520,6 +526,41 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		                                                    : TextureCache::BindingType::Texture);
 		const auto id   = texture_cache.FindImage(desc);
 		return {id, nullptr, std::move(desc)};
+	}
+
+	// Binding resolves every texture a shader references, and while a level loads some slots still
+	// hold stale descriptors that the draw never samples (the GPU does not read them). A sampled
+	// view of eight dwords that cannot describe an image at all (a base mip above the last, a
+	// format with no texel layout) is bound as the null image, loudly; a storage view is written
+	// back and still has to be exact. A well-formed descriptor of an unsupported feature is not
+	// this case and keeps its fatal report.
+	if (!storage) {
+		const char* invalid = nullptr;
+		if (!IsMultisampledTexture(TextureType(descriptor)) &&
+		    descriptor.BaseLevel() > descriptor.LastLevel()) {
+			invalid = "base mip above last mip";
+		} else if (TileTextureElementLayout element {};
+		           !TileGetTextureElementLayout(descriptor.Format(), element)) {
+			invalid = "format without a texel layout";
+		}
+		if (invalid != nullptr) {
+			static std::atomic<uint32_t> reported {0};
+			const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (count <= 32) {
+				std::printf("Texture: sampled descriptor is not an image (%s), bound as null: "
+				            "addr=0x%016" PRIx64 " format=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,"
+				            "%08x,%08x (%" PRIu32 " so far)\n",
+				            invalid, descriptor.Base40(),
+				            static_cast<uint32_t>(descriptor.Format()), descriptor.fields[0],
+				            descriptor.fields[1], descriptor.fields[2], descriptor.fields[3],
+				            descriptor.fields[4], descriptor.fields[5], descriptor.fields[6],
+				            descriptor.fields[7], count);
+				std::fflush(stdout);
+			}
+			auto       desc = NullTextureDesc(resource, TextureCache::BindingType::Texture);
+			const auto id   = texture_cache.FindImage(desc);
+			return {id, nullptr, std::move(desc)};
+		}
 	}
 
 	const auto address         = descriptor.Base40();
@@ -777,13 +818,18 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			}
 			if (descriptor.NumRecords() == UINT32_MAX) {
 				if (program.info.buffers[resource].written) {
-					// Sentinel write ranges end before tables captured by any bound stage.
+					// Sentinel write ranges end before tables captured by any bound stage. A
+					// compute dispatch's own scalar reads may overlap its writes (see
+					// CommitBindings), so a table at the start of its own range is allowed; later
+					// tables still end the range so it never grows past the existing limits.
 					for (const auto* reader: stages) {
+						const bool own_compute_reads =
+						    reader == stage && program.stage == ShaderType::Compute;
 						for (const auto [read_address, read_size]: reader->runtime->resources->specialization_reads) {
 							if (read_size == 0) continue;
 							if (read_address > address) {
 								size = std::min(size, read_address - address);
-							} else if (address - read_address < read_size) {
+							} else if (address - read_address < read_size && !own_compute_reads) {
 								EXIT("scalar resource reads overlap a shader buffer write\n");
 							}
 						}
@@ -796,6 +842,10 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				}
 			}
 			size = Libs::LibKernel::Memory::ClampRangeSize(address, size);
+			if (size == 0) { // unmapped: bound as a null buffer
+				source = {};
+				continue;
+			}
 			source = {address, size, cache.FindBuffer(address, size)};
 		}
 	}
@@ -855,6 +905,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
+		} else {
+			texture_cache.MaterializeViewClear(images[i].image_id, images[i].desc);
 		}
 		auto& binding = images[i];
 		binding.mip_views.clear();
@@ -979,6 +1031,12 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			}
 			for (const auto* writer: prepared_bindings) {
 				const auto& program = *writer->runtime->program;
+				// A compute dispatch reading a buffer it writes itself through scalar loads is racy
+				// on hardware: the scalar cache is not coherent with the dispatch's own vector
+				// writes, so the value captured at dispatch start is a valid result. The next
+				// dispatch re-materializes its specialization from memory, so the writes are still
+				// observed from then on.
+				if (writer == reader && program.stage == ShaderType::Compute) continue;
 				for (const auto& resource: program.info.buffers) {
 					if (!resource.written || resource.descriptor_index == UINT32_MAX) continue;
 					const auto& written = writer->buffer_sources[resource.descriptor_index];
