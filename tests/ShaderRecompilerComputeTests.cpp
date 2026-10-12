@@ -39970,7 +39970,7 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
   code.push_back(EncodeMubuf0(0x0cu, 0, true, false)); // buffer_load_dword v1, v0 idxen, s[0:3]
   code.push_back(EncodeMubuf1(1, 0, 0));
   code.push_back(EncodeMubuf0(0x1cu, 0, true, false)); // buffer_store_dword v1, v0 idxen, s[12:15]
-  code.push_back(EncodeMubuf1(1, 12, 0));
+  code.push_back(EncodeMubuf1(1, 3, 0)); // srsrc counts groups of four SGPRs: s[12:15]
   AppendEnd(&code);
   auto *memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
   std::fill(memory, memory + 64, 0u);
