@@ -1,5 +1,6 @@
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
+#include "common/loopGuard.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
@@ -31,7 +32,8 @@ namespace Libs::Graphics {
 namespace {
 
 constexpr uint64_t MiB           = 1024 * 1024;
-constexpr uint64_t GdsBufferSize = 64 * 1024;
+// The guest sees 64 KiB; the host tail after it holds the shader loop guard reports (common/loopGuard.h).
+constexpr uint64_t GdsBufferSize = Common::LoopGuard::GuestGdsBytes + Common::LoopGuard::HostTailBytes;
 
 } // namespace
 
@@ -824,7 +826,27 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionCpuModified(vaddr, size);
 }
 
+void BufferCache::PollLoopGuard() {
+	const auto limit = Config::GetShaderLoopLimit();
+	if (limit == 0 || m_gds_buffer.Mapped().empty()) {
+		return;
+	}
+	// Best effort, like Sync::ReadGds: the shaders write the tail with device atomics into this
+	// mapped stream buffer while it is read.
+	std::array<uint32_t, Common::LoopGuard::Slots> tail {};
+	std::memcpy(tail.data(), m_gds_buffer.Mapped().data() + Common::LoopGuard::GuestGdsBytes,
+	            sizeof(tail));
+	for (const auto& line: Common::LoopGuard::GetMonitor().Observe(tail, limit)) {
+		LOGF("%s", line.c_str());
+		std::printf("%s", line.c_str());
+		std::fflush(stdout);
+	}
+}
+
 void BufferCache::RunGarbageCollector() {
+	if ((m_gc_runs & 0xffu) == 0) {
+		PollLoopGuard();
+	}
 	const bool     frame_clock = Config::GcClockFrames();
 	const uint64_t run         = m_gc_runs++;
 	uint64_t       tick        = 0;

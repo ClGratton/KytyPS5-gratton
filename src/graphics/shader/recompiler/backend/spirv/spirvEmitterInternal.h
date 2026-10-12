@@ -20,6 +20,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -141,6 +142,14 @@ struct EmitterState {
 	// Pixel shaders with subgroup ballots: gl_HelperInvocation, so that guest ballots leave out
 	// helper (quad padding) invocations, whose memory operations the host drops.
 	uint32_t                   helper_invocation_variable            = 0;
+	// --shader-loop-limit: a per-invocation budget of loop-header executions (all loops of the
+	// shader share it). When it runs out, every exit edge of every structured loop is taken, so a
+	// loop that never terminates (a linked list with a cycle, a garbage trip count) ends instead
+	// of hanging the GPU. 0 = off. loop_merges holds the merge blocks of the loops whose header
+	// has been emitted; a conditional branch to one of them also leaves when the budget is spent.
+	uint32_t                                         loop_limit             = 0;
+	uint32_t                                         loop_budget_variable   = 0;
+	std::unordered_set<const IR::Block*>             loop_merges;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
@@ -155,6 +164,16 @@ struct EmitterState {
 	std::vector<OutputBinding> outputs;
 	std::vector<uint32_t>      interface_variables;
 };
+
+// A structured loop the loop guard can cut (header with a merge and a continue block). Programs that
+// fall back to the dispatcher are not guarded.
+[[nodiscard]] inline bool ProgramHasGuardableLoop(const IR::Program& program) {
+	return !program.dispatcher_fallback &&
+	       std::any_of(program.blocks.begin(), program.blocks.end(), [](const IR::Block* block) {
+		       return block->terminator.loop_header && block->terminator.merge_block != nullptr &&
+		              block->terminator.continue_block != nullptr;
+	       });
+}
 
 uint32_t TypeVoid(EmitterState& state);
 uint32_t TypeBool(EmitterState& state);

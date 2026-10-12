@@ -8111,6 +8111,80 @@ void TestNewShaderRecompilerCfgLoopBreakContinue() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+// --shader-loop-limit: the loop's exit edges also leave once the invocation's budget of loop-header
+// executions is spent, so a loop over corrupt data (a linked list with a cycle) cannot hang the GPU.
+// Off by default: with limit 0 the SPIR-V must not change at all.
+void TestShaderLoopLimitGuard() {
+  const uint32_t shader[] = {
+      EncodeSMovB32(0, 128),       // s0 = 0
+      EncodeSopc(0x0a, 0, 129),    // s_cmp_lt_u32 s0, 1
+      EncodeSopp(0x04, 2),         // break when scc == 0
+      EncodeSop2(0x00, 0, 0, 129), // s_add_u32 s0, s0, 1
+      EncodeSopp(0x02, 0xfffcu),   // continue/backedge
+      0xbf810000u,
+  };
+
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.dump_ir = true;
+  const auto plain = RecompileForTest(shader, options);
+  options.loop_limit = 0;
+  const auto off = RecompileForTest(shader, options);
+  Check(plain.spirv == off.spirv, "loop limit 0 changed the SPIR-V");
+  Check(DisassembleSpirvBinary(plain.spirv).find("loop_budget") == std::string::npos,
+        "an unguarded shader has a loop budget");
+
+  options.loop_limit = 77;
+  const auto guarded = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(guarded.spirv);
+  const auto text = DisassembleSpirvBinary(guarded.spirv);
+  Check(text.find("loop_budget") != std::string::npos, "a guarded loop has no loop budget variable");
+  Check(text.find("OpConstant %uint 77") != std::string::npos, "the budget does not start at the limit");
+  // A guarded shader reports what it used through the host tail of the GDS buffer, so it binds GDS
+  // even if it never touched it, and records its use at the return.
+  Check(guarded.program.bindings.descriptor_counts[static_cast<size_t>(
+            ShaderRecompiler::IR::DescriptorBindingKind::Gds)] == 1u,
+        "a guarded shader does not bind the GDS buffer for its reports");
+  Check(plain.program.bindings.descriptor_counts[static_cast<size_t>(
+            ShaderRecompiler::IR::DescriptorBindingKind::Gds)] == 0u,
+        "an unguarded shader binds GDS");
+  Check(text.find("OpAtomicUMax") != std::string::npos, "a guarded shader does not report its use");
+  Check(SpirvInstructionOpcodeCount(guarded.spirv, 246) == SpirvInstructionOpcodeCount(plain.spirv, 246),
+        "the guard changed the number of loops");
+  // The header spends one unit (load, compare, subtract, select, store) and the exit edge reads the
+  // budget again: more loads and logical operations than the plain loop.
+  Check(SpirvInstructionOpcodeCount(guarded.spirv, 61) > SpirvInstructionOpcodeCount(plain.spirv, 61),
+        "the guarded loop does not read its budget");
+  Check(SpirvInstructionOpcodeCount(guarded.spirv, 166) + SpirvInstructionOpcodeCount(guarded.spirv, 167) >
+            SpirvInstructionOpcodeCount(plain.spirv, 166) + SpirvInstructionOpcodeCount(plain.spirv, 167),
+        "the exit condition does not include the spent budget");
+
+  // Nested loops share one budget and still validate (structured control flow is untouched).
+  const uint32_t nested[] = {
+      EncodeSopc(0x0a, 0, 129),    // outer loop: s_cmp_lt_u32 s0, 1
+      EncodeSopp(0x04, 6),         // outer exit -> end
+      EncodeSopc(0x0a, 1, 129),    // inner loop: s_cmp_lt_u32 s1, 1
+      EncodeSopp(0x04, 2),         // inner exit -> outer continue
+      EncodeSMovB32(2, 129),       // inner work
+      EncodeSopp(0x02, 0xfffcu),   // inner backedge
+      EncodeSop2(0x00, 0, 0, 129), // outer continue: s_add_u32 s0, s0, 1
+      EncodeSopp(0x02, 0xfff8u),   // outer backedge
+      0xbf810000u,
+  };
+  const auto nested_plain = [&] {
+    auto o = MakeCompileOptions(ShaderType::Compute);
+    return RecompileForTest(nested, o);
+  }();
+  options.loop_limit = 5;
+  const auto nested_guarded = RecompileForTest(nested, options);
+  CheckSpirvBinaryValidates(nested_guarded.spirv);
+  Check(SpirvInstructionOpcodeCount(nested_guarded.spirv, 246) >= 2 &&
+            SpirvInstructionOpcodeCount(nested_guarded.spirv, 246) ==
+                SpirvInstructionOpcodeCount(nested_plain.spirv, 246),
+        "nested loops lost a loop under the guard");
+  const auto nested_text = DisassembleSpirvBinary(nested_guarded.spirv);
+  Check(nested_text.find("loop_budget") != std::string::npos, "nested guarded loops have no budget");
+}
+
 void TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured() {
   const uint32_t shader[] = {
       EncodeSMovB32(0, 128), // preheader: s0 = 0
@@ -15790,6 +15864,7 @@ int main() {
   TestNewShaderRecompilerCfgTerminalExitMergePS();
   TestNewShaderRecompilerCfgPostEndTargetMergePS();
   TestNewShaderRecompilerCfgLoopBreakContinue();
+  TestShaderLoopLimitGuard();
   TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured();
   TestNewShaderRecompilerCfgLoopHeaderBufferLoadStructured();
   TestNewShaderRecompilerCfgLoopHeaderDsAppendConsumeStructured();

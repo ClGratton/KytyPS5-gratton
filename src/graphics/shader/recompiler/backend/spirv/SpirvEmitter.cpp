@@ -17,7 +17,7 @@ namespace {
 	std::abort();
 }
 
-void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
+void ValidateNativeProgram(const IR::Program& program, bool lds_storage, bool loop_guard) {
 	uint64_t live_buffers = 0;
 	bool uses_lds = false;
 	bool uses_gds = false;
@@ -165,7 +165,8 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 		count += image.mip_count;
 	}
 	expected[static_cast<size_t>(Kind::Samplers)] = static_cast<uint32_t>(program.info.samplers.size());
-	expected[static_cast<size_t>(Kind::Gds)] = uses_gds;
+	// The loop guard reports through the host tail of the GDS buffer.
+	expected[static_cast<size_t>(Kind::Gds)] = uses_gds || loop_guard;
 	expected[static_cast<size_t>(Kind::SharedMemory)] = uses_lds && lds_storage;
 	expected[static_cast<size_t>(Kind::BdaPagetable)] = program.info.uses_dma;
 	expected[static_cast<size_t>(Kind::FaultBuffer)] = program.info.uses_dma;
@@ -197,7 +198,7 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 } // namespace
 
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
-                                  uint32_t push_data_start_dword) {
+                                  uint32_t push_data_start_dword, uint32_t loop_limit) {
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
@@ -216,6 +217,11 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	IR::ValidateProgramIfEnabled(program, true);
 	program.bindings = {.push_data_start_dword = push_data_start_dword};
 	EmitterState state(program, input_info);
+	state.loop_limit = loop_limit;
+	const bool loop_guard = loop_limit != 0 && ProgramHasGuardableLoop(program);
+	if (loop_guard) {
+		program.info.uses_gds = true;
+	}
 	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
 	state.lane_count =
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
@@ -223,7 +229,8 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        : 1u;
 	DefineModule(state);
 	ValidateNativeProgram(program, program.stage == ShaderType::Compute &&
-	                                   input_info.compute != nullptr && input_info.compute->lds_storage);
+	                                   input_info.compute != nullptr && input_info.compute->lds_storage,
+	                      loop_guard);
 	EmitProgram(state);
 	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
 	                            "main", state.interface_variables);

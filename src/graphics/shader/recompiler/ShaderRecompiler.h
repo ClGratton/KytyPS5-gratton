@@ -26,6 +26,8 @@ struct CompileOptions {
 	std::span<const uint32_t>   user_data;
 	std::span<const uint32_t>   back_code;
 	ShaderStageInputInfo        input_info;
+	// --shader-loop-limit: see EmitterState::loop_limit. 0 = off.
+	uint32_t                    loop_limit      = 0;
 };
 
 struct TranslateResult {

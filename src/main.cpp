@@ -227,6 +227,10 @@ static void PrintUsage() {
 	         "                                       report, a wait of 5+ s, device loss). checkpoints\n"
 	         "                                       also drops VK_NV_device_diagnostic_checkpoints\n"
 	         "                                       markers. Default: off.\n");
+	::printf("  --shader-loop-limit <N>              Guard: each shader invocation may execute loop headers\n"
+	         "                                       N times in total, then its loops are left and the\n"
+	         "                                       shader is reported (a loop over corrupt data cannot\n"
+	         "                                       hang the GPU). 0 = off. Default: 1048576.\n");
 	::printf("  --debug-dump-shader <hex[,hex...]>   Debug: write the SPIR-V and guest binary of these shader\n"
 	         "                                       hashes (see --debug-gpu-ops) to --shader-log-folder.\n");
 	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
@@ -878,6 +882,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid --debug-gpu-ops (expected off, ring or checkpoints): %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--shader-loop-limit") {
+			uint64_t limit = 0;
+			if (!ParseUint64(value, limit) || limit > 0x7fffffffu) {
+				::printf("invalid --shader-loop-limit (expected 0-2147483647): %s\n", value.c_str());
+				return false;
+			}
+			options.config.shader_loop_limit = static_cast<uint32_t>(limit);
 		} else if (arg == "--debug-dump-shader") {
 			size_t start = 0;
 			while (start <= value.size()) {

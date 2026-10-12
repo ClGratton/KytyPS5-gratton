@@ -114,6 +114,10 @@ bool DebugDumpShaderMatches(uint64_t shader_hash) {
 	return std::find(list.begin(), list.end(), shader_hash) != list.end();
 }
 
+uint32_t GetShaderLoopLimit() {
+	return g_config->shader_loop_limit;
+}
+
 uint32_t GetGpuOpsMode() {
 	return g_config->gpu_ops_mode;
 }

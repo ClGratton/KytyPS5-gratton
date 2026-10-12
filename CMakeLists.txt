@@ -491,6 +491,11 @@ add_executable(readback_plan_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(readback_plan_tests PRIVATE ${inc_headers})
 
+add_executable(loop_guard_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/LoopGuardTests.cpp"
+)
+target_include_directories(loop_guard_tests PRIVATE ${inc_headers})
+
 add_executable(gpu_op_ring_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GpuOpRingTests.cpp"
 )
@@ -736,6 +741,7 @@ if(BUILD_TESTING)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME gpu_op_ring COMMAND $<TARGET_FILE:gpu_op_ring_tests>)
+	add_test(NAME loop_guard COMMAND $<TARGET_FILE:loop_guard_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
@@ -869,6 +875,7 @@ if(BUILD_TESTING)
 		readback_plan_tests
 		gc_clock_tests
 		gpu_op_ring_tests
+		loop_guard_tests
 		buffer_gc_gate_tests
 		bda_sync_gate_tests
 		sys_file_read_tests
