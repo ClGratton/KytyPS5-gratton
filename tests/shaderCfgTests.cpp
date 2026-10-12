@@ -11299,6 +11299,7 @@ void TestMeshInputAssembly() {
     uint32_t wave_size = 64;
     bool fast_launch = false;
     uint32_t threads = 256;
+    uint32_t base_group = 0; // the dispatch's base group (sliced draws)
   };
   std::vector<Case> cases = {
       {Prospero::PrimitiveType::kTriList, 14, 177, 14, 2, 2, 0x1002, UINT32_MAX,
@@ -11359,6 +11360,14 @@ void TestMeshInputAssembly() {
        0x41000a20, 0x0a87e000, 96, 97, 98, 0, 43, false, 32, false, 128},
       {Prospero::PrimitiveType::kTriList, 256, 256, 0, 64, 0, 0, 11,
        0x82001520, 0x154ff000, 192, 193, 194, 0, 75, false, 32, false, 256},
+      // A sliced dispatch (base group + local group) must equal the same global group of one
+      // oversized dispatch: these repeat cases 0, 5 and 8 with the group split across the base.
+      {Prospero::PrimitiveType::kTriList, 14, 177, 4, 2, 2, 0x1002, UINT32_MAX,
+       0x40000309, 0x00c09000, 6, 7, 8, 340, 0xabcc, true, 64, false, 256, 10},
+      {Prospero::PrimitiveType::kTriStrip, 5, 8, 0, 1, 0, 0, 11,
+       0x40000305, 0x00c05000, 1, 2, 3, 0, 15, false, 64, false, 256, 1},
+      {Prospero::PrimitiveType::kTriFan, 5, 8, 0, 0, 2, 0x1002, 0,
+       0x40000305, 0x00c05000, 0, 1, 2, 0, 0xabcd, true, 64, false, 256, 1},
   };
   for (const uint32_t wave_size : {32u, 64u}) {
     for (const uint32_t threads : {wave_size, 2u * wave_size}) {
@@ -11399,7 +11408,8 @@ void TestMeshInputAssembly() {
     options.input_info.vertex = &input;
     auto program = Frontend::TranslateProgram(decoded, graph, options);
     const uint32_t draw[] = {test.count, test.base_vertex, 7, test.width,
-                             test.address_low, 0x12};
+                             test.address_low, 0x12, test.base_group};
+    static_assert(std::size(draw) == PushData::MeshDrawDwordCount);
     Inst *load = nullptr;
     for (auto &inst : *program.blocks.front()) {
       if (inst.GetOpcode() == ValueOpcode::MeshDrawParameter) {

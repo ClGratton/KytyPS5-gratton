@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/meshDispatch.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1100,6 +1101,30 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	return true;
 }
 
+// A guest draw has no workgroup-count limit; the host does. A draw over the limits is replayed
+// as slices (meshDispatch.h). Slicing is exact, but a title that needs it every frame pays for
+// it, so the first draws are logged and counted.
+static void LogMeshDispatchSliced(const vk::PhysicalDeviceMeshShaderPropertiesEXT& limits,
+                                  uint32_t groups, uint32_t instances) {
+	if (groups <= limits.maxMeshWorkGroupCount[0] && instances <= limits.maxMeshWorkGroupCount[1] &&
+	    static_cast<uint64_t>(groups) * instances <= limits.maxMeshWorkGroupTotalCount) {
+		return;
+	}
+	static std::atomic_uint64_t sliced_draws = 0;
+	const auto                  count        = sliced_draws.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (count <= 4 || (count & (count - 1)) == 0) {
+		std::printf("Warning: mesh draw %ux%u exceeds the host workgroup limits (%u, %u, total %u); "
+		            "drawn as %zu slices (%" PRIu64 " sliced draws so far)\n",
+		            groups, instances, limits.maxMeshWorkGroupCount[0],
+		            limits.maxMeshWorkGroupCount[1], limits.maxMeshWorkGroupTotalCount,
+		            SplitMeshDispatch(groups, instances, limits.maxMeshWorkGroupCount[0],
+		                              limits.maxMeshWorkGroupCount[1],
+		                              limits.maxMeshWorkGroupTotalCount)
+		                .size(),
+		            count);
+	}
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -1130,15 +1155,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (primitives == 0 || draw.instance_count == 0) {
 			return;
 		}
-		mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
-		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
-		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
-		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
-		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
-		        limits.maxMeshWorkGroupTotalCount) {
-			EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
-			     draw.instance_count);
-		}
+		mesh_groups = (primitives - 1u) / mesh.primitives_per_group + 1u;
+		LogMeshDispatchSliced(m_context.GetGraphics().mesh_shader_properties, mesh_groups,
+		                      draw.instance_count);
 	}
 
 	if (mesh_active && draw.IsIndexed()) {
@@ -1201,18 +1220,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (mesh_active) {
-		const uint32_t draw_data[] {
-		    draw.index_count,
-		    draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
-		    emit.first_instance, index_source.guest_element_size,
-		    static_cast<uint32_t>(index_source.address),
-		    static_cast<uint32_t>(index_source.address >> 32u)};
-		static_assert(std::size(draw_data) == ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
-		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
-		vk_buffer.pushConstants(pipeline.pipeline_layout,
-		                        vk::ShaderStageFlagBits::eMeshEXT |
-		                            vk::ShaderStageFlagBits::eFragment,
-		                        0, sizeof(draw_data), draw_data);
+		// The draw record is pushed per dispatch slice, just before its draw call below.
 	} else {
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
@@ -1236,7 +1244,31 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
 	if (mesh_active) {
-		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+		// Replay the draw as sliced dispatches when it exceeds the host's workgroup limits (a
+		// guest draw has none); each slice carries its own base group and first instance, so the
+		// mesh shader sees the same inputs as one oversized dispatch would give.
+		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
+		ForEachMeshDispatch(
+		    mesh_groups, draw.instance_count, limits.maxMeshWorkGroupCount[0],
+		    limits.maxMeshWorkGroupCount[1], limits.maxMeshWorkGroupTotalCount,
+		    [&](const MeshDispatchSlice& slice) {
+			    const uint32_t draw_data[] {
+			        draw.index_count,
+			        draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
+			        emit.first_instance + slice.instance_offset, index_source.guest_element_size,
+			        static_cast<uint32_t>(index_source.address),
+			        static_cast<uint32_t>(index_source.address >> 32u), slice.group_offset};
+			    static_assert(std::size(draw_data) ==
+			                  ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
+			    {
+				    Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+				    vk_buffer.pushConstants(pipeline.pipeline_layout,
+				                            vk::ShaderStageFlagBits::eMeshEXT |
+				                                vk::ShaderStageFlagBits::eFragment,
+				                            0, sizeof(draw_data), draw_data);
+			    }
+			    vk_buffer.drawMeshTasksEXT(slice.group_count, slice.instance_count, 1);
+		    });
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
