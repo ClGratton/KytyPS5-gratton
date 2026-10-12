@@ -432,6 +432,53 @@ void CompileSrtWalker(ResourcePlan& program) {
 	}
 	if (visited.size() != pointer_uses.size()) return;
 
+	// The same walk as a table (SrtRuntime::table_walk); left empty when it does not fit.
+	{
+		auto& table           = program.srt_table;
+		table                 = {};
+		table.user_data_count = user_data_count;
+		bool fits             = true;
+		const auto build = [&](auto&& self, int32_t parent, uint32_t user_dword, uint32_t lo_flat,
+		                       uint32_t hi_flat, const Reads& reads) -> void {
+			if (!fits) return;
+			if (table.nodes.size() >= SrtTable::MaxNodes) {
+				fits = false;
+				return;
+			}
+			SrtTable::Node node;
+			node.parent          = parent;
+			node.user_data_dword = user_dword;
+			node.lo_flat         = lo_flat;
+			node.hi_flat         = hi_flat;
+			node.first           = reads.begin()->first;
+			node.last            = reads.rbegin()->first;
+			node.step_begin      = static_cast<uint32_t>(table.steps.size());
+			node.step_count      = static_cast<uint32_t>(reads.size());
+			for (const auto& [offset, read]: reads) {
+				table.steps.push_back(
+				    {.offset      = offset,
+				     .flat_offset = read->flat_offset,
+				     .eval_index  = read->value.ResolveInstruction()->EvaluationIndex(
+				         program.evaluation_value_count)});
+			}
+			const auto index = static_cast<int32_t>(table.nodes.size());
+			table.nodes.push_back(node);
+			for (const auto& [offset, read]: reads) {
+				const auto child = pointer_uses.find(read->value.ResolveInstruction());
+				if (child == pointer_uses.end()) continue;
+				const auto high = reads.find(offset + 4);
+				if (high == reads.end()) {
+					fits = false;
+					return;
+				}
+				self(self, index, 0u, read->flat_offset, high->second->flat_offset, child->second);
+			}
+		};
+		for (const auto& [reg, reads]: roots) {
+			build(build, -1, reg, 0u, 0u, reads);
+		}
+		if (!fits) table = {};
+	}
 	program.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
 	auto& code = *program.srt_code;
 	Xbyak::Label failed, finished;
@@ -1082,8 +1129,51 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 	return true;
 }
 
+// Table form of the native walk (the Xbyak walker's job), through the runtime's reader. Reads the
+// same dwords in the same pointer tree, applies the same pointer masking and range checks, and
+// seeds the evaluator's memo with each value like the native walker does. Any failure returns false
+// and the caller redoes the refresh with the graph walk, which decides what the answer is.
+bool SrtWalker::RefreshFlatTable(std::vector<uint32_t>& flat) {
+	const auto& table = m_program.srt_table;
+	if (table.nodes.empty() || m_runtime.read_memory == nullptr ||
+	    m_runtime.user_data.size() < table.user_data_count) {
+		return false;
+	}
+	flat.resize(m_program.srt_reads.size());
+	m_program.active_sources.clear();
+	m_context.values.resize(m_program.evaluation_value_count);
+	constexpr uint64_t kPointerMask = AddressMask & ~uint64_t {3};
+	for (const auto& node: table.nodes) {
+		uint64_t raw = 0;
+		if (node.parent < 0) {
+			raw = m_runtime.user_data[node.user_data_dword] |
+			      (static_cast<uint64_t>(m_runtime.user_data[node.user_data_dword + 1u]) << 32u);
+		} else {
+			raw = flat[node.lo_flat] | (static_cast<uint64_t>(flat[node.hi_flat]) << 32u);
+		}
+		const uint64_t pointer = raw & kPointerMask;
+		if ((node.first < 0 && pointer < static_cast<uint64_t>(-static_cast<int64_t>(node.first))) ||
+		    (node.last > 0 && pointer > AddressMask - static_cast<uint64_t>(node.last))) {
+			return false;
+		}
+		for (uint32_t s = node.step_begin; s < node.step_begin + node.step_count; ++s) {
+			const auto& step = table.steps[s];
+			uint32_t    word = 0;
+			if (!m_runtime.read_memory(m_runtime.userdata,
+			                           static_cast<uint64_t>(static_cast<int64_t>(pointer) + step.offset),
+			                           {&word, 1})) {
+				return false;
+			}
+			flat[step.flat_offset] = word;
+			m_context.values[step.eval_index] = {.value = word, .generation = m_context.generation};
+		}
+	}
+	return true;
+}
+
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	if (!m_program.srt_plan_complete) return false;
+	if (m_runtime.table_walk && RefreshFlatTable(flat)) return true;
 	if (m_program.srt_code && m_runtime.read_memory == nullptr) {
 		flat.resize(m_program.srt_reads.size());
 		m_program.active_sources.clear();

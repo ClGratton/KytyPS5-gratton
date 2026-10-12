@@ -18,6 +18,10 @@ struct SrtRuntime {
 	void*                     userdata                   = nullptr;
 	SrtMemoryReader           read_specialization_memory = nullptr;
 	std::span<const uint32_t> workgroup_counts;
+	// --srt-table-walk: refresh the flattened SRT of a native-eligible plan from its SrtTable, reading
+	// through read_memory, instead of walking the value graph. Falls back to the graph walk when a
+	// check or a read fails, so the result is the graph walk's.
+	bool                      table_walk = false;
 };
 
 class SrtReadCapture {
@@ -64,6 +68,7 @@ public:
 	bool RefreshFlatBuffer(std::vector<uint32_t>& flat);
 
 private:
+	bool RefreshFlatTable(std::vector<uint32_t>& flat);
 	static ResourcePlan::EvaluationContext& AcquireContext(const ResourcePlan& program);
 	static float Float32(uint64_t bits);
 	bool EvaluateWide(Value value, uint64_t& result);

@@ -572,6 +572,31 @@ struct UniformFillPlan {
 
 // Resource analysis retained by the shader cache. It owns immutable descriptor/SRT,
 // condition and fill values without translated blocks, plus reusable evaluation scratch.
+// Table form of the native SRT walk (see CompileSrtWalker): the pointer tree of a plan whose scalar
+// reads all follow user-data pointers, flattened so a host that must read through a callback can
+// run it without walking the value graph. Nodes are in preorder (a parent before its children).
+struct SrtTable {
+	static constexpr uint32_t MaxNodes = 32;
+	struct Step {
+		int32_t  offset      = 0; // signed byte offset from the node's pointer
+		uint32_t flat_offset = 0; // destination in the flattened SRT
+		uint32_t eval_index  = 0; // memo slot of the read instruction
+	};
+	struct Node {
+		int32_t  parent          = -1;
+		uint32_t user_data_dword = 0; // root: the pointer is user_data[d] | user_data[d + 1] << 32
+		uint32_t lo_flat         = 0; // child: flat offsets of the pointer's two dwords
+		uint32_t hi_flat         = 0;
+		int32_t  first           = 0; // smallest and largest read offset
+		int32_t  last            = 0;
+		uint32_t step_begin      = 0;
+		uint32_t step_count      = 0;
+	};
+	std::vector<Node> nodes;
+	std::vector<Step> steps;
+	uint32_t          user_data_count = 0;
+};
+
 struct ResourcePlan {
 	struct EvaluationContext {
 		struct Entry {
@@ -608,6 +633,7 @@ struct ResourcePlan {
 	ShaderInfo                          info;
 	UniformFillPlan                     uniform_fill;
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
+	SrtTable                              srt_table; // empty unless the plan is native-eligible
 	// GPU-thread scratch for nested clean/EXEC memos, activity and material keys.
 	mutable std::deque<EvaluationContext> evaluation_contexts;
 	mutable uint32_t                       evaluation_value_count = 0;
