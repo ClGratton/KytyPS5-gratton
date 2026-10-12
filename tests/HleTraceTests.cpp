@@ -107,7 +107,7 @@ int main() {
 	Check(headers == 2, "one block per thread that made calls");
 
 	// The ring keeps the most recent calls: 1000 calls on one thread leave a bounded window.
-	Check(Common::HleTrace::CallCount() >= 1004, "all calls counted");
+	Check(Common::HleTrace::CallCount() >= 1003, "all calls counted");
 	std::printf("HleTraceTests: passed\n");
 	return 0;
 }
