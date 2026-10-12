@@ -665,7 +665,7 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 
 	// --precompile-on-load / --pipeline-variants-replay: the shader is registered and its register
 	// list carries the real program address, so the load-time build can start now.
-	if (Config::GetPrecompileOnLoad() || Config::GetPipelineVariantsReplay()) {
+	if (Config::GetPrecompileOnLoad() || Config::GetPipelineVariantsReplay() || Config::GetGenericCompute()) {
 		std::vector<PipelineCache::ShaderRegisterEntry> sh_registers;
 		if (h->sh_registers != nullptr) {
 			sh_registers.reserve(h->num_sh_registers);

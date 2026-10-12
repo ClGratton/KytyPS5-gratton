@@ -194,7 +194,7 @@ std::size_t HashSpecialization(const ShaderRecompiler::IR::ResourceSpecializatio
 	auto mix = [](std::size_t& hash, std::size_t value) {
 		hash ^= value + static_cast<std::size_t>(0x9e3779b97f4a7c15ull) + (hash << 6u) + (hash >> 2u);
 	};
-	std::size_t hash = spec.buffers.size() * 31u + spec.images.size();
+	std::size_t hash = spec.buffers.size() * 31u + spec.images.size() + (spec.generic ? 0x67656eu : 0u);
 	for (const auto& buffer: spec.buffers) {
 		mix(hash, buffer.packed_stride);
 		mix(hash, static_cast<std::size_t>(buffer.descriptor_format));
@@ -211,6 +211,8 @@ std::size_t HashSpecialization(const ShaderRecompiler::IR::ResourceSpecializatio
 		mix(hash, image.indirect_mapping_offset);
 		mix(hash, image.indirect_search_iterations);
 		mix(hash, (image.cube ? 1u : 0u) | (image.fmask ? 2u : 0u));
+		mix(hash, image.class_root);
+		mix(hash, image.class_mask);
 	}
 	return hash;
 }
@@ -582,6 +584,19 @@ struct PipelineCache::ProgramCache {
 			return &permutations.emplace_back(std::move(compiled));
 		}
 
+		// --generic-compute: why a published generic variant of this program does not fit the
+		// dispatch whose descriptors specialize to `live` (nullopt: there is none).
+		std::optional<ShaderRecompiler::IR::GenericMismatch>
+		GenericVerdict(const ShaderRecompiler::IR::ResourceSpecialization& live) {
+			std::shared_lock lock(mutex);
+			for (const auto& candidate: permutations) {
+				if (candidate.specialization.generic) {
+					return ShaderRecompiler::IR::MatchGenericSpecialization(candidate.specialization, live);
+				}
+			}
+			return std::nullopt;
+		}
+
 		// Looks for an already-published permutation without touching guest memory. Used by the
 		// async path to close the window between "not in flight" and "published".
 		Permutation* FindPublished(uint32_t push_data_cursor,
@@ -623,7 +638,7 @@ struct PipelineCache::ProgramCache {
 				const auto& layout = candidate.program.bindings;
 				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
 				        push_data_cursor, layout.ShaderDataDwords()) ||
-				    candidate.specialization != wanted) {
+				    !Serves(candidate.specialization, wanted)) {
 					continue;
 				}
 				if constexpr (HasCalls) {
@@ -634,6 +649,17 @@ struct PipelineCache::ProgramCache {
 			return nullptr;
 		}
 	};
+
+	// Whether a permutation built for `have` serves a dispatch whose descriptors specialize to
+	// `wanted`: the same specialization, or a generic variant (--generic-compute) whose hard
+	// signature the dispatch has.
+	static bool Serves(const ShaderRecompiler::IR::ResourceSpecialization& have,
+	                   const ShaderRecompiler::IR::ResourceSpecialization& wanted) {
+		if (have == wanted) return true;
+		return have.generic && !wanted.generic &&
+		       ShaderRecompiler::IR::MatchGenericSpecialization(have, wanted) ==
+		           ShaderRecompiler::IR::GenericMismatch::None;
+	}
 
 	struct ProgramKeyHash {
 		std::size_t operator()(const ProgramKey& key) const {
@@ -775,6 +801,9 @@ struct PipelineCache::ProgramCache {
 			} else {
 				cache.stage_permutation_counts[static_cast<size_t>(stage)].fetch_add(
 				    1, std::memory_order_relaxed);
+				if (stage == ShaderType::Compute && cache.load != nullptr) {
+					cache.load->compute_ondemand.fetch_add(1, std::memory_order_relaxed);
+				}
 			}
 			result    = published;
 			duplicate = dup;
@@ -844,7 +873,7 @@ struct PipelineCache::ProgramCache {
 
 		[[nodiscard]] bool SpecIs(const ShaderRecompiler::IR::ResourceSpecialization& wanted) {
 			std::lock_guard lock(spec_mutex);
-			return spec.has_value() && *spec == wanted;
+			return spec.has_value() && Serves(*spec, wanted);
 		}
 		void Execute() override;
 		void Cancel() override { Unregister(); }
@@ -859,6 +888,7 @@ struct PipelineCache::ProgramCache {
 		uint32_t              priority        = 0;      // background queue order (first use last time)
 		bool                  joinable        = true;   // a dispatch may wait for it (pool jobs only)
 		bool                  guess           = true;   // false: `explicit_spec` is a stored variant
+		bool                  generic         = false;  // --generic-compute: builds the generic variant
 		std::optional<ShaderRecompiler::IR::ResourceSpecialization> explicit_spec;
 
 		std::mutex spec_mutex;
@@ -875,7 +905,7 @@ struct PipelineCache::ProgramCache {
 		std::lock_guard lock(load_mutex);
 		for (const auto& other: load_active) {
 			if (other->key == job->key && other->guess == job->guess &&
-			    other->explicit_spec == job->explicit_spec) {
+			    other->generic == job->generic && other->explicit_spec == job->explicit_spec) {
 				return false;
 			}
 		}
@@ -910,6 +940,45 @@ struct PipelineCache::ProgramCache {
 	[[nodiscard]] size_t LoadActive() {
 		std::lock_guard lock(load_mutex);
 		return load_active.size();
+	}
+
+	// ---- --generic-compute bookkeeping ---------------------------------------------------------
+	// Why a dispatch ran a specialized variant although the flag is on: LoadCounters::generic_miss
+	// is indexed by GenericMismatch (a generic variant exists, the dispatch's hard signature differs)
+	// and by these.
+	enum GenericMissKind : size_t {
+		kMissPending = static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::Count), // being built
+		kMissRefused,      // the binary has no generic variant (LoadCounters::generic_refusal)
+		kMissOtherStatic,  // registered, but with other static state (queue, wave, dispatch mode)
+		kMissUnregistered, // never seen at registration, or not yet
+		kMissKinds,
+	};
+	static_assert(kMissKinds <= PipelineCache::LoadCounters::kGenericMissKinds);
+
+	bool generic = false; // --generic-compute is on (set by the PipelineCache before the first dispatch)
+	std::unordered_map<uint64_t, ShaderRecompiler::IR::GenericRefusal> generic_by_hash; // load_mutex
+
+	void NoteGenericVariant(uint64_t hash, ShaderRecompiler::IR::GenericRefusal refusal) {
+		std::lock_guard lock(load_mutex);
+		generic_by_hash[hash] = refusal;
+	}
+
+	[[nodiscard]] size_t ClassifyGenericMiss(SourceEntry* entry, const ProgramKey& key,
+	                                         const ShaderRecompiler::IR::ResourceSpecialization& live) {
+		if (entry != nullptr) {
+			if (const auto verdict = entry->GenericVerdict(live)) {
+				return *verdict == ShaderRecompiler::IR::GenericMismatch::None
+				           ? static_cast<size_t>(kMissPending) : static_cast<size_t>(*verdict);
+			}
+		}
+		std::lock_guard lock(load_mutex);
+		for (const auto& job: load_active) {
+			if (job->generic && job->key == key) return kMissPending;
+		}
+		const auto found = generic_by_hash.find(key.hash);
+		if (found == generic_by_hash.end()) return kMissUnregistered;
+		return found->second != ShaderRecompiler::IR::GenericRefusal::None ? kMissRefused
+		                                                                  : kMissOtherStatic;
 	}
 
 	// ---- graphics replay (--pipeline-variants-replay) ---------------------------------------
@@ -1088,6 +1157,24 @@ struct PipelineCache::ProgramCache {
 		const bool timing = Bench::TimingEnabled();
 		if (!track_use && !timing) return;
 		if (permutation.used.Exchange()) return;
+		if (permutation.specialization.generic) {
+			// A generic variant is no variant to record (its key is not the dispatch's): count it
+			// and leave the store to the specialized ones.
+			if (load != nullptr) {
+				load->generic_programs_used.fetch_add(1, std::memory_order_relaxed);
+				if (permutation.load_register_ns != 0) load->NoteLead(Bench::NowNs() - permutation.load_register_ns);
+			}
+			if (timing) {
+				Bench::LogTiming("generic_use", params.hash, Bench::NowNs(), 0, true,
+				                 fmt::format("register_ns={};ready_ns={};lead_ns={};lead_after_ready_ns={};"
+				                             "shader_id={}",
+				                             permutation.load_register_ns, permutation.load_ready_ns,
+				                             Bench::NowNs() - permutation.load_register_ns,
+				                             Bench::NowNs() - permutation.load_ready_ns,
+				                             permutation.handle.id));
+			}
+			return;
+		}
 		if (permutation.from_load && load != nullptr) {
 			const auto now = Bench::NowNs();
 			load->program_hit.fetch_add(1, std::memory_order_relaxed);
@@ -1186,6 +1273,16 @@ struct PipelineCache::ProgramCache {
 		const auto note_use = [&](Permutation& p) {
 			if (prefetch || (entry != nullptr && entry->call_source != nullptr)) return;
 			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+				if (generic && load != nullptr) {
+					load->generic_dispatches.fetch_add(1, std::memory_order_relaxed);
+					if (p.specialization.generic) {
+						load->generic_hits.fetch_add(1, std::memory_order_relaxed);
+					} else if (entry != nullptr) {
+						// The dispatch runs a specialized variant: say why the generic one did not do.
+						load->generic_miss[ClassifyGenericMiss(entry, lookup_key, entry->specialization)]
+						    .fetch_add(1, std::memory_order_relaxed);
+					}
+				}
 				NoteComputeUse(p, params, input_info);
 			} else {
 				NoteGraphicsProgramUse(p, params, input_info, stage, cursor_in, lookup_key.static_state);
@@ -1194,6 +1291,14 @@ struct PipelineCache::ProgramCache {
 		bool source_changed = false;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		Permutation* verify_target = nullptr;
+		// A generic variant (--generic-compute) reads this dispatch's descriptors in its own image
+		// order, plus the words that stand for the fields it did not specialize on.
+		const auto bind_generic = [&](const Permutation& p) {
+			if (p.specialization.generic) {
+				ShaderRecompiler::IR::BuildGenericBinding(p.program.info, p.program.bindings,
+				                                          entry->specialization, entry->resources);
+			}
+		};
 		if (entry != nullptr) {
 			Permutation* permutation = nullptr;
 			Common::GpuPhase::Scope gpu_phase_materialize(
@@ -1239,6 +1344,7 @@ struct PipelineCache::ProgramCache {
 			}
 			if (permutation != nullptr) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->resources};
+				bind_generic(*permutation);
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				note_use(*permutation);
 				report_steps(false);
@@ -1259,6 +1365,7 @@ struct PipelineCache::ProgramCache {
 		const auto use_published = [&](Permutation& permutation, bool miss_report) {
 			input_info.stage = {.program = &permutation.program,
 			                    .resources = prefetch ? &PrefetchResources() : &entry->resources};
+			if (!prefetch) bind_generic(permutation);
 			permutation.program.bindings.AdvancePushData(push_data_cursor);
 			note_use(permutation);
 			report_steps(miss_report);
@@ -1596,6 +1703,9 @@ struct PipelineCache::ProgramCache {
 			device.destroyShaderModule(compiled.handle.module, nullptr);
 		} else {
 			stage_permutation_counts[static_cast<size_t>(stage)].fetch_add(1, std::memory_order_relaxed);
+			if (stage == ShaderType::Compute && load != nullptr) {
+				load->compute_ondemand.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 		const auto& permutation = *published;
 		input_info.stage = {.program = &permutation.program, .resources = &entry->resources};
@@ -1800,13 +1910,55 @@ std::string PipelineCache::LoadCounters::Summary() const {
 	    static_cast<double>(lead_max_ns.load()) / 1e6);
 }
 
+std::string PipelineCache::LoadCounters::GenericSummary() const {
+	const auto dispatches = generic_dispatches.load();
+	const auto hits       = generic_hits.load();
+	std::string misses;
+	std::string refusals;
+	for (size_t i = 0; i < kGenericMissKinds; i++) {
+		const auto count = generic_miss[i].load();
+		if (count == 0) continue;
+		const char* name = "?";
+		if (i < static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::Count)) {
+			name = ShaderRecompiler::IR::GenericMismatchName(static_cast<ShaderRecompiler::IR::GenericMismatch>(i));
+		} else {
+			switch (i - static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::Count)) {
+				case 0: name = "building"; break;
+				case 1: name = "refused"; break;
+				case 2: name = "other_static_state"; break;
+				case 3: name = "unregistered"; break;
+				default: break;
+			}
+		}
+		misses += fmt::format(";miss_{}={}", name, count);
+	}
+	for (size_t i = 1; i < kGenericMissKinds; i++) {
+		const auto count = generic_refusal[i].load();
+		if (count == 0) continue;
+		refusals += fmt::format(";refused_{}={}", ShaderRecompiler::IR::GenericRefusalName(
+		                                              static_cast<ShaderRecompiler::IR::GenericRefusal>(i)),
+		                        count);
+	}
+	const auto n = lead_n.load();
+	return fmt::format(
+	    "registered_cs={};jobs={};built={};refused={};dispatches={};hits={};hit_pct={:.1f};"
+	    "programs_used={};compute_ondemand={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f}{}{}",
+	    registered_cs.load(), generic_jobs.load(), generic_built.load(), generic_refused.load(),
+	    dispatches, hits, dispatches != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(dispatches) : 0.0,
+	    generic_programs_used.load(), compute_ondemand.load(), n,
+	    n != 0 ? static_cast<double>(lead_sum_ns.load()) / static_cast<double>(n) / 1e6 : 0.0,
+	    n != 0 ? static_cast<double>(lead_min_ns.load()) / 1e6 : 0.0, misses, refusals);
+}
+
 // --pipeline-variants-replay: opens <TITLE>.variants next to the driver cache. The store records
 // every compute variant a dispatch uses (ProgramCache::NoteComputeUse) and, from the next session
 // on, answers NoteShaderRegistered(). It holds keys only: no code, no SPIR-V.
 void PipelineCache::InitializeVariants() {
 	m_program_cache->load = &m_load;
 	m_program_cache->clock_start_ns = Bench::NowNs();
-	if (!Config::GetPipelineVariantsReplay() && !Config::GetPrecompileOnLoad()) {
+	m_program_cache->generic = Config::GetGenericCompute();
+	if (!Config::GetPipelineVariantsReplay() && !Config::GetPrecompileOnLoad() &&
+	    !Config::GetGenericCompute()) {
 		return;
 	}
 	m_program_cache->track_use = true;
@@ -1968,6 +2120,13 @@ void PipelineCache::ShutdownAsync() {
 		                 m_variants != nullptr ? m_variants->Size() : 0);
 		if (Bench::TimingEnabled()) {
 			Bench::LogTiming("summary_load", 0, Bench::NowNs(), 0, false, summary);
+		}
+	}
+	if (Config::GetGenericCompute()) {
+		const auto summary = m_load.GenericSummary();
+		PipelineCacheLog("Generic compute: {}", summary);
+		if (Bench::TimingEnabled()) {
+			Bench::LogTiming("summary_generic", 0, Bench::NowNs(), 0, false, summary);
 		}
 	}
 	if (Config::GetPipelineLookahead()) {
@@ -2496,17 +2655,28 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 	const std::vector<uint32_t> user_data(user_data_count, 0u);
 	ShaderRecompiler::CompileOptions options;
 	options.stage              = ShaderType::Compute;
+	// The program a dispatch would build: the same loop guard and robust-bounds policy, so a
+	// variant built at registration is interchangeable with one built on demand.
+	options.loop_limit         = Config::GetShaderLoopLimit();
 	options.shader_hash        = key.hash;
+	Common::LoopGuard::GetMonitor().Register(key.hash, "cs");
 	options.user_data          = user_data;
 	options.dump_ir            = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 	options.early_dump         = options.dump_ir;
 	options.dump_label         = "ShaderRecompiler CS";
 	options.wave_size          = info.wave_size;
+	options.robust_buffers     = cache.robust_buffers;
 	options.input_info.compute = &info;
 
 	auto source = ShaderRecompiler::PrepareShaderSource(code, options);
 	if (source.call) {
 		counters.skipped_call.fetch_add(1, std::memory_order_relaxed);
+		if (generic) {
+			cache.NoteGenericVariant(key.hash, ShaderRecompiler::IR::GenericRefusal::CallSource);
+			counters.generic_refused.fetch_add(1, std::memory_order_relaxed);
+			counters.generic_refusal[static_cast<size_t>(ShaderRecompiler::IR::GenericRefusal::CallSource)]
+			    .fetch_add(1, std::memory_order_relaxed);
+		}
 		Unregister();
 		return;
 	}
@@ -2519,6 +2689,20 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 		wanted = *explicit_spec;
 		usable = SpecializationFits(plan, wanted);
 		if (!usable) counters.skipped_stale.fetch_add(1, std::memory_order_relaxed);
+	} else if (generic) {
+		// The generic variant of the binary: what the instructions fix, nothing a descriptor says.
+		const auto refusal = ShaderRecompiler::IR::MakeGenericSpecialization(plan, wanted);
+		cache.NoteGenericVariant(key.hash, refusal);
+		if (refusal != ShaderRecompiler::IR::GenericRefusal::None) {
+			usable = false;
+			counters.generic_refused.fetch_add(1, std::memory_order_relaxed);
+			counters.generic_refusal[static_cast<size_t>(refusal)].fetch_add(1, std::memory_order_relaxed);
+			if (timing) {
+				AddTimingRow("generic_refused", key.hash, sw.Start(), sw.Elapsed(),
+				             fmt::format("reason={};code_dwords={}",
+				                         ShaderRecompiler::IR::GenericRefusalName(refusal), code.size()));
+			}
+		}
 	} else if (!ShaderRecompiler::IR::GuessSpecialization(plan, wanted)) {
 		usable = false;
 		counters.skipped_unguessable.fetch_add(1, std::memory_order_relaxed);
@@ -2556,6 +2740,7 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 		cache.stage_permutation_counts[static_cast<size_t>(ShaderType::Compute)].fetch_add(
 		    1, std::memory_order_relaxed);
 		counters.built.fetch_add(1, std::memory_order_relaxed);
+		if (generic) counters.generic_built.fetch_add(1, std::memory_order_relaxed);
 	}
 	if (timing) {
 		// The variant this job built, in the compute_variant row's format, so the guess can be
@@ -2566,9 +2751,9 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 		built_variant.state            = ToVariantStatic(info, user_data_count);
 		built_variant.spec             = ToVariantSpec(wanted);
 		AddTimingRow("load_program", key.hash, sw.Start(), sw.Elapsed(),
-		             fmt::format("shader_id={};dup={};guess={};frontend_ns={};backend_ns={};"
+		             fmt::format("shader_id={};dup={};guess={};generic={};frontend_ns={};backend_ns={};"
 		                         "module_ns={};register_ns={};code_dwords={};{}",
-		                         published->handle.id, dup ? 1 : 0, guess ? 1 : 0, frontend_ns,
+		                         published->handle.id, dup ? 1 : 0, guess ? 1 : 0, generic ? 1 : 0, frontend_ns,
 		                         backend_ns, module_ns, register_ns, code.size(),
 		                         DescribeVariant(built_variant)));
 	}
@@ -2611,7 +2796,7 @@ void PipelineCache::SubmitLoadedComputePipeline(const ShaderProgram& program,
 
 void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 	if (m_async_mode == Config::AsyncPipelineMode::Off ||
-	    (!Config::GetPrecompileOnLoad() && m_variants == nullptr)) {
+	    (!Config::GetPrecompileOnLoad() && !Config::GetGenericCompute() && m_variants == nullptr)) {
 		return;
 	}
 	const bool compute = static_cast<Prospero::ShaderBinaryType>(reg.type) == Prospero::ShaderBinaryType::kCs;
@@ -2656,7 +2841,7 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 	const uint32_t host_subgroup = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto submit = [&](ShaderComputeInputInfo info, uint32_t user_data_count,
 	                        std::optional<ShaderRecompiler::IR::ResourceSpecialization> spec,
-	                        uint32_t priority) {
+	                        uint32_t priority, bool generic = false) {
 		info.host_subgroup_size = host_subgroup;
 		ProgramCache::ProgramKey key;
 		key.stage           = ShaderType::Compute;
@@ -2671,12 +2856,14 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 		job->user_data_count = user_data_count;
 		job->register_ns     = register_ns;
 		job->priority        = priority;
-		job->guess           = !spec.has_value();
+		job->guess           = !spec.has_value() && !generic;
+		job->generic         = generic;
 		job->explicit_spec   = std::move(spec);
 		if (!m_program_cache->AddLoad(job)) {
 			return;
 		}
-		(job->guess ? m_load.jobs_guess : m_load.jobs_stored).fetch_add(1, std::memory_order_relaxed);
+		(generic ? m_load.generic_jobs : job->guess ? m_load.jobs_guess : m_load.jobs_stored)
+		    .fetch_add(1, std::memory_order_relaxed);
 		if (job->guess) {
 			// Not a pool job: nothing can wait for it, and its translation is speculative.
 			job->joinable = false;
@@ -2690,6 +2877,31 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 		}
 	};
 
+	// The static state the header and the dispatch modifier imply. The modifier carries the
+	// DISPATCH_INITIATOR bits the guest library ORs into every dispatch of this shader (wave size,
+	// thread-dimension mode); the queue (async compute) is only known at the dispatch.
+	const auto implied_statics = [&](ShaderComputeInputInfo& info, uint32_t& user_data_count) {
+		regs.cs_regs.wave_size = Pm4::ComputeWaveSize(reg.dispatch_modifier);
+		info = {};
+		info.async_compute              = false;
+		info.dispatch_thread_dimensions = (reg.dispatch_modifier & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+		info.host_subgroup_size         = host_subgroup;
+		const auto params               = PrepareProgram(regs, HW::ShaderRegisters {}, info);
+		user_data_count                 = params.user_data_count;
+		return params.hash == reg.hash;
+	};
+	if (Config::GetGenericCompute()) {
+		// --generic-compute: the generic variant of the binary, which a dispatch with the same
+		// hard signature uses whatever its buffers' strides and its images' swizzles are.
+		ShaderComputeInputInfo info {};
+		uint32_t               user_data_count = 0;
+		if (!implied_statics(info, user_data_count)) {
+			m_load.skipped_registers.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		submit(info, user_data_count, std::nullopt, Variants::ComputeVariant::kUnknownFirstUse, true);
+		return;
+	}
 	if (m_variants != nullptr) {
 		const auto stored = m_variants->Find(reg.hash, code_dwords);
 		m_load.stored_variants.fetch_add(stored.size(), std::memory_order_relaxed);
@@ -2705,20 +2917,14 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 	if (!Config::GetPrecompileOnLoad()) {
 		return;
 	}
-	// No history: the variant the header and the dispatch modifier imply. The modifier carries the
-	// DISPATCH_INITIATOR bits the guest library ORs into every dispatch of this shader (wave size,
-	// thread-dimension mode); the queue (async compute) is only known at the dispatch.
-	regs.cs_regs.wave_size = Pm4::ComputeWaveSize(reg.dispatch_modifier);
+	// No history: the variant the header and the dispatch modifier imply.
 	ShaderComputeInputInfo info {};
-	info.async_compute              = false;
-	info.dispatch_thread_dimensions = (reg.dispatch_modifier & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-	info.host_subgroup_size         = host_subgroup;
-	const auto params               = PrepareProgram(regs, HW::ShaderRegisters {}, info);
-	if (params.hash != reg.hash) {
+	uint32_t               user_data_count = 0;
+	if (!implied_statics(info, user_data_count)) {
 		m_load.skipped_registers.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
-	submit(info, params.user_data_count, std::nullopt, Variants::ComputeVariant::kUnknownFirstUse);
+	submit(info, user_data_count, std::nullopt, Variants::ComputeVariant::kUnknownFirstUse);
 }
 
 // The guest registered a non-compute shader. When a stored graphics pipeline needs its binary the

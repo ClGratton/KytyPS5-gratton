@@ -206,6 +206,13 @@ struct ConfigOptions {
 	// and pipeline are built on the worker pool's low-priority queue for the most likely variant,
 	// seconds before the first dispatch. Needs --async-pipelines stall|skip. Default off.
 	bool                   precompile_on_load          = false;
+	// --generic-compute: when the guest registers a compute shader (AgcCreateShader) its generic
+	// variant is built on the worker pool's low-priority queue: buffer strides, swizzles and
+	// out-of-bounds modes, image cube flags and swizzles and the numeric class of loaded or stored
+	// images are read from the descriptors at run time, so the variant does not depend on them. A
+	// dispatch whose remaining (hard) fields match uses it, any other dispatch compiles the
+	// specialized variant as before. Needs --async-pipelines stall|skip. Default off.
+	bool                   generic_compute             = false;
 	// --pipeline-variants-replay: record the compute variants the game uses in
 	// _PipelineCache/<TITLE>.variants and, in the next session, build every stored variant of a
 	// shader when the guest registers it. Needs --async-pipelines stall|skip. Default off.
@@ -317,6 +324,7 @@ bool              GetPipelineLookahead();
 bool              GetPipelinesUnoptimizedFirst();
 // Both effective only with --async-pipelines on (the builds run on the pool).
 bool              GetPrecompileOnLoad();
+bool              GetGenericCompute();
 bool              GetPipelineVariantsReplay();
 uint32_t          GetPipelineLookaheadKinds();
 uint32_t          GetGpuOpsMode();

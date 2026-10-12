@@ -261,12 +261,17 @@ static bool IsSupportedStorageTextureDescriptor(const ShaderRecompiler::IR::Imag
 	const bool is_2d =
 	    resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D && valid_2d_slice;
 	// Storage cube coordinates address individual faces, including partial cube views.
-	const bool is_cube = resource.cube && descriptor.Type() == Prospero::ImageType::kCube &&
+	// A resource specialized for a descriptor knows whether it is a cube; a generic one does not
+	// (the flag is the descriptor's type, which is also how the specialization derives it).
+	const bool resource_cube = resource.generic
+	                               ? descriptor.Type() == Prospero::ImageType::kCube
+	                               : resource.cube;
+	const bool is_cube = resource_cube && descriptor.Type() == Prospero::ImageType::kCube &&
 	                     descriptor.Width5() == descriptor.Height5() &&
 	                     descriptor.BaseArray5() <= descriptor.Depth();
 	const bool is_2d_array =
 	    resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2DArray &&
-	    ((!resource.cube && is_color_2d_array && descriptor.BaseArray5() <= descriptor.Depth()) ||
+	    ((!resource_cube && is_color_2d_array && descriptor.BaseArray5() <= descriptor.Depth()) ||
 	     is_cube);
 	const bool is_3d = resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim3D &&
 	                   descriptor.Type() == Prospero::ImageType::kColor3D &&
@@ -795,8 +800,12 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.images.resize(program.info.images.size());
 	prepared.samplers.clear();
 	prepared.shader_data.clear();
+	// A generic program's images are the originals plus the members of its numeric-class groups;
+	// BuildGenericBinding laid the dispatch's descriptors out in that order.
+	const auto& image_descriptors = program.info.generic ? snapshot.generic_images : snapshot.images;
+	EXIT_IF(image_descriptors.size() != program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
-		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
+		auto binding = ResolveTexture(program.info.images[i], image_descriptors[i]);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
@@ -903,6 +912,12 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		                                              resource, buffer_offset);
 		pack_memory_offset(index, buffer_offset);
 	}
+	if (program.info.generic) {
+		// The fields a generic variant reads from the descriptors of this dispatch.
+		EXIT_IF(snapshot.generic_data.size() != layout.dynamic_dwords ||
+		        layout.dynamic_dword + layout.dynamic_dwords > prepared.shader_data.size());
+		std::ranges::copy(snapshot.generic_data, prepared.shader_data.begin() + layout.dynamic_dword);
+	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0) {
 		prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
 	}
@@ -917,8 +932,10 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program  = *prepared.runtime->program;
 	const auto& snapshot = *prepared.runtime->resources;
+	const auto& image_descriptors = program.info.generic ? snapshot.generic_images : snapshot.images;
 	auto&       images   = prepared.images;
-	EXIT_IF(images.size() != program.info.images.size());
+	EXIT_IF(images.size() != program.info.images.size() ||
+	        image_descriptors.size() != program.info.images.size());
 	auto& texture_cache = m_context.GetTextureCache();
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
@@ -928,7 +945,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
 			}
-			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
+			images[i] = ResolveTexture(program.info.images[i], image_descriptors[i]);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
 		} else {

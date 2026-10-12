@@ -978,6 +978,16 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
 	set_tests_properties(graphics_pipeline_shader_load PROPERTIES
 		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
+	# --generic-compute: every compute case that fits a generic variant's hard
+	# signature is run a second time with the generic variant and has to produce identical bytes.
+	add_test(NAME shader_recompiler_compute_generic
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_generic PROPERTIES
+		ENVIRONMENT "KYTY_TEST_GENERIC=1")
+	add_test(NAME generic_compute_load
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --generic-load-only)
+	set_tests_properties(generic_compute_load PROPERTIES
+		ENVIRONMENT "KYTY_TEST_GENERIC_COMPUTE=1")
 	add_test(NAME shader_load_precompile
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --shader-load-only)
 	set_tests_properties(shader_load_precompile PROPERTIES

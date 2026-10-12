@@ -1053,6 +1053,13 @@ void EnsureConfigInitialized() {
       options.async_pipelines = Config::AsyncPipelineMode::Stall;
       options.pipeline_workers = 4;
     }
+    // ... and with =1 --generic-compute: a registered shader gets its generic variant on the pool.
+    if (const char *generic = std::getenv("KYTY_TEST_GENERIC_COMPUTE");
+        generic != nullptr && std::strcmp(generic, "1") == 0) {
+      options.generic_compute = true;
+      options.async_pipelines = Config::AsyncPipelineMode::Stall;
+      options.pipeline_workers = 4;
+    }
     if (const char *async_mode = std::getenv("KYTY_TEST_ASYNC_PIPELINES")) {
       if (std::strcmp(async_mode, "stall") == 0) {
         options.async_pipelines = Config::AsyncPipelineMode::Stall;
@@ -1718,7 +1725,16 @@ ShaderRecompiler::RobustBufferPolicy &TestRobustBufferPolicy() {
   return policy;
 }
 
-CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
+// How a case fared when a generic variant was asked for (KYTY_TEST_GENERIC): the variant is only
+// built when the case's own resources fit its hard signature, exactly like a dispatch.
+struct GenericOutcome {
+  bool built = false;
+  ShaderRecompiler::IR::GenericRefusal refusal = ShaderRecompiler::IR::GenericRefusal::None;
+  ShaderRecompiler::IR::GenericMismatch mismatch = ShaderRecompiler::IR::GenericMismatch::None;
+};
+
+CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64,
+                           GenericOutcome *generic = nullptr) {
   auto user_data =
       MakeNativeUserData(test.has_user_data ? &test.user_data : nullptr);
   const auto uses_image =
@@ -1764,21 +1780,39 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
           ShaderRecompiler::IR::MaterializeResources(
               resource_plan, runtime, resources, specialization),
           "translated resources could not be materialized");
+  const auto live_specialization = specialization;
+  if (generic != nullptr) {
+    ShaderRecompiler::IR::ResourceSpecialization variant;
+    generic->refusal = ShaderRecompiler::IR::MakeGenericSpecialization(resource_plan, variant);
+    if (generic->refusal != ShaderRecompiler::IR::GenericRefusal::None) return {};
+    generic->mismatch = ShaderRecompiler::IR::MatchGenericSpecialization(variant, live_specialization);
+    if (generic->mismatch != ShaderRecompiler::IR::GenericMismatch::None) return {};
+    generic->built = true;
+    specialization = std::move(variant);
+  }
   auto result = ShaderRecompiler::CompileProgram(
       std::move(translated), options, specialization);
-  for (const auto &[text, expected] : test.decoded_counts) {
+  if (generic != nullptr) {
+    // The words the dispatch would hand the generic program, from this case's own descriptors.
+    ShaderRecompiler::IR::BuildGenericBinding(result.program.info, result.program.bindings,
+                                              live_specialization, resources);
+  }
+  // The shape checks below describe the specialized program (a generic one keeps loads the
+  // descriptor would have folded); the parity run compares what the shaders compute instead.
+  const std::vector<std::pair<std::string, size_t>> no_counts;
+  for (const auto &[text, expected] : generic != nullptr ? no_counts : test.decoded_counts) {
     const auto actual = CountText(result.decoded_dump, text);
     Require(test.name, "decoded RDNA2", actual == expected,
             text + " count=" + std::to_string(actual) +
                 ", expected=" + std::to_string(expected));
   }
-  for (const auto &[text, expected] : test.ir_counts) {
+  for (const auto &[text, expected] : generic != nullptr ? no_counts : test.ir_counts) {
     const auto actual = CountText(result.ir_dump, text);
     Require(test.name, "typed IR", actual == expected,
             text + " count=" + std::to_string(actual) +
                 ", expected=" + std::to_string(expected));
   }
-  if (test.expected_mip_descriptors != 0) {
+  if (test.expected_mip_descriptors != 0 && generic == nullptr) {
     const auto image = std::ranges::find_if(
         result.program.info.images, [](const auto &resource) {
           return resource.mip_mode ==
@@ -1795,7 +1829,7 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
                     result.program.bindings.descriptor_counts[static_cast<size_t>(*kind)],
             "dynamic image did not receive one descriptor per mip");
   }
-  if (test.expand_shader_data_storage) {
+  if (test.expand_shader_data_storage && generic == nullptr) {
     auto &block = *result.program.blocks.front();
     for (u32 reg = 0; reg < 33; reg++) {
       auto &user_data = block.AppendNewInst(
@@ -1819,8 +1853,8 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   Require(test.name, "SPIR-V emit", !result.spirv.empty(),
           "recompiler returned empty SPIR-V");
   ValidateSpirv(test.name, result.spirv);
-  CheckSpirvText(test, result.spirv);
-  if (test.expected_buffer_resources) {
+  if (generic == nullptr) CheckSpirvText(test, result.spirv);
+  if (test.expected_buffer_resources && generic == nullptr) {
     std::vector<u32> resources;
     for (u32 i = 0; i < result.program.info.buffers.size(); ++i) {
       if (result.program.info.buffers[i].descriptor_index != UINT32_MAX) resources.push_back(i);
@@ -1835,6 +1869,13 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
         resources.user_data[reg - result.program.user_data_base]);
   }
   packed_user_data.resize(result.program.bindings.ShaderDataDwords());
+  if (generic != nullptr) {
+    Require(test.name, "generic words",
+            resources.generic_data.size() == result.program.bindings.dynamic_dwords,
+            "dynamic section size does not match the program layout");
+    std::copy(resources.generic_data.begin(), resources.generic_data.end(),
+              packed_user_data.begin() + result.program.bindings.dynamic_dword);
+  }
   for (u32 resource = 0; resource < result.program.info.buffers.size(); ++resource) {
     const auto index = result.program.info.buffers[resource].descriptor_index;
     if (index == UINT32_MAX) continue;
@@ -20394,32 +20435,17 @@ void CompareGraphicsWords(const GraphicsCase &test, const char *stage,
   Fail(test.name, stage, out.str());
 }
 
-void RunCase(VulkanHarness *vulkan, const TestCase &test) {
-  auto compiled = CompileCase(test, vulkan != nullptr ? vulkan->SubgroupSize() : 64u);
-  if (test.image_descriptor_swizzle != DstSel(4, 5, 6, 7) &&
-      !compiled.program.info.images.empty()) {
-    Require(test.name, "resource specialization",
-            compiled.program.info.images[0].shader_swizzle ==
-                    test.image_descriptor_swizzle,
-            "storage image descriptor swizzle did not reach the specialized "
-            "program");
-  }
-  if (test.expected_force_point_sampler) {
-    Require(test.name, "sampler specialization",
-            compiled.program.info.samplers.size() == 1u &&
-                compiled.program.info.samplers[0].force_point_filtering,
-            "bit-packed sampled image did not force point filtering");
-  }
-  if (test.sampler_filter == vk::Filter::eLinear) {
-    Require(test.name, "sampler specialization",
-            std::ranges::none_of(compiled.program.info.samplers,
-                                [](const auto &sampler) { return sampler.force_point_filtering; }),
-            "filterable sampled image incorrectly forced point filtering");
-  }
-  if (test.compile_only) {
-    std::printf("[compute] %-32s ok\n", test.name);
-    return;
-  }
+// Everything a dispatch of a compute case leaves behind.
+struct CaseOutputs {
+  std::vector<u32> buffer;
+  std::vector<u32> gds;
+  std::vector<u32> storage_image;
+  std::vector<u32> storage_image_uint;
+};
+
+CaseOutputs ExecuteCase(VulkanHarness *vulkan, const TestCase &test,
+                        const CompiledShader &compiled) {
+  CaseOutputs outputs;
   using Kind = ShaderRecompiler::IR::DescriptorBindingKind;
   auto Has = [&](Kind kind) {
     return compiled.program.bindings.descriptor_counts[static_cast<size_t>(kind)] != 0;
@@ -20498,23 +20524,17 @@ void RunCase(VulkanHarness *vulkan, const TestCase &test) {
                    needs_storage_image ? &storage_image : nullptr,
                    needs_storage_image ? &storage_image_uint : nullptr,
                    sampler);
-  auto actual = vulkan->ReadBuffer(test.name, buffer, test.expected.size());
+  outputs.buffer = vulkan->ReadBuffer(test.name, buffer, test.expected.size());
   if (!test.expected_gds.empty()) {
-    const auto gds_actual =
-        vulkan->ReadBuffer(test.name, gds_buffer, test.expected_gds.size());
-    CompareWords(test, "GDS readback", test.expected_gds, gds_actual);
+    outputs.gds = vulkan->ReadBuffer(test.name, gds_buffer, test.expected_gds.size());
   }
   if (!test.expected_storage_image_rgba.empty()) {
-    auto image_actual = vulkan->ReadImage(test.name, &storage_image);
-    image_actual.resize(test.expected_storage_image_rgba.size());
-    CompareWords(test, "storage image readback",
-                 test.expected_storage_image_rgba, image_actual);
+    outputs.storage_image = vulkan->ReadImage(test.name, &storage_image);
+    outputs.storage_image.resize(test.expected_storage_image_rgba.size());
   }
   if (!test.expected_storage_image_r32ui.empty()) {
-    auto image_actual = vulkan->ReadImage(test.name, &storage_image_uint);
-    image_actual.resize(test.expected_storage_image_r32ui.size());
-    CompareWords(test, "uint storage image readback",
-                 test.expected_storage_image_r32ui, image_actual);
+    outputs.storage_image_uint = vulkan->ReadImage(test.name, &storage_image_uint);
+    outputs.storage_image_uint.resize(test.expected_storage_image_r32ui.size());
   }
   if (sampler != nullptr) {
     vulkan->Device().destroySampler(sampler, nullptr);
@@ -20524,7 +20544,138 @@ void RunCase(VulkanHarness *vulkan, const TestCase &test) {
   vulkan->DestroyImage(&storage_image_uint);
   vulkan->DestroyBuffer(&gds_buffer);
   vulkan->DestroyBuffer(&buffer);
-  CompareWords(test, "readback", test.expected, actual);
+  return outputs;
+}
+
+void CompareOutputs(const TestCase &test, const CaseOutputs &outputs) {
+  if (!test.expected_gds.empty()) {
+    CompareWords(test, "GDS readback", test.expected_gds, outputs.gds);
+  }
+  if (!test.expected_storage_image_rgba.empty()) {
+    CompareWords(test, "storage image readback",
+                 test.expected_storage_image_rgba, outputs.storage_image);
+  }
+  if (!test.expected_storage_image_r32ui.empty()) {
+    CompareWords(test, "uint storage image readback",
+                 test.expected_storage_image_r32ui, outputs.storage_image_uint);
+  }
+  CompareWords(test, "readback", test.expected, outputs.buffer);
+}
+
+// KYTY_TEST_GENERIC=1: every case that fits a generic variant's hard signature is run a second time
+// with the generic variant, from the same inputs. The outputs have to be identical to the
+// specialized variant's, bit for bit (and, through the usual comparison, to the expected ones).
+// Cases the variant cannot serve are counted by reason, like a dispatch's fallbacks.
+struct GenericParityTally {
+  std::mutex mutex;
+  u32 cases = 0;
+  u32 matched = 0;
+  std::array<u32, static_cast<size_t>(ShaderRecompiler::IR::GenericRefusal::Count)> refused{};
+  std::array<u32, static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::Count)> mismatched{};
+};
+
+GenericParityTally &GenericParity() {
+  static GenericParityTally tally;
+  return tally;
+}
+
+bool GenericParityEnabled() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("KYTY_TEST_GENERIC");
+    return value != nullptr && value[0] == '1';
+  }();
+  return enabled;
+}
+
+void RunGenericParity(VulkanHarness *vulkan, const TestCase &test, const CaseOutputs &specialized) {
+  auto &tally = GenericParity();
+  GenericOutcome outcome;
+  auto compiled = CompileCase(test, vulkan->SubgroupSize(), &outcome);
+  std::lock_guard lock(tally.mutex);
+  tally.cases++;
+  if (!outcome.built) {
+    if (outcome.refusal != ShaderRecompiler::IR::GenericRefusal::None) {
+      tally.refused[static_cast<size_t>(outcome.refusal)]++;
+    } else {
+      tally.mismatched[static_cast<size_t>(outcome.mismatch)]++;
+    }
+    return;
+  }
+  tally.matched++;
+  const auto generic = ExecuteCase(vulkan, test, compiled);
+  const auto Same = [&](const char *what, const std::vector<u32> &a, const std::vector<u32> &b) {
+    if (a.size() != b.size() ||
+        (!a.empty() && std::memcmp(a.data(), b.data(), a.size() * sizeof(u32)) != 0)) {
+      size_t first = 0;
+      while (first < a.size() && first < b.size() && a[first] == b[first]) first++;
+      Fail(test.name, "generic parity",
+           std::string(what) + " differs between the specialized and the generic variant: first "
+           "difference at dword " + std::to_string(first) + " (specialized 0x" +
+           (first < a.size() ? std::to_string(a[first]) : std::string("-")) + ", generic " +
+           (first < b.size() ? std::to_string(b[first]) : std::string("-")) + ")");
+    }
+  };
+  Same("buffer", specialized.buffer, generic.buffer);
+  Same("GDS", specialized.gds, generic.gds);
+  Same("storage image", specialized.storage_image, generic.storage_image);
+  Same("uint storage image", specialized.storage_image_uint, generic.storage_image_uint);
+  CompareOutputs(test, generic);
+}
+
+void PrintGenericParityTally() {
+  if (!GenericParityEnabled()) return;
+  auto &tally = GenericParity();
+  std::string text;
+  for (size_t i = 1; i < tally.refused.size(); i++) {
+    if (tally.refused[i] != 0) {
+      text += std::string(" ") + ShaderRecompiler::IR::GenericRefusalName(
+                  static_cast<ShaderRecompiler::IR::GenericRefusal>(i)) + "=" +
+              std::to_string(tally.refused[i]);
+    }
+  }
+  for (size_t i = 1; i < tally.mismatched.size(); i++) {
+    if (tally.mismatched[i] != 0) {
+      text += std::string(" ") + ShaderRecompiler::IR::GenericMismatchName(
+                  static_cast<ShaderRecompiler::IR::GenericMismatch>(i)) + "=" +
+              std::to_string(tally.mismatched[i]);
+    }
+  }
+  std::printf("[generic] parity: %u compute cases, %u ran the generic variant identically, "
+              "the rest fell back:%s\n",
+              tally.cases, tally.matched, text.empty() ? " none" : text.c_str());
+}
+
+void RunCase(VulkanHarness *vulkan, const TestCase &test) {
+  auto compiled = CompileCase(test, vulkan != nullptr ? vulkan->SubgroupSize() : 64u);
+  if (test.image_descriptor_swizzle != DstSel(4, 5, 6, 7) &&
+      !compiled.program.info.images.empty()) {
+    Require(test.name, "resource specialization",
+            compiled.program.info.images[0].shader_swizzle ==
+                    test.image_descriptor_swizzle,
+            "storage image descriptor swizzle did not reach the specialized "
+            "program");
+  }
+  if (test.expected_force_point_sampler) {
+    Require(test.name, "sampler specialization",
+            compiled.program.info.samplers.size() == 1u &&
+                compiled.program.info.samplers[0].force_point_filtering,
+            "bit-packed sampled image did not force point filtering");
+  }
+  if (test.sampler_filter == vk::Filter::eLinear) {
+    Require(test.name, "sampler specialization",
+            std::ranges::none_of(compiled.program.info.samplers,
+                                [](const auto &sampler) { return sampler.force_point_filtering; }),
+            "filterable sampled image incorrectly forced point filtering");
+  }
+  if (test.compile_only) {
+    std::printf("[compute] %-32s ok\n", test.name);
+    return;
+  }
+  const auto outputs = ExecuteCase(vulkan, test, compiled);
+  CompareOutputs(test, outputs);
+  if (GenericParityEnabled()) {
+    RunGenericParity(vulkan, test, outputs);
+  }
   std::printf("[compute] %-32s ok\n", test.name);
 }
 
@@ -39809,6 +39960,136 @@ void CheckShaderLoadPrecompile(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+// --generic-compute (KYTY_TEST_GENERIC_COMPUTE=1, mode --generic-load-only): registering a compute
+// binary builds its generic variant on the pool; dispatches with other strides, swizzles and
+// out-of-bounds modes find that one program, a dispatch whose hard signature differs compiles its
+// own, and every dispatch is counted with the reason it did not use the generic variant.
+void CheckGenericCompute(VulkanHarness &vulkan) {
+  constexpr const char *name = "GenericCompute";
+  std::vector<u32> code;
+  code.push_back(EncodeMubuf0(0x0cu, 0, true, false)); // buffer_load_dword v1, v0 idxen, s[0:3]
+  code.push_back(EncodeMubuf1(1, 0, 0));
+  code.push_back(EncodeMubuf0(0x1cu, 0, true, false)); // buffer_store_dword v1, v0 idxen, s[12:15]
+  code.push_back(EncodeMubuf1(1, 12, 0));
+  AppendEnd(&code);
+  auto *memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
+  std::fill(memory, memory + 64, 0u);
+  std::copy(code.begin(), code.end(), memory);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto bytes = static_cast<u32>(code.size() * sizeof(u32));
+  const auto hash = ShaderMapUserData(
+      address, {.type = Prospero::ShaderBinaryType::kCs, .code_size_bytes = bytes});
+  const std::vector<PipelineCache::ShaderRegisterEntry> header = {
+      {Pm4::COMPUTE_PGM_LO, static_cast<u32>(address >> 8u)},
+      {Pm4::COMPUTE_PGM_HI, static_cast<u32>(address >> 40u) & 0xffu},
+      {Pm4::COMPUTE_PGM_RSRC1, 0xc0u << Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT},
+      {Pm4::COMPUTE_PGM_RSRC2, (16u << Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) |
+                                   (4u << Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT)},
+      {Pm4::COMPUTE_NUM_THREAD_X, 1},
+      {Pm4::COMPUTE_NUM_THREAD_Y, 1},
+      {Pm4::COMPUTE_NUM_THREAD_Z, 1}};
+  constexpr u32 dispatch_modifier = 1u << Pm4::COMPUTE_DISPATCH_INITIATOR_CS_W32_EN_SHIFT;
+  HW::ComputeShaderInfo regs{};
+  for (const auto &entry : header) {
+    (void)HW::ApplyComputeShaderRegister(regs.cs_regs, entry.offset, entry.value);
+  }
+  regs.cs_regs.wave_size = Pm4::ComputeWaveSize(dispatch_modifier);
+  const auto registration = PipelineCache::ShaderRegistration{
+      .type = static_cast<uint8_t>(Prospero::ShaderBinaryType::kCs),
+      .address = address,
+      .hash = hash,
+      .code_size_bytes = bytes,
+      .dispatch_modifier = dispatch_modifier,
+      .sh_registers = header};
+  Require(name, "header", regs.cs_regs.user_sgpr == 16u,
+          "the register list did not decode to sixteen user SGPRs");
+
+  // Two buffer descriptors in the user SGPRs: the one read (s0..3) and the one written (s12..15).
+  const auto Describe = [&](u32 stride_in, u32 stride_out, bool oob_mode_0_in, bool add_tid_in) {
+    auto set = [&](u32 first, u32 stride, u32 records, bool oob_mode_0, bool add_tid) {
+      ShaderBufferResource d{};
+      d.UpdateAddress48(0x10000 + first * 0x100);
+      d.fields[1] |= (stride & 0x3fffu) << 16u;
+      d.fields[2] = records;
+      d.fields[3] = DstSel(4, 5, 6, 7) | (oob_mode_0 ? 0u : 3u << 28u) | (add_tid ? 1u << 23u : 0u);
+      for (u32 i = 0; i < 4; i++) regs.cs_user_sgpr.value[first + i] = d.fields[i];
+    };
+    set(0, stride_in, 64, oob_mode_0_in, add_tid_in);
+    set(12, stride_out, 64, false, false);
+  };
+
+  GraphicContext graphics;
+  graphics.device = vulkan.Device();
+  graphics.physical_device_properties =
+      vulkan.RuntimeContext().GetPhysicalDeviceProperties();
+  PipelineCache cache(graphics);
+  cache.NoteShaderRegistered(registration);
+  Require(name, "idle", cache.WaitLoadIdle(120000), "load jobs did not finish");
+  const auto &load = cache.Load();
+  Require(name, "variant built",
+          load.registered_cs == 1 && load.generic_jobs == 1 && load.generic_built == 1 &&
+              load.generic_refused == 0 && load.pipelines == 1 && load.jobs_guess == 0,
+          "registration did not build the generic program and queue its pipeline");
+
+  ShaderComputeInputInfo input{};
+  Describe(16, 16, false, false);
+  const auto first = cache.GetComputeProgram(regs, {}, input);
+  Require(name, "generic program", input.stage.program != nullptr && input.stage.program->info.generic,
+          "the first dispatch did not get the generic program");
+  Require(name, "one hit", load.generic_dispatches == 1 && load.generic_hits == 1,
+          "the first dispatch was not counted as a generic hit");
+  const auto &data = input.stage.resources->generic_data;
+  Require(name, "words of dispatch 1",
+          data.size() == input.stage.program->bindings.dynamic_dwords && data.size() >= 2 &&
+              data[0] == 16u && data[1] == 16u,
+          "the dynamic words are not the dispatch's strides");
+  auto &pipeline = cache.GetComputePipeline(input, first);
+  Require(name, "pipeline hit", pipeline.pipeline != nullptr && load.pipeline_hit_ready == 1,
+          "the first dispatch did not find the pipeline built at registration");
+
+  // Another stride, a zero stride with out-of-bounds mode 0 and a swizzled written buffer: same program.
+  ShaderComputeInputInfo second_input{};
+  Describe(0, 4, true, false);
+  regs.cs_user_sgpr.value[13] |= (1u << 31u); // swizzle enable
+  regs.cs_user_sgpr.value[15] |= (2u << 21u); // index stride
+  const auto second = cache.GetComputeProgram(regs, {}, second_input);
+  Require(name, "same program", second.id == first.id && load.generic_hits == 2 &&
+              load.compute_ondemand == 0,
+          "a dispatch with other strides compiled its own program");
+  const auto &data2 = second_input.stage.resources->generic_data;
+  Require(name, "words of dispatch 2",
+          data2.size() >= 2 && data2[0] == ShaderRecompiler::IR::GenericBufferZeroOobBit &&
+              data2[1] == (4u | (1u << 14u) | (2u << 16u)),
+          "the dynamic words do not carry the stride and the out-of-bounds mode");
+  Require(name, "same pipeline", cache.GetComputePipeline(second_input, second).pipeline == pipeline.pipeline,
+          "the pipeline was built twice");
+
+  // ADD_TID is a hard field (the variant is built without it): this dispatch compiles its own.
+  regs.cs_user_sgpr.value[13] &= ~(1u << 31u);
+  regs.cs_user_sgpr.value[15] &= ~(3u << 21u);
+  ShaderComputeInputInfo tid_input{};
+  Describe(16, 16, false, true);
+  const auto third = cache.GetComputeProgram(regs, {}, tid_input);
+  Require(name, "add_tid falls back",
+          third.id != first.id && !tid_input.stage.program->info.generic && load.generic_hits == 2 &&
+              load.compute_ondemand == 1 &&
+              load.generic_miss[static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::BufferAddTid)] == 1,
+          "a dispatch outside the hard signature did not compile its own program");
+
+  // The async compute queue is part of the program key, not of the generic variant.
+  ShaderComputeInputInfo async_input{};
+  async_input.async_compute = true;
+  Describe(16, 16, false, false);
+  const auto fourth = cache.GetComputeProgram(regs, {}, async_input);
+  Require(name, "other static state",
+          fourth.id != first.id && load.generic_hits == 2 && load.generic_dispatches == 4 &&
+              load.generic_miss[static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::Count) + 2] == 1,
+          "an async-queue dispatch must be counted as another static state");
+  cache.WaitLoadIdle(120000);
+  std::free(memory);
+  std::printf("[gpu]     %-32s ok\n", name);
+}
+
 // --pipelines-unoptimized-first (KYTY_TEST_UNOPTIMIZED_FIRST=1, mode --unoptimized-first-only):
 // a new compute pipeline is created unoptimized, the background build finishes, the next lookup
 // swaps it in on the same layouts and hands the replaced VkPipeline to the retire handler.
@@ -46172,6 +46453,11 @@ int main(int argc, char **argv) {
     CheckShaderLoadPrecompile(vulkan);
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--generic-load-only") == 0) {
+    VulkanHarness vulkan;
+    CheckGenericCompute(vulkan);
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--unoptimized-first-only") == 0) {
     VulkanHarness vulkan;
     CheckUnoptimizedFirstPromotion(vulkan);
@@ -46500,6 +46786,7 @@ int main(int argc, char **argv) {
   for (const auto &test : tests) {
     RunCase(&vulkan, test);
   }
+  PrintGenericParityTally();
   for (const auto &test : graphics_tests) {
     RunGraphicsCase(&vulkan, test);
   }

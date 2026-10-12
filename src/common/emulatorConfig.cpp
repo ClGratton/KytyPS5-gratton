@@ -95,6 +95,10 @@ bool GetPrecompileOnLoad() {
 	return g_config->precompile_on_load && g_config->async_pipelines != AsyncPipelineMode::Off;
 }
 
+bool GetGenericCompute() {
+	return g_config->generic_compute && g_config->async_pipelines != AsyncPipelineMode::Off;
+}
+
 bool GetPipelineVariantsReplay() {
 	return g_config->pipeline_variants_replay && g_config->async_pipelines != AsyncPipelineMode::Off;
 }

@@ -12,6 +12,7 @@
 #include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
 #include "graphics/shader/shader.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -316,6 +317,18 @@ public:
 		std::atomic<uint64_t> gfx_unrecorded {0};      // pipelines the first draw could not record
 		std::atomic<uint64_t> gfx_hit_ready {0};       // first draw found the pipeline finished
 		std::atomic<uint64_t> gfx_hit_inflight {0};    // first draw waited for it
+		// --generic-compute. A dispatch is counted once, when its program is found or built.
+		static constexpr size_t kGenericMissKinds = 16;
+		std::atomic<uint64_t> generic_jobs {0};        // generic load jobs queued at registration
+		std::atomic<uint64_t> generic_built {0};       // generic permutations published
+		std::atomic<uint64_t> generic_refused {0};     // binaries whose variant cannot be built
+		std::atomic<uint64_t> generic_dispatches {0};  // compute dispatches seen while the flag is on
+		std::atomic<uint64_t> generic_hits {0};        // ... that ran a generic variant
+		std::atomic<uint64_t> generic_programs_used {0}; // distinct generic permutations dispatched
+		std::atomic<uint64_t> generic_joined {0};      // hits that waited for the variant to finish
+		std::atomic<uint64_t> compute_ondemand {0};    // specialized compute programs a dispatch built
+		std::array<std::atomic<uint64_t>, kGenericMissKinds> generic_miss {};   // by reason, see names
+		std::array<std::atomic<uint64_t>, kGenericMissKinds> generic_refusal {}; // by GenericRefusal
 		std::atomic<uint64_t> lead_n {0};              // register-to-first-use lead of the hits
 		std::atomic<int64_t>  lead_sum_ns {0};
 		std::atomic<int64_t>  lead_min_ns {std::numeric_limits<int64_t>::max()};
@@ -331,6 +344,7 @@ public:
 			}
 		}
 		[[nodiscard]] std::string Summary() const;
+		[[nodiscard]] std::string GenericSummary() const;
 	};
 	[[nodiscard]] LoadCounters& Load() { return m_load; }
 

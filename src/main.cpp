@@ -180,6 +180,15 @@ static void PrintUsage() {
 	         "                                       low-priority worker when the game registers it, for\n"
 	         "                                       the most likely variant (needs --async-pipelines\n"
 	         "                                       stall|skip). Default: false.\n");
+	::printf("  --generic-compute <true|false>       Build a generic variant of a compute shader on a\n"
+	         "                                       low-priority worker when the game registers it: buffer\n"
+	         "                                       strides, swizzles and out-of-bounds modes, image cube\n"
+	         "                                       flags and swizzles and the numeric class of loaded or\n"
+	         "                                       stored images are read from the descriptors at run\n"
+	         "                                       time. A dispatch with the same image dimensions and\n"
+	         "                                       fixed classes uses it, any other compiles its own\n"
+	         "                                       variant (needs --async-pipelines stall|skip).\n"
+	         "                                       Default: false.\n");
 	::printf("  --pipeline-variants-replay <true|false>\n"
 	         "                                       Record the compute variants the game uses in\n"
 	         "                                       _PipelineCache/<TITLE>.variants and build the stored\n"
@@ -900,6 +909,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--precompile-on-load") {
 			if (!ParseBool(value, options.config.precompile_on_load)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--generic-compute") {
+			if (!ParseBool(value, options.config.generic_compute)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

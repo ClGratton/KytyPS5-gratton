@@ -84,6 +84,15 @@ QList<Option> BuildTable() {
 	             "shader, seconds before its first dispatch. Helps from the second session on."
 	             "\n\nNeeds Async pipelines = stall or skip.",
 	             EMU_BOOL(pipeline_variants_replay), {}, 0, 0, "", "", true});
+	defs.append({"generic_compute", "--generic-compute", Tab::Shaders, "Pipeline compilation",
+	             Kind::Bool, "Generic compute shaders",
+	             "Builds a generic variant of a compute shader when the game registers it: buffer "
+	             "strides and swizzles, image cube flags and swizzles and the numeric class of loaded "
+	             "or stored images are read from the descriptors at run time, so the variant fits "
+	             "most dispatches and is ready before the first one. A dispatch it does not fit "
+	             "compiles its own variant as usual. Experimental."
+	             "\n\nNeeds Async pipelines = stall or skip.",
+	             EMU_BOOL(generic_compute), {}, 0, 0, "", "", true});
 	defs.append({"precompile_on_load", "--precompile-on-load", Tab::Shaders, "Pipeline compilation",
 	             Kind::Bool, "Precompile compute shaders when the game loads them (guess)",
 	             "Builds a compute shader's program and pipeline for its most likely variant when the "

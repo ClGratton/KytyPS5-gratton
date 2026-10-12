@@ -142,7 +142,20 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		    input.threads_num[2] != 1)
 			return false;
 		const auto  descriptor = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[0]);
-		const auto& resource   = program.info.images[0];
+		// A generic program holds the image once per numeric class: the member for this descriptor.
+		auto resource_index = 0u;
+		if (program.info.generic && !program.info.images.empty() &&
+		    program.info.images[0].class_root == 0u) {
+			const auto format = descriptor.Format();
+			const auto wanted =
+			    format == Prospero::BufferFormat::k32SInt
+			        ? Prospero::TextureNumericClass::Uint // a signed 32-bit store is bound unsigned
+			        : Prospero::SampledTextureNumericClass(format);
+			for (const auto member: program.info.images[0].class_resources) {
+				if (program.info.images[member].numeric_class == wanted) resource_index = member;
+			}
+		}
+		const auto& resource   = program.info.images[resource_index];
 		if (descriptor.IsNull() || descriptor.Format() != Prospero::BufferFormat::k8UInt ||
 		    descriptor.Type() != Prospero::ImageType::kColor2DArray || descriptor.MetaCompress() ||
 		    descriptor.WriteCompress() || descriptor.BaseLevel() > descriptor.LastLevel() ||
@@ -483,7 +496,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 		for (uint32_t i = 0; i < program.info.images.size(); i++) {
 			const auto& image = program.info.images[i];
-			const auto  r     = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[i]);
+			const auto  r     = DecodeNativeDescriptor<ShaderTextureResource>(
+			    (program.info.generic ? resources.generic_images : resources.images)[i]);
 			LOGF("  CS texture[%u]: source=%u usage=%s sampled=%s addr=0x%010" PRIx64
 			     " type=%u fmt=%u extent=%ux%u depth=%u levels=%u tile=%u\n",
 			     i, image.source, image.written ? "read-write" : "read-only",
