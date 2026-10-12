@@ -117,6 +117,11 @@ struct ConfigOptions {
 	// fifth of translate time; the output is byte-identical). Debug builds always validate and
 	// KYTY_IR_VALIDATE forces it on. Default off (= validate, stock behaviour).
 	bool                   skip_ir_validation          = false;
+	// --pipelines-unoptimized-first: a pipeline no cache holds is created with
+	// VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT so its draw can proceed, and the optimized build
+	// replaces it from a background worker. Needs --async-pipelines stall|skip; NVIDIA only unless
+	// KYTY_PIPELINE_FAST_BUILD=1. Default off.
+	bool                   pipelines_unoptimized_first = false;
 	// --debug-lookahead-verify: the GPU thread recompiles every program a prefetch built before
 	// its first use and compares the SPIR-V; mismatches are logged (finds prefetch inputs that
 	// differ from the real draw's). Slow, debug only.
@@ -164,6 +169,8 @@ AsyncPipelineMode GetAsyncPipelineMode();
 // Resolved worker count (never 0).
 uint32_t          GetPipelineWorkerCount();
 bool              GetPipelineLookahead();
+// The flag, effective only with --async-pipelines on (the optimized rebuilds run on the pool).
+bool              GetPipelinesUnoptimizedFirst();
 uint32_t          GetPipelineLookaheadKinds();
 bool              GetLookaheadVerify();
 

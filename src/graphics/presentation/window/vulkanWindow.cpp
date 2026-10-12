@@ -624,6 +624,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	features13.robustImageAccess   = supported_features13.robustImageAccess;
 	features13.subgroupSizeControl =
 	    graphics.compute_subgroup_size_control_enabled ? VK_TRUE : VK_FALSE;
+	// --pipelines-unoptimized-first asks the driver cache "do you hold this pipeline?" without
+	// compiling (VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED). Enabled only on request.
+	graphics.pipeline_cache_control_enabled =
+	    Config::GetPipelinesUnoptimizedFirst() &&
+	    supported_features13.pipelineCreationCacheControl == VK_TRUE;
+	features13.pipelineCreationCacheControl =
+	    graphics.pipeline_cache_control_enabled ? VK_TRUE : VK_FALSE;
 
 	LOGF("Vulkan robustness: robustImageAccess=%s robustImageAccess2=%s\n",
 	     features13.robustImageAccess == VK_TRUE ? "true" : "false",

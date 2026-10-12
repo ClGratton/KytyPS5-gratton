@@ -209,6 +209,37 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 	            &create, nullptr, &pipeline.descriptor_set_layout) != vk::Result::eSuccess);
 }
 
+// Creates the VkPipeline as `build` says (see PipelineBuild). `create(cache, info)` wraps the
+// vkCreate{Graphics,Compute}Pipelines call and writes pipeline.pipeline.
+template <typename Info, typename Create>
+static vk::Result CreatePipelineHandle(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
+                                       Info info, vk::PipelineCache driver_cache,
+                                       PipelineBuild build, Create create) {
+	// A cache that may hold the pipeline can only be asked without compiling when the device has
+	// pipelineCreationCacheControl; without it the unoptimized path would ignore a warm cache.
+	const bool can_probe = driver_cache != nullptr && graphics.pipeline_cache_control_enabled;
+	if (build != PipelineBuild::Fast || (driver_cache != nullptr && !can_probe)) {
+		return create(driver_cache, info);
+	}
+	if (can_probe) {
+		auto probe = info;
+		probe.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequired;
+		const auto result = create(driver_cache, probe);
+		if (result == vk::Result::eSuccess) {
+			return result; // the driver cache held it: optimized, nothing was compiled
+		}
+		pipeline.pipeline = nullptr;
+		if (result != vk::Result::ePipelineCompileRequired) {
+			return result;
+		}
+	}
+	// In no cache: compiles about two orders of magnitude faster on NVIDIA, so the draw or
+	// dispatch that needs it does not stall. The optimized build follows on a worker.
+	info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	pipeline.unoptimized = true;
+	return create(nullptr, info);
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const PipelineRenderingState&          rendering,
@@ -217,7 +248,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderPixelInputInfo*            ps_input_info,
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache) {
+                            vk::PipelineCache                      driver_cache,
+                            PipelineBuild                          build) {
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
@@ -434,43 +466,45 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	color_blending.attachmentCount = rendering.color_count;
 	color_blending.pAttachments    = color_blend_attachment;
 
-	std::vector<vk::DescriptorSetLayoutBinding> descriptor_bindings;
-	vk::ShaderStageFlags graphics_stages = vk::ShaderStageFlagBits::eFragment;
-	for (const auto& stage: vertex_info) {
-		const auto native_stage = NativeShaderStage(stage.logical_stage);
-		AddLayoutBindings(descriptor_bindings, *stage.stage.program, native_stage);
-		graphics_stages |= native_stage;
-	}
-	if (ps_active) {
-		EXIT_IF(!ps_input_info->stage);
-		AddLayoutBindings(descriptor_bindings, *ps_input_info->stage.program,
-		                  vk::ShaderStageFlagBits::eFragment);
-	}
-	CreateDescriptorLayout(graphics, pipeline, descriptor_bindings);
-	const vk::PushConstantRange push_constants {graphics_stages, 0,
-	                                            ShaderRecompiler::IR::NativePushConstantSize};
+	vk::Result result = vk::Result::eSuccess;
+	if (build != PipelineBuild::Optimize) { // Optimize reuses the layouts of the unoptimized pipeline
+		std::vector<vk::DescriptorSetLayoutBinding> descriptor_bindings;
+		vk::ShaderStageFlags graphics_stages = vk::ShaderStageFlagBits::eFragment;
+		for (const auto& stage: vertex_info) {
+			const auto native_stage = NativeShaderStage(stage.logical_stage);
+			AddLayoutBindings(descriptor_bindings, *stage.stage.program, native_stage);
+			graphics_stages |= native_stage;
+		}
+		if (ps_active) {
+			EXIT_IF(!ps_input_info->stage);
+			AddLayoutBindings(descriptor_bindings, *ps_input_info->stage.program,
+			                  vk::ShaderStageFlagBits::eFragment);
+		}
+		CreateDescriptorLayout(graphics, pipeline, descriptor_bindings);
+		const vk::PushConstantRange push_constants {graphics_stages, 0,
+		                                            ShaderRecompiler::IR::NativePushConstantSize};
 
-	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
-	pipeline_layout_info.setLayoutCount         = 1;
-	pipeline_layout_info.pSetLayouts            = &pipeline.descriptor_set_layout;
-	pipeline_layout_info.pushConstantRangeCount = 1;
-	pipeline_layout_info.pPushConstantRanges    = &push_constants;
+		vk::PipelineLayoutCreateInfo pipeline_layout_info {};
+		pipeline_layout_info.setLayoutCount         = 1;
+		pipeline_layout_info.pSetLayouts            = &pipeline.descriptor_set_layout;
+		pipeline_layout_info.pushConstantRangeCount = 1;
+		pipeline_layout_info.pPushConstantRanges    = &push_constants;
 
-	EXIT_IF(pipeline.pipeline_layout != nullptr);
+		EXIT_IF(pipeline.pipeline_layout != nullptr);
 
-	if (graphics_debug_dump_enabled()) {
-		LOGF("PipelineTrace: vkCreatePipelineLayout begin VS=%" PRIu64 " PS=%" PRIu64
-		     " set_layouts=1 push_constants=%" PRIu32 "\n",
-		     vertex_program.id, ps_active ? pixel_program.id : 0, 1u);
+		if (graphics_debug_dump_enabled()) {
+			LOGF("PipelineTrace: vkCreatePipelineLayout begin VS=%" PRIu64 " PS=%" PRIu64
+			     " set_layouts=1 push_constants=%" PRIu32 "\n",
+			     vertex_program.id, ps_active ? pixel_program.id : 0, 1u);
+		}
+		result = graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
+		                                                   &pipeline.pipeline_layout);
+		if (graphics_debug_dump_enabled()) {
+			LOGF("PipelineTrace: vkCreatePipelineLayout done result=%s layout=%p\n",
+			     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
+		}
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	}
-	auto result = graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
-	                                                   &pipeline.pipeline_layout);
-	if (graphics_debug_dump_enabled()) {
-		LOGF("PipelineTrace: vkCreatePipelineLayout done result=%s layout=%p\n",
-		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
-	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline_layout == nullptr);
 
 	vk::PipelineDepthStencilStateCreateInfo depth_stencil_info {};
@@ -542,8 +576,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		     dynamic_state.dynamicStateCount);
 	}
 	const auto driver_t0 = Bench::TimingEnabled() ? Bench::NowNs() : int64_t {0};
-	result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info, nullptr,
-	                                                 &pipeline.pipeline);
+	result = CreatePipelineHandle(graphics, pipeline, pipeline_info, driver_cache, build,
+	                              [&](vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info) {
+		                              return graphics.device.createGraphicsPipelines(
+		                                  cache, 1, &info, nullptr, &pipeline.pipeline);
+	                              });
 	if (driver_t0 != 0) Bench::SetDriverCreateNs(Bench::NowNs() - driver_t0);
 	if (graphics_debug_dump_enabled()) {
 		LOGF("PipelineTrace: vkCreateGraphicsPipelines done result=%s pipeline=%p\n",
@@ -564,7 +601,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache) {
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
+                            PipelineBuild build) {
 	EXIT_IF(compute_module == nullptr);
 
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
@@ -580,29 +618,31 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		comp_shader_stage_info.pNext            = &comp_subgroup_size;
 	}
 
-	std::vector<vk::DescriptorSetLayoutBinding> descriptor_bindings;
-	AddLayoutBindings(descriptor_bindings, *input_info.stage.program,
-	                  vk::ShaderStageFlagBits::eCompute);
-	CreateDescriptorLayout(graphics, pipeline, descriptor_bindings);
-	const vk::PushConstantRange push_constants {vk::ShaderStageFlagBits::eCompute, 0,
-	                                            ShaderRecompiler::IR::NativePushConstantSize};
+	vk::Result result = vk::Result::eSuccess;
+	if (build != PipelineBuild::Optimize) { // Optimize reuses the layouts of the unoptimized pipeline
+		std::vector<vk::DescriptorSetLayoutBinding> descriptor_bindings;
+		AddLayoutBindings(descriptor_bindings, *input_info.stage.program,
+		                  vk::ShaderStageFlagBits::eCompute);
+		CreateDescriptorLayout(graphics, pipeline, descriptor_bindings);
+		const vk::PushConstantRange push_constants {vk::ShaderStageFlagBits::eCompute, 0,
+		                                            ShaderRecompiler::IR::NativePushConstantSize};
 
-	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
-	pipeline_layout_info.setLayoutCount         = 1;
-	pipeline_layout_info.pSetLayouts            = &pipeline.descriptor_set_layout;
-	pipeline_layout_info.pushConstantRangeCount = 1;
-	pipeline_layout_info.pPushConstantRanges    = &push_constants;
+		vk::PipelineLayoutCreateInfo pipeline_layout_info {};
+		pipeline_layout_info.setLayoutCount         = 1;
+		pipeline_layout_info.pSetLayouts            = &pipeline.descriptor_set_layout;
+		pipeline_layout_info.pushConstantRangeCount = 1;
+		pipeline_layout_info.pPushConstantRanges    = &push_constants;
 
-	EXIT_IF(pipeline.pipeline_layout != nullptr);
+		EXIT_IF(pipeline.pipeline_layout != nullptr);
 
-	LOGF("PipelineTrace: vkCreatePipelineLayout CS begin set_layouts=1 push_constants=%u\n",
-	     1u);
-	auto result = graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
-	                                                  &pipeline.pipeline_layout);
-	LOGF("PipelineTrace: vkCreatePipelineLayout CS done result=%s layout=%p\n",
-	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
+		LOGF("PipelineTrace: vkCreatePipelineLayout CS begin set_layouts=1 push_constants=%u\n",
+		     1u);
+		result = graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
+		                                                  &pipeline.pipeline_layout);
+		LOGF("PipelineTrace: vkCreatePipelineLayout CS done result=%s layout=%p\n",
+		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline_layout));
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	}
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline_layout == nullptr);
 
 	vk::ComputePipelineCreateInfo info {};
@@ -615,8 +655,11 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	LOGF("PipelineTrace: vkCreateComputePipelines begin layout=%p\n",
 	     static_cast<void*>(pipeline.pipeline_layout));
 	const auto driver_t0 = Bench::TimingEnabled() ? Bench::NowNs() : int64_t {0};
-	result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr,
-	                                                &pipeline.pipeline);
+	result = CreatePipelineHandle(graphics, pipeline, info, driver_cache, build,
+	                              [&](vk::PipelineCache cache, const vk::ComputePipelineCreateInfo& create) {
+		                              return graphics.device.createComputePipelines(
+		                                  cache, 1, &create, nullptr, &pipeline.pipeline);
+	                              });
 	if (driver_t0 != 0) Bench::SetDriverCreateNs(Bench::NowNs() - driver_t0);
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));

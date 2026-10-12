@@ -34,6 +34,9 @@ struct GraphicContext {
 	bool                               attachment_feedback_loop_enabled      = false;
 	bool                               provoking_vertex_last_enabled         = false;
 	bool                               depth_color_copy_enabled               = false;
+	// pipelineCreationCacheControl: FAIL_ON_PIPELINE_COMPILE_REQUIRED probes of a pipeline cache
+	// (--pipelines-unoptimized-first).
+	bool                               pipeline_cache_control_enabled         = false;
 	bool                               supports_block_texel_view              = false;
 	bool                                      mesh_shader_enabled                   = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};

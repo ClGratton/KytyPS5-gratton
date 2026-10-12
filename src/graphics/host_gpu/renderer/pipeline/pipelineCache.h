@@ -115,6 +115,13 @@ public:
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
 
+	// The background optimized build of an unoptimized Pipeline (--pipelines-unoptimized-first):
+	// a worker stores `pipeline` (null when the build failed) and then sets `done`.
+	struct OptimizedBuild {
+		std::atomic<bool> done {false};
+		vk::Pipeline      pipeline = nullptr;
+	};
+
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;
 		vk::Pipeline            pipeline              = nullptr;
@@ -124,6 +131,11 @@ public:
 		// the first draw/dispatch uses it (prediction hit accounting only).
 		bool prefetched = false;
 		bool claimed    = false;
+		// --pipelines-unoptimized-first: `pipeline` was created with DISABLE_OPTIMIZATION and
+		// `optimized` is the background build that replaces it (PromoteOptimized(), GPU thread
+		// only). Both are set before the Pipeline is published and cleared by the promotion.
+		bool                                            unoptimized = false;
+		std::shared_ptr<OptimizedBuild>                 optimized;
 	};
 
 	struct GraphicsPrograms {
@@ -313,6 +325,15 @@ private:
 };
 
 void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pixel_program_id);
+// How CreatePipelineInternal gets the VkPipeline (--pipelines-unoptimized-first):
+//  Full      the usual create on the driver cache (stock behaviour);
+//  Fast      the driver cache when it already holds the pipeline (probed with
+//            FAIL_ON_PIPELINE_COMPILE_REQUIRED, nothing is compiled), else compiled with
+//            DISABLE_OPTIMIZATION and no cache (Pipeline::unoptimized);
+//  Optimize  the optimized build of a Fast pipeline: its layouts are already in `pipeline`, only
+//            `pipeline.pipeline` (null) is created, on the driver cache.
+enum class PipelineBuild { Full, Fast, Optimize };
+
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const PipelineRenderingState&          rendering,
                             const PipelineVertexInputState&        vertex_input,
@@ -320,10 +341,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderPixelInputInfo*            ps_input_info,
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache);
+                            vk::PipelineCache                      driver_cache,
+                            PipelineBuild                          build = PipelineBuild::Full);
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache);
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
+                            PipelineBuild build = PipelineBuild::Full);
 
 } // namespace Libs::Graphics
 
