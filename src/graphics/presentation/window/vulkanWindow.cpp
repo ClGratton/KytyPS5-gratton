@@ -559,6 +559,11 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	vk::PhysicalDeviceProperties2 properties2 {};
 	properties2.pNext = &float_controls;
 
+	vk::PhysicalDeviceRobustness2PropertiesEXT robustness2_properties {};
+	if (robustness2_ext_enabled) {
+		robustness2_properties.pNext = properties2.pNext;
+		properties2.pNext            = &robustness2_properties;
+	}
 	if (graphics.mesh_shader_enabled) {
 		subgroup_size_control.pNext = &graphics.mesh_shader_properties;
 	}
@@ -669,6 +674,16 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	LOGF("Vulkan robustness: robustImageAccess=%s robustImageAccess2=%s\n",
 	     features13.robustImageAccess == VK_TRUE ? "true" : "false",
 	     robustness2_ext_enabled && robustness2.robustImageAccess2 == VK_TRUE ? "true" : "false");
+	graphics.robust_buffer_access2_enabled =
+	    robustness2_ext_enabled && robustness2.robustBufferAccess2 == VK_TRUE;
+	graphics.robust_storage_buffer_alignment =
+	    graphics.robust_buffer_access2_enabled
+	        ? static_cast<uint32_t>(robustness2_properties.robustStorageBufferAccessSizeAlignment)
+	        : 0u;
+	LOGF("Vulkan robustness: robustBufferAccess2=%s storageAlignment=%u spirv-robust-bounds=%s\n",
+	     graphics.robust_buffer_access2_enabled ? "true" : "false",
+	     graphics.robust_storage_buffer_alignment,
+	     graphics.SpirvRobustBufferPolicy().dword_elements ? "active" : "off");
 
 	vk::DeviceCreateInfo create_info {};
 	vk::PhysicalDeviceMeshShaderFeaturesEXT mesh_features {};

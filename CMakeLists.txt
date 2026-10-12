@@ -704,6 +704,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_skip_ir_validation_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --skip-ir-validation maybe)
 	set_tests_properties(emulator_skip_ir_validation_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_spirv_robust_bounds_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --spirv-robust-bounds true)
+	add_test(NAME emulator_spirv_robust_bounds_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --spirv-robust-bounds maybe)
+	set_tests_properties(emulator_spirv_robust_bounds_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME emulator_unoptimized_first_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --pipelines-unoptimized-first true)
 	add_test(NAME emulator_unoptimized_first_invalid

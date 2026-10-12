@@ -9990,6 +9990,28 @@ void TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic() {
   }
 }
 
+// --spirv-robust-bounds: which storage-buffer accesses may be left to robustBufferAccess2. Only a
+// device with robustBufferAccess2 and a known access alignment qualifies; sub-dword elements need
+// byte-exact checking (alignment 1).
+void TestRobustBufferPolicy() {
+  using namespace ShaderRecompiler;
+  const auto policy = [](bool requested, bool robust2, uint32_t alignment) {
+    return MakeRobustBufferPolicy(requested, robust2, alignment);
+  };
+  Check(!policy(false, true, 1).Any(), "robust bounds active without the flag");
+  Check(!policy(true, false, 1).Any(), "robust bounds active without robustBufferAccess2");
+  Check(!policy(true, true, 0).Any(), "robust bounds active with an unknown alignment");
+  Check(policy(true, true, 1) == RobustBufferPolicy {true, true},
+        "alignment 1 must cover dword and sub-dword elements");
+  Check(policy(true, true, 4) == RobustBufferPolicy {true, false},
+        "alignment 4 must cover dword elements only");
+  Check(policy(true, true, 2) == RobustBufferPolicy {true, false},
+        "alignment 2 must cover dword elements only");
+  Check(!policy(true, true, 8).Any(), "alignment above 4 must keep the explicit checks");
+  Check(CompileOptions {}.robust_buffers == RobustBufferPolicy {},
+        "compile options must default to explicit bounds checks");
+}
+
 // --skip-ir-validation: release translations may skip the IR consistency checks. The output must not
 // change, a broken program must still be caught when validation is on, and debug builds (and
 // KYTY_IR_VALIDATE) always validate.
@@ -15672,6 +15694,7 @@ int main() {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  TestRobustBufferPolicy();
   TestRayTracingInstructions();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();

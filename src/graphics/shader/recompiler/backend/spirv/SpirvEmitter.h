@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/stringUtils.h"
+#include "graphics/shader/recompiler/RobustBufferPolicy.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <vector>
@@ -11,7 +12,8 @@ namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
 // Resets and writes backend IDs and descriptor indices; do not emit the same program concurrently.
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
-                                  uint32_t push_data_start_dword = 0);
+                                  uint32_t push_data_start_dword = 0,
+                                  RobustBufferPolicy robust_buffers = {});
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

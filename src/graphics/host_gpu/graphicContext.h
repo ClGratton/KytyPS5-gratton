@@ -3,9 +3,11 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
+#include "graphics/shader/recompiler/RobustBufferPolicy.h"
 
 #include <array>
 #include <atomic>
@@ -65,6 +67,10 @@ struct GraphicContext {
 	// (--pipelines-unoptimized-first).
 	bool                               pipeline_cache_control_enabled         = false;
 	bool                               supports_block_texel_view              = false;
+	// VK_EXT_robustness2: robustBufferAccess2 enabled on the device, and the granularity the driver
+	// checks storage-buffer accesses at (robustStorageBufferAccessSizeAlignment, 0 = unknown).
+	bool                               robust_buffer_access2_enabled          = false;
+	uint32_t                           robust_storage_buffer_alignment        = 0;
 	bool                                      mesh_shader_enabled                   = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;
@@ -121,6 +127,13 @@ struct GraphicContext {
 
 	[[nodiscard]] bool SupportsComputeWave64() const noexcept {
 		return subgroup_size == 64u || compute_subgroup_size_control_enabled;
+	}
+
+	// Which storage-buffer accesses the SPIR-V emitter may leave to the device (--spirv-robust-bounds).
+	[[nodiscard]] ShaderRecompiler::RobustBufferPolicy SpirvRobustBufferPolicy() const {
+		return ShaderRecompiler::MakeRobustBufferPolicy(
+		    Config::SpirvRobustBoundsRequested(), robust_buffer_access2_enabled,
+		    robust_storage_buffer_alignment);
 	}
 
 	[[nodiscard]] vk::DeviceSize StorageMinAlignment() const {

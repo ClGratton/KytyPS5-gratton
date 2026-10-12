@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/stringUtils.h"
+#include "graphics/shader/recompiler/RobustBufferPolicy.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shader.h"
@@ -26,6 +27,8 @@ struct CompileOptions {
 	std::span<const uint32_t>   user_data;
 	std::span<const uint32_t>   back_code;
 	ShaderStageInputInfo        input_info;
+	// Storage-buffer accesses the emitter leaves to robustBufferAccess2 (--spirv-robust-bounds).
+	RobustBufferPolicy          robust_buffers;
 };
 
 struct TranslateResult {

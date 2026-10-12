@@ -269,6 +269,10 @@ bool ReadbackLinearImagesEnabled() {
 	return g_config->readback_linear_images;
 }
 
+bool SpirvRobustBoundsRequested() {
+	return g_config->spirv_robust_bounds;
+}
+
 bool SyncRawImageBuffersEnabled() {
 	return g_config->sync_raw_image_buffers;
 }

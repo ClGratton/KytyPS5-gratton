@@ -648,6 +648,7 @@ struct PipelineCache::ProgramCache {
 			options.dump_label     = label;
 			options.wave_size      = wave_size;
 			options.user_data_base = user_data_base;
+			options.robust_buffers = cache.robust_buffers;
 			if (vertex_info) {
 				options.input_info.vertex = &*vertex_info;
 			} else if (pixel_info) {
@@ -948,6 +949,7 @@ struct PipelineCache::ProgramCache {
 		options.early_dump  = options.dump_ir;
 		options.dump_label  = label;
 		options.input_info  = stage_input;
+		options.robust_buffers = robust_buffers;
 
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			options.user_data_base = 8;
@@ -1189,6 +1191,10 @@ struct PipelineCache::ProgramCache {
 	}
 
 	explicit ProgramCache(vk::Device device): device(device) {}
+
+	// Storage-buffer accesses the emitter leaves to robustBufferAccess2 (--spirv-robust-bounds);
+	// fixed after construction, read by the worker threads.
+	ShaderRecompiler::RobustBufferPolicy robust_buffers;
 	~ProgramCache() {
 		for (const auto& [key, entry]: programs) {
 			(void)key;
@@ -1228,6 +1234,13 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)),
       m_async_mode(Config::GetAsyncPipelineMode()) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	m_program_cache->robust_buffers = graphics.SpirvRobustBufferPolicy();
+	if (m_program_cache->robust_buffers.Any()) {
+		PipelineCacheLog("SPIR-V robust bounds: storage-buffer accesses use robustBufferAccess2 "
+		                 "(dword elements={} sub-dword={})",
+		                 m_program_cache->robust_buffers.dword_elements,
+		                 m_program_cache->robust_buffers.subdword_elements);
+	}
 	InitializeDriverCache();
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
 		const auto workers = Config::GetPipelineWorkerCount();
