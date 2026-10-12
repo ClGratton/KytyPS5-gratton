@@ -1090,8 +1090,8 @@ void TestSmallerFlexibleMapReusesReleasedHole() {
 	constexpr int      RuntimeMap = 0x8000;
 
 	// Leave a 0x30000 hole before an allocated backing block. The large mapping must then be
-	// assembled from two flexible-backing extents, matching the allocation that exposed the
-	// PPSA30528 regression.
+	// assembled from two flexible-backing extents, matching an allocation that exposed the
+	// bug this test guards.
 	void* seed_hole = nullptr;
 	CheckOk(test,
 	        Libs::LibKernel::Memory::KernelMapNamedFlexibleMemory(
