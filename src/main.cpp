@@ -131,7 +131,12 @@ static void PrintUsage() {
 	         "  --gc-texture-pressure-mb <MiB>       Texture GC evicts harder above this (0 = auto).\n"
 	         "  --gc-texture-critical-mb <MiB>       Texture GC is aggressive above this (0 = auto).\n"
 	         "  --gc-buffer-trigger-mb <MiB>         Buffer GC starts above this (0 = auto).\n"
-	         "  --gc-buffer-critical-mb <MiB>        Buffer GC is aggressive above this (0 = auto).\n");
+	         "  --gc-buffer-critical-mb <MiB>        Buffer GC is aggressive above this (0 = auto).\n"
+	         "  --gc-buffer-own-share <percent>      Buffer GC also needs the buffer cache itself to hold\n"
+	         "                                       this percentage of the critical budget before it\n"
+	         "                                       downloads dirty buffers (each batch is a GPU drain);\n"
+	         "                                       the texture cache can keep the whole device above the\n"
+	         "                                       mark on its own. 0 = stock. Default: 0.\n");
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
@@ -635,6 +640,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--gc-buffer-critical-mb") {
 			if (!ParseUint32(value, options.config.gc_buffer_critical_mb)) {
 				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--gc-buffer-own-share") {
+			if (!ParseUint32(value, options.config.gc_buffer_own_share_pct) ||
+			    options.config.gc_buffer_own_share_pct > 100) {
+				::printf("invalid value for %s (0..100): %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--vram-paging") {

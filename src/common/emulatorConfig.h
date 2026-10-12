@@ -120,6 +120,10 @@ struct ConfigOptions {
 	uint32_t               gc_texture_critical_mb      = 0;
 	uint32_t               gc_buffer_trigger_mb        = 0;
 	uint32_t               gc_buffer_critical_mb       = 0;
+	// --gc-buffer-own-share <pct> (K42): the buffer GC only goes aggressive (downloads dirty buffers,
+	// a full drain each) when the buffer cache itself holds this share of the critical budget.
+	// 0 = stock (device usage alone decides).
+	uint32_t               gc_buffer_own_share_pct     = 0;
 	// Observation-only benchmark instrumentation (see common/benchInstrument.h). Off by default.
 	std::filesystem::path  bench_frames_csv;
 	uint64_t               bench_exit_after_frames     = 0;
@@ -248,6 +252,7 @@ uint32_t GcTexturePressureMb();
 uint32_t GcTextureCriticalMb();
 uint32_t GcBufferTriggerMb();
 uint32_t GcBufferCriticalMb();
+uint32_t GcBufferOwnSharePercent();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 #endif

@@ -2,6 +2,7 @@
 #include "common/gpuPhaseStats.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -101,6 +102,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 		(void)it;
 		EXIT_IF(!inserted);
 		m_total_used_memory += buffer.Size();
+		m_registered_bytes += buffer.Size();
 		buffer.lru_id = m_lru_cache.Insert(id, m_gc_tick);
 		std::vector<vk::DeviceAddress> addresses;
 		addresses.reserve(size_pages);
@@ -115,6 +117,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 		m_buffers.erase(found);
 		EXIT_IF(buffer.Size() > m_total_used_memory);
 		m_total_used_memory -= buffer.Size();
+		m_registered_bytes -= std::min<uint64_t>(m_registered_bytes, buffer.Size());
 		m_lru_cache.Free(buffer.lru_id);
 		m_bda_pagetable_buffer.Fill(table_offset,
 		                            size_pages * sizeof(vk::DeviceAddress), 0);
@@ -643,7 +646,11 @@ void BufferCache::RunGarbageCollector() {
 		return;
 	}
 
-	const bool     aggressive = m_total_used_memory >= m_critical_gc_memory;
+	// Device usage is shared with the texture cache, so it alone can keep this cache aggressive (a
+	// full GPU drain per download) for pressure that freeing buffers cannot relieve (K42).
+	const bool     aggressive = BufferGcGate::Aggressive(m_total_used_memory, m_critical_gc_memory,
+	                                                      m_registered_bytes,
+	                                                      Config::GcBufferOwnSharePercent());
 	const auto     ages       = GcClock::BufferAgesFor(clock_mode, Config::GetVblankFrequency());
 	const uint64_t want_age   = aggressive ? ages.aggressive : ages.normal;
 	if (!GcClock::AgeReached(clock_mode, tick, want_age)) {

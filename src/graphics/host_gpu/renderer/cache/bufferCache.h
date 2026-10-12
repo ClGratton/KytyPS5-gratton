@@ -138,6 +138,9 @@ private:
 	StreamBuffer                                      m_device_buffer;
 	TextureCache&                                     m_texture_cache;
 	uint64_t                                          m_total_used_memory  = 0;
+	// Bytes of buffers registered in this cache (m_total_used_memory is replaced by the device total
+	// when the driver reports it). Input of BufferGcGate.
+	uint64_t                                          m_registered_bytes   = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;

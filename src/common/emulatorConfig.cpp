@@ -296,6 +296,10 @@ uint32_t GcBufferCriticalMb() {
 	return g_config->gc_buffer_critical_mb;
 }
 
+uint32_t GcBufferOwnSharePercent() {
+	return g_config->gc_buffer_own_share_pct;
+}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled() {
 	return g_config->red_zone_protection_enabled;
