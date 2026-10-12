@@ -219,6 +219,7 @@ struct AsyncStats {
 	std::atomic<uint64_t> low_completed {0};
 	std::atomic<uint64_t> low_cancelled {0};
 	std::atomic<uint64_t> low_run_ns {0};
+	std::atomic<uint64_t> low_promoted {0}; // a draw waited for a low-priority job: moved up
 };
 
 class AsyncPipelineCompiler {
@@ -249,7 +250,8 @@ public:
 	[[nodiscard]] AsyncStats& Stats() { return m_stats; }
 
 	// Waits for `job` on the calling (GPU) thread and accounts the blocked time. A job still in
-	// the queue is moved to the front first (the nearest draw wins).
+	// the queue is moved to the front first (the nearest draw wins); a low-priority one becomes a
+	// normal job.
 	bool WaitFor(AsyncJob& job);
 
 	// One-line summary (also written as a summary_async timing row when timing is on).

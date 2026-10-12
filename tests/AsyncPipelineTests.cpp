@@ -590,6 +590,58 @@ void TestLowPriorityJobs() {
 	Check(pool.Stats().low_cancelled.load() == 1, "low cancel count");
 }
 
+// A draw that waits for a low-priority job (a load-time precompile it needs now) promotes it: the
+// job leaves the low queue, ignores the low-priority slot limit and runs before other background
+// jobs, as soon as a worker is free (one worker here, so the order is strict).
+void TestWaitForPromotesLowPriorityJob() {
+	AsyncPipelineCompiler pool(Config::AsyncPipelineMode::Stall, 1); // one worker: a strict order
+	std::atomic<bool> release {false};
+	std::atomic<int>  running {0};
+	auto blocker = std::make_shared<TestJob>(nullptr, 600, [&] {
+		running.fetch_add(1);
+		Check(WaitUntil([&] { return release.load(); }), "release blocker");
+	});
+	Check(pool.Submit(blocker), "submit blocker");
+	Check(WaitUntil([&] { return running.load() == 1; }), "the worker is busy");
+
+	std::mutex       order_mutex;
+	std::vector<int> order;
+	std::vector<std::shared_ptr<TestJob>> lows;
+	for (int i = 0; i < 5; i++) {
+		lows.push_back(std::make_shared<TestJob>(nullptr, 700 + i, [&, i] {
+			std::lock_guard lock(order_mutex);
+			order.push_back(700 + i);
+		}));
+		Check(pool.SubmitLowPriority(lows.back()), "submit low");
+	}
+	// The draw needs the last one now.
+	std::atomic<bool> waited {false};
+	std::thread       waiter([&] {
+        Check(pool.WaitFor(*lows.back()), "WaitFor returns true for a finished job");
+        waited.store(true);
+    });
+	std::this_thread::sleep_for(std::chrono::milliseconds(30));
+	Check(!waited.load() && pool.Stats().low_promoted.load() == 1, "the waited job was promoted");
+	release.store(true);
+	waiter.join();
+	Check(WaitUntil([&] {
+		      for (const auto& job: lows) {
+			      if (!job->IsFinished()) return false;
+		      }
+		      return true;
+	      }),
+	      "all low jobs finished");
+	{
+		std::lock_guard lock(order_mutex);
+		Check(order.size() == 5 && order.front() == 704, "the promoted job ran first");
+	}
+	// Promotion of a job that is not queued (done) or not low is a no-op.
+	pool.WaitFor(*lows.front());
+	Check(pool.Stats().low_promoted.load() == 1, "waiting for a finished job does not promote");
+	Check(pool.Stats().low_submitted.load() == 5 && pool.Stats().low_completed.load() == 4,
+	      "promoted job counts as a normal completion");
+}
+
 int main() {
 	TestJobsRunOnWorkersConcurrently();
 	TestDedupeSharesOneJob();
@@ -602,6 +654,7 @@ int main() {
 	TestConcurrentInsertSameKeyRunsOnce();
 	TestWaitForFinishedJobAndStats();
 	TestLowPriorityJobs();
+	TestWaitForPromotesLowPriorityJob();
 	std::printf("AsyncPipelineTests: all cases passed\n");
 	return 0;
 }

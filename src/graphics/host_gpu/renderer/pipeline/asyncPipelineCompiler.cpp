@@ -202,8 +202,26 @@ void AsyncPipelineCompiler::Shutdown() {
 
 void AsyncPipelineCompiler::Promote(AsyncJob& job) {
 	std::lock_guard lock(m_mutex);
-	if (job.GetState() != AsyncJob::State::Queued || m_queue.empty() ||
-	    m_queue.front().get() == &job) {
+	if (job.GetState() != AsyncJob::State::Queued) {
+		return;
+	}
+	if (job.m_low) {
+		// A draw now waits for a background job (load-time precompile, optimized rebuild): it
+		// becomes a normal job at the front of the queue, no longer limited to the low slots.
+		for (auto it = m_low_queue.begin(); it != m_low_queue.end(); ++it) {
+			if (it->get() == &job) {
+				auto moved = std::move(*it);
+				m_low_queue.erase(it);
+				moved->m_low = false;
+				m_queue.push_front(std::move(moved));
+				m_stats.low_promoted.fetch_add(1, std::memory_order_relaxed);
+				m_signal.notify_one();
+				return;
+			}
+		}
+		return;
+	}
+	if (m_queue.empty() || m_queue.front().get() == &job) {
 		return;
 	}
 	for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
@@ -297,12 +315,13 @@ std::string AsyncPipelineCompiler::Summary() const {
 	return fmt::format(
 	    "mode={};workers={};jobs_submitted={};jobs_completed={};jobs_cancelled={};peak_queue={};"
 	    "gpu_waits={};gpu_wait_ns={};skipped_draws={};skipped_program_draws={};"
-	    "skipped_pipeline_draws={};low_submitted={};low_completed={};low_cancelled={};low_run_ns={}",
+	    "skipped_pipeline_draws={};low_submitted={};low_completed={};low_cancelled={};low_run_ns={};"
+	    "low_promoted={}",
 	    AsyncModeName(m_mode), m_worker_count, m_stats.submitted.load(), m_stats.completed.load(),
 	    m_stats.cancelled.load(), m_stats.peak_queue.load(), m_stats.gpu_waits.load(),
 	    m_stats.gpu_wait_ns.load(), skipped_program + skipped_pipeline, skipped_program,
 	    skipped_pipeline, m_stats.low_submitted.load(), m_stats.low_completed.load(),
-	    m_stats.low_cancelled.load(), m_stats.low_run_ns.load());
+	    m_stats.low_cancelled.load(), m_stats.low_run_ns.load(), m_stats.low_promoted.load());
 }
 
 void AsyncPipelineCompiler::LogSummary() {
