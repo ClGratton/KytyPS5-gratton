@@ -263,6 +263,31 @@ QList<Option> BuildTable() {
 	             "When no frame was presented for this long, write a thread, worker pool and "
 	             "look-ahead report to stderr and _hang_watchdog.txt.",
 	             EMU_INT(hang_watchdog_seconds), {}, 0, 3600, "Off", " s"});
+	defs.append({"shader_loop_limit", "--shader-loop-limit", Tab::Debug, "Diagnostics", Kind::Int,
+	             "Shader loop guard:",
+	             "Safety net, on by default: each shader invocation may run its loop headers this "
+	             "many times in total, then its loops are left and the shader is reported "
+	             "(\"LOOP GUARD TRIPPED\" in the log), so a loop over corrupt data cannot hang the "
+	             "GPU. It hides an emulation bug rather than fixing it: a report is worth a bug "
+	             "report. Off = no guard.",
+	             EMU_INT(shader_loop_limit), {}, 0, 2147483647, "Off"});
+	defs.append({"hle_trace", "--debug-hle-trace", Tab::Debug, "Diagnostics", Kind::Bool,
+	             "HLE call trace",
+	             "Records the last HLE calls of every guest thread (name, first arguments, caller, "
+	             "result for file and memory calls) and prints them in the fatal fault report. "
+	             "Linux x86-64 only.",
+	             EMU_BOOL(hle_trace)});
+	defs.append({"debug_gpu_ops", "--debug-gpu-ops", Tab::Debug, "Diagnostics", Kind::Choice,
+	             "GPU operation ring:",
+	             "Keeps a host-side ring of the last draws and dispatches and prints the ones of "
+	             "unfinished submissions when the GPU stops answering. checkpoints also uses "
+	             "VK_NV_device_diagnostic_checkpoints (NVIDIA).",
+	             [](const C& c) {
+		             return QVariant(c.gpu_ops_mode == 1 ? QStringLiteral("ring")
+		                             : c.gpu_ops_mode == 2 ? QStringLiteral("checkpoints")
+		                                                   : QStringLiteral("off"));
+	             },
+	             {"off", "ring", "checkpoints"}});
 	defs.append({"texture_gc", "--debug-texture-gc", Tab::Debug, "Diagnostics", Kind::Choice,
 	             "Texture garbage collector:",
 	             "true: normal. false: disable the texture GC (tells whether a rendering difference "
