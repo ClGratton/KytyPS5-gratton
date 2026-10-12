@@ -1120,7 +1120,15 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	endif()
 endif()
 
+# Diagnostic build: a sampling heap profiler that replaces malloc (src/tools/heapProfile.cpp) and keeps the
+# symbol table. Never a release build; see the file header for the output.
+option(KYTY_HEAP_PROFILE "Sampling heap profiler in kyty_emulator (Linux diagnostic build)" OFF)
+
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
+if(KYTY_HEAP_PROFILE AND LINUX)
+	target_sources(kyty_emulator PRIVATE "${KYTY_SOURCE_DIR}/tools/heapProfile.cpp")
+	target_link_options(kyty_emulator PRIVATE -Wl,--export-dynamic)
+endif()
 configure_macos_guest_address_space(kyty_emulator)
 
 set(KYTY_TROPHY_UNLOCK_SOUND "${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/trophy-unlock.wav")
@@ -1173,7 +1181,7 @@ elseif(WIN32 OR LINUX)
 	target_link_options(kyty_emulator PRIVATE "-Wl,-Map=${KYTY_EMULATOR_MAP_LINK_PATH}")
 endif()
 
-if(LINUX)
+if(LINUX AND NOT KYTY_HEAP_PROFILE)
     target_link_options(kyty_emulator PRIVATE
         $<$<CONFIG:Release>:-Wl,--strip-all>
     )
