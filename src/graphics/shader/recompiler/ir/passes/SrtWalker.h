@@ -22,6 +22,9 @@ struct SrtRuntime {
 	// through read_memory, instead of walking the value graph. Falls back to the graph walk when a
 	// check or a read fails, so the result is the graph walk's.
 	bool                      table_walk = false;
+	// --debug-draw-key-verify: after a table walk, redo the refresh with the graph walk on a fresh
+	// memo and stop if the two flattened SRTs differ (reads happen twice).
+	bool                      table_verify = false;
 };
 
 class SrtReadCapture {
@@ -69,6 +72,7 @@ public:
 
 private:
 	bool RefreshFlatTable(std::vector<uint32_t>& flat);
+	void VerifyFlatTable(const std::vector<uint32_t>& flat);
 	static ResourcePlan::EvaluationContext& AcquireContext(const ResourcePlan& program);
 	static float Float32(uint64_t bits);
 	bool EvaluateWide(Value value, uint64_t& result);

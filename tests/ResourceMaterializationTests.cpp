@@ -392,6 +392,18 @@ void TestTableWalkMatchesTheGraphWalk() {
   const std::array<uint32_t, 2> wrap_root{0xfffffffcu, 0xffffu};
   expect_same(good, wrap_root, false, "root at the top of the 48-bit space");
 
+  // Verify mode (graph walk on a fresh memo after the table walk) passes on good inputs.
+  {
+    Memory memory = good;
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    const SrtRuntime runtime{.user_data = user_data, .read_memory = reader, .userdata = &memory,
+                             .table_walk = true, .table_verify = true};
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              snapshot.flattened_srt == ok.flat,
+          "verify mode changed the table walk's result");
+  }
+
   // The values a table walk seeds are not read again by descriptor evaluation.
   {
     Memory memory = good;

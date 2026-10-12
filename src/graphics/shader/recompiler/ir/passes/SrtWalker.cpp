@@ -1171,9 +1171,24 @@ bool SrtWalker::RefreshFlatTable(std::vector<uint32_t>& flat) {
 	return true;
 }
 
+void SrtWalker::VerifyFlatTable(const std::vector<uint32_t>& flat) {
+	auto plain          = m_runtime;
+	plain.table_walk    = false;
+	plain.table_verify  = false;
+	SrtWalker             graph(m_program, plain, m_clean_evaluator);
+	std::vector<uint32_t> expected;
+	if (!graph.RefreshFlatBuffer(expected) || expected != flat) {
+		EXIT("SrtWalker: table walk of shader 0x%016llx differs from the graph walk (%zu vs %zu dwords)\n",
+		     static_cast<unsigned long long>(m_program.shader_hash), flat.size(), expected.size());
+	}
+}
+
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	if (!m_program.srt_plan_complete) return false;
-	if (m_runtime.table_walk && RefreshFlatTable(flat)) return true;
+	if (m_runtime.table_walk && RefreshFlatTable(flat)) {
+		if (m_runtime.table_verify) VerifyFlatTable(flat);
+		return true;
+	}
 	if (m_program.srt_code && m_runtime.read_memory == nullptr) {
 		flat.resize(m_program.srt_reads.size());
 		m_program.active_sources.clear();
