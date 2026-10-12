@@ -1,3 +1,4 @@
+#include "graphics/presentation/window/swapchainExtent.h"
 #include "common/assert.h"
 #include "common/benchInstrument.h"
 #include "common/gpuPhaseStats.h"
@@ -367,14 +368,19 @@ void Swapchain::Create() {
 	const auto& surface = m_window.surface_capabilities;
 	EXIT_NOT_IMPLEMENTED(surface.formats.empty());
 
-	m_extent = surface.capabilities.currentExtent;
-	if (m_extent.width == std::numeric_limits<uint32_t>::max()) {
-		m_extent.width =
-		    std::clamp(m_window_extent.width, surface.capabilities.minImageExtent.width,
-		               surface.capabilities.maxImageExtent.width);
-		m_extent.height =
-		    std::clamp(m_window_extent.height, surface.capabilities.minImageExtent.height,
-		               surface.capabilities.maxImageExtent.height);
+	{
+		const auto& caps = surface.capabilities;
+		const auto  extent = ChooseSwapchainExtent(
+		    {caps.currentExtent.width, caps.currentExtent.height},
+		    {caps.minImageExtent.width, caps.minImageExtent.height},
+		    {caps.maxImageExtent.width, caps.maxImageExtent.height},
+		    {m_window_extent.width, m_window_extent.height});
+		if (caps.currentExtent.width == 0 || caps.currentExtent.height == 0) {
+			// A minimized window; keep a valid size until the next out-of-date acquire.
+			LOGF("Swapchain: surface reported a zero extent (window minimized?), using %ux%u\n",
+			     extent.width, extent.height);
+		}
+		m_extent = vk::Extent2D {extent.width, extent.height};
 	}
 	uint32_t image_count = surface.capabilities.minImageCount + 1;
 	if (surface.capabilities.maxImageCount != 0) {
