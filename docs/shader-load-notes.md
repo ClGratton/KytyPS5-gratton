@@ -108,10 +108,12 @@ cx recipes). Nothing is ported: this is a re-implementation around Kyty's own pr
   replay jobs competed for the driver; idle-only jobs fixed that (see above).
 * **Two pitfalls found by running it:** an NGG vertex program with a GS back half has a program-key hash combining both binaries (the
   guest registers the front one under its own hash), and a graphics pipeline's expensive vertex programs are exactly these.
-* **`--precompile-on-load` (the guess) does not pay on this title.** Every compute binary the route uses has typed buffers, bindless
-  descriptors or a specialization that needs guest memory, so `GuessSpecialization` refuses all 79 of them; the 170 guesses it did build
-  were for binaries the route never dispatches. 0 hits, no stutter change, and it translates binaries the game may never use (8
-  of 685 hit translator checks; they run on an isolated speculative thread so they cannot end the emulator or the lookahead). Default
+* **`--precompile-on-load` (the guess) does not pay on this title.** Of 685 guess jobs the single speculative thread finished 255 before
+  the run ended (170 programs built, 39 refused as unguessable, 8 stopped by translator checks on binaries the route never dispatches,
+  the rest still queued): none of the 79 compute binaries the route uses was among the 170 built, so 0 hits and the stutter is that of
+  the baseline. Even a perfect guess of the statics would match at most about a third of the 84 used variants (16-byte structured
+  buffers and default images; the rest have other strides or formats). The guess translates binaries the game may never use, which is
+  why it runs on an isolated speculative thread (a translator check there cannot end the emulator or switch the lookahead off). Default
   off, kept as an experiment; the persisted variants are the mechanism that works.
 * **Sharing.** The variants file holds keys only (hashes, translator state, specializations, stage input structs), no code and no
   SPIR-V, and nothing title-specific in the code; a file recorded on one machine is a valid starting point for another with the same
