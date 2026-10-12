@@ -75,6 +75,11 @@ struct GraphicContext {
 	Common::Mutex                      queue_mutex;
 	uint32_t                           queue_family = static_cast<uint32_t>(-1);
 	vk::Queue                          queue        = nullptr;
+	uint32_t                           queue_count  = 1; // queues created in queue_family
+	// --readback-queue: a second queue of the same family for buffer readbacks (nullptr when the
+	// family has one queue or the flag is off).
+	Common::Mutex                      readback_queue_mutex;
+	vk::Queue                          readback_queue = nullptr;
 
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;

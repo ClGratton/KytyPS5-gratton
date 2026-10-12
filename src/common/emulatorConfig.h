@@ -186,6 +186,18 @@ struct ConfigOptions {
 	uint32_t               submit_coalesce_max         = 16;
 	// 0 = derive from the vblank frequency (period / 8); otherwise microseconds.
 	uint32_t               submit_coalesce_us          = 0;
+	// --elide-barriers (K14): leave out a guest global barrier when nothing was recorded since the
+	// previous one in the same command buffer. Default off.
+	bool                   elide_barriers              = false;
+	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
+	// clear discovery needs no GPU->CPU readback for them. Default off.
+	bool                   known_fills                 = false;
+	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
+	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
+	bool                   clean_guest_reads           = false;
+	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
+	// rendering family and wait only for the work that wrote the data. Default off.
+	bool                   readback_queue              = false;
 	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
@@ -247,6 +259,10 @@ bool              BdaSyncSkip();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
+bool              ElideBarriersEnabled();
+bool              KnownFillsEnabled();
+bool              CleanGuestReadsEnabled();
+bool              ReadbackQueueEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

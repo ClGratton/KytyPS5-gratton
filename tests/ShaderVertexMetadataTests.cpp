@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -108,10 +109,59 @@ void TestValidAndInvalidMetadata() {
 	CheckRejected(missing_semantics.mapped, "missing vertex semantic array was accepted");
 }
 
+// ShaderReadGuest (--clean-guest-reads): a clean reader that accepts supplies the bytes; one that
+// refuses, or none at all, leaves the plain copy.
+struct FakeReaderState {
+	bool     accept = false;
+	uint32_t calls  = 0;
+};
+
+bool FakeReader(void* context, uint64_t, void* data, uint64_t size) {
+	auto* state = static_cast<FakeReaderState*>(context);
+	++state->calls;
+	if (!state->accept) {
+		return false;
+	}
+	std::memset(data, 0xcd, static_cast<size_t>(size));
+	return true;
+}
+
+void TestCleanGuestReader() {
+	const std::array<uint8_t, 8> source {1, 2, 3, 4, 5, 6, 7, 8};
+	std::array<uint8_t, 8>       out {};
+
+	ShaderSetCleanGuestReader(nullptr, nullptr);
+	ShaderReadGuest(out.data(), source.data(), out.size());
+	Check(out == source, "without a reader the copy is plain");
+	Check(!ShaderTryReadGuestClean(out.data(), source.data(), out.size()),
+	      "without a reader the clean path refuses");
+
+	FakeReaderState state;
+	ShaderSetCleanGuestReader(FakeReader, &state);
+	out = {};
+	ShaderReadGuest(out.data(), source.data(), out.size());
+	Check(state.calls == 1 && out == source, "a refusing reader falls back to the plain copy");
+
+	state.accept = true;
+	out          = {};
+	ShaderReadGuest(out.data(), source.data(), out.size());
+	Check(state.calls == 2 && out[0] == 0xcd && out[7] == 0xcd,
+	      "an accepting reader supplies the bytes");
+	Check(ShaderTryReadGuestClean(out.data(), source.data(), out.size()),
+	      "the clean path reports success");
+
+	state.calls = 0;
+	ShaderReadGuest(out.data(), source.data(), 0);
+	Check(state.calls == 0, "a zero-size read never reaches the reader");
+
+	ShaderSetCleanGuestReader(nullptr, nullptr);
+}
+
 } // namespace
 
 int main() {
 	TestValidAndInvalidMetadata();
+	TestCleanGuestReader();
 	std::puts("ShaderVertexMetadataTests: all cases passed");
 	return 0;
 }

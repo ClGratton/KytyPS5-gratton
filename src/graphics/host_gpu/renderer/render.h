@@ -114,7 +114,11 @@ public:
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
 
+	// Every access for recording counts as work (RecordedWork); sync code that only validates the
+	// buffer uses AssertRecording, which does not.
 	[[nodiscard]] vk::CommandBuffer Handle() const;
+	void                            AssertRecording() const;
+	[[nodiscard]] uint64_t          RecordedWork() const noexcept { return m_recorded_work; }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -144,6 +148,7 @@ private:
 	uint64_t            m_debug_arg4      = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	mutable uint64_t    m_recorded_work = 0; // Handle() calls; never reset
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

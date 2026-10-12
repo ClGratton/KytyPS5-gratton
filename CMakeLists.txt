@@ -471,6 +471,26 @@ add_executable(submit_coalescer_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(submit_coalescer_tests PRIVATE ${inc_headers})
 
+add_executable(drain_causes_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/DrainCausesTests.cpp"
+)
+target_include_directories(drain_causes_tests PRIVATE ${inc_headers})
+
+add_executable(barrier_elision_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BarrierElisionTests.cpp"
+)
+target_include_directories(barrier_elision_tests PRIVATE ${inc_headers})
+
+add_executable(known_fills_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/KnownFillsTests.cpp"
+)
+target_include_directories(known_fills_tests PRIVATE ${inc_headers})
+
+add_executable(readback_plan_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ReadbackPlanTests.cpp"
+)
+target_include_directories(readback_plan_tests PRIVATE ${inc_headers})
+
 add_executable(gc_clock_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GcClockTests.cpp"
 )
@@ -705,6 +725,10 @@ if(BUILD_TESTING)
 	add_test(NAME texture_gc_policy COMMAND $<TARGET_FILE:texture_gc_policy_tests>)
 	add_test(NAME phase_timers COMMAND $<TARGET_FILE:phase_timers_tests>)
 	add_test(NAME submit_coalescer COMMAND $<TARGET_FILE:submit_coalescer_tests>)
+	add_test(NAME drain_causes COMMAND $<TARGET_FILE:drain_causes_tests>)
+	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
+	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
+	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
@@ -831,6 +855,10 @@ if(BUILD_TESTING)
 		texture_gc_policy_tests
 		phase_timers_tests
 		submit_coalescer_tests
+		drain_causes_tests
+		barrier_elision_tests
+		known_fills_tests
+		readback_plan_tests
 		gc_clock_tests
 		buffer_gc_gate_tests
 		bda_sync_gate_tests

@@ -2,6 +2,7 @@
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_COMMAND_PROCESSOR_H
 
 #include "common/assert.h"
+#include "graphics/guest_gpu/command_processor/barrierElision.h"
 #include "graphics/guest_gpu/command_processor/shadowTypes.h"
 #include "graphics/guest_gpu/command_processor/submitCoalescer.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -228,6 +229,7 @@ private:
 	bool      m_predicate_skip              = false;
 	ShadowSink* m_shadow_sink               = nullptr;
 	SubmitCoalescer m_coalescer {CoalescerConfigFromGlobals()};
+	GlobalBarrierElider m_barrier_elider;
 };
 
 } // namespace Libs::Graphics

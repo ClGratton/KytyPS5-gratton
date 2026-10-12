@@ -89,6 +89,22 @@ bool GetPipelinesUnoptimizedFirst() {
 	return g_config->pipelines_unoptimized_first && g_config->async_pipelines != AsyncPipelineMode::Off;
 }
 
+bool ElideBarriersEnabled() {
+	return g_config->elide_barriers;
+}
+
+bool KnownFillsEnabled() {
+	return g_config->known_fills;
+}
+
+bool CleanGuestReadsEnabled() {
+	return g_config->clean_guest_reads;
+}
+
+bool ReadbackQueueEnabled() {
+	return g_config->readback_queue;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

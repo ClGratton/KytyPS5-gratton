@@ -117,6 +117,7 @@ public:
 		frame->busy = true;
 		m_mutex.Unlock();
 
+		Common::GpuPhase::DrainCauseScope drain_cause(Common::GpuPhase::DrainCause::FramePool);
 		m_scheduler.Wait(frame->present_tick);
 		return frame;
 	}

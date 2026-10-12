@@ -341,6 +341,9 @@ bool StreamBuffer::WaitPendingOperations(const std::vector<Watch>& watches,
 		if (!Scheduler().IsFree(watch.tick) && !allow_wait) {
 			return false;
 		}
+		Common::GpuPhase::DrainCauseScope drain_cause(Usage() == MemoryUsage::Download
+		                                                  ? Common::GpuPhase::DrainCause::DownloadWrap
+		                                                  : Common::GpuPhase::DrainCause::StreamWrap);
 		Scheduler().Wait(watch.tick);
 		if (Usage() == MemoryUsage::Download) {
 			Scheduler().WaitPriorityOperations(watch.tick);

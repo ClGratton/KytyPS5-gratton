@@ -1535,6 +1535,15 @@ void CommandProcessor::EmitGlobalBarrier() {
 	}
 	Common::LockGuard lock(m_renderer.GetMutex());
 
+	// --elide-barriers: a run of guest flush events needs one barrier (barrierElision.h).
+	const auto& current = CurrentBuffer();
+	if (Config::ElideBarriersEnabled() &&
+	    m_barrier_elider.CanElide(GetScheduler().CurrentTick(), current.RecordedWork())) {
+		Common::GpuPhase::NoteBarrier(true);
+		return;
+	}
+	Common::GpuPhase::NoteBarrier(false);
+
 	vk::MemoryBarrier2 barrier {};
 	barrier.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
 	barrier.srcAccessMask = vk::AccessFlagBits2::eMemoryWrite;
@@ -1546,6 +1555,7 @@ void CommandProcessor::EmitGlobalBarrier() {
 	dependency.pMemoryBarriers    = &barrier;
 	GetScheduler().EndRendering();
 	CurrentBuffer().Handle().pipelineBarrier2(dependency);
+	m_barrier_elider.Emitted(GetScheduler().CurrentTick(), current.RecordedWork());
 }
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {

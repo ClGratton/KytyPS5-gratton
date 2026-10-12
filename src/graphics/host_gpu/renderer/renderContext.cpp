@@ -80,7 +80,11 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
-		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (GuestGpu::IsGpuThread()) {
+			Common::GpuPhase::NoteGpuThreadFault();
+		}
+		m_buffer_cache.ReadMemory(fault_vaddr, fault_size, false,
+		                          Common::GpuPhase::DrainCause::ReadbackFault);
 	}
 	return true;
 }
@@ -140,7 +144,10 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	m_gpu->SendCommandSync(unmap);
 }
 
-void RenderContext::PrepareBda() {
+void RenderContext::PrepareBda(bool address_writes) {
+	if (address_writes) {
+		m_buffer_cache.NoteAddressWrites();
+	}
 	if (!m_bda_logged) {
 		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");
 		m_bda_logged = true;

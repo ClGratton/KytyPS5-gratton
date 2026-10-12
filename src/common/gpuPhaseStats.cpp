@@ -6,6 +6,11 @@
 #include <tracy/Tracy.hpp>
 #include <tracy/TracyC.h>
 
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -13,6 +18,8 @@
 #include <cstdio>
 #include <fmt/format.h>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace Common::GpuPhase {
 
@@ -47,6 +54,14 @@ std::atomic<uint32_t> g_interval_s {0};
 std::atomic<bool>     g_phases {true};
 std::atomic<uint64_t> g_submits {0};
 std::atomic<uint64_t> g_frames {0};
+std::atomic<uint64_t> g_barriers_emitted {0};
+std::atomic<uint64_t> g_barriers_elided {0};
+std::atomic<uint64_t> g_qr_calls {0};
+std::atomic<uint64_t> g_qr_flushed {0};
+std::atomic<uint64_t> g_qr_lag {0};
+std::atomic<uint64_t> g_clean_reads {0};
+std::atomic<uint64_t> g_direct_reads {0};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
 std::array<std::atomic<uint64_t>, kCoalesce> g_coalesce {};
 
 int64_t WallNs() {
@@ -69,6 +84,19 @@ struct ThreadState {
 	std::array<uint64_t, 256>            packet_ticks {};
 	std::array<uint64_t, 256>            packet_count {};
 	std::array<uint64_t, 256>            drain_ticks_by_packet {};
+	DrainCauses::Table                   drain_causes;      // DrainTick waits, by cause
+	DrainCauses::Table                   window_drain_causes;
+	struct Readback {
+		uint64_t   calls = 0, bytes = 0, ticks = 0;
+		DrainCause cause = DrainCause::Other; // of the latest readback of this region
+	};
+	std::unordered_map<uint64_t, Readback> readbacks; // by guest address of the first copy
+	struct FaultSite {
+		uint64_t              hits = 0;
+		std::vector<uint64_t> offsets; // return addresses relative to the main binary
+	};
+	std::unordered_map<uint64_t, FaultSite> fault_sites; // by hash of the stack
+	std::unordered_map<uint64_t, uint64_t>  fault_reported; // hits already listed
 
 	// Window start (previous report) and what the counters read then.
 	int64_t  window_wall_ns = 0;
@@ -76,6 +104,8 @@ struct ThreadState {
 	int64_t  first_wall_ns  = 0;
 	uint64_t window_submits = 0;
 	uint64_t window_frames  = 0;
+	uint64_t window_barriers_emitted = 0;
+	uint64_t window_barriers_elided  = 0;
 	std::array<uint64_t, kPhases>   window_total {};
 	std::array<uint64_t, kPhases>   window_calls {};
 	std::array<uint64_t, 256>       window_packet_ticks {};
@@ -90,6 +120,9 @@ struct ThreadState {
 };
 
 thread_local ThreadState* t_state = nullptr;
+thread_local DrainCause   t_drain_cause = DrainCause::Other;
+thread_local bool         t_drain_full  = false;
+thread_local uint64_t     t_readback_key = 0;
 
 uint64_t Now() noexcept {
 #if defined(__x86_64__) || defined(__i386__)
@@ -119,7 +152,26 @@ void Exit(ThreadState* state, Phase phase, uint64_t start) noexcept {
 	}
 	if (IsDrain(phase) && now > start) {
 		state->drain_ticks_by_packet[state->current_opcode & 0xffu] += now - start;
+		if (phase == Phase::DrainTick) {
+			state->drain_causes.Add(t_drain_cause, t_drain_full, now - start);
+			if (t_readback_key != 0) {
+				state->readbacks[t_readback_key].ticks += now - start;
+				t_readback_key = 0;
+			}
+		}
 	}
+}
+
+void NoteReadbackImpl(ThreadState* state, uint64_t address, uint64_t bytes) noexcept {
+	// Keyed by region and cause (cause in the top byte; guest addresses use 48 bits).
+	const uint64_t key = address | (static_cast<uint64_t>(t_drain_cause) << 56);
+	if (state->readbacks.size() < 8192 || state->readbacks.contains(key)) {
+		auto& r = state->readbacks[key];
+		++r.calls;
+		r.bytes += bytes;
+		r.cause = t_drain_cause;
+	}
+	t_readback_key = key;
 }
 
 void SetPacket(ThreadState* state, uint32_t opcode) noexcept {
@@ -151,8 +203,63 @@ bool Enabled() noexcept {
 	return g_interval_s.load(std::memory_order_relaxed) != 0;
 }
 
+void NoteGpuThreadFault() noexcept {
+#if defined(__linux__)
+	auto* state = detail::t_state;
+	if (state == nullptr) {
+		return;
+	}
+	void*     frames[24];
+	const int n = backtrace(frames, 24);
+	uint64_t  hash = 1469598103934665603ull;
+	std::vector<uint64_t> offsets;
+	Dl_info               info {};
+	for (int i = 0; i < n; ++i) {
+		const auto address = reinterpret_cast<uint64_t>(frames[i]);
+		uint64_t   offset  = address;
+		if (dladdr(frames[i], &info) != 0 && info.dli_fbase != nullptr) {
+			offset = address - reinterpret_cast<uint64_t>(info.dli_fbase);
+		}
+		hash = (hash ^ offset) * 1099511628211ull;
+		offsets.push_back(offset);
+	}
+	if (state->fault_sites.size() >= 64 && !state->fault_sites.contains(hash)) {
+		return;
+	}
+	auto& site = state->fault_sites[hash];
+	++site.hits;
+	if (site.offsets.empty()) {
+		site.offsets = std::move(offsets);
+	}
+#endif
+}
+
+void NoteReadback(uint64_t address, uint64_t bytes) noexcept {
+	if (detail::t_state != nullptr) {
+		detail::NoteReadbackImpl(detail::t_state, address, bytes);
+	}
+}
+
 void NoteSubmit() noexcept {
 	g_submits.fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteBarrier(bool elided) noexcept {
+	(elided ? g_barriers_elided : g_barriers_emitted).fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteKnownFill(KnownFill kind) noexcept {
+	g_known_fills[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteCleanRead(bool clean) noexcept {
+	(clean ? g_clean_reads : g_direct_reads).fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteQueueReadback(bool flushed, uint64_t lag_ticks) noexcept {
+	g_qr_calls.fetch_add(1, std::memory_order_relaxed);
+	g_qr_flushed.fetch_add(flushed ? 1 : 0, std::memory_order_relaxed);
+	g_qr_lag.fetch_add(lag_ticks, std::memory_order_relaxed);
 }
 
 void NoteFrame() noexcept {
@@ -186,6 +293,8 @@ void AttachGpuThread() {
 	state->window_tsc     = detail::Now();
 	state->window_submits = Submits();
 	state->window_frames  = Frames();
+	state->window_barriers_emitted = g_barriers_emitted.load(std::memory_order_relaxed);
+	state->window_barriers_elided  = g_barriers_elided.load(std::memory_order_relaxed);
 	for (size_t i = 0; i < kCoalesce; ++i) {
 		state->window_coalesce[i] = g_coalesce[i].load(std::memory_order_relaxed);
 	}
@@ -199,6 +308,9 @@ void AttachGpuThread() {
 				header += fmt::format(",{}_pct,{}_calls", name, name);
 			}
 			header += ",unscoped_pct";
+			for (const auto* name: DrainCauses::kCauseNames) {
+				header += fmt::format(",drain_{}_ms,drain_{}_calls", name, name);
+			}
 		}
 		header += "\n";
 		std::fputs(header.c_str(), state->csv);
@@ -224,6 +336,12 @@ void Report(detail::ThreadState& s, bool final_report) {
 	const double ns_per_tick = wall_ns / tsc_d;
 	const auto   frames      = Frames() - s.window_frames;
 	const auto   submits     = Submits() - s.window_submits;
+	const auto   barriers_emitted = g_barriers_emitted.load(std::memory_order_relaxed);
+	const auto   barriers_elided  = g_barriers_elided.load(std::memory_order_relaxed);
+	const auto   barrier_emit_d   = barriers_emitted - s.window_barriers_emitted;
+	const auto   barrier_elide_d  = barriers_elided - s.window_barriers_elided;
+	s.window_barriers_emitted     = barriers_emitted;
+	s.window_barriers_elided      = barriers_elided;
 	std::array<uint64_t, kCoalesce> coalesce {};
 	for (size_t i = 0; i < kCoalesce; ++i) {
 		const auto now = g_coalesce[i].load(std::memory_order_relaxed);
@@ -241,8 +359,41 @@ void Report(detail::ThreadState& s, bool final_report) {
 	    frames != 0 ? static_cast<double>(submits) / static_cast<double>(frames) : 0.0,
 	    coalesce[0], coalesce[1], coalesce[2], coalesce[3]);
 
+	{
+		std::array<uint64_t, static_cast<size_t>(KnownFill::Count)> now {};
+		bool                                                        any = false;
+		for (size_t i = 0; i < now.size(); ++i) {
+			now[i] = g_known_fills[i].load(std::memory_order_relaxed);
+			any    = any || now[i] != 0;
+		}
+		if (any) {
+			line += fmt::format(
+			    "known fills (total): hit={} readback={} discarded={} discard_refused={}\n", now[0],
+			    now[1], now[2], now[3]);
+		}
+	}
+	if (g_clean_reads.load(std::memory_order_relaxed) + g_direct_reads.load(std::memory_order_relaxed) != 0) {
+		line += fmt::format("clean guest reads (total): clean={} direct={}\n",
+		                    g_clean_reads.load(std::memory_order_relaxed),
+		                    g_direct_reads.load(std::memory_order_relaxed));
+	}
+	if (g_qr_calls.load(std::memory_order_relaxed) != 0) {
+		const auto calls = g_qr_calls.load(std::memory_order_relaxed);
+		line += fmt::format("queue readbacks (total): {} flushed_first={} mean_producer_lag={:.1f} ticks\n",
+		                    calls, g_qr_flushed.load(std::memory_order_relaxed),
+		                    static_cast<double>(g_qr_lag.load(std::memory_order_relaxed)) /
+		                        static_cast<double>(calls));
+	}
+	line += fmt::format("guest barriers: emitted={} ({:.1f}/frame) elided={} ({:.1f}/frame)\n",
+	                    barrier_emit_d,
+	                    frames != 0 ? static_cast<double>(barrier_emit_d) / static_cast<double>(frames) : 0.0,
+	                    barrier_elide_d,
+	                    frames != 0 ? static_cast<double>(barrier_elide_d) / static_cast<double>(frames) : 0.0);
+
 	std::array<double, kPhases>   pct {};
 	std::array<uint64_t, kPhases> calls {};
+	std::array<double, DrainCauses::kCauseNames.size()>   cause_ms {};
+	std::array<uint64_t, DrainCauses::kCauseNames.size()> cause_calls {};
 	double                        scoped = 0.0;
 	if (s.phases) {
 		for (size_t i = 0; i < kPhases; ++i) {
@@ -282,6 +433,68 @@ void Report(detail::ThreadState& s, bool final_report) {
 			                    static_cast<double>(drain_top[i].first) * ns_per_tick / 1e6);
 		}
 		line += "\n";
+		{
+			const auto causes = s.drain_causes.Since(s.window_drain_causes);
+			s.window_drain_causes = s.drain_causes;
+			line += "GpuPhase drain causes (calls/full/ms):";
+			for (size_t i = 0; i < DrainCauses::kCauseNames.size(); ++i) {
+				const auto& e = causes.Get(static_cast<DrainCause>(i));
+				if (e.calls != 0) {
+					line += fmt::format(" {}={}/{}/{:.1f}", DrainCauses::kCauseNames[i], e.calls,
+					                    e.full_calls,
+					                    static_cast<double>(e.ticks) * ns_per_tick / 1e6);
+				}
+			}
+			line += "\n";
+			if (!s.readbacks.empty()) {
+				std::vector<std::pair<uint64_t, detail::ThreadState::Readback>> order(
+				    s.readbacks.begin(), s.readbacks.end());
+				const size_t keep = std::min<size_t>(5, order.size());
+				std::partial_sort(order.begin(), order.begin() + keep, order.end(),
+				                  [](const auto& a, const auto& b) {
+					                  return a.second.ticks > b.second.ticks;
+				                  });
+				line += fmt::format("GpuPhase readback regions: {} distinct; top (addr calls KiB/call ms):",
+				                    order.size());
+				for (size_t i = 0; i < keep; ++i) {
+					const auto& r = order[i].second;
+					line += fmt::format(" 0x{:x}[{}] {}x {:.1f}KiB {:.1f}ms",
+					                    order[i].first & ((1ull << 56) - 1),
+					                    DrainCauses::kCauseNames[static_cast<size_t>(r.cause)], r.calls,
+					                    r.calls != 0 ? static_cast<double>(r.bytes) / 1024.0 /
+					                                       static_cast<double>(r.calls)
+					                                 : 0.0,
+					                    static_cast<double>(r.ticks) * ns_per_tick / 1e6);
+				}
+				line += "\n";
+				s.readbacks.clear();
+			}
+			if (!s.fault_sites.empty()) {
+				std::vector<std::pair<uint64_t, uint64_t>> order; // hits, hash
+				for (const auto& [hash, site]: s.fault_sites) {
+					const auto before = s.fault_reported[hash];
+					if (site.hits > before) {
+						order.emplace_back(site.hits - before, hash);
+					}
+					s.fault_reported[hash] = site.hits;
+				}
+				std::sort(order.rbegin(), order.rend());
+				for (size_t i = 0; i < std::min<size_t>(order.size(), 4); ++i) {
+					const auto& site = s.fault_sites[order[i].second];
+					line += fmt::format("GpuPhase GPU-thread fault site {:016x} hits={} frames:",
+					                    order[i].second, order[i].first);
+					for (size_t f = 2; f < std::min<size_t>(site.offsets.size(), 14); ++f) {
+						line += fmt::format(" +0x{:x}", site.offsets[f]);
+					}
+					line += "\n";
+				}
+			}
+			for (size_t i = 0; i < DrainCauses::kCauseNames.size(); ++i) {
+				const auto& e = causes.Get(static_cast<DrainCause>(i));
+				cause_ms[i]    = static_cast<double>(e.ticks) * ns_per_tick / 1e6;
+				cause_calls[i] = e.calls;
+			}
+		}
 		const auto                count_base = s.window_packet_count;
 		const auto                packet_top = top(s.packet_ticks, s.window_packet_ticks);
 		line += "GpuPhase packets (inclusive):";
@@ -304,6 +517,9 @@ void Report(detail::ThreadState& s, bool final_report) {
 				row += fmt::format(",{:.2f},{}", pct[i], calls[i]);
 			}
 			row += fmt::format(",{:.2f}", std::max(0.0, 100.0 - scoped));
+			for (size_t i = 0; i < cause_ms.size(); ++i) {
+				row += fmt::format(",{:.2f},{}", cause_ms[i], cause_calls[i]);
+			}
 		}
 		row += "\n";
 		std::fputs(row.c_str(), s.csv);

@@ -199,6 +199,7 @@ void CommandScheduler::Finish() {
 void CommandScheduler::Wait(uint64_t tick) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
+		Common::GpuPhase::NoteDrainFull(true);
 		Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
 		CheckActive();
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
@@ -209,6 +210,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		m_master.Wait(tick);
 		BeginNext();
 	} else if (!m_master.IsFree(tick)) {
+		Common::GpuPhase::NoteDrainFull(false);
 		Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
 		m_master.Wait(tick);
 	}

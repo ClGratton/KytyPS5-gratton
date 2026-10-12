@@ -3,16 +3,19 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+#include "common/gpuPhaseStats.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/knownFills.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <atomic>
 #include <map>
+#include <mutex>
 #include <span>
 #include <utility>
 #include <vector>
@@ -52,7 +55,9 @@ public:
 	KYTY_CLASS_NO_COPY(BufferCache);
 
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
-	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
+	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false,
+	                                  Common::GpuPhase::DrainCause cause =
+	                                      Common::GpuPhase::DrainCause::BufferReadback);
 	[[nodiscard]] Buffer&  GetBuffer(BufferId id) { return m_slot_buffers[id]; }
 	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
@@ -84,6 +89,22 @@ public:
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// --known-fills: true when [vaddr, vaddr + size) was last written, on the GPU, by one fill with
+	// *value. Lets a caller use a GPU-resident fill result without draining the GPU to read it.
+	[[nodiscard]] bool TryGetKnownFill(uint64_t vaddr, uint64_t size, uint32_t* value);
+	// Records that the GPU work recorded last filled [vaddr, vaddr + size) with `value`.
+	void RecordKnownFill(uint64_t vaddr, uint64_t size, uint32_t value);
+	// Drops the GPU-modified state of [vaddr, vaddr + size) without downloading it, for a range the
+	// caller is about to overwrite completely from the CPU. Refuses (false, nothing changed) when
+	// GPU-modified bytes outside the range share its tracking pages. GPU thread only.
+	[[nodiscard]] bool TryDiscardGpuModified(uint64_t vaddr, uint64_t size);
+	// Copies [vaddr, vaddr + size) from the guest backing when guest memory is authoritative for
+	// exactly those bytes: none is GPU-modified, and no GPU-modified image overlaps. Otherwise false
+	// and nothing is read. Never faults and never waits for the GPU. GPU thread only.
+	[[nodiscard]] bool TryReadCleanBytes(uint64_t vaddr, void* data, uint64_t size);
+	// A shader that may store through raw addresses into any buffer was recorded in the current
+	// command buffer (so a second-queue readback must wait for it).
+	void NoteAddressWrites() noexcept;
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
@@ -136,6 +157,19 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	// --readback-queue: copy on the second queue after a timeline wait on the producer's tick.
+	[[nodiscard]] bool ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,
+	                                         const std::vector<vk::BufferCopy>& copies,
+	                                         uint64_t total_size, const Buffer& download,
+	                                         uint64_t offset);
+	uint64_t        m_address_write_tick = 0;
+	vk::CommandPool m_readback_pool      = nullptr;
+	vk::CommandBuffer m_readback_command = nullptr;
+	vk::Semaphore   m_readback_semaphore = nullptr; // timeline, signaled by readback submits
+	uint64_t        m_readback_value     = 0;
+	std::mutex                                        m_known_fills_mutex;
+	KnownFills                                        m_known_fills;
+	void ForgetKnownFills(uint64_t vaddr, uint64_t size);
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;

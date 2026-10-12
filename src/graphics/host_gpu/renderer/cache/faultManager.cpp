@@ -1,3 +1,4 @@
+#include "common/gpuPhaseStats.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 
 #include "common/assert.h"
@@ -76,6 +77,7 @@ FaultManager::~FaultManager() {
 
 void FaultManager::ProcessFaultBuffer() {
 	if (const auto wait_tick = m_fault_areas[m_current_area]; wait_tick != 0) {
+		Common::GpuPhase::DrainCauseScope drain_cause(Common::GpuPhase::DrainCause::FaultBuffer);
 		m_scheduler.Wait(wait_tick);
 		m_scheduler.PopPendingOperations();
 	}
