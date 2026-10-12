@@ -260,6 +260,7 @@ static bool FindTerminal(QString* program, QStringList* prefix) {
 	};
 
 	static const TerminalSpec candidates[] = {
+	    {"xdg-terminal-exec", nullptr},
 	    {"x-terminal-emulator", "-e"},
 	    {"gnome-terminal", "--"},
 	    {"konsole", "-e"},
