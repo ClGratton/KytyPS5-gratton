@@ -35,6 +35,10 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <pthread.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -48,6 +52,7 @@
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
 #include <thread>
+#include <condition_variable>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -835,6 +840,7 @@ struct PipelineCache::ProgramCache {
 		uint32_t              user_data_count = 0;
 		int64_t               register_ns     = 0;
 		uint32_t              priority        = 0;      // background queue order (first use last time)
+		bool                  joinable        = true;   // a dispatch may wait for it (pool jobs only)
 		bool                  guess           = true;   // false: `explicit_spec` is a stored variant
 		std::optional<ShaderRecompiler::IR::ResourceSpecialization> explicit_spec;
 
@@ -876,7 +882,7 @@ struct PipelineCache::ProgramCache {
 	FindLoad(const ProgramKey& key, const ShaderRecompiler::IR::ResourceSpecialization& wanted) {
 		std::lock_guard lock(load_mutex);
 		for (const auto& job: load_active) {
-			if (job->key == key && job->SpecIs(wanted)) return job;
+			if (job->joinable && job->key == key && job->SpecIs(wanted)) return job;
 		}
 		return nullptr;
 	}
@@ -1601,6 +1607,83 @@ struct PipelineCache::ProgramCache {
 	    stage_permutation_counts {};
 };
 
+// --precompile-on-load: translating and compiling the guessed variant of every registered compute
+// binary touches binaries the game may never use, and a translator check that fires on one of them
+// (an unimplemented instruction) must not end the emulator. This thread runs the guess jobs inside
+// a speculation scope like the lookahead thread: such a check parks the thread, switches the
+// speculative features off for the rest of the run and leaves the real path alone. It runs at a
+// lower scheduling priority than the game's threads.
+class PipelineCache::GuessThread {
+public:
+	GuessThread() { m_thread = std::thread([this] { Run(); }); }
+	~GuessThread() { Stop(); }
+	GuessThread(const GuessThread&)            = delete;
+	GuessThread& operator=(const GuessThread&) = delete;
+
+	void Push(std::shared_ptr<ProgramCache::LoadJob> job) {
+		{
+			std::lock_guard lock(m_mutex);
+			if (m_stopping) return;
+			m_queue.push_back(std::move(job));
+		}
+		m_cv.notify_one();
+	}
+
+	void Stop() {
+		{
+			std::lock_guard lock(m_mutex);
+			if (m_stopping) return;
+			m_stopping = true;
+			m_queue.clear();
+		}
+		m_cv.notify_all();
+		if (!m_thread.joinable()) return;
+		// A thread parked by a speculative abort never exits: do not wait for it.
+		for (int i = 0; i < 2000 && !m_exited.load(std::memory_order_acquire) &&
+		                !Common::Speculation::Aborted();
+		     i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		if (m_exited.load(std::memory_order_acquire)) {
+			m_thread.join();
+		} else {
+			m_thread.detach();
+		}
+	}
+
+private:
+	void Run() {
+#if defined(__linux__)
+		pthread_setname_np(pthread_self(), "kyty-precompile");
+		(void)setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
+#endif
+		Common::Speculation::Scope speculation;
+		for (;;) {
+			std::shared_ptr<ProgramCache::LoadJob> job;
+			{
+				std::unique_lock lock(m_mutex);
+				m_cv.wait(lock, [this] { return m_stopping || !m_queue.empty(); });
+				if (m_stopping) break;
+				job = std::move(m_queue.front());
+				m_queue.pop_front();
+			}
+			if (!Common::Speculation::Aborted()) {
+				job->Execute();
+			} else {
+				job->Unregister();
+			}
+		}
+		m_exited.store(true, std::memory_order_release);
+	}
+
+	std::mutex                                          m_mutex;
+	std::condition_variable                             m_cv;
+	std::deque<std::shared_ptr<ProgramCache::LoadJob>>  m_queue;
+	bool                                                m_stopping = false;
+	std::atomic<bool>                                   m_exited {false};
+	std::thread                                         m_thread;
+};
+
 PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)),
       m_async_mode(Config::GetAsyncPipelineMode()) {
@@ -1652,6 +1735,9 @@ void PipelineCache::InitializeVariants() {
 		return;
 	}
 	m_program_cache->track_use = true;
+	if (Config::GetPrecompileOnLoad()) {
+		m_guess_thread = std::make_unique<GuessThread>();
+	}
 	if (!Config::GetPipelineVariantsReplay()) {
 		return;
 	}
@@ -1780,6 +1866,9 @@ void PipelineCache::ShutdownAsync() {
 	// cancelled, running ones finish (and publish). Callers holding the render context lock
 	// (Save() from WindowRun) cannot race with a draw waiting on a job.
 	Common::Hang::UnregisterProvider("pipeline_pool");
+	if (m_guess_thread != nullptr) {
+		m_guess_thread->Stop();
+	}
 	m_async->Shutdown();
 	m_program_cache->program_jobs.Clear();
 	m_graphics_jobs.Clear();
@@ -2489,7 +2578,15 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 			return;
 		}
 		(job->guess ? m_load.jobs_guess : m_load.jobs_stored).fetch_add(1, std::memory_order_relaxed);
-		if (!pool->SubmitLowPriority(job, true, priority)) {
+		if (job->guess) {
+			// Not a pool job: nothing can wait for it, and its translation is speculative.
+			job->joinable = false;
+			if (m_guess_thread == nullptr || Common::Speculation::Aborted()) {
+				m_program_cache->RemoveLoad(job.get());
+			} else {
+				m_guess_thread->Push(job);
+			}
+		} else if (!pool->SubmitLowPriority(job, true, priority)) {
 			m_program_cache->RemoveLoad(job.get());
 		}
 	};

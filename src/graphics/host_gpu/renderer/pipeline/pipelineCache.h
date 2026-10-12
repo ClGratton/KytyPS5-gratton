@@ -354,6 +354,7 @@ public:
 
 private:
 	struct ProgramCache;
+	class GuessThread;
 	struct LoadJob;
 	struct GraphicsPipelineJob;
 	struct ComputePipelineJob;
@@ -429,6 +430,9 @@ private:
 	LookaheadCounters m_lookahead;
 	LoadCounters      m_load;
 	std::unique_ptr<Variants::VariantStore> m_variants; // --pipeline-variants-replay
+	// --precompile-on-load: translation of guessed variants runs here, in a speculation scope (see
+	// GuessThread), because it translates binaries the game may never use.
+	std::unique_ptr<GuessThread> m_guess_thread;
 	void InitializeVariants();
 	// Stored graphics pipelines wait here until the guest has registered the shaders they need
 	// (NoteShaderRegistered copies the code of those), then one background job builds each.
