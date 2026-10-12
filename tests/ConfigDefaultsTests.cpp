@@ -104,6 +104,24 @@ void TestVramStatsAreIndependentOfPaging() {
 	Check(!Config::VramPagingEnabled() && Config::VramStatsEnabled(), "stats alone work");
 }
 
+// Safety net: with memory priorities and pageable device-local memory the driver pages
+// low-priority VRAM out under pressure instead of failing an image allocation. It only
+// does something on a device with both extensions (the device setup logs when it does not); the
+// allocation ladder underneath (reclaim, retry, host fallback) works either way.
+void TestVramPagingDefault() {
+	const Config::ConfigOptions options;
+	Check(options.vram_paging, "vram_paging defaults to on");
+	Check(!options.vram_stats, "the VRAM stats log stays off by default");
+	Apply(options);
+	Check(Config::VramPagingEnabled(), "an unconfigured emulator requests VRAM paging");
+	Check(!Config::VramStatsEnabled(), "and does not log VRAM stats");
+
+	Config::ConfigOptions off;
+	off.vram_paging = false;
+	Apply(off);
+	Check(!Config::VramPagingEnabled(), "--vram-paging off still opts out");
+}
+
 } // namespace
 
 int main() {
@@ -113,6 +131,7 @@ int main() {
 	TestBufferGcOwnShare();
 	TestPipelineCacheKeyDefault();
 	TestVramStatsAreIndependentOfPaging();
+	TestVramPagingDefault();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");

@@ -123,7 +123,10 @@ struct ConfigOptions {
 	bool                   trophy_enabled              = true;
 	bool                   playgo_hack_enabled         = false;
 	bool                   skip_notice_screen          = false;
-	bool                   vram_paging                 = false;
+	// Default true: VK_EXT_memory_priority + VK_EXT_pageable_device_local_memory (when the device has
+	// them) so the driver pages low-priority VRAM out instead of failing an allocation. A safety net
+	// under the hardened allocation ladder (reclaim, retry, host fallback), which stays on either way.
+	bool                   vram_paging                 = true;
 	bool                   vram_stats                  = false;
 	bool                   mem_stats                   = false;
 	bool                   mem_release_punch           = false;

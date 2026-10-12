@@ -736,6 +736,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_pipeline_cache_key_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --pipeline-cache-key stale)
 	set_tests_properties(emulator_pipeline_cache_key_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_vram_paging_off_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --vram-paging off)
+	add_test(NAME emulator_vram_paging_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --vram-paging maybe)
+	set_tests_properties(emulator_vram_paging_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
