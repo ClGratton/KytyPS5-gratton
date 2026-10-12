@@ -237,10 +237,22 @@ void TestManyJobsAllRunOnce() {
 	std::mutex                threads_mutex;
 	std::vector<std::shared_ptr<TestJob>> jobs;
 	for (int i = 0; i < count; i++) {
-		jobs.push_back(std::make_shared<TestJob>(nullptr, i, [&] {
+		jobs.push_back(std::make_shared<TestJob>(nullptr, i, [&, i] {
 			ran.fetch_add(1);
-			std::lock_guard lock(threads_mutex);
-			threads.insert(std::this_thread::get_id());
+			{
+				std::lock_guard lock(threads_mutex);
+				threads.insert(std::this_thread::get_id());
+			}
+			// The first jobs wait for a second worker, so the spread check does not depend on
+			// how the scheduler happens to hand out 2000 tiny jobs (a loaded machine can let
+			// one worker take them all).
+			if (i < 2) {
+				Check(WaitUntil([&] {
+					      std::lock_guard lock(threads_mutex);
+					      return threads.size() > 1;
+				      }),
+				      "a second worker picked up a job");
+			}
 		}));
 		Check(pool.Submit(jobs.back()), "submit");
 	}
@@ -250,8 +262,9 @@ void TestManyJobsAllRunOnce() {
 	}
 	Check(ran.load() == count, "all jobs ran");
 	Check(threads.size() > 1, "work was spread over several workers");
-	Check(pool.Stats().submitted.load() == count && pool.Stats().completed.load() == count,
-	      "stats");
+	// completed is counted after the job is published, so WaitFor can return just before it.
+	Check(WaitUntil([&] { return pool.Stats().completed.load() == count; }), "completed count");
+	Check(pool.Stats().submitted.load() == count, "submitted count");
 	pool.Shutdown();
 }
 
@@ -449,8 +462,9 @@ void TestWaitForFinishedJobAndStats() {
 	const auto before = pool.Stats().gpu_waits.load();
 	Check(pool.WaitFor(*job), "wait on a finished job succeeds");
 	Check(pool.Stats().gpu_waits.load() == before + 1, "the wait is counted");
-	Check(pool.Stats().submitted.load() == 1 && pool.Stats().completed.load() == 1,
-	      "submitted and completed counters");
+	Check(WaitUntil([&] { return pool.Stats().completed.load() == 1; }),
+	      "completed counter");
+	Check(pool.Stats().submitted.load() == 1, "submitted counter");
 	// A cancelled job's Cancel() runs exactly once even if Shutdown() is called twice.
 	AsyncPipelineCompiler second(Config::AsyncPipelineMode::Stall, 1);
 	std::atomic<bool> release {false};
