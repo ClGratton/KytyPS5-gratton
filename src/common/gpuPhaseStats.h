@@ -57,6 +57,8 @@ void Finish();
 
 // Counters, always on (one relaxed atomic add): used for the "submits per frame" figure.
 void NoteSubmit() noexcept;
+// Guest global barrier events: recorded, or left out by --elide-barriers.
+void NoteBarrier(bool elided) noexcept;
 void NoteFrame() noexcept;
 [[nodiscard]] uint64_t Submits() noexcept;
 [[nodiscard]] uint64_t Frames() noexcept;
@@ -87,6 +89,10 @@ public:
 private:
 	DrainCause m_previous;
 };
+
+// A synchronous buffer readback of `bytes` starting at guest address `address` is about to wait:
+// the report lists the regions that cost the most drain time (hot regions). GPU thread only.
+void NoteReadback(uint64_t address, uint64_t bytes) noexcept;
 
 // Set by CommandScheduler::Wait before its DrainTick scope: the wait forced a submit.
 inline void NoteDrainFull(bool full) noexcept {

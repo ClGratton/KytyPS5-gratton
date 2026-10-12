@@ -23,7 +23,13 @@ enum class Cause : uint8_t {
 	FaultBuffer,    // GPU page-fault buffer parse: waits for the previous parse of the same area
 	StreamWrap,     // upload/stream/staging ring wrapped onto work still in flight
 	DownloadWrap,   // download ring wrapped onto work still in flight
-	BufferReadback, // synchronous GPU->guest buffer download (CPU needs GPU-written bytes)
+	BufferReadback, // synchronous GPU->guest buffer download, caller not tagged
+	ReadbackFault,  // ... for a game-thread read of GPU-written memory (page fault)
+	ReadbackFaultGpu, // ... for a read by the GPU thread itself (shader/metadata parsing) of a
+	                  //     page that also holds GPU-written bytes
+	ReadbackCpuWrite, // ... for a CPU write over GPU-written memory (page fault)
+	ReadbackIndirect, // ... for the arguments of an indirect dispatch (LDS sizing)
+	ReadbackTextureMeta, // ... for the clear code of a render-target metadata block
 	BufferGc,       // buffer GC publishing downloads before it frees GPU-modified buffers
 	TextureReclaim, // texture reclaim waiting for deferred deletions
 	FramePool,      // presentation frame pool waiting for the frame's previous present
@@ -32,7 +38,8 @@ enum class Cause : uint8_t {
 
 constexpr std::array<const char*, static_cast<size_t>(Cause::Count)> kCauseNames = {
     "other",          "fault_buffer",  "stream_wrap", "download_wrap",
-    "buffer_readback", "buffer_gc",    "texture_reclaim", "frame_pool"};
+    "buffer_readback", "readback_fault", "readback_fault_gpu", "readback_cpu_write", "readback_indirect",
+    "readback_texture_meta", "buffer_gc", "texture_reclaim", "frame_pool"};
 
 struct Entry {
 	uint64_t calls      = 0; // drains

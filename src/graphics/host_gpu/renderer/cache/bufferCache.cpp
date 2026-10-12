@@ -201,6 +201,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	                       vk::PipelineStageFlagBits::eAllCommands |
 	                           vk::PipelineStageFlagBits::eHost,
 	                       {}, 0, nullptr, 1, &after, 0, nullptr);
+	[[maybe_unused]] const auto first_copy_address = buffer_address + copies.front().srcOffset;
 	auto publish = [this, mapped, offset, total_size, buffer_address,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
@@ -213,7 +214,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
 		const auto tick = m_scheduler.CurrentTick();
-		Common::GpuPhase::DrainCauseScope drain_cause(Common::GpuPhase::DrainCause::BufferReadback);
+		Common::GpuPhase::NoteReadback(first_copy_address, total_size);
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
 		publish();
@@ -280,16 +281,26 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
 	m_memory_tracker.InvalidateRegion(vaddr, size,
-	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
+	                                  [this, vaddr, size] {
+		                                  ReadMemory(vaddr, size, true,
+		                                             Common::GpuPhase::DrainCause::ReadbackCpuWrite);
+	                                  });
 }
 
-void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
+                             Common::GpuPhase::DrainCause cause) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+	// A fault taken by the GPU thread itself (it parses shader metadata straight from guest
+	// memory) is a different problem from a game thread reading results.
+	if (cause == Common::GpuPhase::DrainCause::ReadbackFault && GuestGpu::IsGpuThread()) {
+		cause = Common::GpuPhase::DrainCause::ReadbackFaultGpu;
+	}
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cause] {
+		Common::GpuPhase::DrainCauseScope drain_cause(cause);
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
