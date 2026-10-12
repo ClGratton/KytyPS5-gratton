@@ -1,4 +1,5 @@
 #include "common/gpuPhaseStats.h"
+#include "graphics/shader/recompiler/ir/passes/MaterializeProbe.h"
 
 #include "common/logging/log.h"
 #include "common/phaseTimers.h"
@@ -337,6 +338,8 @@ void AttachGpuThread() {
 		std::fflush(state->csv);
 	}
 	t_report = state;
+	Libs::Graphics::ShaderRecompiler::IR::MaterializeProbe::g_enabled.store(
+	    state->phases, std::memory_order_relaxed);
 	if (state->phases) {
 		detail::t_state = state; // --gpu-phase-stats or --profile: the scopes are live
 	}
@@ -396,6 +399,22 @@ void Report(detail::ThreadState& s, bool final_report) {
 		line += fmt::format("clean guest reads (total): clean={} direct={}\n",
 		                    g_clean_reads.load(std::memory_order_relaxed),
 		                    g_direct_reads.load(std::memory_order_relaxed));
+	}
+	if (s.phases) {
+		namespace Probe = Libs::Graphics::ShaderRecompiler::IR::MaterializeProbe;
+		static std::array<uint64_t, Probe::Count> prev_ticks {}, prev_calls {};
+		line += "MaterializeResources sections (share of wall / ns per call / calls):";
+		for (size_t i = 0; i < Probe::Count; ++i) {
+			const auto ticks = Probe::g_ticks[i].load(std::memory_order_relaxed);
+			const auto calls = Probe::g_calls[i].load(std::memory_order_relaxed);
+			const auto dt    = static_cast<double>(ticks - prev_ticks[i]) * ns_per_tick;
+			const auto dc    = calls - prev_calls[i];
+			line += fmt::format(" {}={:.2f}%/{:.0f}/{}", Probe::kNames[i], dt * 100.0 / wall_ns,
+			                    dc != 0 ? dt / static_cast<double>(dc) : 0.0, dc);
+			prev_ticks[i] = ticks;
+			prev_calls[i] = calls;
+		}
+		line += "\n";
 	}
 	if (const auto calls = g_mat_calls.load(std::memory_order_relaxed); calls != 0) {
 		const auto eq = [&](size_t i) { return g_mat_equal[i].load(std::memory_order_relaxed); };
