@@ -129,13 +129,46 @@ static bool ReadFallbackDisabled() {
 	return disabled;
 }
 
+// Fault injection: KYTY_SYSFILE_CHAOS_EFAULT=<permille> makes that share of reads of more than two
+// pages behave as if the kernel had met a write-protected guest page: only the bytes up to the next
+// page boundary of the destination arrive and the read then fails with EFAULT. Real events of this
+// kind are rare and timing dependent (the GPU thread re-protects a tracked page while a file read
+// is in flight); with this switch the effect of a read that is not complete can be tested, and the
+// fallback checked, on a fixed schedule. Default off.
+static unsigned ChaosPermille() {
+	static const unsigned value = [] {
+		const char* text = std::getenv("KYTY_SYSFILE_CHAOS_EFAULT");
+		return text != nullptr ? static_cast<unsigned>(std::strtoul(text, nullptr, 10)) : 0u;
+	}();
+	return value;
+}
+
+static bool ChaosHit() {
+	thread_local uint64_t state = 0x9e3779b97f4a7c15ull ^ reinterpret_cast<uintptr_t>(&state);
+	state ^= state << 13u;
+	state ^= state >> 7u;
+	state ^= state << 17u;
+	return (state >> 11u) % 1000u < ChaosPermille();
+}
+
 static size_t ReadFileIntoMemory(FILE* f, void* data, size_t size) {
-	const size_t w = fread(data, 1, size, f);
-	if (w == size || feof(f) != 0 || ferror(f) == 0) {
+	bool         injected = false;
+	size_t       w        = 0;
+	const size_t page     = 4096;
+	if (ChaosPermille() != 0 && size > 2 * page && ChaosHit()) {
+		const size_t to_boundary = page - (reinterpret_cast<uintptr_t>(data) & (page - 1));
+		w                        = fread(data, 1, to_boundary, f);
+		injected                 = (w == to_boundary);
+	} else {
+		w = fread(data, 1, size, f);
+	}
+	if (!injected && (w == size || feof(f) != 0 || ferror(f) == 0)) {
 		return w;
 	}
-	const int error = errno;
-	clearerr(f);
+	const int error = injected ? EFAULT : errno;
+	if (!injected) {
+		clearerr(f);
+	}
 	const auto index = g_read_fallback_count.fetch_add(1, std::memory_order_relaxed);
 	if (index == 0) {
 		printf("SysFileRead: read into guest memory failed (errno %d), reading through a host "
