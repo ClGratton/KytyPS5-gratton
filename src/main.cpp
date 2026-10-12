@@ -199,9 +199,10 @@ static void PrintUsage() {
 	::printf("  --known-fills <true|false>           Remember ranges last written by one GPU uniform fill so\n"
 	         "                                       color-metadata clear discovery needs no GPU->CPU\n"
 	         "                                       readback for them. Default: false.\n");
-	::printf("  --draw-key-cache <true|false>        Remember the graphics pipelines of the last few draws and\n"
-	         "                                       find them by comparing keys, without hashing the key\n"
-	         "                                       and probing the pipeline map. Default: false.\n");
+	::printf("  --draw-key-cache <true|false>        Per-draw lookup fast paths: remember the graphics pipelines of\n"
+	         "                                       the last few draws and find them by comparing keys, and\n"
+	         "                                       refresh shader SRT tables from a table (--srt-table-walk).\n"
+	         "                                       Default: false.\n");
 	::printf("  --srt-table-walk <true|false>        Refresh a shader's flattened SRT (pointer tree reads) from a\n"
 	         "                                       precomputed table instead of walking the value graph.\n"
 	         "                                       Default: false.\n");

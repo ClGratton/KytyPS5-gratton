@@ -102,7 +102,7 @@ bool DrawKeyCacheEnabled() {
 }
 
 bool SrtTableWalkEnabled() {
-	return g_config->srt_table_walk;
+	return g_config->srt_table_walk || g_config->draw_key_cache;
 }
 
 bool DrawKeyVerifyEnabled() {

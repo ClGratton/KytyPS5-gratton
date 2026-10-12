@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
+#include "graphics/host_gpu/renderer/pipeline/drawKeyMemo.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
@@ -332,6 +333,15 @@ private:
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
 	std::shared_mutex                                       m_pipelines_mutex;
+
+	// --draw-key-cache (GPU thread only): the last few graphics pipelines found, compared by key
+	// before the hash and map lookup. Pipeline nodes are never erased while the cache lives.
+	bool                                           m_draw_key_cache  = false;
+	bool                                           m_draw_key_verify = false;
+	DrawKeyMemo<GraphicsPipelineKey, Pipeline*, 4> m_draw_key_memo;
+	uint64_t                                       m_draw_key_lookups  = 0;
+	uint64_t                                       m_draw_key_verified = 0;
+	Pipeline* FindGraphicsPipelineMemo(const GraphicsPipelineKey& key);
 
 	// --async-pipelines. The mode is fixed at construction; m_async is null in Off mode.
 	const Config::AsyncPipelineMode m_async_mode;

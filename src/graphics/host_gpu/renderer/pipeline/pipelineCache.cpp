@@ -1256,6 +1256,8 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics.device)),
       m_async_mode(Config::GetAsyncPipelineMode()) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	m_draw_key_cache  = Config::DrawKeyCacheEnabled();
+	m_draw_key_verify = Config::DrawKeyVerifyEnabled();
 	InitializeDriverCache();
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
 		const auto workers = Config::GetPipelineWorkerCount();
@@ -1410,6 +1412,40 @@ PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const GraphicsPipel
 	}
 	const auto iter = m_graphics_pipelines.find(key);
 	return iter != m_graphics_pipelines.end() ? iter->second.get() : nullptr;
+}
+
+// GPU thread: FindGraphicsPipeline() behind the --draw-key-cache memo. A memo hit needs a key equal
+// to a remembered one (the map's own equality), so it can only return what the map returned for
+// that key. --debug-draw-key-verify runs the real lookup on every hit and stops on a disagreement.
+PipelineCache::Pipeline* PipelineCache::FindGraphicsPipelineMemo(const GraphicsPipelineKey& key) {
+	if (!m_draw_key_cache) {
+		return FindGraphicsPipeline(key);
+	}
+	++m_draw_key_lookups;
+	if ((m_draw_key_lookups & 0x3ffffu) == 0) {
+		const auto& stats = m_draw_key_memo.GetStats();
+		PipelineCacheLog("DrawKeyCache: lookups={} memo_hits={} ({:.1f}%) verified={}",
+		                 m_draw_key_lookups, stats.hits,
+		                 100.0 * static_cast<double>(stats.hits) /
+		                     static_cast<double>(m_draw_key_lookups),
+		                 m_draw_key_verified);
+	}
+	if (auto* hit = m_draw_key_memo.Find(key)) {
+		if (m_draw_key_verify) {
+			auto* const real = FindGraphicsPipeline(key);
+			if (real != *hit) {
+				EXIT("DrawKeyCache: memo returned pipeline %p but the pipeline map has %p\n",
+				     static_cast<void*>(*hit), static_cast<void*>(real));
+			}
+			++m_draw_key_verified;
+		}
+		return *hit;
+	}
+	auto* const found = FindGraphicsPipeline(key);
+	if (found != nullptr) {
+		m_draw_key_memo.Remember(key, found);
+	}
+	return found;
 }
 
 PipelineCache::Pipeline* PipelineCache::FindComputePipeline(uint64_t program_id) {
@@ -2324,7 +2360,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	Pipeline* found = nullptr;
 	{
 		Common::GpuPhase::Scope gpu_phase_find(Common::GpuPhase::Phase::PipeFind);
-		found = FindGraphicsPipeline(key);
+		found = FindGraphicsPipelineMemo(key);
 	}
 	if (found != nullptr) {
 		NoteDrawUse(*found, true, false);
