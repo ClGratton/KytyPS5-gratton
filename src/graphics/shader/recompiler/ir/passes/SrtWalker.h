@@ -53,6 +53,9 @@ enum class RuntimeValueType { Any, Integer, ImmutableInteger };
 bool ValidateRuntimeValue(const ResourcePlan& program, Value value,
                           RuntimeValueType type = RuntimeValueType::Any);
 void CompileSrtWalker(ResourcePlan& program);
+// Fills program.fast_reads: for each scalar SRT read whose pointer comes from constants, user data
+// or other reads, the data SrtWalker needs to compute it without the graph walk (table_walk).
+void BuildFastReads(ResourcePlan& program);
 // Uses the strict reader for values that affect shader specialization.
 SrtRuntime CleanRuntime(SrtRuntime runtime);
 
@@ -72,6 +75,8 @@ public:
 
 private:
 	bool RefreshFlatTable(std::vector<uint32_t>& flat);
+	bool FastSource(const SrtFastRead::Source& source, uint64_t& result);
+	bool FastRead(const SrtFastRead& fast, const SrtRead& read, std::vector<uint32_t>& flat);
 	void VerifyFlatTable(const std::vector<uint32_t>& flat);
 	static ResourcePlan::EvaluationContext& AcquireContext(const ResourcePlan& program);
 	static float Float32(uint64_t bits);

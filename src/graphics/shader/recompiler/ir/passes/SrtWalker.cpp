@@ -536,6 +536,65 @@ void CompileSrtWalker(ResourcePlan& program) {
 	EXIT_IF(Xbyak::GetError() != 0);
 }
 
+void BuildFastReads(ResourcePlan& program) {
+	program.fast_reads.assign(program.srt_reads.size(), {});
+	if (!program.srt_plan_complete || !program.resource_tracking_complete) return;
+	const auto source_of = [&](Value value) {
+		SrtFastRead::Source source;
+		value = value.Resolve();
+		if (value.IsImmediate()) {
+			if (value.GetType() == Type::U32) {
+				source.kind  = SrtFastRead::Source::Kind::Imm;
+				source.value = value.U32();
+			}
+			return source;
+		}
+		const auto* inst = value.TryInstruction();
+		if (inst == nullptr) return source;
+		if (inst->GetOpcode() == ValueOpcode::GetUserData && inst->NumArgs() == 1 &&
+		    inst->Arg(0).GetType() == Type::ScalarReg) {
+			const auto reg = RegIndex(inst->Arg(0).ScalarRegister());
+			if (reg >= program.user_data_base) {
+				source.kind  = SrtFastRead::Source::Kind::UserData;
+				source.value = reg - program.user_data_base;
+			}
+		} else if (inst->GetOpcode() == ValueOpcode::LoadAddressU32) {
+			source.kind       = SrtFastRead::Source::Kind::Inst;
+			source.inst       = inst;
+			source.eval_index = inst->EvaluationIndex(program.evaluation_value_count);
+		}
+		return source;
+	};
+	for (size_t slot = 0; slot < program.srt_reads.size(); ++slot) {
+		const auto* inst = program.srt_reads[slot].value.ResolveInstruction();
+		if (inst == nullptr || inst->GetOpcode() != ValueOpcode::LoadAddressU32 ||
+		    inst->NumArgs() < 2 || !IsRawRead(program, *inst) ||
+		    inst->Flags<SrtReadFlags>().clean != 0u) {
+			continue;
+		}
+		const auto* handle = inst->Arg(0).ResolveInstruction();
+		const auto  offset = inst->Arg(1).Resolve();
+		if (handle == nullptr || handle->GetOpcode() != ValueOpcode::GetAddressResource ||
+		    handle->NumArgs() != 2 || !offset.IsImmediate() || offset.GetType() != Type::U32) {
+			continue;
+		}
+		const auto flags = inst->Flags<SrtReadFlags>();
+		if (flags.index >= program.memory_info.size()) continue;
+		auto& fast      = program.fast_reads[slot];
+		fast.low        = source_of(handle->Arg(0));
+		fast.high       = source_of(handle->Arg(1));
+		if (fast.low.kind == SrtFastRead::Source::Kind::None ||
+		    fast.high.kind == SrtFastRead::Source::Kind::None) {
+			fast = {};
+			continue;
+		}
+		const auto immediate = static_cast<int64_t>(static_cast<int32_t>(program.memory_info[flags.index].offset));
+		fast.relative   = (immediate & ~int64_t {3}) + static_cast<int64_t>(offset.U32() & ~3u);
+		fast.eval_index = inst->EvaluationIndex(program.evaluation_value_count);
+		fast.valid      = true;
+	}
+}
+
 SrtWalker::SrtWalker(const ResourcePlan& program, const SrtRuntime& runtime,
                      SrtWalker* clean_evaluator, Value active_mask)
     : m_program(program), m_runtime(runtime), m_clean_evaluator(clean_evaluator),
@@ -1171,6 +1230,54 @@ bool SrtWalker::RefreshFlatTable(std::vector<uint32_t>& flat) {
 	return true;
 }
 
+// Source of a fast read's pointer word: a constant, a user-data dword or a value some other read
+// already produced (the memo) or produces now (the graph evaluator, which also decides how reads
+// flagged clean are made).
+bool SrtWalker::FastSource(const SrtFastRead::Source& source, uint64_t& result) {
+	switch (source.kind) {
+		case SrtFastRead::Source::Kind::Imm: result = source.value; return true;
+		case SrtFastRead::Source::Kind::UserData:
+			if (source.value >= m_runtime.user_data.size()) return false;
+			result = m_runtime.user_data[source.value];
+			return true;
+		case SrtFastRead::Source::Kind::Inst: {
+			if (source.eval_index < m_context.values.size() &&
+			    m_context.values[source.eval_index].generation == m_context.generation) {
+				result = m_context.values[source.eval_index].value;
+				return true;
+			}
+			return EvaluateWide(Value(const_cast<Inst*>(source.inst)), result);
+		}
+		default: return false;
+	}
+}
+
+// One scalar SRT read of the flat refresh without the graph evaluator: the same address
+// arithmetic and checks as EvaluateRawRead, the same reader, the same memo entry. Returns false
+// when the caller must evaluate the read the ordinary way (which then decides the outcome).
+bool SrtWalker::FastRead(const SrtFastRead& fast, const SrtRead& read, std::vector<uint32_t>& flat) {
+	if (read.flat_offset >= flat.size()) return false;
+	if (fast.eval_index >= m_context.values.size()) {
+		m_context.values.resize(m_program.evaluation_value_count);
+	}
+	if (m_context.values[fast.eval_index].generation == m_context.generation) {
+		flat[read.flat_offset] = static_cast<uint32_t>(m_context.values[fast.eval_index].value);
+		return true;
+	}
+	if (m_context.values[fast.eval_index].generation == (m_context.generation | 1u)) return false;
+	uint64_t low = 0, high = 0;
+	if (!FastSource(fast.low, low) || !FastSource(fast.high, high)) return false;
+	const auto base = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
+	uint64_t   address = 0;
+	if (!AddSignedAddress(base & ~uint64_t {3}, fast.relative, address)) return false;
+	uint32_t word = 0;
+	if (!m_runtime.read_memory(m_runtime.userdata, address, {&word, 1})) return false;
+	if (fast.eval_index >= m_context.values.size()) m_context.values.resize(m_program.evaluation_value_count);
+	m_context.values[fast.eval_index] = {.value = word, .generation = m_context.generation};
+	flat[read.flat_offset]            = word;
+	return true;
+}
+
 void SrtWalker::VerifyFlatTable(const std::vector<uint32_t>& flat) {
 	auto plain          = m_runtime;
 	plain.table_walk    = false;
@@ -1198,6 +1305,8 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		return m_program.srt_code->getCode<Walker>()(m_runtime.user_data.data(), flat.data(),
 		    m_context.values.data(), m_context.generation, m_runtime.user_data.size());
 	}
+	const bool fast_ok = m_runtime.table_walk && m_runtime.read_memory != nullptr &&
+	                     m_active_mask.IsEmpty();
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_program.srt_reads.size()) return false;
 		const auto& read = m_program.srt_reads[slot];
@@ -1206,6 +1315,10 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr))
 			return false;
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
+		if (fast_ok && !clean && slot < m_program.fast_reads.size() && m_program.fast_reads[slot].valid &&
+		    FastRead(m_program.fast_reads[slot], read, flat)) {
+			return true;
+		}
 		return read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
 	};
 	auto& active = m_program.active_sources;
@@ -1215,6 +1328,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		for (uint32_t slot = 0; slot < m_program.srt_reads.size(); ++slot) {
 			if (!refresh(slot)) return false;
 		}
+		if (fast_ok && m_runtime.table_verify) VerifyFlatTable(flat);
 		return true;
 	}
 	flat.assign(m_program.srt_reads.size(), 0u);
@@ -1247,6 +1361,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			pending.insert(pending.end(), block.successors.begin(), block.successors.end());
 		}
 	}
+	if (fast_ok && m_runtime.table_verify) VerifyFlatTable(flat);
 	return true;
 }
 

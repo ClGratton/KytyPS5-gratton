@@ -420,6 +420,114 @@ void TestTableWalkMatchesTheGraphWalk() {
   }
 }
 
+
+// The same pointer tree in a plan with control flow (the usual case): reads go through the graph
+// evaluator, or with table_walk through SrtFastRead. Answers must agree on every input; a source
+// that is not a plain pointer word (here an IAdd32 of user data) keeps its slot on the graph walk.
+void TestFastReadsMatchTheGraphWalk() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  for (const bool computed_pointer : {false, true}) {
+    auto program = SrtProgram(0u);
+    program.user_data_base = 4;
+    program.user_data_count = 2;
+    auto &block = *program.blocks[0];
+    const auto emit = [&](ValueOpcode opcode, std::initializer_list<Value> args) {
+      return Value(&block.AppendNewInst(opcode, args));
+    };
+    auto low = emit(ValueOpcode::GetUserData, {Value(ScalarReg(4))});
+    const auto high = emit(ValueOpcode::GetUserData, {Value(ScalarReg(5))});
+    if (computed_pointer) {
+      low = emit(ValueOpcode::IAdd32, {low, Value(0u)});
+    }
+    const auto root = emit(ValueOpcode::GetAddressResource, {low, high});
+    const auto read = [&](Value address, uint32_t offset) {
+      const auto value = emit(ValueOpcode::LoadAddressU32,
+                              {address, Value(offset), Value(0u), Value(true)});
+      value.Instruction()->SetFlags(MemoryFlags{.index = 0});
+      program.srt_reads.push_back(
+          {value, static_cast<uint32_t>(program.srt_reads.size())});
+      return value;
+    };
+    const auto pointer_low = read(root, 0u);
+    const auto pointer_high = read(root, 4u);
+    auto *leaf = program.srt_reads[0].value.Instruction();
+    leaf->Arg(0).Instruction()->SetArg(0, pointer_low);
+    leaf->Arg(0).Instruction()->SetArg(1, pointer_high);
+    leaf->SetArg(1, Value(7u));
+    read(leaf->Arg(0), 11u);
+    // Make the flat reads visible to the control-flow plan: one ReadConst per slot.
+    auto &srt = block.AppendNewInst(ValueOpcode::GetSrtResource);
+    for (uint32_t slot = 0; slot < program.srt_reads.size(); ++slot) {
+      block.AppendNewInst(ValueOpcode::ReadConst, {Value(&srt), Value(slot)});
+    }
+    block.terminator.kind = Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind::Return;
+    auto plan = ExtractResourcePlan(program);
+    Check(!plan.control_flow.empty() && plan.control_flow[0].srt_reads.size() >= 4,
+          "the plan should have a control-flow block listing its SRT reads");
+    uint32_t fast = 0;
+    for (const auto &entry : plan.fast_reads) fast += entry.valid ? 1u : 0u;
+    Check(computed_pointer ? fast == 2 : fast == 4,
+          "unexpected number of fast reads (a computed pointer word keeps its readers on the graph walk)");
+
+    struct Memory {
+      std::map<uint64_t, uint32_t> words;
+      std::vector<uint64_t>        log;
+    };
+    const auto reader = +[](void *data, uint64_t address, std::span<uint32_t> out) {
+      auto &memory = *static_cast<Memory *>(data);
+      memory.log.push_back(address);
+      const auto found = memory.words.find(address);
+      if (found == memory.words.end()) return false;
+      out[0] = found->second;
+      return true;
+    };
+    struct Outcome {
+      bool                  ok = false;
+      std::vector<uint32_t> flat;
+      std::vector<uint64_t> reads;
+    };
+    const auto run = [&](Memory memory, std::span<const uint32_t> user_data, bool table, bool verify) {
+      Outcome out;
+      ResourceSnapshot snapshot;
+      ResourceSpecialization specialization;
+      const SrtRuntime runtime{.user_data = user_data, .read_memory = reader,
+                               .userdata = &memory, .table_walk = table, .table_verify = verify};
+      out.ok = MaterializeResources(plan, runtime, snapshot, specialization);
+      out.flat = snapshot.flattened_srt;
+      out.reads = memory.log;
+      return out;
+    };
+    const auto sorted = [](std::vector<uint64_t> v) { std::sort(v.begin(), v.end()); return v; };
+    const auto expect_same = [&](const Memory &memory, std::span<const uint32_t> data, bool expect_ok,
+                                 const char *what) {
+      const auto graph = run(memory, data, false, false);
+      const auto table = run(memory, data, true, false);
+      const auto verified = run(memory, data, true, true);
+      Check(graph.ok == expect_ok && table.ok == graph.ok && verified.ok == graph.ok, what);
+      if (graph.ok) {
+        Check(table.flat == graph.flat && verified.flat == graph.flat, what);
+        Check(sorted(table.reads) == sorted(graph.reads), what);
+      }
+      return table;
+    };
+    const std::array<uint32_t, 2> user_data{0x1003u, 0xabcd0000u};
+    const Memory good{{{0x1000u, 0x2003u}, {0x1004u, 0xabcd0000u}, {0x2004u, 0x1234u}, {0x2008u, 0x5678u}}, {}};
+    const auto ok = expect_same(good, user_data, true, "control-flow plan: fast reads differ from the graph walk");
+    Check(ok.flat == std::vector<uint32_t>{0x1234u, 0x2003u, 0xabcd0000u, 0x5678u} &&
+              ok.reads.size() == 4,
+          "control-flow plan: values or number of guest reads");
+    const std::array<uint32_t, 2> user_data2{0x3003u, 0xabcd0000u};
+    const Memory other{{{0x3000u, 0x4003u}, {0x3004u, 0xabcd0000u}, {0x4004u, 0x9u}, {0x4008u, 0xau}}, {}};
+    expect_same(other, user_data2, true, "control-flow plan: second input");
+    Memory no_leaf = good;
+    no_leaf.words.erase(0x2004u);
+    expect_same(no_leaf, user_data, false, "control-flow plan: missing leaf word");
+    expect_same(good, std::span(user_data).first(1), false, "control-flow plan: truncated user data");
+    const std::array<uint32_t, 2> wrap_root{0xfffffffcu, 0xffffu};
+    expect_same(good, wrap_root, false, "control-flow plan: root at the top of the address space");
+  }
+}
+
 void TestIntegerRuntimeValueFollowsSrtReads() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   auto plan = SrtProgram(0x10000);
@@ -985,6 +1093,7 @@ int main() {
   TestMappedSrtUsesDirectReaderByDefault();
   TestNativeNestedSrtRefresh();
   TestTableWalkMatchesTheGraphWalk();
+  TestFastReadsMatchTheGraphWalk();
   TestIntegerRuntimeValueFollowsSrtReads();
   TestSrtAliasesRetainReadPolicy();
   TestUniformVectorDescriptorRead();
