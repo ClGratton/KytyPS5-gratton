@@ -2748,6 +2748,67 @@ void TestFixedDirectReplacementPreservesAccess() {
 	CheckOk(test, KernelReleaseDirectMemory(physical, page * 4), "KernelReleaseDirectMemory");
 	std::printf("[host]    %-48s ok\n", test);
 }
+
+std::atomic<uint64_t> g_transient_unmap_retries {0};
+
+// The part of the runtime linker's fault handler that retries accesses to a replaced mapping.
+void TransientUnmapSignalHandler(int, siginfo_t* info, void*) {
+	const auto address = reinterpret_cast<uint64_t>(info->si_addr);
+	const auto window  = Libs::LibKernel::Memory::WaitForTransientUnmap(address);
+	if (window != 0 && Libs::LibKernel::Memory::RetryTransientUnmapFault(address, window)) {
+		g_transient_unmap_retries.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	signal(SIGSEGV, SIG_DFL); // a real violation: fault again and die
+}
+
+// On the console MAP_FIXED over a mapping is atomic: other threads keep using the memory. A
+// flexible mapping is replaced by unmapping and mapping it again, so a thread using it meanwhile
+// must wait out the gap, not die on an access violation.
+void TestAccessDuringFlexibleReplacement() {
+	using namespace Libs::LibKernel::Memory;
+	const char*        test = "AccessDuringFlexibleReplacement";
+	constexpr uint64_t page = SceKernelPageSize;
+	const auto         base = MapNamedFlexible(test, page, SceKernelProtCpuRw, "transient_flex");
+
+	struct sigaction action {};
+	struct sigaction previous {};
+	action.sa_sigaction = TransientUnmapSignalHandler;
+	action.sa_flags     = SA_SIGINFO | SA_NODEFER;
+	sigemptyset(&action.sa_mask);
+	Check(test, sigaction(SIGSEGV, &action, &previous) == 0, "could not install fault handler");
+	g_transient_unmap_retries = 0;
+
+	std::atomic<bool>     stop {false};
+	std::atomic<uint64_t> accesses {0};
+	std::thread           worker([&] {
+		auto* word = reinterpret_cast<volatile uint64_t*>(base);
+		for (uint64_t i = 0; !stop.load(std::memory_order_relaxed); i++) {
+			word[i % 512] = i;
+			(void)word[(i + 1) % 512];
+			accesses.store(i + 1, std::memory_order_relaxed);
+		}
+	});
+	while (accesses.load(std::memory_order_relaxed) == 0) {
+		std::this_thread::yield(); // the worker is hammering the page before the first replacement
+	}
+
+	for (int i = 0; i < 2000; i++) {
+		void* fixed = reinterpret_cast<void*>(base);
+		CheckOk(test,
+		        KernelMapNamedFlexibleMemory(&fixed, page, SceKernelProtCpuRw, SceKernelMapFixed,
+		                                     "transient_flex"),
+		        "KernelMapNamedFlexibleMemory(fixed)");
+		Check(test, reinterpret_cast<uint64_t>(fixed) == base, "MAP_FIXED moved the mapping");
+	}
+	stop = true;
+	worker.join();
+	sigaction(SIGSEGV, &previous, nullptr);
+
+	CheckOk(test, KernelMunmap(base, page), "KernelMunmap(cleanup)");
+	std::printf("[host]    %-48s ok (%" PRIu64 " accesses, %" PRIu64 " retried)\n", test,
+	            accesses.load(), g_transient_unmap_retries.load());
+}
 #endif
 
 void TestFixedReserveReplacesPartialDirectMapping() {
@@ -4862,6 +4923,7 @@ int main(int argc, char** argv) {
 #if defined(__linux__)
 	if (argc == 2 && std::strcmp(argv[1], "--fixed-direct-replacement-only") == 0) {
 		RunTest(TestFixedDirectReplacementPreservesAccess);
+		RunTest(TestAccessDuringFlexibleReplacement);
 		return g_failed_tests == 0 ? 0 : 1;
 	}
 #endif
@@ -4956,6 +5018,7 @@ int main(int argc, char** argv) {
 	RunTest(TestDirectMapUnmapReusesHostAddress);
 #if defined(__linux__)
 	RunTest(TestFixedDirectReplacementPreservesAccess);
+	RunTest(TestAccessDuringFlexibleReplacement);
 #endif
 	RunTest(TestFixedReserveReplacesPartialDirectMapping);
 	RunTest(TestFixedReserveRollbackConsumesRestoredPlaceholder);
