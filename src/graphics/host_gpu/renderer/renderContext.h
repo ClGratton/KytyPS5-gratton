@@ -88,6 +88,7 @@ private:
 	uint64_t                  m_mapped_generation = 0;
 	uint64_t                  m_bda_full          = 0;
 	uint64_t                  m_bda_skipped       = 0;
+	uint64_t                  m_bda_full_ns       = 0; // time spent in full passes
 
 	Common::Mutex                        m_interrupt_mutex;
 	std::vector<InterruptEqRegistration> m_interrupt_eqs;

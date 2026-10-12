@@ -9,6 +9,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fmt/format.h>
 
 namespace Libs::Graphics {
@@ -140,16 +141,23 @@ void RenderContext::PrepareBda() {
 	if (m_bda_sync_gate.CanSkip(Config::BdaSyncSkip(), now)) {
 		m_bda_skipped++;
 	} else {
+		const auto pass_start = std::chrono::steady_clock::now();
 		m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
 			m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
 		});
+		m_bda_full_ns += static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(
+		        std::chrono::steady_clock::now() - pass_start)
+		        .count());
 		m_bda_sync_gate.RecordFullPass(now);
 		m_bda_full++;
 	}
 	if (((m_bda_full + m_bda_skipped) & 0x3FFF) == 0) {
 		Log::WriteToConsoleAndLog(
-		    fmt::format("GPU: BDA sync calls={} full={} skipped={} (--bda-sync-skip {})\n",
+		    fmt::format("GPU: BDA sync calls={} full={} skipped={} full_pass_ms={:.1f} "
+		                "(--bda-sync-skip {})\n",
 		                m_bda_full + m_bda_skipped, m_bda_full, m_bda_skipped,
+		                static_cast<double>(m_bda_full_ns) / 1e6,
 		                Config::BdaSyncSkip() ? "on" : "off"));
 	}
 	m_fault_process_pending = true;
