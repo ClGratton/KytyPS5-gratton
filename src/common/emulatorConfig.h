@@ -158,8 +158,9 @@ struct ConfigOptions {
 	// time; an out-of-bounds load reads zero either way). Stores and atomics keep their checks.
 	// Needs a device with robustBufferAccess2 and robustStorageBufferAccessSizeAlignment <= 4;
 	// otherwise the explicit checks stay.
-	// Default off (see docs/emitter-shape-notes.md).
-	bool                   spirv_robust_bounds         = false;
+	// Default on since the measurement in docs/emitter-shape-notes.md; --spirv-robust-bounds false
+	// restores the explicit checks.
+	bool                   spirv_robust_bounds         = true;
 	// --pipelines-unoptimized-first: a pipeline no cache holds is created with
 	// VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT so its draw can proceed, and the optimized build
 	// replaces it from a background worker. Needs --async-pipelines stall|skip; NVIDIA only unless

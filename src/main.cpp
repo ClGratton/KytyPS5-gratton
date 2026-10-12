@@ -214,7 +214,7 @@ static void PrintUsage() {
 	         "                                       compiles; an out-of-bounds load reads zero either way).\n"
 	         "                                       Stores, atomics and typed accesses keep their checks.\n"
 	         "                                       Needs robustBufferAccess2 and a storage access\n"
-	         "                                       alignment <= 4; otherwise ignored. Default: false.\n");
+	         "                                       alignment <= 4; otherwise ignored. Default: true.\n");
 	::printf("  --skip-ir-validation <true|false>    Skip the shader IR consistency checks in release\n"
 	         "                                       translations (cuts translate time; output is\n"
 	         "                                       identical). KYTY_IR_VALIDATE=1 forces them on.\n"
