@@ -148,7 +148,7 @@ bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job, bool urgent) {
 	return true;
 }
 
-bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job) {
+bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job, bool idle_only) {
 	{
 		std::unique_lock lock(m_mutex);
 		if (m_stopping.load(std::memory_order_relaxed)) {
@@ -160,6 +160,7 @@ bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job) {
 		job->m_submit_ns = Bench::NowNs();
 		job->m_mode      = m_mode;
 		job->m_low       = true;
+		job->m_idle_only = idle_only;
 		job->m_submitted.store(true, std::memory_order_relaxed);
 		m_low_queue.push_back(std::move(job));
 		m_stats.low_submitted.fetch_add(1, std::memory_order_relaxed);
@@ -261,7 +262,8 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 			std::unique_lock lock(m_mutex);
 			m_signal.wait(lock, [this] {
 				return m_stopping.load(std::memory_order_relaxed) || !m_queue.empty() ||
-				       (!m_low_queue.empty() && m_low_running < m_low_limit);
+				       (!m_low_queue.empty() && m_low_running < m_low_limit &&
+				        (!m_low_queue.front()->m_idle_only || m_normal_running == 0));
 			});
 			if (m_stopping.load(std::memory_order_relaxed)) {
 				// Shutdown() took the queue; nothing left for us.
@@ -270,10 +272,14 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 			if (!m_queue.empty()) {
 				job = std::move(m_queue.front());
 				m_queue.pop_front();
+				m_normal_running++;
 			} else {
 				job = std::move(m_low_queue.front());
 				m_low_queue.pop_front();
 				m_low_running++;
+				if (!m_low_queue.empty()) {
+					m_signal.notify_one(); // let the next background job start too, up to the limit
+				}
 			}
 			job->m_start_ns = Bench::NowNs();
 			job->m_state.store(AsyncJob::State::Running, std::memory_order_release);
@@ -305,6 +311,15 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 			m_signal.notify_one();
 		} else {
 			m_stats.completed.fetch_add(1, std::memory_order_relaxed);
+			bool idle = false;
+			{
+				std::lock_guard lock(m_mutex);
+				idle = --m_normal_running == 0;
+			}
+			// The pool went quiet: an idle-only background job may start now.
+			if (idle) {
+				m_signal.notify_one();
+			}
 		}
 	}
 }

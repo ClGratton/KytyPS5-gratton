@@ -642,6 +642,58 @@ void TestWaitForPromotesLowPriorityJob() {
 	      "promoted job counts as a normal completion");
 }
 
+// Idle-only background jobs (the load-time precompile) start only while no normal job runs or is
+// queued: free workers are not enough, because the driver's compile throughput is shared.
+void TestIdleOnlyLowPriorityJobs() {
+	AsyncPipelineCompiler pool(Config::AsyncPipelineMode::Stall, 4);
+	std::atomic<bool> release {false};
+	std::atomic<int>  running {0};
+	auto blocker = std::make_shared<TestJob>(nullptr, 800, [&] {
+		running.fetch_add(1);
+		Check(WaitUntil([&] { return release.load(); }), "release blocker");
+	});
+	Check(pool.Submit(blocker), "submit blocker");
+	Check(WaitUntil([&] { return running.load() == 1; }), "blocker running");
+	auto plain = std::make_shared<TestJob>(nullptr, 801, [] {});
+	std::vector<std::shared_ptr<TestJob>> idle;
+	for (int i = 0; i < 4; i++) {
+		idle.push_back(std::make_shared<TestJob>(nullptr, 810 + i, [] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}));
+	}
+	// A plain background job is not held back by a running normal job (three workers are free).
+	Check(pool.SubmitLowPriority(plain), "submit plain low");
+	Check(WaitUntil([&] { return plain->IsFinished(); }), "plain low job ran beside the blocker");
+	for (const auto& job: idle) {
+		Check(pool.SubmitLowPriority(job, true), "submit idle-only");
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(60));
+	for (const auto& job: idle) {
+		Check(job->ran.load() == 0, "an idle-only job ran while a normal job was running");
+	}
+	release.store(true);
+	Check(WaitUntil([&] {
+		      for (const auto& job: idle) {
+			      if (!job->IsFinished()) return false;
+		      }
+		      return true;
+	      }),
+	      "idle-only jobs ran once the pool was idle");
+	// A normal job submitted while idle-only jobs are queued runs at once and holds them back.
+	std::atomic<bool> hold {false};
+	auto again = std::make_shared<TestJob>(nullptr, 820, [&] {
+		Check(WaitUntil([&] { return hold.load(); }), "hold");
+	});
+	auto late_idle = std::make_shared<TestJob>(nullptr, 821, [] {});
+	Check(pool.Submit(again), "submit second blocker");
+	Check(WaitUntil([&] { return again->GetState() == AsyncJob::State::Running; }), "running");
+	Check(pool.SubmitLowPriority(late_idle, true), "submit idle-only behind it");
+	std::this_thread::sleep_for(std::chrono::milliseconds(40));
+	Check(late_idle->ran.load() == 0, "idle-only job started beside a running normal job");
+	hold.store(true);
+	Check(WaitUntil([&] { return late_idle->IsFinished(); }), "idle-only job ran after it");
+}
+
 int main() {
 	TestJobsRunOnWorkersConcurrently();
 	TestDedupeSharesOneJob();
@@ -655,6 +707,7 @@ int main() {
 	TestWaitForFinishedJobAndStats();
 	TestLowPriorityJobs();
 	TestWaitForPromotesLowPriorityJob();
+	TestIdleOnlyLowPriorityJobs();
 	std::printf("AsyncPipelineTests: all cases passed\n");
 	return 0;
 }

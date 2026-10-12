@@ -2260,7 +2260,7 @@ void PipelineCache::SubmitLoadedComputePipeline(const ShaderProgram& program,
 	if (!inserted) {
 		return;
 	}
-	if (!pool->SubmitLowPriority(fresh)) {
+	if (!pool->SubmitLowPriority(fresh, true)) {
 		m_compute_jobs.Erase(program.id);
 		return;
 	}
@@ -2326,7 +2326,7 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 			return;
 		}
 		(job->guess ? m_load.jobs_guess : m_load.jobs_stored).fetch_add(1, std::memory_order_relaxed);
-		if (!pool->SubmitLowPriority(job)) {
+		if (!pool->SubmitLowPriority(job, true)) {
 			m_program_cache->RemoveLoad(job.get());
 		}
 	};
