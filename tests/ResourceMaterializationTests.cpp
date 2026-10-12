@@ -793,6 +793,45 @@ void TestFiniteImageRefreshReusesScalarReads() {
         "finite image refresh grew reusable resource storage after warmup");
 }
 
+void TestUndefinedImageFormatBindsNullImage() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  const auto materialize = [](uint32_t format) {
+    Program program;
+    program.stage = Libs::Graphics::ShaderType::Compute;
+    program.srt_plan_complete = true;
+    program.resource_tracking_complete = true;
+    AddValueBlock(program);
+    DescriptorSource source;
+    source.dword_count = 8;
+    source.dwords.fill(Value(0u));
+    source.dwords[0] = Value(0x1234u);
+    source.dwords[1] = Value(format << 20u);
+    source.dwords[3] = Value(static_cast<uint32_t>(
+        Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+    program.descriptor_sources.push_back(source);
+    program.info.images.push_back({
+        .source = 0,
+        .resource_class = ImageResourceClass::Sampled,
+        .numeric_class = Libs::Graphics::Prospero::TextureNumericClass::Float,
+        .dimension = Libs::Graphics::ShaderRecompiler::Decoder::ImageDimension::Dim2D});
+    auto plan = ExtractResourcePlan(program);
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    Check(MaterializeResources(plan, {}, snapshot, specialization) &&
+              snapshot.images.size() == 1,
+          "image materialization failed");
+    return snapshot.images[0].dwords;
+  };
+  // The format encoding has gaps (nothing is defined between 136 and 156). Eight dwords whose
+  // format names nothing are not a descriptor: they bind as the null image, not abort.
+  const auto garbage = materialize(139u);
+  Check(std::all_of(garbage.begin(), garbage.end(), [](uint32_t word) { return word == 0u; }),
+        "a descriptor with an undefined format was not bound as the null image");
+  const auto valid = materialize(static_cast<uint32_t>(
+      Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float));
+  Check(valid[0] == 0x1234u, "a descriptor with a defined format was nulled");
+}
+
 void TestMixedSamplerVariantsShareRuntimeDescriptor() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   auto program = MixedSamplerProgram();
@@ -853,6 +892,7 @@ int main() {
   TestFailedMaterializationRejectsStage();
   TestSharedControlPredicates();
   TestFiniteImageRefreshReusesScalarReads();
+  TestUndefinedImageFormatBindsNullImage();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
