@@ -2,6 +2,7 @@
 
 #include "common/emulatorConfig.h"
 #include "configuration.h"
+#include "emulatorOptionsPanel.h"
 #include "mandatoryLineEdit.h"
 #include <SDL3/SDL.h>
 
@@ -23,6 +24,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -126,12 +128,25 @@ ConfigurationEditDialog::ConfigurationEditDialog(Configuration& info, QWidget* p
 	m_ui->setupUi(this);
 	setMinimumWidth(width());
 	InitGameDirectories();
+	InitEmulatorOptionTabs();
 	m_ui->controller_group->setVisible(false);
 	m_ui->settings_button->setVisible(false);
 
 	connect(m_ui->ok_button, &QPushButton::clicked, this, &ConfigurationEditDialog::save);
 	connect(m_ui->cancel_button, &QPushButton::clicked, this, &QDialog::reject);
 	connect(m_ui->clear_button, &QPushButton::clicked, this, &ConfigurationEditDialog::clear);
+	{
+		auto* preset_button = new QPushButton(tr("Recommended for play"), this);
+		preset_button->setMinimumSize(80, 25);
+		preset_button->setToolTip(
+		    tr("Fill the settings with the measured play set: 2560x1440 fullscreen, Mailbox "
+		       "present, async pipelines (stall) with look-ahead, submit coalescing with the "
+		       "frame GC clock, the three drain cuts, memory statistics and a 15 s hang "
+		       "watchdog. Nothing is saved until you press Save."));
+		m_ui->buttonLayout->insertWidget(1, preset_button);
+		connect(preset_button, &QPushButton::clicked, this,
+		        &ConfigurationEditDialog::apply_recommended_for_play);
+	}
 	connect(m_ui->button_controller_color, &QPushButton::clicked, this, [this]() {
 		const auto current = m_ui->button_controller_color->property("controllerColor").toString();
 		const auto initial =
@@ -328,6 +343,69 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->lineEdit_printf_file->setEnabled(info.printf_direction ==
 	                                       Configuration::LogDirection::File);
 	m_ui->checkBox_profiler->setChecked(info.profiler_enabled);
+	auto option_values = info.emulator_options;
+	for (auto it = info.controller.options.constBegin(); it != info.controller.options.constEnd();
+	     ++it) {
+		option_values.insert(it.key(), it.value());
+	}
+	m_options_panel->Load(option_values);
+}
+
+// A tab page that scrolls when its content is taller than the dialog.
+static QScrollArea* MakeScrollPage(QWidget* content) {
+	auto* scroll = new QScrollArea;
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+	scroll->setWidget(content);
+	return scroll;
+}
+
+// The emulator-option tabs are built from the EmulatorOptions table (emulatorOptions.h).
+void ConfigurationEditDialog::InitEmulatorOptionTabs() {
+	m_options_panel = new EmulatorOptionsPanel(this);
+	auto* tabs      = m_ui->settings_tabs;
+
+	// Display: the existing graphics group moves here, with the overlay and window options.
+	auto* display_page   = new QWidget;
+	auto* display_layout = new QVBoxLayout(display_page);
+	m_ui->sectionsLayout->removeWidget(m_ui->graphics_group);
+	m_ui->graphics_group->setParent(display_page);
+	m_ui->sectionsLayout->addWidget(m_ui->general_group, 0, 1);
+	display_layout->addWidget(m_ui->graphics_group);
+	display_layout->addWidget(
+	    m_options_panel->BuildSections(EmulatorOptions::Tab::Display, display_page));
+	display_layout->addStretch(1);
+	tabs->insertTab(1, MakeScrollPage(display_page), tr("Display"));
+
+	const struct {
+		EmulatorOptions::Tab tab;
+		const char*          title;
+	} option_tabs[] = {
+	    {EmulatorOptions::Tab::Shaders, QT_TR_NOOP("Shaders && stutter")},
+	    {EmulatorOptions::Tab::Gpu, QT_TR_NOOP("GPU thread")},
+	    {EmulatorOptions::Tab::Memory, QT_TR_NOOP("VRAM / RAM")},
+	};
+	int index = 2;
+	for (const auto& entry: option_tabs) {
+		auto* page   = new QWidget;
+		auto* layout = new QVBoxLayout(page);
+		layout->addWidget(m_options_panel->BuildSections(entry.tab, page));
+		layout->addStretch(1);
+		tabs->insertTab(index++, MakeScrollPage(page), tr(entry.title));
+	}
+
+	// Controller (global settings only): the DualSense speaker options join the existing group.
+	m_options_panel->AddRows(m_ui->controllerLayout, EmulatorOptions::Tab::Controller,
+	                         m_ui->controller_group);
+
+	// Debug: the diagnostics join the existing debug group; the page scrolls.
+	m_ui->debugTabLayout->insertWidget(
+	    m_ui->debugTabLayout->count() - 1,
+	    m_options_panel->BuildSections(EmulatorOptions::Tab::Debug, m_ui->debug_tab));
+	const int debug_index = tabs->indexOf(m_ui->debug_tab);
+	tabs->removeTab(debug_index);
+	m_debug_page = MakeScrollPage(m_ui->debug_tab);
+	tabs->insertTab(debug_index, m_debug_page, tr("Debug"));
 }
 
 void ConfigurationEditDialog::InitGameDirectories() {
@@ -436,7 +514,8 @@ void ConfigurationEditDialog::resizeEvent(QResizeEvent* event) {
 	g_last_geometry = saveGeometry();
 }
 
-static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, bool global_settings) {
+static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui,
+                       const EmulatorOptionsPanel& options, bool global_settings) {
 	info.user_name = ui.lineEdit_user_name->text().trimmed();
 	info.user_id   = ui.spinBox_user_id->value();
 	info.audio_input_device = ui.comboBox_audio_input_device->currentData().toString();
@@ -481,13 +560,26 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	    TextToEnum<Configuration::LogDirection>(ui.comboBox_printf_direction->currentText());
 	info.printf_output_file = ui.lineEdit_printf_file->text();
 	info.profiler_enabled = ui.checkBox_profiler->isChecked();
+	const auto option_values = options.Save();
+	QVariantMap emulator_options;
+	QVariantMap controller_options;
+	for (auto it = option_values.constBegin(); it != option_values.constEnd(); ++it) {
+		const auto* option = EmulatorOptions::Find(it.key());
+		(option != nullptr && option->tab == EmulatorOptions::Tab::Controller ? controller_options
+		                                                                      : emulator_options)
+		    .insert(it.key(), it.value());
+	}
+	info.emulator_options = emulator_options;
+	if (global_settings) {
+		info.controller.options = controller_options;
+	}
 }
 
 void ConfigurationEditDialog::save() {
 	for (auto* field: {m_ui->lineEdit_shader_log_folder, m_ui->lineEdit_printf_file,
 	                   m_ui->lineEdit_cmd_dump_folder}) {
 		if (field->isEnabled() && field->text().isEmpty()) {
-			m_ui->settings_tabs->setCurrentWidget(m_ui->debug_tab);
+			m_ui->settings_tabs->setCurrentWidget(m_debug_page);
 			field->setFocus();
 			break;
 		}
@@ -510,7 +602,7 @@ void ConfigurationEditDialog::save() {
 		return;
 	}
 
-	UpdateInfo(m_info, *m_ui, m_global_settings);
+	UpdateInfo(m_info, *m_ui, *m_options_panel, m_global_settings);
 
 	emit accept();
 }
@@ -524,6 +616,16 @@ void ConfigurationEditDialog::clear() {
 		m_game_dirs_list->clear();
 		update_game_directory_buttons();
 	}
+}
+
+void ConfigurationEditDialog::apply_recommended_for_play() {
+	// Apply the preset on top of what the controls show now, then show the result.
+	Configuration preset;
+	preset.CopyEmulatorSettingsFrom(m_info);
+	preset.controller = m_info.controller;
+	UpdateInfo(preset, *m_ui, *m_options_panel, m_global_settings);
+	preset.ApplyRecommendedForPlay();
+	Init(preset);
 }
 
 void ConfigurationEditDialog::add_game_directory() {

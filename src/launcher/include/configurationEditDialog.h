@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 class QByteArray;
+class EmulatorOptionsPanel;
 class QGroupBox;
 class QListWidget;
 class QMoveEvent;
@@ -12,6 +13,7 @@ class QResizeEvent;
 class QToolButton;
 class QSettings;
 class QWidget;
+class QScrollArea;
 
 class Configuration;
 namespace Ui {
@@ -43,10 +45,13 @@ private:
 	QListWidget*                 m_game_dirs_list         = nullptr;
 	QToolButton*                 m_remove_game_dir_button = nullptr;
 	bool                         m_global_settings        = false;
+	EmulatorOptionsPanel*        m_options_panel          = nullptr;
+	QWidget*                     m_debug_page             = nullptr;
 
 protected:
 	void Init(const Configuration& info);
 	void InitGameDirectories();
+	void InitEmulatorOptionTabs();
 	void AddGameDirectoryItem(const QString& dir);
 
 	void moveEvent(QMoveEvent* event) override;
@@ -58,6 +63,7 @@ protected:
 
 	void save();
 	void clear();
+	void apply_recommended_for_play();
 	void add_game_directory();
 	void remove_selected_game_directories();
 	void update_game_directory_buttons();
