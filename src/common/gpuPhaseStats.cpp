@@ -33,7 +33,7 @@ constexpr std::array<const char*, kPhases> kNames = {
     "submit", "drain_tick", "drain_flush", "drain_finish", "gc", "pipe_prepare", "pipe_programkey",
     "pipe_materialize", "pipe_keybuild", "pipe_find", "pipe_entrylock", "pipe_srtread",
     "pipe_permsearch", "desc_buffers", "desc_upload", "desc_images", "desc_resolve", "desc_findtex",
-    "desc_commit", "desc_transit", "desc_push", "srt_shadow"};
+    "desc_commit", "desc_hazard", "desc_writes", "desc_transit", "desc_push", "srt_shadow"};
 
 // Tracy zone per phase (--profile): named "gpu:<phase>" and emitted only on the GPU thread, so
 // `tracy-csvexport -e -f gpu:` yields the exclusive time per phase of that thread alone.
@@ -467,9 +467,10 @@ void Report(detail::ThreadState& s, bool final_report) {
 		line += fmt::format(" unscoped={:.1f}%\n", std::max(0.0, 100.0 - scoped));
 		{
 			// Descriptor family (the former single "descriptors" phase) and its parts.
-			constexpr std::array<Phase, 8> kDesc = {Phase::DescBuffers,     Phase::DescUpload,  Phase::DescImages,
-			                                        Phase::DescResolve,     Phase::DescFindTexture,
-			                                        Phase::DescCommit,      Phase::DescTransit, Phase::DescPush};
+			constexpr std::array<Phase, 10> kDesc = {Phase::DescBuffers,     Phase::DescUpload,  Phase::DescImages,
+			                                         Phase::DescResolve,     Phase::DescFindTexture,
+			                                         Phase::DescCommit,      Phase::DescHazard,  Phase::DescWrites,
+			                                         Phase::DescTransit,     Phase::DescPush};
 			double total = pct[static_cast<size_t>(Phase::Descriptors)];
 			for (const auto phase: kDesc) total += pct[static_cast<size_t>(phase)];
 			line += fmt::format("GpuPhase descriptors_total={:.1f}% [", total);

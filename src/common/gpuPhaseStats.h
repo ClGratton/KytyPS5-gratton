@@ -58,7 +58,9 @@ enum class Phase : uint8_t {
 	DescImages,      // RebindImages: its own code (rebind decision, view clears, mip loop)
 	DescResolve,     // RebindImages: ResolveTexture + BindImage (texture-cache image lookup)
 	DescFindTexture, // RebindImages: TextureCache::FindTexture (image view lookup/creation)
-	DescCommit,      // CommitBindings: its own code (hazard checks, descriptor write building)
+	DescCommit,      // CommitBindings: its own code (binding counts, push-data copy)
+	DescHazard,      // CommitBindings: scalar-read vs shader/attachment write overlap checks
+	DescWrites,      // CommitBindings: per-stage descriptor write and image-info building
 	DescTransit,     // CommitBindings: Image::Transit (layout transitions, barriers excluded: VkCmd)
 	DescPush,        // CommitBindings: push constants and the push-descriptor / descriptor-set update
 	SrtPlanShadow,   // --srt-plan-shadow: lookup, validity check and comparison of a plan on kyGpu
