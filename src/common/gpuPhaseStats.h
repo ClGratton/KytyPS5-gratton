@@ -59,6 +59,9 @@ void Finish();
 void NoteSubmit() noexcept;
 // Guest global barrier events: recorded, or left out by --elide-barriers.
 void NoteBarrier(bool elided) noexcept;
+// --known-fills: color-metadata clear discovery outcomes (see TextureCache::MaterializeColorClear).
+enum class KnownFill : uint8_t { Hit, Readback, Discarded, DiscardRefused, Count };
+void NoteKnownFill(KnownFill kind) noexcept;
 void NoteFrame() noexcept;
 [[nodiscard]] uint64_t Submits() noexcept;
 [[nodiscard]] uint64_t Frames() noexcept;

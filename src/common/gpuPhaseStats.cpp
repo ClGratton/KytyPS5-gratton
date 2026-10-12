@@ -51,6 +51,7 @@ std::atomic<uint64_t> g_submits {0};
 std::atomic<uint64_t> g_frames {0};
 std::atomic<uint64_t> g_barriers_emitted {0};
 std::atomic<uint64_t> g_barriers_elided {0};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
 std::array<std::atomic<uint64_t>, kCoalesce> g_coalesce {};
 
 int64_t WallNs() {
@@ -76,7 +77,8 @@ struct ThreadState {
 	DrainCauses::Table                   drain_causes;      // DrainTick waits, by cause
 	DrainCauses::Table                   window_drain_causes;
 	struct Readback {
-		uint64_t calls = 0, bytes = 0, ticks = 0;
+		uint64_t   calls = 0, bytes = 0, ticks = 0;
+		DrainCause cause = DrainCause::Other; // of the latest readback of this region
 	};
 	std::unordered_map<uint64_t, Readback> readbacks; // by guest address of the first copy
 
@@ -149,6 +151,7 @@ void NoteReadbackImpl(ThreadState* state, uint64_t address, uint64_t bytes) noex
 		auto& r = state->readbacks[address];
 		++r.calls;
 		r.bytes += bytes;
+		r.cause = t_drain_cause;
 	}
 	t_readback_key = address;
 }
@@ -194,6 +197,10 @@ void NoteSubmit() noexcept {
 
 void NoteBarrier(bool elided) noexcept {
 	(elided ? g_barriers_elided : g_barriers_emitted).fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteKnownFill(KnownFill kind) noexcept {
+	g_known_fills[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 }
 
 void NoteFrame() noexcept {
@@ -293,6 +300,19 @@ void Report(detail::ThreadState& s, bool final_report) {
 	    frames != 0 ? static_cast<double>(submits) / static_cast<double>(frames) : 0.0,
 	    coalesce[0], coalesce[1], coalesce[2], coalesce[3]);
 
+	{
+		std::array<uint64_t, static_cast<size_t>(KnownFill::Count)> now {};
+		bool                                                        any = false;
+		for (size_t i = 0; i < now.size(); ++i) {
+			now[i] = g_known_fills[i].load(std::memory_order_relaxed);
+			any    = any || now[i] != 0;
+		}
+		if (any) {
+			line += fmt::format(
+			    "known fills (total): hit={} readback={} discarded={} discard_refused={}\n", now[0],
+			    now[1], now[2], now[3]);
+		}
+	}
 	line += fmt::format("guest barriers: emitted={} ({:.1f}/frame) elided={} ({:.1f}/frame)\n",
 	                    barrier_emit_d,
 	                    frames != 0 ? static_cast<double>(barrier_emit_d) / static_cast<double>(frames) : 0.0,
@@ -367,7 +387,8 @@ void Report(detail::ThreadState& s, bool final_report) {
 				                    order.size());
 				for (size_t i = 0; i < keep; ++i) {
 					const auto& r = order[i].second;
-					line += fmt::format(" 0x{:x} {}x {:.1f}KiB {:.1f}ms", order[i].first, r.calls,
+					line += fmt::format(" 0x{:x}[{}] {}x {:.1f}KiB {:.1f}ms", order[i].first,
+					                    DrainCauses::kCauseNames[static_cast<size_t>(r.cause)], r.calls,
 					                    r.calls != 0 ? static_cast<double>(r.bytes) / 1024.0 /
 					                                       static_cast<double>(r.calls)
 					                                 : 0.0,

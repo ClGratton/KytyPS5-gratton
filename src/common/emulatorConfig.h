@@ -166,6 +166,9 @@ struct ConfigOptions {
 	// --elide-barriers (K14): leave out a guest global barrier when nothing was recorded since the
 	// previous one in the same command buffer. Default off.
 	bool                   elide_barriers              = false;
+	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
+	// clear discovery needs no GPU->CPU readback for them. Default off.
+	bool                   known_fills                 = false;
 	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
@@ -222,6 +225,7 @@ bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
+bool              KnownFillsEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

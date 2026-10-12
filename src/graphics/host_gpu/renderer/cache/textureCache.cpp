@@ -1060,15 +1060,29 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	}
 	// Finish native metadata writes before reading backing bytes. This can submit the scheduler,
 	// so discovery runs before final draw uploads and never holds the texture lock across it.
-	if (m_buffer_cache.IsRegionGpuModified(range.address, range.size)) {
-		m_buffer_cache.ReadMemory(range.address, range.size, false,
-		                          Common::GpuPhase::DrainCause::ReadbackTextureMeta);
+	// --known-fills: when the GPU wrote the whole range with one byte-uniform fill, its value is
+	// known and the readback (a full GPU drain) is skipped.
+	const bool gpu_modified = m_buffer_cache.IsRegionGpuModified(range.address, range.size);
+	uint32_t   fill_value   = 0;
+	const bool known_fill   = gpu_modified &&
+	                        m_buffer_cache.TryGetKnownFill(range.address, range.size, &fill_value) &&
+	                        (fill_value & 0xffu) * 0x01010101u == fill_value;
+	if (gpu_modified) {
+		if (known_fill) {
+			Common::GpuPhase::NoteKnownFill(Common::GpuPhase::KnownFill::Hit);
+		} else {
+			if (Config::KnownFillsEnabled()) {
+				Common::GpuPhase::NoteKnownFill(Common::GpuPhase::KnownFill::Readback);
+			}
+			m_buffer_cache.ReadMemory(range.address, range.size, false,
+			                          Common::GpuPhase::DrainCause::ReadbackTextureMeta);
+		}
 	}
 	const auto slice_size = range.size / layers;
 	for (uint32_t slice = 0; slice < count; slice++) {
 		const auto address = range.address + slice_size * (first + slice);
-		uint8_t code = 0;
-		if (!LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
+		uint8_t code = static_cast<uint8_t>(fill_value);
+		if (!known_fill && !LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
 			EXIT("TextureCache: failed to read color metadata backing\n");
 		}
 		vk::ClearValue clear {};
@@ -1076,11 +1090,14 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			continue;
 		}
 		std::vector<uint8_t> bytes(slice_size);
-		if (!LibKernel::Memory::TryReadBacking(address, bytes.data(), bytes.size())) {
-			EXIT("TextureCache: failed to read color metadata slice\n");
-		}
-		if (!std::all_of(bytes.begin(), bytes.end(), [code](uint8_t byte) { return byte == code; })) {
-			continue;
+		if (!known_fill) {
+			if (!LibKernel::Memory::TryReadBacking(address, bytes.data(), bytes.size())) {
+				EXIT("TextureCache: failed to read color metadata slice\n");
+			}
+			if (!std::all_of(bytes.begin(), bytes.end(),
+			                 [code](uint8_t byte) { return byte == code; })) {
+				continue;
+			}
 		}
 		{
 			std::scoped_lock lock {m_lock};
@@ -1099,6 +1116,13 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		// to overlapping image data. Invalidate the buffer before updating its backing.
 		if (desc.type != BindingType::VideoOut) {
 			std::fill(bytes.begin(), bytes.end(), uint8_t {0xff});
+			if (known_fill) {
+				// The CPU is about to overwrite the whole slice: the GPU's fill need not be
+				// downloaded first (InvalidateMemory would drain the GPU for it).
+				Common::GpuPhase::NoteKnownFill(m_buffer_cache.TryDiscardGpuModified(address, slice_size)
+				                                    ? Common::GpuPhase::KnownFill::Discarded
+				                                    : Common::GpuPhase::KnownFill::DiscardRefused);
+			}
 			m_buffer_cache.InvalidateMemory(address, slice_size);
 			LibKernel::Memory::WriteBacking(address, bytes.data(), bytes.size());
 		}

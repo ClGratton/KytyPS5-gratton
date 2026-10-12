@@ -84,6 +84,10 @@ bool ElideBarriersEnabled() {
 	return g_config->elide_barriers;
 }
 
+bool KnownFillsEnabled() {
+	return g_config->known_fills;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

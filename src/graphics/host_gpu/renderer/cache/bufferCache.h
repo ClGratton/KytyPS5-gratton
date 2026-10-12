@@ -9,10 +9,12 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/knownFills.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <map>
+#include <mutex>
 #include <span>
 #include <utility>
 #include <vector>
@@ -82,6 +84,15 @@ public:
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// --known-fills: true when [vaddr, vaddr + size) was last written, on the GPU, by one fill with
+	// *value. Lets a caller use a GPU-resident fill result without draining the GPU to read it.
+	[[nodiscard]] bool TryGetKnownFill(uint64_t vaddr, uint64_t size, uint32_t* value);
+	// Records that the GPU work recorded last filled [vaddr, vaddr + size) with `value`.
+	void RecordKnownFill(uint64_t vaddr, uint64_t size, uint32_t value);
+	// Drops the GPU-modified state of [vaddr, vaddr + size) without downloading it, for a range the
+	// caller is about to overwrite completely from the CPU. Refuses (false, nothing changed) when
+	// GPU-modified bytes outside the range share its tracking pages. GPU thread only.
+	[[nodiscard]] bool TryDiscardGpuModified(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
@@ -134,6 +145,9 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	std::mutex                                        m_known_fills_mutex;
+	KnownFills                                        m_known_fills;
+	void ForgetKnownFills(uint64_t vaddr, uint64_t size);
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;

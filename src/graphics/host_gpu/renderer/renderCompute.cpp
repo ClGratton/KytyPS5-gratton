@@ -317,6 +317,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
+	// --known-fills: a dispatch that writes one uniform value over a whole buffer still runs, but
+	// its result is known, so later CPU-side consumers (color-metadata clear discovery) need not
+	// read it back from the GPU. Resolved here, before thread counts become group counts.
+	ShaderBufferResource fill_descriptor;
+	uint32_t             fill_value = 0;
+	uint64_t             fill_size  = 0;
+	const bool           uniform_fill =
+	    Config::KnownFillsEnabled() &&
+	    ResolveComputeBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, mode,
+	                             fill_descriptor, fill_value, fill_size);
+
 	if (use_thread_dimensions) {
 		const uint32_t old_x = thread_group_x;
 		const uint32_t old_y = thread_group_y;
@@ -440,6 +451,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	if (uniform_fill) {
+		// After binding, which registered this dispatch's writes and forgot older fills.
+		m_context.GetBufferCache().RecordKnownFill(fill_descriptor.Base48(), fill_size, fill_value);
+	}
 	ResetBindings();
 }
 
