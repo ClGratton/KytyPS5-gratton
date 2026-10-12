@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/meshDispatch.h"
+#include "graphics/host_gpu/renderer/meshRestart.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1137,16 +1138,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto vertex_stages =
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
 	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
-	uint32_t   mesh_groups = 0;
+	std::vector<MeshRestartSegment> restart_segments;
+	bool                            split_at_restart = false;
 	if (mesh_active) {
 		const auto& mesh = state.vertex_info[0].mesh;
 		EXIT_NOT_IMPLEMENTED(mesh.fast_launch && (draw.IsIndexed() || primitive_restart_enable));
-		static std::atomic_bool restart_warned = false;
-		if (primitive_restart_enable && !restart_warned.exchange(true, std::memory_order_relaxed)) {
-			std::printf("Warning: primitive restart is not implemented for mesh shaders; "
-			            "continuing draw (primitive=%u indexed=%u)\n",
-			            static_cast<uint32_t>(ucfg.GetPrimType()), draw.IsIndexed());
-		}
 		if (mesh.primitives_per_group == 0) {
 			EXIT("unsupported mesh draw: primitive=%u indexed=%u restart=%u\n",
 			     static_cast<uint32_t>(ucfg.GetPrimType()), draw.IsIndexed(), primitive_restart_enable);
@@ -1155,9 +1151,38 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (primitives == 0 || draw.instance_count == 0) {
 			return;
 		}
-		mesh_groups = (primitives - 1u) / mesh.primitives_per_group + 1u;
-		LogMeshDispatchSliced(m_context.GetGraphics().mesh_shader_properties, mesh_groups,
-		                      draw.instance_count);
+		// Strips and fans end at a restart marker. The mesh shader knows nothing of markers, so
+		// the draw is split into the runs between them (meshRestart.h), which restarts a fan's
+		// centre and a strip's winding as hardware does. The split reads the indices on the CPU;
+		// indices the GPU wrote may not be in guest memory yet, so that draw is not split.
+		if (primitive_restart_enable && draw.IsIndexed()) {
+			const auto bytes = uint64_t {draw.index_count} * index_source.guest_element_size;
+			if (index_source.address == 0 ||
+			    m_context.GetBufferCache().IsRegionGpuModified(index_source.address, bytes)) {
+				static std::atomic_uint64_t unsplit = 0;
+				const auto n = unsplit.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (n <= 4 || (n & (n - 1)) == 0) {
+					std::printf("Warning: mesh draw with primitive restart reads GPU-written indices; "
+					            "drawn without restart, markers read as vertices (primitive=%u, %" PRIu64
+					            " such draws so far)\n",
+					            static_cast<uint32_t>(ucfg.GetPrimType()), n);
+				}
+			} else {
+				const auto marker = UINT32_MAX >> ((4u - index_source.guest_element_size) * 8u);
+				restart_segments  = SplitAtPrimitiveRestart(
+                    reinterpret_cast<const void*>(index_source.address),
+                    index_source.guest_element_size, draw.index_count, marker);
+				split_at_restart = true;
+				static std::atomic_uint64_t split_draws = 0;
+				const auto n = split_draws.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (n <= 4 || (n & (n - 1)) == 0) {
+					std::printf("mesh restart: primitive=%u indices=%u index_bytes=%u split into %zu "
+					            "runs (%" PRIu64 " split draws so far)\n",
+					            static_cast<uint32_t>(ucfg.GetPrimType()), draw.index_count,
+					            index_source.guest_element_size, restart_segments.size(), n);
+				}
+			}
+		}
 	}
 
 	if (mesh_active && draw.IsIndexed()) {
@@ -1246,29 +1271,48 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (mesh_active) {
 		// Replay the draw as sliced dispatches when it exceeds the host's workgroup limits (a
 		// guest draw has none); each slice carries its own base group and first instance, so the
-		// mesh shader sees the same inputs as one oversized dispatch would give.
+		// mesh shader sees the same inputs as one oversized dispatch would give. A draw split at
+		// primitive restart is replayed once per run of indices.
 		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
-		ForEachMeshDispatch(
-		    mesh_groups, draw.instance_count, limits.maxMeshWorkGroupCount[0],
-		    limits.maxMeshWorkGroupCount[1], limits.maxMeshWorkGroupTotalCount,
-		    [&](const MeshDispatchSlice& slice) {
-			    const uint32_t draw_data[] {
-			        draw.index_count,
-			        draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
-			        emit.first_instance + slice.instance_offset, index_source.guest_element_size,
-			        static_cast<uint32_t>(index_source.address),
-			        static_cast<uint32_t>(index_source.address >> 32u), slice.group_offset};
-			    static_assert(std::size(draw_data) ==
-			                  ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
-			    {
-				    Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
-				    vk_buffer.pushConstants(pipeline.pipeline_layout,
-				                            vk::ShaderStageFlagBits::eMeshEXT |
-				                                vk::ShaderStageFlagBits::eFragment,
-				                            0, sizeof(draw_data), draw_data);
-			    }
-			    vk_buffer.drawMeshTasksEXT(slice.group_count, slice.instance_count, 1);
-		    });
+		const auto& mesh   = state.vertex_info[0].mesh;
+		const auto  dispatch_run = [&](uint32_t index_count, uint64_t index_address) {
+			const auto primitives = mesh.InputPrimitiveCount(index_count);
+			if (primitives == 0) {
+				return;
+			}
+			const auto groups = (primitives - 1u) / mesh.primitives_per_group + 1u;
+			LogMeshDispatchSliced(limits, groups, draw.instance_count);
+			ForEachMeshDispatch(
+			    groups, draw.instance_count, limits.maxMeshWorkGroupCount[0],
+			    limits.maxMeshWorkGroupCount[1], limits.maxMeshWorkGroupTotalCount,
+			    [&](const MeshDispatchSlice& slice) {
+				    const uint32_t draw_data[] {
+				        index_count,
+				        draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset)
+				                         : emit.first_vertex,
+				        emit.first_instance + slice.instance_offset,
+				        index_source.guest_element_size, static_cast<uint32_t>(index_address),
+				        static_cast<uint32_t>(index_address >> 32u), slice.group_offset};
+				    static_assert(std::size(draw_data) ==
+				                  ShaderRecompiler::IR::PushData::MeshDrawDwordCount);
+				    {
+					    Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+					    vk_buffer.pushConstants(pipeline.pipeline_layout,
+					                            vk::ShaderStageFlagBits::eMeshEXT |
+					                                vk::ShaderStageFlagBits::eFragment,
+					                            0, sizeof(draw_data), draw_data);
+				    }
+				    vk_buffer.drawMeshTasksEXT(slice.group_count, slice.instance_count, 1);
+			    });
+		};
+		if (split_at_restart) {
+			for (const auto& run: restart_segments) {
+				dispatch_run(run.count, index_source.address +
+				                            uint64_t {run.first} * index_source.guest_element_size);
+			}
+		} else {
+			dispatch_run(draw.index_count, index_source.address);
+		}
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}

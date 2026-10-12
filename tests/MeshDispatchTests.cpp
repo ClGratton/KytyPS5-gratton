@@ -1,8 +1,11 @@
 #include "graphics/host_gpu/renderer/meshDispatch.h"
+#include "graphics/host_gpu/renderer/meshRestart.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <array>
+#include <utility>
 #include <unordered_set>
 
 namespace {
@@ -176,6 +179,130 @@ void TestNonDividingStridesConsumeExactRemainders() {
         "batched instances did not consume the exact trailing remainder");
 }
 
+
+// ---- Primitive restart -------------------------------------------------------------------------
+
+using Libs::Graphics::MeshRestartSegment;
+using Libs::Graphics::SplitAtPrimitiveRestart;
+
+using Triangle = std::array<uint32_t, 3>;
+
+// What hardware draws for an indexed triangle strip with restart: a marker ends the strip, the
+// next index begins a new one with fresh winding.
+std::vector<Triangle> ReferenceStrip(const std::vector<uint32_t> &indices,
+                                     uint32_t marker) {
+  std::vector<Triangle> out;
+  uint32_t run = 0;
+  for (size_t i = 0; i < indices.size(); i++) {
+    if (indices[i] == marker) {
+      run = 0;
+      continue;
+    }
+    run++;
+    if (run >= 3) {
+      const auto a = indices[i - 2], b = indices[i - 1], c = indices[i];
+      out.push_back((run & 1u) ? Triangle{a, b, c} : Triangle{b, a, c});
+    }
+  }
+  return out;
+}
+
+std::vector<Triangle> ReferenceFan(const std::vector<uint32_t> &indices,
+                                   uint32_t marker) {
+  std::vector<Triangle> out;
+  uint32_t run = 0, centre = 0;
+  for (size_t i = 0; i < indices.size(); i++) {
+    if (indices[i] == marker) {
+      run = 0;
+      continue;
+    }
+    run++;
+    if (run == 1) {
+      centre = indices[i];
+    } else if (run >= 3) {
+      out.push_back({centre, indices[i - 1], indices[i]});
+    }
+  }
+  return out;
+}
+
+// The mesh shader assembles a strip or fan from the first index of whatever draw it is given,
+// with winding and centre taken from that start. Model that, then draw each run on its own.
+std::vector<Triangle> MeshStrip(const std::vector<uint32_t> &indices) {
+  std::vector<Triangle> out;
+  for (size_t p = 0; p + 2 < indices.size(); p++) {
+    const auto a = indices[p], b = indices[p + 1], c = indices[p + 2];
+    out.push_back((p & 1u) ? Triangle{b, a, c} : Triangle{a, b, c});
+  }
+  return out;
+}
+
+std::vector<Triangle> MeshFan(const std::vector<uint32_t> &indices) {
+  std::vector<Triangle> out;
+  for (size_t p = 0; p + 2 < indices.size(); p++) {
+    out.push_back({indices[0], indices[p + 1], indices[p + 2]});
+  }
+  return out;
+}
+
+template <typename Index>
+std::vector<Triangle> DrawSegmented(const std::vector<uint32_t> &wide, bool fan) {
+  std::vector<Index> narrow(wide.begin(), wide.end());
+  const uint32_t marker = static_cast<Index>(~Index{0});
+  const auto segments = SplitAtPrimitiveRestart(narrow.data(), sizeof(Index),
+                                                static_cast<uint32_t>(narrow.size()), marker);
+  std::vector<Triangle> out;
+  for (const auto &run : segments) {
+    const std::vector<uint32_t> part(wide.begin() + run.first,
+                                     wide.begin() + run.first + run.count);
+    const auto tris = fan ? MeshFan(part) : MeshStrip(part);
+    out.insert(out.end(), tris.begin(), tris.end());
+  }
+  return out;
+}
+
+void TestRestartSegments() {
+  const std::vector<uint16_t> idx = {0, 1, 2, 3, 0xffff, 4, 5, 6, 0xffff, 0xffff, 7, 8, 9, 0xffff};
+  const auto seg = SplitAtPrimitiveRestart(idx.data(), 2, static_cast<uint32_t>(idx.size()), 0xffffu);
+  Check(seg.size() == 3u, "wrong number of runs");
+  Check(seg[0].first == 0u && seg[0].count == 4u, "first run is wrong");
+  Check(seg[1].first == 5u && seg[1].count == 3u, "second run is wrong");
+  Check(seg[2].first == 10u && seg[2].count == 3u, "third run is wrong");
+  Check(SplitAtPrimitiveRestart(idx.data(), 2, 0, 0xffffu).empty(), "empty draw has runs");
+  const std::vector<uint16_t> only = {0xffff, 0xffff};
+  Check(SplitAtPrimitiveRestart(only.data(), 2, 2, 0xffffu).empty(),
+        "markers only produced a run");
+  const std::vector<uint16_t> none = {1, 2, 3};
+  const auto whole = SplitAtPrimitiveRestart(none.data(), 2, 3, 0xffffu);
+  Check(whole.size() == 1u && whole[0].first == 0u && whole[0].count == 3u,
+        "a draw without markers must stay whole");
+  const std::vector<uint8_t> bytes = {1, 2, 0xff, 3, 4, 5};
+  const auto b = SplitAtPrimitiveRestart(bytes.data(), 1, 6, 0xffu);
+  Check(b.size() == 2u && b[1].first == 3u && b[1].count == 3u, "8-bit markers are wrong");
+  // A 32-bit index that merely contains 0xffff is not a marker.
+  const std::vector<uint32_t> wide = {0xffffu, 0xffffffffu, 7u};
+  const auto w = SplitAtPrimitiveRestart(wide.data(), 4, 3, 0xffffffffu);
+  Check(w.size() == 2u && w[0].count == 1u && w[1].first == 2u, "32-bit markers are wrong");
+  Check(SplitAtPrimitiveRestart(nullptr, 2, 4, 0xffffu).empty(), "null indices produced runs");
+  Check(SplitAtPrimitiveRestart(idx.data(), 3, 4, 0xffffu).empty(), "bad element size produced runs");
+}
+
+void TestRestartMatchesHardwareAssembly() {
+  // Runs of odd and even length: strip winding must restart per run (an odd run shifts parity
+  // for everything after it if the restart is ignored).
+  const std::vector<uint32_t> idx = {0, 1, 2, 3, 4, 0xffff, 10, 11, 12, 13, 0xffff,
+                                     20, 21, 22, 0xffff, 30, 31};
+  const auto strip_ref = ReferenceStrip(idx, 0xffffu);
+  const auto fan_ref = ReferenceFan(idx, 0xffffu);
+  Check(DrawSegmented<uint16_t>(idx, false) == strip_ref,
+        "segmented strip differs from hardware strip assembly");
+  Check(DrawSegmented<uint16_t>(idx, true) == fan_ref,
+        "segmented fan differs from hardware fan assembly");
+  // The unsplit draw reads markers as vertices and uses one centre and one parity.
+  Check(MeshStrip(idx) != strip_ref, "the unsplit strip unexpectedly matches (test is vacuous)");
+  Check(MeshFan(idx) != fan_ref, "the unsplit fan unexpectedly matches (test is vacuous)");
+}
+
 } // namespace
 
 int main() {
@@ -188,6 +315,8 @@ int main() {
   TestTotalLimitTighterThanGroupLimit();
   TestZeroAndTinyLimitsClampToOne();
   TestNonDividingStridesConsumeExactRemainders();
+  TestRestartSegments();
+  TestRestartMatchesHardwareAssembly();
   std::puts("MeshDispatchTests: all cases passed");
   return 0;
 }
