@@ -653,7 +653,7 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	map.code_size_bytes     = h->shader_size;
 	map.scratch_size_dwords = h->scratch_size_dw_per_thread;
 
-	ShaderMapUserData(base, map);
+	const auto hash = ShaderMapUserData(base, map);
 
 	EXIT_NOT_IMPLEMENTED((base & 0xFFFF0000000000FFull) != 0);
 
@@ -661,6 +661,25 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	    patch_program_address_register(h->sh_registers, h->num_sh_registers, h->type, base);
 	if (patch_result != OK) {
 		return patch_result;
+	}
+
+	// --precompile-on-load / --pipeline-variants-replay: the shader is registered and its register
+	// list carries the real program address, so the load-time build can start now.
+	if (Config::GetPrecompileOnLoad() || Config::GetPipelineVariantsReplay()) {
+		std::vector<PipelineCache::ShaderRegisterEntry> sh_registers;
+		if (h->sh_registers != nullptr) {
+			sh_registers.reserve(h->num_sh_registers);
+			for (uint32_t i = 0; i < h->num_sh_registers; i++) {
+				sh_registers.push_back({h->sh_registers[i].offset, h->sh_registers[i].value});
+			}
+		}
+		g_renderer->GetPipelineCache().NoteShaderRegistered(
+		    {.type              = h->type,
+		     .address           = base,
+		     .hash              = hash,
+		     .code_size_bytes   = h->shader_size,
+		     .dispatch_modifier = h->specials != nullptr ? h->specials->dispatch_modifier : 0u,
+		     .sh_registers      = sh_registers});
 	}
 
 	*dst = h;

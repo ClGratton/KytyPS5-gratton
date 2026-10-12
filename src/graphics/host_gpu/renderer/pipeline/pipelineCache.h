@@ -144,6 +144,11 @@ public:
 		// the first draw/dispatch uses it (prediction hit accounting only).
 		bool prefetched = false;
 		bool claimed    = false;
+		// --precompile-on-load / --pipeline-variants-replay: built by a shader-load job. Same
+		// accounting as `prefetched`, kept apart so the two features can be told apart.
+		bool    loaded        = false;
+		bool    load_claimed  = false;
+		int64_t load_ready_ns = 0;
 		// --pipelines-unoptimized-first: `pipeline` was created with DISABLE_OPTIMIZATION and
 		// `optimized` is the background build that replaces it (PromoteOptimized(), GPU thread
 		// only). Both are set before the Pipeline is published and cleared by the promotion.
@@ -286,6 +291,7 @@ public:
 		std::atomic<uint64_t> jobs_guess {0};          // load jobs for the guessed variant
 		std::atomic<uint64_t> skipped_unguessable {0}; // typed buffers, bindless, guest-memory specialization
 		std::atomic<uint64_t> skipped_call {0};        // S_SWAP_PC programs stay on the GPU thread
+		std::atomic<uint64_t> skipped_stale {0};       // a stored variant that no longer fits the translation
 		std::atomic<uint64_t> skipped_known {0};       // an equal permutation was already there
 		std::atomic<uint64_t> skipped_registers {0};   // the header had no usable compute registers
 		std::atomic<uint64_t> built {0};               // permutations published by load jobs
@@ -313,10 +319,34 @@ public:
 		[[nodiscard]] std::string Summary() const;
 	};
 	[[nodiscard]] LoadCounters& Load() { return m_load; }
+
+	// The guest registered a shader binary (AgcCreateShader). Guest thread; cheap: the code is
+	// copied and one low-priority job per variant is queued on the worker pool. Compute shaders
+	// only. With --pipeline-variants-replay every stored variant of the binary is built, else with
+	// --precompile-on-load the most likely one (GuessSpecialization, the dispatch modifier bits).
+	struct ShaderRegisterEntry {
+		uint32_t offset = 0;
+		uint32_t value  = 0;
+	};
+	struct ShaderRegistration {
+		uint8_t                              type              = 0; // Prospero::ShaderBinaryType
+		uint64_t                             address           = 0; // the code (ShaderMapUserData key)
+		uint64_t                             hash              = 0; // XXH3 of the code
+		uint32_t                             code_size_bytes   = 0;
+		uint32_t                             dispatch_modifier = 0; // ShaderSpecialRegs::dispatch_modifier
+		std::span<const ShaderRegisterEntry> sh_registers; // the header's register list
+	};
+	void NoteShaderRegistered(const ShaderRegistration& registration);
+	// Waits until no load job is queued or running (tests; shutdown cancels what is left).
+	bool WaitLoadIdle(int timeout_ms);
 	[[nodiscard]] const Variants::VariantStore* VariantsStore() const { return m_variants.get(); }
+	// Opens (creating it) the variant file at `path` and starts recording into / replaying from it.
+	// The constructor does this for _PipelineCache/<TITLE>.variants; tests pass their own path.
+	bool UseVariantStore(const std::filesystem::path& path);
 
 private:
 	struct ProgramCache;
+	struct LoadJob;
 	struct GraphicsPipelineJob;
 	struct ComputePipelineJob;
 	struct GraphicsOptimizeJob;
@@ -392,6 +422,9 @@ private:
 	LoadCounters      m_load;
 	std::unique_ptr<Variants::VariantStore> m_variants; // --pipeline-variants-replay
 	void InitializeVariants();
+	// Worker side of a load job: queues the pipeline build for a program it just published.
+	void SubmitLoadedComputePipeline(const ShaderProgram& program, ShaderComputeInputInfo info,
+	                                 const ShaderRecompiler::IR::CompiledShaderInfo* compiled);
 	std::function<std::string()> m_lookahead_thread_summary;
 	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
 	// (or starts) while the pool and the registries are torn down.

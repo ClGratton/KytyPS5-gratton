@@ -8,6 +8,7 @@
 #include "gpu_test_shaders/gpu_test_ms_depth_spv.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
+#include "graphics/guest_gpu/csRegisters.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -1010,6 +1011,14 @@ void EnsureConfigInitialized() {
     if (const char *first = std::getenv("KYTY_TEST_UNOPTIMIZED_FIRST");
         first != nullptr && std::strcmp(first, "1") == 0) {
       options.pipelines_unoptimized_first = true;
+      options.async_pipelines = Config::AsyncPipelineMode::Stall;
+      options.pipeline_workers = 4;
+    }
+    // ... and with =1 the shader-load features (--precompile-on-load, --pipeline-variants-replay).
+    if (const char *load = std::getenv("KYTY_TEST_SHADER_LOAD");
+        load != nullptr && std::strcmp(load, "1") == 0) {
+      options.precompile_on_load = true;
+      options.pipeline_variants_replay = true;
       options.async_pipelines = Config::AsyncPipelineMode::Stall;
       options.pipeline_workers = 4;
     }
@@ -38033,6 +38042,130 @@ void CheckComputeLdsLimit(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+// --precompile-on-load / --pipeline-variants-replay (KYTY_TEST_SHADER_LOAD=1, mode
+// --shader-load-only): registering a compute binary builds its program and pipeline on the pool
+// before any dispatch; the first dispatch finds both ready (no program or pipeline job of its own).
+// Without history the guess is built; with a stored variant, exactly that one.
+void CheckShaderLoadPrecompile(VulkanHarness &vulkan) {
+  constexpr const char *name = "ShaderLoadPrecompile";
+  std::vector<u32> code;
+  AppendVMovU32(&code, 1, 7);
+  code.push_back(EncodeDs0(0x0d)); // ds_write_b32 v0, v1
+  code.push_back(EncodeDs1(0, 1, 0));
+  AppendEnd(&code);
+  // A real shader sits at a 256-byte aligned address (COMPUTE_PGM_LO keeps address bits 8..39).
+  auto *memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
+  std::fill(memory, memory + 64, 0u);
+  std::copy(code.begin(), code.end(), memory);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto bytes = static_cast<u32>(code.size() * sizeof(u32));
+  const auto hash = ShaderMapUserData(
+      address, {.type = Prospero::ShaderBinaryType::kCs, .code_size_bytes = bytes});
+
+  // The register list of the AGC shader header, and the dispatch-side registers decoded from it.
+  const std::vector<PipelineCache::ShaderRegisterEntry> header = {
+      {Pm4::COMPUTE_PGM_LO, static_cast<u32>(address >> 8u)},
+      {Pm4::COMPUTE_PGM_HI, static_cast<u32>(address >> 40u) & 0xffu},
+      {Pm4::COMPUTE_PGM_RSRC1, 0xc0u << Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT},
+      {Pm4::COMPUTE_PGM_RSRC2, 4u << Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT},
+      {Pm4::COMPUTE_NUM_THREAD_X, 1},
+      {Pm4::COMPUTE_NUM_THREAD_Y, 1},
+      {Pm4::COMPUTE_NUM_THREAD_Z, 1}};
+  constexpr u32 dispatch_modifier = 1u << Pm4::COMPUTE_DISPATCH_INITIATOR_CS_W32_EN_SHIFT;
+  HW::ComputeShaderInfo regs{};
+  for (const auto &entry : header) {
+    (void)HW::ApplyComputeShaderRegister(regs.cs_regs, entry.offset, entry.value);
+  }
+  regs.cs_regs.wave_size = Pm4::ComputeWaveSize(dispatch_modifier);
+  const auto registration = PipelineCache::ShaderRegistration{
+      .type = static_cast<uint8_t>(Prospero::ShaderBinaryType::kCs),
+      .address = address,
+      .hash = hash,
+      .code_size_bytes = bytes,
+      .dispatch_modifier = dispatch_modifier,
+      .sh_registers = header};
+
+  GraphicContext graphics;
+  graphics.device = vulkan.Device();
+  graphics.physical_device_properties =
+      vulkan.RuntimeContext().GetPhysicalDeviceProperties();
+  const auto variants_path =
+      std::filesystem::temp_directory_path() / "kyty_shader_load_test.variants";
+  std::filesystem::remove(variants_path);
+
+  {
+    // 1. No history: the guess is built at registration.
+    PipelineCache cache(graphics);
+    cache.NoteShaderRegistered(registration);
+    Require(name, "idle", cache.WaitLoadIdle(120000), "load jobs did not finish");
+    const auto &load = cache.Load();
+    Require(name, "guess built",
+            load.registered_cs == 1 && load.jobs_guess == 1 && load.jobs_stored == 0 &&
+                load.built == 1 && load.pipelines == 1,
+            "registration did not build the program and queue its pipeline");
+    ShaderComputeInputInfo input{};
+    const auto program = cache.GetComputeProgram(regs, {}, input);
+    Require(name, "program hit", load.program_hit == 1 && load.program_other == 0,
+            "the first dispatch did not use the program built at registration");
+    auto &pipeline = cache.GetComputePipeline(input, program);
+    Require(name, "pipeline hit",
+            pipeline.pipeline != nullptr && load.pipeline_hit_ready == 1 &&
+                load.pipeline_hit_inflight == 0,
+            "the first dispatch did not find the pipeline built at registration");
+    Require(name, "same program again",
+            cache.GetComputeProgram(regs, {}, input).id == program.id && load.program_hit == 1,
+            "a later dispatch counted as a load hit again or got another program");
+    // Another queue (async compute) is another program key: not covered by the guess.
+    ShaderComputeInputInfo async{};
+    async.async_compute = true;
+    const auto other = cache.GetComputeProgram(regs, {}, async);
+    Require(name, "other variant", other.id != program.id && load.program_other == 1,
+            "an async-queue dispatch must be a separate program and counted as another variant");
+    // The same shader registered again: nothing new is built (the program exists).
+    cache.NoteShaderRegistered(registration);
+    Require(name, "idle again", cache.WaitLoadIdle(120000), "second load did not finish");
+    Require(name, "known", load.skipped_known == 1 && load.built == 1,
+            "a second registration rebuilt an existing program");
+  }
+  {
+    // 2. Record: this session has no stored variants, uses the async-queue variant and stores it.
+    PipelineCache cache(graphics);
+    Require(name, "open store", cache.UseVariantStore(variants_path), "variant file");
+    cache.NoteShaderRegistered(registration);
+    Require(name, "idle", cache.WaitLoadIdle(120000), "load jobs did not finish");
+    ShaderComputeInputInfo async{};
+    async.async_compute = true;
+    const auto program = cache.GetComputeProgram(regs, {}, async);
+    (void)cache.GetComputePipeline(async, program);
+    Require(name, "recorded", cache.Load().recorded == 1 && cache.VariantsStore()->Size() == 1,
+            "the dispatched variant was not stored");
+  }
+  {
+    // 3. Replay: the stored (async-queue) variant is built at registration, not the guess.
+    PipelineCache cache(graphics);
+    Require(name, "reopen store", cache.UseVariantStore(variants_path) &&
+                                      cache.VariantsStore()->Size() == 1,
+            "variant file lost its record");
+    cache.NoteShaderRegistered(registration);
+    Require(name, "idle", cache.WaitLoadIdle(120000), "load jobs did not finish");
+    const auto &load = cache.Load();
+    Require(name, "stored built", load.stored_variants == 1 && load.jobs_stored == 1 &&
+                                      load.jobs_guess == 0 && load.built == 1,
+            "a stored variant must be built instead of the guess");
+    ShaderComputeInputInfo async{};
+    async.async_compute = true;
+    const auto program = cache.GetComputeProgram(regs, {}, async);
+    auto &pipeline = cache.GetComputePipeline(async, program);
+    Require(name, "replay hit",
+            pipeline.pipeline != nullptr && load.program_hit == 1 && load.pipeline_hit_ready == 1 &&
+                load.recorded == 0,
+            "the replayed variant was not used by the dispatch");
+  }
+  std::filesystem::remove(variants_path);
+  std::free(memory);
+  std::printf("[gpu]     %-32s ok\n", name);
+}
+
 // --pipelines-unoptimized-first (KYTY_TEST_UNOPTIMIZED_FIRST=1, mode --unoptimized-first-only):
 // a new compute pipeline is created unoptimized, the background build finishes, the next lookup
 // swaps it in on the same layouts and hands the replaced VkPipeline to the retire handler.
@@ -44204,6 +44337,11 @@ int main(int argc, char **argv) {
     vulkan.CheckRenderExecutorStencilBindingDiscovery();
     vulkan.CheckUnifiedTextureCacheFlow();
     vulkan.CheckBgra16Readback();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--shader-load-only") == 0) {
+    VulkanHarness vulkan;
+    CheckShaderLoadPrecompile(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--unoptimized-first-only") == 0) {

@@ -10,8 +10,10 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/csRegisters.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
@@ -30,6 +32,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -43,6 +46,8 @@
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
+#include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <xxhash.h>
@@ -774,6 +779,86 @@ struct PipelineCache::ProgramCache {
 		bool         duplicate = false;
 	};
 
+	// ---- shader-load jobs (--precompile-on-load / --pipeline-variants-replay) -----------------
+	//
+	// The guest registered a compute binary (AgcCreateShader). A load job translates it on a worker
+	// (low priority, nobody waits), compiles one specialization of it - a stored variant, or the
+	// guess - and queues its pipeline. It publishes exactly like a program job, so a dispatch whose
+	// specialization is equal finds the permutation and the pipeline ready or in flight. A dispatch
+	// that needs an equal specialization while the job runs joins it (WaitFor promotes it), so
+	// nothing is compiled twice; a dispatch with another specialization never waits for it.
+	struct LoadJob final: AsyncJob {
+		LoadJob(PipelineCache& owner_cache, ProgramKey program_key, uint64_t key_hash)
+		    : AsyncJob(Kind::Program, key_hash), owner(owner_cache), key(std::move(program_key)) {}
+
+		[[nodiscard]] bool SpecIs(const ShaderRecompiler::IR::ResourceSpecialization& wanted) {
+			std::lock_guard lock(spec_mutex);
+			return spec.has_value() && *spec == wanted;
+		}
+		void Execute() override;
+		void Cancel() override { Unregister(); }
+		void Unregister();
+
+		PipelineCache&        owner;
+		ProgramKey            key;
+		ShaderComputeInputInfo info;                    // statics of the variant (device values)
+		std::vector<uint32_t> code;                     // copy of the binary
+		uint32_t              user_data_count = 0;
+		int64_t               register_ns     = 0;
+		bool                  guess           = true;   // false: `explicit_spec` is a stored variant
+		std::optional<ShaderRecompiler::IR::ResourceSpecialization> explicit_spec;
+
+		std::mutex spec_mutex;
+		std::optional<ShaderRecompiler::IR::ResourceSpecialization> spec; // what this job builds
+	};
+
+	std::mutex                            load_mutex;
+	std::vector<std::shared_ptr<LoadJob>> load_active;
+	std::unordered_set<uint64_t>          load_hashes; // code hashes registered with a load request
+
+	// Registers a load job unless an equal one is active (same program, same stored variant or
+	// both guesses). False: duplicate.
+	bool AddLoad(const std::shared_ptr<LoadJob>& job) {
+		std::lock_guard lock(load_mutex);
+		for (const auto& other: load_active) {
+			if (other->key == job->key && other->guess == job->guess &&
+			    other->explicit_spec == job->explicit_spec) {
+				return false;
+			}
+		}
+		load_active.push_back(job);
+		load_hashes.insert(job->key.hash);
+		return true;
+	}
+	void RemoveLoad(const LoadJob* job) {
+		std::shared_ptr<LoadJob> released;
+		{
+			std::lock_guard lock(load_mutex);
+			const auto iter = std::ranges::find_if(load_active, [&](const auto& other) {
+				return other.get() == job;
+			});
+			if (iter == load_active.end()) return;
+			released = std::move(*iter);
+			load_active.erase(iter);
+		}
+	}
+	[[nodiscard]] std::shared_ptr<LoadJob>
+	FindLoad(const ProgramKey& key, const ShaderRecompiler::IR::ResourceSpecialization& wanted) {
+		std::lock_guard lock(load_mutex);
+		for (const auto& job: load_active) {
+			if (job->key == key && job->SpecIs(wanted)) return job;
+		}
+		return nullptr;
+	}
+	[[nodiscard]] bool LoadedBinary(uint64_t hash) {
+		std::lock_guard lock(load_mutex);
+		return load_hashes.contains(hash);
+	}
+	[[nodiscard]] size_t LoadActive() {
+		std::lock_guard lock(load_mutex);
+		return load_active.size();
+	}
+
 	struct AsyncContext {
 		AsyncPipelineCompiler* pool       = nullptr;
 		bool                   allow_skip = false; // graphics only; compute always waits
@@ -1005,11 +1090,44 @@ struct PipelineCache::ProgramCache {
 			} else if (auto* published = entry->FindPublished(push_data_cursor, specialization)) {
 				return use_published(*published, true);
 			}
+			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+				// A shader-load job is already building exactly this specialization: join it
+				// instead of compiling the same SPIR-V again.
+				if (load != nullptr && track_use) {
+					if (auto load_job = FindLoad(lookup_key, specialization)) {
+						if (wait_job(*load_job)) {
+							if (auto* published = entry->FindPublished(push_data_cursor, specialization)) {
+								return use_published(*published, true);
+							}
+						}
+						if (prefetch) {
+							return {};
+						}
+					} else if (!prefetch && LoadedBinary(params.hash)) {
+						load->program_other.fetch_add(1, std::memory_order_relaxed);
+						if (Bench::TimingEnabled()) {
+							Bench::LogTiming("load_miss", params.hash, Bench::NowNs(), 0, true,
+							                 "reason=other_variant");
+						}
+					}
+				}
+			}
 		}
 
 		Stopwatch miss_sw;
 		int64_t   prepare_ns = 0, frontend_ns = 0, plan_ns = 0, backend_ns = 0, module_ns = 0;
 		const bool new_source = entry == nullptr;
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			// The binary was registered with a load request but this dispatch's static state
+			// (wave size, dispatch mode, queue, ...) is another one than was built.
+			if (new_source && !prefetch && load != nullptr && track_use && LoadedBinary(params.hash)) {
+				load->program_other.fetch_add(1, std::memory_order_relaxed);
+				if (timing) {
+					Bench::LogTiming("load_miss", params.hash, Bench::NowNs(), 0, true,
+					                 "reason=other_static_state");
+				}
+			}
+		}
 
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
@@ -1344,12 +1462,12 @@ std::string PipelineCache::LoadCounters::Summary() const {
 	const auto n = lead_n.load();
 	return fmt::format(
 	    "registered_cs={};registered_other={};stored_variants={};jobs_stored={};jobs_guess={};"
-	    "skipped_unguessable={};skipped_call={};skipped_known={};skipped_registers={};built={};"
+	    "skipped_unguessable={};skipped_call={};skipped_stale={};skipped_known={};skipped_registers={};built={};"
 	    "duplicates={};pipelines={};program_hit={};program_other={};pipeline_hit_ready={};"
 	    "pipeline_hit_inflight={};recorded={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f};"
 	    "lead_max_ms={:.1f}",
 	    registered_cs.load(), registered_other.load(), stored_variants.load(), jobs_stored.load(),
-	    jobs_guess.load(), skipped_unguessable.load(), skipped_call.load(), skipped_known.load(),
+	    jobs_guess.load(), skipped_unguessable.load(), skipped_call.load(), skipped_stale.load(), skipped_known.load(),
 	    skipped_registers.load(), built.load(), duplicates.load(), pipelines.load(),
 	    program_hit.load(), program_other.load(), pipeline_hit_ready.load(),
 	    pipeline_hit_inflight.load(), recorded.load(), n,
@@ -1375,12 +1493,15 @@ void PipelineCache::InitializeVariants() {
 		PipelineCacheLog("Pipeline variants: disabled (no title id)");
 		return;
 	}
-	const auto path = std::filesystem::path("_PipelineCache") / (title_id + ".variants");
-	auto       store = std::make_unique<Variants::VariantStore>();
+	UseVariantStore(std::filesystem::path("_PipelineCache") / (title_id + ".variants"));
+}
+
+bool PipelineCache::UseVariantStore(const std::filesystem::path& path) {
+	auto       store  = std::make_unique<Variants::VariantStore>();
 	const auto loaded = store->Load(path);
 	if (!store->OpenAppend(path)) {
 		PipelineCacheLog("Pipeline variants: disabled (cannot write {})", Common::PathToString(path));
-		return;
+		return false;
 	}
 	PipelineCacheLog("Pipeline variants: {} ({} stored, {} records, torn_tail={}, schema_ok={})",
 	                 Common::PathToString(path), store->Size(), loaded.records, loaded.torn_tail,
@@ -1390,8 +1511,10 @@ void PipelineCache::InitializeVariants() {
 		                 fmt::format("stored={};records={};torn_tail={};file_found={}", store->Size(),
 		                             loaded.records, loaded.torn_tail ? 1 : 0, loaded.file_found ? 1 : 0));
 	}
-	m_variants                 = std::move(store);
+	m_variants                = std::move(store);
 	m_program_cache->variants = m_variants.get();
+	m_program_cache->track_use = true;
+	return true;
 }
 
 // --pipelines-unoptimized-first is active only where it is safe and effective:
@@ -1939,9 +2062,13 @@ struct PipelineCache::ComputePipelineJob final: AsyncJob {
 		}
 		auto      cached = std::make_unique<Pipeline>();
 		cached->prefetched = IsPrefetched();
+		cached->loaded     = from_load;
 		Stopwatch create_sw;
 		CreatePipelineInternal(cache.m_graphics, *cached, input_info, module, driver_cache,
 		                       cache.FirstBuild());
+		if (from_load) {
+			cached->load_ready_ns = Bench::NowNs();
+		}
 		if (create_sw.On()) {
 			const auto create_ns = create_sw.Elapsed();
 			AddTimingRow("pipeline_create_cs", program_id, create_sw.Start(), create_ns,
@@ -1985,7 +2112,266 @@ struct PipelineCache::ComputePipelineJob final: AsyncJob {
 	ShaderComputeInputInfo input_info;
 	vk::ShaderModule       module       = nullptr;
 	vk::PipelineCache      driver_cache = nullptr;
+	bool                   from_load    = false; // queued by a shader-load job
 };
+
+// ---- shader-load jobs: see ProgramCache::LoadJob --------------------------------------------
+
+void PipelineCache::ProgramCache::LoadJob::Unregister() {
+	owner.m_program_cache->RemoveLoad(this);
+}
+
+namespace {
+
+// A stored specialization can be stale (the translator changed since it was recorded). Applying an
+// incompatible one is fatal in ApplyResourceSpecialization, so check what it asserts.
+bool SpecializationFits(const ShaderRecompiler::IR::ResourcePlan&           plan,
+                        const ShaderRecompiler::IR::ResourceSpecialization& spec) {
+	using ShaderRecompiler::IR::BufferResource;
+	using ShaderRecompiler::IR::ImageResource;
+	if (spec.buffers.size() < plan.info.buffers.size() || spec.images.size() < plan.info.images.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < spec.buffers.size(); i++) {
+		const auto root = spec.buffers[i].indirect_root;
+		if (root != BufferResource::NoIndirectBuffer && root >= spec.buffers.size()) return false;
+		if (i >= plan.info.buffers.size() &&
+		    (root == BufferResource::NoIndirectBuffer || root >= plan.info.buffers.size())) {
+			return false;
+		}
+	}
+	for (size_t i = 0; i < spec.images.size(); i++) {
+		const auto root = spec.images[i].indirect_root;
+		if (root != ImageResource::NoIndirectImage && root >= spec.images.size()) return false;
+		if (i >= plan.info.images.size() &&
+		    (root == ImageResource::NoIndirectImage || root >= plan.info.images.size())) {
+			return false;
+		}
+	}
+	return true;
+}
+
+} // namespace
+
+void PipelineCache::ProgramCache::LoadJob::Execute() {
+	ProgramCache& cache    = *owner.m_program_cache;
+	LoadCounters& counters = owner.m_load;
+	const bool    timing   = Bench::TimingEnabled();
+	Stopwatch     sw;
+	// Translation reads only the number of user SGPRs; their values matter to materialization,
+	// which a load job does not do.
+	const std::vector<uint32_t> user_data(user_data_count, 0u);
+	ShaderRecompiler::CompileOptions options;
+	options.stage              = ShaderType::Compute;
+	options.shader_hash        = key.hash;
+	options.user_data          = user_data;
+	options.dump_ir            = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+	options.early_dump         = options.dump_ir;
+	options.dump_label         = "ShaderRecompiler CS";
+	options.wave_size          = info.wave_size;
+	options.input_info.compute = &info;
+
+	auto source = ShaderRecompiler::PrepareShaderSource(code, options);
+	if (source.call) {
+		counters.skipped_call.fetch_add(1, std::memory_order_relaxed);
+		Unregister();
+		return;
+	}
+	auto translated = ShaderRecompiler::TranslateProgram(source.decoded, options);
+	const int64_t frontend_ns = sw.Lap();
+	auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+	ShaderRecompiler::IR::ResourceSpecialization wanted;
+	bool usable = true;
+	if (explicit_spec) {
+		wanted = *explicit_spec;
+		usable = SpecializationFits(plan, wanted);
+		if (!usable) counters.skipped_stale.fetch_add(1, std::memory_order_relaxed);
+	} else if (!ShaderRecompiler::IR::GuessSpecialization(plan, wanted)) {
+		usable = false;
+		counters.skipped_unguessable.fetch_add(1, std::memory_order_relaxed);
+	}
+	// The translated source is worth keeping even when no variant can be built: the first dispatch
+	// then finds a known program (first insert wins).
+	auto* entry = cache.InsertEntry(key, std::move(plan), nullptr);
+	if (!usable) {
+		Unregister();
+		return;
+	}
+	{
+		std::lock_guard lock(spec_mutex);
+		spec = wanted;
+	}
+	if (entry->FindPublished(0, wanted) != nullptr) {
+		// A dispatch or the lookahead got there first; its own pipeline job exists or will.
+		counters.skipped_known.fetch_add(1, std::memory_order_relaxed);
+		Unregister();
+		return;
+	}
+	int64_t backend_ns = 0, module_ns = 0;
+	auto    compiled = cache.CompilePermutation("cs", options, std::move(translated), wanted, 0, {},
+	                                            timing ? &backend_ns : nullptr,
+	                                            timing ? &module_ns : nullptr);
+	compiled.from_load         = true;
+	compiled.load_register_ns  = register_ns;
+	compiled.load_ready_ns     = Bench::NowNs();
+	bool dup                   = false;
+	auto* const published      = entry->Publish(compiled, 0, false, dup);
+	if (dup) {
+		cache.device.destroyShaderModule(compiled.handle.module, nullptr);
+		counters.duplicates.fetch_add(1, std::memory_order_relaxed);
+	} else {
+		cache.stage_permutation_counts[static_cast<size_t>(ShaderType::Compute)].fetch_add(
+		    1, std::memory_order_relaxed);
+		counters.built.fetch_add(1, std::memory_order_relaxed);
+	}
+	if (timing) {
+		AddTimingRow("load_program", key.hash, sw.Start(), sw.Elapsed(),
+		             fmt::format("shader_id={};dup={};guess={};frontend_ns={};backend_ns={};"
+		                         "module_ns={};register_ns={};code_dwords={}",
+		                         published->handle.id, dup ? 1 : 0, guess ? 1 : 0, frontend_ns,
+		                         backend_ns, module_ns, register_ns, code.size()));
+	}
+	owner.SubmitLoadedComputePipeline(published->handle, info, &published->program);
+	// Publish first, unregister last: a dispatch that no longer finds the job finds the program.
+	Unregister();
+}
+
+// Worker: queues the pipeline of a program a load job published, on the low-priority queue.
+void PipelineCache::SubmitLoadedComputePipeline(const ShaderProgram& program,
+                                                ShaderComputeInputInfo info,
+                                                const ShaderRecompiler::IR::CompiledShaderInfo* compiled) {
+	auto* pool = AsyncPool();
+	if (pool == nullptr) {
+		return;
+	}
+	info.stage       = {.program = compiled, .resources = &PrefetchResources()};
+	info.lds_storage = info.lds_size_dwords * 4u >
+	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	if (FindComputePipeline(program.id) != nullptr || m_compute_jobs.Find(program.id) != nullptr) {
+		return;
+	}
+	auto fresh = std::make_shared<ComputePipelineJob>(*this, program.id);
+	fresh->input_info      = info;
+	fresh->module          = program.module;
+	fresh->driver_cache    = m_driver_cache;
+	fresh->from_load       = true;
+	bool inserted          = false;
+	m_compute_jobs.Insert(program.id, fresh, inserted);
+	if (!inserted) {
+		return;
+	}
+	if (!pool->SubmitLowPriority(fresh)) {
+		m_compute_jobs.Erase(program.id);
+		return;
+	}
+	m_load.pipelines.fetch_add(1, std::memory_order_relaxed);
+}
+
+void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
+	if (m_async_mode == Config::AsyncPipelineMode::Off ||
+	    (!Config::GetPrecompileOnLoad() && m_variants == nullptr)) {
+		return;
+	}
+	if (static_cast<Prospero::ShaderBinaryType>(reg.type) != Prospero::ShaderBinaryType::kCs) {
+		m_load.registered_other.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	std::shared_lock gate(m_prefetch_gate);
+	if (m_prefetch_stopped) {
+		return;
+	}
+	auto* pool = AsyncPool();
+	if (pool == nullptr) {
+		return;
+	}
+	m_load.registered_cs.fetch_add(1, std::memory_order_relaxed);
+	const auto register_ns = Bench::NowNs();
+
+	// The stage registers the header carries, decoded like the PM4 stream would.
+	HW::ComputeShaderInfo regs {};
+	bool                  has_rsrc2 = false;
+	for (const auto& entry: reg.sh_registers) {
+		if (HW::ApplyComputeShaderRegister(regs.cs_regs, entry.offset, entry.value) ==
+		    HW::CsRegisterResult::Applied) {
+			has_rsrc2 = has_rsrc2 || entry.offset == Pm4::COMPUTE_PGM_RSRC2;
+		}
+	}
+	if (!has_rsrc2 || regs.cs_regs.data_addr != reg.address || reg.code_size_bytes < 4u) {
+		m_load.skipped_registers.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	const uint32_t code_dwords = reg.code_size_bytes / 4u;
+	std::vector<uint32_t> code(code_dwords);
+	std::memcpy(code.data(), reinterpret_cast<const void*>(reg.address), code_dwords * 4u);
+
+	const uint32_t host_subgroup = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	const auto submit = [&](ShaderComputeInputInfo info, uint32_t user_data_count,
+	                        std::optional<ShaderRecompiler::IR::ResourceSpecialization> spec) {
+		info.host_subgroup_size = host_subgroup;
+		ProgramCache::ProgramKey key;
+		key.stage           = ShaderType::Compute;
+		key.hash            = reg.hash;
+		key.user_data_count = user_data_count;
+		key.code_size       = code_dwords;
+		BuildStageStaticKey(info, key.static_state);
+		auto job = std::make_shared<ProgramCache::LoadJob>(
+		    *this, key, static_cast<uint64_t>(ProgramCache::ProgramKeyHash {}(key)));
+		job->info            = info;
+		job->code            = code;
+		job->user_data_count = user_data_count;
+		job->register_ns     = register_ns;
+		job->guess           = !spec.has_value();
+		job->explicit_spec   = std::move(spec);
+		if (!m_program_cache->AddLoad(job)) {
+			return;
+		}
+		(job->guess ? m_load.jobs_guess : m_load.jobs_stored).fetch_add(1, std::memory_order_relaxed);
+		if (!pool->SubmitLowPriority(job)) {
+			m_program_cache->RemoveLoad(job.get());
+		}
+	};
+
+	if (m_variants != nullptr) {
+		const auto stored = m_variants->Find(reg.hash, code_dwords);
+		m_load.stored_variants.fetch_add(stored.size(), std::memory_order_relaxed);
+		for (const auto& variant: stored) {
+			ShaderComputeInputInfo info {};
+			ApplyVariantStatic(variant.state, info);
+			submit(info, variant.state.user_data_count, FromVariantSpec(variant.spec));
+		}
+		if (!stored.empty()) {
+			return;
+		}
+	}
+	if (!Config::GetPrecompileOnLoad()) {
+		return;
+	}
+	// No history: the variant the header and the dispatch modifier imply. The modifier carries the
+	// DISPATCH_INITIATOR bits the guest library ORs into every dispatch of this shader (wave size,
+	// thread-dimension mode); the queue (async compute) is only known at the dispatch.
+	regs.cs_regs.wave_size = Pm4::ComputeWaveSize(reg.dispatch_modifier);
+	ShaderComputeInputInfo info {};
+	info.async_compute              = false;
+	info.dispatch_thread_dimensions = (reg.dispatch_modifier & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+	info.host_subgroup_size         = host_subgroup;
+	const auto params               = PrepareProgram(regs, HW::ShaderRegisters {}, info);
+	if (params.hash != reg.hash) {
+		m_load.skipped_registers.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	submit(info, params.user_data_count, std::nullopt);
+}
+
+bool PipelineCache::WaitLoadIdle(int timeout_ms) {
+	const auto deadline = Bench::NowNs() + static_cast<int64_t>(timeout_ms) * 1000000;
+	while (m_program_cache->LoadActive() != 0 || m_compute_jobs.Size() != 0) {
+		if (Bench::NowNs() > deadline) {
+			return false;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	return true;
+}
 
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
@@ -2164,6 +2550,18 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 // GPU thread: a draw/dispatch is about to use `pipeline`. The first use of a pipeline that a
 // prefetch job built is a prediction hit ("in flight" when the draw had to wait for the job).
 void PipelineCache::NoteDrawUse(Pipeline& pipeline, bool graphics, bool joined_in_flight) {
+	if (pipeline.loaded && !pipeline.load_claimed) {
+		pipeline.load_claimed = true;
+		(joined_in_flight ? m_load.pipeline_hit_inflight : m_load.pipeline_hit_ready)
+		    .fetch_add(1, std::memory_order_relaxed);
+		if (Bench::TimingEnabled()) {
+			const auto now = Bench::NowNs();
+			Bench::LogTiming("load_pipeline_hit", 0, now, 0, true,
+			                 fmt::format("waited={};ready_ns={};idle_ns={}", joined_in_flight ? 1 : 0,
+			                             pipeline.load_ready_ns,
+			                             joined_in_flight ? 0 : now - pipeline.load_ready_ns));
+		}
+	}
 	if (!pipeline.prefetched || pipeline.claimed) {
 		return;
 	}
@@ -2615,6 +3013,8 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	if (auto* pool = AsyncPool()) {
 		std::shared_ptr<AsyncJob> job = m_compute_jobs.Find(compute_program.id);
 		bool                      joined_prefetch = job != nullptr && job->IsPrefetched();
+		bool                      joined_load =
+		    job != nullptr && static_cast<ComputePipelineJob&>(*job).from_load;
 		if (job == nullptr) {
 			if (auto* published = FindComputePipeline(compute_program.id)) {
 				NoteDrawUse(*published, false, false);
@@ -2631,6 +3031,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 				m_lookahead.cs_miss.fetch_add(1, std::memory_order_relaxed);
 			} else {
 				joined_prefetch = job->IsPrefetched();
+				joined_load     = static_cast<ComputePipelineJob&>(*job).from_load;
 			}
 			if (inserted && !pool->Submit(fresh, true)) {
 				m_compute_jobs.Erase(compute_program.id);
@@ -2639,7 +3040,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 		}
 		if (job != nullptr && pool->WaitFor(*job)) {
 			if (auto* published = FindComputePipeline(compute_program.id)) {
-				NoteDrawUse(*published, false, joined_prefetch);
+				NoteDrawUse(*published, false, joined_prefetch || joined_load);
 				PromoteOptimized(*published);
 				return *published;
 			}

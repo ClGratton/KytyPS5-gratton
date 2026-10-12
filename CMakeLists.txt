@@ -797,6 +797,16 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --unoptimized-first-only)
 	set_tests_properties(pipeline_unoptimized_first_promotion PROPERTIES
 		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
+	# --precompile-on-load / --pipeline-variants-replay: the whole suite with variant tracking on
+	# (every first dispatch of a program), and the registration -> build -> hit flow itself.
+	add_test(NAME shader_recompiler_compute_shader_load
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_shader_load PROPERTIES
+		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
+	add_test(NAME shader_load_precompile
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --shader-load-only)
+	set_tests_properties(shader_load_precompile PROPERTIES
+		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME guest_stack_exit
