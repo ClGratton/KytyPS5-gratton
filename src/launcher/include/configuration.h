@@ -2,6 +2,7 @@
 #define LAUNCHER_INCLUDE_CONFIGURATION_H_
 
 #include "common/emulatorConfig.h"
+#include "emulatorOptions.h"
 
 #include <QByteArray>
 #include <QChar>
@@ -14,6 +15,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVariant>
+#include <QVariantMap>
 
 template <class T>
 inline QStringList EnumToList() {
@@ -48,11 +50,19 @@ struct ControllerSettings {
 	QString color;
 	int     speaker_volume      = 50;
 	int     vibration_intensity = 100;
+	// Emulator options of the Controller tab (DualSense speaker routing and level), by option id.
+	QVariantMap options;
 
 	void WriteSettings(QSettings* s) const {
 		s->setValue("controller_color", color);
 		s->setValue("controller_speaker_volume", speaker_volume);
 		s->setValue("controller_vibration_intensity", vibration_intensity);
+		for (const auto& option: EmulatorOptions::All()) {
+			if (option.tab == EmulatorOptions::Tab::Controller) {
+				s->setValue(QStringLiteral("controller_opt_") + option.id,
+				            EmulatorOptions::ToText(option, EmulatorOptions::Value(options, option)));
+			}
+		}
 	}
 
 	void ReadSettings(QSettings* s) {
@@ -65,6 +75,14 @@ struct ControllerSettings {
 		};
 		speaker_volume      = read_percent("controller_speaker_volume", 50);
 		vibration_intensity = read_percent("controller_vibration_intensity", 100);
+		options.clear();
+		for (const auto& option: EmulatorOptions::All()) {
+			if (option.tab == EmulatorOptions::Tab::Controller) {
+				options.insert(option.id,
+				               EmulatorOptions::Parse(
+				                   option, s->value(QStringLiteral("controller_opt_") + option.id)));
+			}
+		}
 	}
 };
 
@@ -154,6 +172,10 @@ public:
 #endif
 	QStringList host_input_mapping;
 
+	// Emulator options of the tabs Display, Shaders, GPU thread, VRAM/RAM and Debug (see
+	// emulatorOptions.h), by option id; a missing id is the emulator's default.
+	QVariantMap emulator_options;
+
 	QString elf = QStringLiteral("eboot.bin");
 
 	void CopyEmulatorSettingsFrom(const Configuration& other) {
@@ -191,6 +213,21 @@ public:
 		red_zone_protection_enabled = other.red_zone_protection_enabled;
 #endif
 		host_input_mapping = other.host_input_mapping;
+		emulator_options   = other.emulator_options;
+	}
+
+	// The "Recommended for play" preset: the flag set of bench/config-play-next.json (the measured
+	// play configuration). Changes only the settings that file sets.
+	void ApplyRecommendedForPlay() {
+		screen_resolution   = Resolution::R2560X1440;
+		present_mode        = PresentMode::Mailbox;
+		vblank_frequency    = 60;
+		fullscreen_enabled  = true;
+		skip_notice_screen  = true;
+		const auto recommended = EmulatorOptions::Recommended();
+		for (auto it = recommended.constBegin(); it != recommended.constEnd(); ++it) {
+			emulator_options.insert(it.key(), it.value());
+		}
 	}
 
 	void CopyGameInfoFrom(const Configuration& other) {

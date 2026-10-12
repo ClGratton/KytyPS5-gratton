@@ -38,6 +38,13 @@ QVariantMap Configuration::GameSettings() const {
 #endif
 	KYTY_CFG_SET(elf);
 #undef KYTY_CFG_SET
+	for (const auto& option: EmulatorOptions::All()) {
+		if (option.tab != EmulatorOptions::Tab::Controller) {
+			values.insert(QStringLiteral("opt_") + option.id,
+			              EmulatorOptions::ToText(option,
+			                                      EmulatorOptions::Value(emulator_options, option)));
+		}
+	}
 	return values;
 }
 
@@ -93,6 +100,13 @@ void Configuration::ReadGameSettingsValues(const Settings& s) {
 #endif
 	elf = s.value("elf", elf).toString();
 #undef KYTY_CFG_GET
+	emulator_options.clear();
+	for (const auto& option: EmulatorOptions::All()) {
+		if (option.tab != EmulatorOptions::Tab::Controller) {
+			emulator_options.insert(
+			    option.id, EmulatorOptions::Parse(option, s.value(QStringLiteral("opt_") + option.id)));
+		}
+	}
 }
 
 void Configuration::WriteSettings(QSettings* s) const {

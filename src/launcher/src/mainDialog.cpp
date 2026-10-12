@@ -5,6 +5,7 @@
 #include "configurationItem.h"
 #include "configurationListWidget.h"
 #include "controllerPreview.h"
+#include "emulatorArgs.h"
 #include "gameContent.h"
 #include "updateChecker.h"
 
@@ -21,6 +22,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QRadioButton>
 #include <QRegularExpression>
 #include <QSettings>
@@ -214,100 +216,6 @@ void MainDialogPrivate::FindInterpreter() {
 	}
 }
 
-static QString BoolArg(bool value) {
-	return value ? QStringLiteral("true") : QStringLiteral("false");
-}
-
-static QStringList CreateEmulatorArgs(const Configuration& info) {
-	QStringList args;
-	auto        r = EnumToText(info.screen_resolution).split('x');
-
-	if (r.size() != 2) {
-		return {};
-	}
-
-	args << "--screen-width" << r.at(0);
-	args << "--screen-height" << r.at(1);
-	args << "--user-name" << info.user_name;
-	args << "--user-id" << QString::number(info.user_id);
-	if (!info.audio_input_device.isEmpty()) {
-		args << "--mic" << info.audio_input_device;
-	}
-	if (!info.controller.color.isEmpty()) {
-		args << "--controller-color" << info.controller.color;
-	}
-	args << "--controller-volume" << QString::number(info.controller.speaker_volume);
-	args << "--controller-vibration" << QString::number(info.controller.vibration_intensity);
-	args << "--present-mode" << EnumToText(info.present_mode);
-	if (info.gpu_index >= 0) {
-		args << "--gpu" << QString::number(info.gpu_index);
-	}
-	if (info.fullscreen_enabled) {
-		args << "--fullscreen";
-	}
-	if (info.hide_cursor_enabled) {
-		args << "--hide-cursor";
-	}
-	args << "--readback-linear-images" << BoolArg(info.readback_linear_images);
-	args << "--sync-raw-image-buffers" << BoolArg(info.sync_raw_image_buffers);
-	args << "--trophy-notifications" << BoolArg(info.trophy_enabled);
-	args << "--skip-notice-screen" << BoolArg(info.skip_notice_screen);
-	if (info.tessellation_enabled) {
-		args << "--tessellation";
-	}
-	args << "--vblank-frequency" << QString::number(info.vblank_frequency);
-	if (info.fps_limit > 0) {
-		args << "--fps-limit" << QString::number(info.fps_limit);
-	}
-	if (info.gpu_time_scale_percent != 100) {
-		args << "--gpu-time-scale" << QString::number(info.gpu_time_scale_percent / 100.0, 'f', 2);
-	}
-	// Always explicit: the emulator default is gpu, and Legacy is a choice that must be passed.
-	args << "--gpu-timestamps"
-	     << (info.gpu_timestamps == Configuration::GpuTimestamps::Gpu ? "gpu" : "legacy");
-	args << "--console-language" << QString::number(info.console_language);
-	args << "--vulkan-validation" << BoolArg(info.vulkan_validation_enabled);
-	args << "--shader-validation" << BoolArg(info.shader_validation_enabled);
-	args << "--shader-optimization-type" << EnumToText(info.shader_optimization_type);
-	args << "--shader-log-direction" << EnumToText(info.shader_log_direction);
-	args << "--shader-log-folder" << info.shader_log_folder;
-	args << "--command-buffer-dump" << BoolArg(info.command_buffer_dump_enabled);
-	args << "--command-buffer-dump-folder" << info.command_buffer_dump_folder;
-	args << "--printf-direction" << EnumToText(info.printf_direction);
-	args << "--printf-output-file" << info.printf_output_file;
-	if (info.profiler_enabled) {
-		args << "--profile";
-	}
-	args << "--spirv-debug-printf" << "false";
-	if (info.amd_cpu_enabled) {
-		args << "--amd-cpu";
-	}
-#if defined(_WIN32)
-	if (info.red_zone_protection_enabled) {
-		args << "--redzone";
-	}
-#endif
-	for (const auto& binding: info.host_input_mapping) {
-		args << "--keymap" << binding;
-	}
-	if (info.renderdoc_enabled) {
-		args << "--rd";
-	}
-
-	QString game = info.basedir;
-	if (!info.elf.isEmpty() && !GameContent::IsArchive(info.basedir)) {
-		game = QDir(info.basedir).filePath(info.elf);
-	}
-	args << "--game" << game;
-
-	const auto patch_plan = Cheats::PlanPath(info.title_id);
-	if (QFileInfo::exists(patch_plan)) {
-		args << "--game-patch" << patch_plan;
-	}
-
-	return args;
-}
-
 #ifdef __linux__
 static QString BashQuote(QString value) {
 	value.replace('\'', "'\\''");
@@ -315,12 +223,19 @@ static QString BashQuote(QString value) {
 }
 
 static bool CreateBashScript(const QString& interpreter, const QStringList& args,
-                             const QString& file_name) {
+                             const QStringList& environment, const QString& file_name) {
 	QFile file(file_name);
 	if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
 		QTextStream s(&file);
 
 		s << "#!/bin/bash\n";
+		for (const auto& assignment: environment) {
+			const auto split = assignment.indexOf('=');
+			if (split > 0) {
+				s << "export " << assignment.left(split) << "=" << BashQuote(assignment.mid(split + 1))
+				  << "\n";
+			}
+		}
 		s << BashQuote(interpreter);
 		for (const auto& arg: args) {
 			s << " " << BashQuote(arg);
@@ -420,7 +335,8 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 	QFileInfo f(interpreter);
 	auto      dir = f.absoluteDir();
 
-	auto args = CreateEmulatorArgs(info);
+	auto args        = CreateEmulatorArgs(info);
+	auto environment = CreateEmulatorEnvironment(info);
 	if (args.isEmpty()) {
 		QMessageBox::critical(this, tr("Error"), tr("Invalid emulator configuration"));
 		QApplication::quit();
@@ -429,7 +345,7 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 
 #ifdef __linux__
 	auto bash_file_name = dir.filePath(KYTY_BASH_FILE);
-	if (!CreateBashScript(interpreter, args, bash_file_name)) {
+	if (!CreateBashScript(interpreter, args, environment, bash_file_name)) {
 		QMessageBox::critical(this, tr("Error"), tr("Can't create file:\n") + bash_file_name);
 		QApplication::quit();
 		return;
@@ -459,6 +375,18 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 #else
 	process->setProgram(interpreter);
 	process->setArguments(args);
+#endif
+#if !defined(__linux__)
+	{
+		auto process_environment = QProcessEnvironment::systemEnvironment();
+		for (const auto& assignment: environment) {
+			const auto split = assignment.indexOf('=');
+			if (split > 0) {
+				process_environment.insert(assignment.left(split), assignment.mid(split + 1));
+			}
+		}
+		process->setProcessEnvironment(process_environment);
+	}
 #endif
 	process->setWorkingDirectory(dir.path());
 #if defined(_WIN32)

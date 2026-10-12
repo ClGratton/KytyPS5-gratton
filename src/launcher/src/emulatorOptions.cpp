@@ -1,0 +1,462 @@
+#include "emulatorOptions.h"
+
+#include <QCoreApplication>
+
+namespace EmulatorOptions {
+
+namespace {
+
+using C = Config::ConfigOptions;
+
+#define EMU_BOOL(field) [](const C& c) { return QVariant(static_cast<bool>(c.field)); }
+#define EMU_INT(field) [](const C& c) { return QVariant(static_cast<int>(c.field)); }
+
+QString tr(const char* text) {
+	return QCoreApplication::translate("EmulatorOptions", text);
+}
+
+struct Def {
+	const char* id;
+	const char* flag;
+	Tab         tab;
+	const char* section;
+	Kind        kind;
+	const char* label;
+	const char* tooltip;
+	std::function<QVariant(const C&)> emulator_default;
+	QStringList choices   = {};
+	int         min       = 0;
+	int         max       = 0;
+	const char* special   = "";
+	const char* suffix    = "";
+	bool        needs_async = false;
+	bool        flag_if_off = false;
+	const char* env       = "";
+	QVariant    launcher_default = {};
+};
+
+QString AsyncText(Config::AsyncPipelineMode mode) {
+	switch (mode) {
+		case Config::AsyncPipelineMode::Stall: return QStringLiteral("stall");
+		case Config::AsyncPipelineMode::Skip: return QStringLiteral("skip");
+		default: return QStringLiteral("off");
+	}
+}
+
+QList<Option> BuildTable() {
+	QList<Def> defs;
+
+	// ---- Display -------------------------------------------------------------------------------
+	defs.append({"overlay", "", Tab::Display, "Overlay and window", Kind::Bool,
+	             "Performance overlay (MangoHud)",
+	             "Show MangoHud's fps, frame-time graph, CPU, GPU and memory overlay over the game. "
+	             "Needs the mangohud package; the launcher only sets MANGOHUD=1 for the emulator.",
+	             nullptr, {}, 0, 0, "", "", false, false, "MANGOHUD", QVariant(false)});
+	defs.append({"splash", "--no-splash", Tab::Display, "Overlay and window", Kind::Bool,
+	             "Show the startup splash screen",
+	             "The emulator's own splash window while the game loads.",
+	             EMU_BOOL(splash_enabled), {}, 0, 0, "", "", false, true});
+
+	// ---- Shaders and stutter --------------------------------------------------------------------
+	defs.append({"async_pipelines", "--async-pipelines", Tab::Shaders, "Pipeline compilation",
+	             Kind::Choice, "Async pipelines:",
+	             "Where shader translation and Vulkan pipeline creation run.\n"
+	             "off: on the GPU thread, as stock Kyty (stutters while shaders compile).\n"
+	             "stall: on worker threads; the draw waits for its pipeline (no visual difference "
+	             "from off, shorter stalls, and the basis for look-ahead).\n"
+	             "skip: draws whose pipeline is not ready are skipped instead of waited for. This "
+	             "removes most stutter but can show transient glitches (objects missing for a few "
+	             "frames the first time they are seen).",
+	             [](const C& c) { return QVariant(AsyncText(c.async_pipelines)); },
+	             {"off", "stall", "skip"}});
+	defs.append({"pipeline_lookahead", "--pipeline-lookahead", Tab::Shaders, "Pipeline compilation",
+	             Kind::Bool, "Look-ahead (build pipelines from queued command buffers)",
+	             "Reads the submitted command buffers ahead of the GPU thread and starts building the "
+	             "shaders and pipelines they will need. Halved the GPU thread's wait on pipeline "
+	             "compiles in the measurements and removes most first-play stutter."
+	             "\n\nNeeds Async pipelines = stall or skip.",
+	             EMU_BOOL(pipeline_lookahead), {}, 0, 0, "", "", true});
+	defs.append({"pipeline_variants_replay", "--pipeline-variants-replay", Tab::Shaders,
+	             "Pipeline compilation", Kind::Bool, "Replay recorded shader variants",
+	             "Records the compute shader variants the game uses in _PipelineCache/<title>.variants "
+	             "and, in the next session, builds the stored ones as soon as the game registers the "
+	             "shader, seconds before its first dispatch. Helps from the second session on."
+	             "\n\nNeeds Async pipelines = stall or skip.",
+	             EMU_BOOL(pipeline_variants_replay), {}, 0, 0, "", "", true});
+	defs.append({"precompile_on_load", "--precompile-on-load", Tab::Shaders, "Pipeline compilation",
+	             Kind::Bool, "Precompile compute shaders when the game loads them (guess)",
+	             "Builds a compute shader's program and pipeline for its most likely variant when the "
+	             "game registers it. A guess: a wrong variant is wasted work. Experimental."
+	             "\n\nNeeds Async pipelines = stall or skip.",
+	             EMU_BOOL(precompile_on_load), {}, 0, 0, "", "", true});
+	defs.append({"pipelines_unoptimized_first", "--pipelines-unoptimized-first", Tab::Shaders,
+	             "Pipeline compilation", Kind::Bool, "Unoptimized pipelines first",
+	             "A pipeline no cache holds is created unoptimized so its draw does not wait, then "
+	             "rebuilt optimized in the background. Measured with no gain on NVIDIA; other GPUs "
+	             "need the KYTY_PIPELINE_FAST_BUILD=1 environment variable. Experimental."
+	             "\n\nNeeds Async pipelines = stall or skip.",
+	             EMU_BOOL(pipelines_unoptimized_first), {}, 0, 0, "", "", true});
+	defs.append({"pipeline_workers", "--pipeline-workers", Tab::Shaders, "Pipeline compilation",
+	             Kind::Int, "Compile worker threads:",
+	             "Worker threads for the async pipeline pool. Auto = the smaller of 8 and half the "
+	             "hardware threads."
+	             "\n\nNeeds Async pipelines = stall or skip.",
+	             EMU_INT(pipeline_workers), {}, 0, 64, "Auto", "", true});
+	defs.append({"spirv_robust_bounds", "--spirv-robust-bounds", Tab::Shaders, "Shader code",
+	             Kind::Bool, "Robust buffer bounds (shorter SPIR-V)",
+	             "Leaves storage-buffer loads to the GPU's robustBufferAccess2 instead of emitting a "
+	             "bounds check around each one: shorter SPIR-V and faster driver compiles. An "
+	             "out-of-bounds load reads zero either way; stores and atomics keep their checks. "
+	             "Ignored on a device without robustBufferAccess2.",
+	             EMU_BOOL(spirv_robust_bounds)});
+	defs.append({"skip_ir_validation", "--skip-ir-validation", Tab::Shaders, "Shader code",
+	             Kind::Bool, "Skip shader IR validation",
+	             "Skips the internal consistency checks of every shader translation (about a fifth of "
+	             "translate time; the output is identical). Saves about 0.6 s per run.",
+	             EMU_BOOL(skip_ir_validation)});
+
+	// ---- GPU thread -----------------------------------------------------------------------------
+	defs.append({"submit_coalesce", "--submit-coalesce", Tab::Gpu, "Submission", Kind::Bool,
+	             "Coalesce submits",
+	             "Holds back the Vulkan submit of end-of-pipe events and sends several at once: "
+	             "about 47 instead of 360 submits per frame, +5.8% fps in the measurements.",
+	             EMU_BOOL(submit_coalesce)});
+	defs.append({"submit_coalesce_max", "--submit-coalesce-max", Tab::Gpu, "Submission", Kind::Int,
+	             "Coalesce at most this many events:", "Events held back before a submit is forced.",
+	             EMU_INT(submit_coalesce_max), {}, 1, 256});
+	defs.append({"submit_coalesce_us", "--submit-coalesce-us", Tab::Gpu, "Submission", Kind::Int,
+	             "Coalesce age limit:",
+	             "Longest time an event is held back, in microseconds. Auto = one eighth of the "
+	             "vblank period.",
+	             EMU_INT(submit_coalesce_us), {}, 0, 20000, "Auto", " us"});
+	defs.append({"gc_clock", "--gc-clock", Tab::Gpu, "Submission", Kind::Choice,
+	             "Cache garbage-collector clock:",
+	             "What ages the texture and buffer caches: collector runs (one per guest submission, "
+	             "stock) or presented frames. Use frames together with Coalesce submits.",
+	             [](const C& c) { return QVariant(c.gc_clock_frames ? QStringLiteral("frames")
+	                                                                 : QStringLiteral("runs")); },
+	             {"runs", "frames"}});
+	defs.append({"elide_barriers", "--elide-barriers", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Bool, "Elide redundant barriers",
+	             "Leaves out a guest cache-flush barrier when nothing was recorded since the "
+	             "previous one in the same command buffer (about half of them in Astro Bot).",
+	             EMU_BOOL(elide_barriers)});
+	defs.append({"known_fills", "--known-fills", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
+	             "Remember GPU fills",
+	             "Remembers ranges last written by a uniform GPU fill so clear discovery needs no "
+	             "GPU to CPU readback for them.",
+	             EMU_BOOL(known_fills)});
+	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Bool, "Read clean guest memory without a drain",
+	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "
+	             "when none of the bytes is GPU-written, with no GPU drain.",
+	             EMU_BOOL(clean_guest_reads)});
+	defs.append({"bda_sync_skip", "--bda-sync-skip", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
+	             "Skip the buffer-address sync when nothing changed",
+	             "Skips the all-buffer synchronization before draws that address memory through raw "
+	             "pointers while no page changed since the last full pass. Under 1% in the "
+	             "measurements.",
+	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"readback_queue", "--readback-queue", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Bool, "Readbacks on a second queue",
+	             "GPU to guest buffer readbacks copy on a second queue and wait only for the work "
+	             "that wrote the data. No gain measured.",
+	             EMU_BOOL(readback_queue)});
+	defs.append({"gpu_indirect_draws", "--gpu-indirect-draws", Tab::Gpu, "Draw path", Kind::Bool,
+	             "GPU-built indirect draws",
+	             "Indirect draws whose argument block a GPU pass wrote are built on the GPU instead "
+	             "of being read on the CPU after a full drain (mesh-emulated draws too).",
+	             EMU_BOOL(gpu_indirect_draws)});
+	defs.append({"draw_key_cache", "--draw-key-cache", Tab::Gpu, "Draw path", Kind::Bool,
+	             "Draw key cache",
+	             "Remembers the graphics pipelines of the last few draws and finds them by comparing "
+	             "keys before hashing; also enables the SRT table walk below.",
+	             EMU_BOOL(draw_key_cache)});
+	defs.append({"srt_table_walk", "--srt-table-walk", Tab::Gpu, "Draw path", Kind::Bool,
+	             "SRT table walk",
+	             "Refreshes a shader's flattened SRT from a precomputed table instead of walking the "
+	             "value graph.",
+	             EMU_BOOL(srt_table_walk)});
+
+	// ---- VRAM and RAM ---------------------------------------------------------------------------
+	defs.append({"vram_paging", "--vram-paging", Tab::Memory, "VRAM", Kind::Bool,
+	             "VRAM paging (memory priority + pageable memory)",
+	             "Uses VK_EXT_memory_priority and VK_EXT_pageable_device_local_memory so the driver "
+	             "pages low-priority textures out instead of failing an allocation. A safety net "
+	             "for GPUs with little VRAM; a no-op without both extensions.",
+	             EMU_BOOL(vram_paging)});
+	defs.append({"gc_buffer_own_share", "--gc-buffer-own-share", Tab::Memory, "VRAM", Kind::Int,
+	             "Buffer GC share:",
+	             "The buffer garbage collector only goes aggressive (downloading dirty buffers, a "
+	             "GPU drain each) when the buffer cache itself holds this share of the critical "
+	             "budget. 0 = device usage alone decides. 25 suits cards whose problem is those "
+	             "drains and that run with VRAM paging off; with paging on it measured worse.",
+	             EMU_INT(gc_buffer_own_share_pct), {}, 0, 100, "Off", " %"});
+	defs.append({"gc_texture_trigger_mb", "--gc-texture-trigger-mb", Tab::Memory, "VRAM",
+	             Kind::Int, "Texture GC starts above:",
+	             "VRAM usage in MiB above which the texture GC starts. Auto = derived from the "
+	             "device's VRAM budget (never a fixed size).",
+	             EMU_INT(gc_texture_trigger_mb), {}, 0, 1048576, "Auto", " MiB"});
+	defs.append({"gc_texture_pressure_mb", "--gc-texture-pressure-mb", Tab::Memory, "VRAM",
+	             Kind::Int, "Texture GC evicts harder above:",
+	             "VRAM usage in MiB above which the texture GC evicts harder. Auto = derived.",
+	             EMU_INT(gc_texture_pressure_mb), {}, 0, 1048576, "Auto", " MiB"});
+	defs.append({"gc_texture_critical_mb", "--gc-texture-critical-mb", Tab::Memory, "VRAM",
+	             Kind::Int, "Texture GC aggressive above:",
+	             "VRAM usage in MiB above which the texture GC is aggressive. Auto = derived.",
+	             EMU_INT(gc_texture_critical_mb), {}, 0, 1048576, "Auto", " MiB"});
+	defs.append({"gc_buffer_trigger_mb", "--gc-buffer-trigger-mb", Tab::Memory, "VRAM", Kind::Int,
+	             "Buffer GC starts above:",
+	             "VRAM usage in MiB above which the buffer GC starts. Auto = derived.",
+	             EMU_INT(gc_buffer_trigger_mb), {}, 0, 1048576, "Auto", " MiB"});
+	defs.append({"gc_buffer_critical_mb", "--gc-buffer-critical-mb", Tab::Memory, "VRAM",
+	             Kind::Int, "Buffer GC aggressive above:",
+	             "VRAM usage in MiB above which the buffer GC is aggressive. Auto = derived.",
+	             EMU_INT(gc_buffer_critical_mb), {}, 0, 1048576, "Auto", " MiB"});
+	defs.append({"mem_release_punch", "--mem-release-punch", Tab::Memory, "Host RAM", Kind::Bool,
+	             "Return released guest memory to the host",
+	             "Gives guest memory the game released (and no view maps) back to the host with "
+	             "fallocate(PUNCH_HOLE). Whole host pages only. Off until a trace shows memory "
+	             "released but still resident.",
+	             EMU_BOOL(mem_release_punch)});
+	defs.append({"mem_stats", "--mem-stats", Tab::Memory, "Statistics", Kind::Bool,
+	             "Log guest memory statistics",
+	             "Logs guest memory release, unmap and decommit counters and how much released "
+	             "memory is still resident, every 5 s and on exit.",
+	             EMU_BOOL(mem_stats)});
+	defs.append({"vram_stats", "--vram-stats", Tab::Memory, "Statistics", Kind::Bool,
+	             "Log VRAM statistics",
+	             "Logs VRAM heap usage and its split every 5 s, and each pipeline compile time.",
+	             EMU_BOOL(vram_stats)});
+
+	// ---- Controller (global settings) -----------------------------------------------------------
+	defs.append({"pad_speaker", "--pad-speaker", Tab::Controller, "", Kind::Bool,
+	             "Route game audio to the DualSense speaker",
+	             "On: the game's controller-speaker audio plays on the DualSense. Off: it plays on "
+	             "the normal audio output.",
+	             EMU_BOOL(pad_speaker_enabled)});
+	defs.append({"pad_speaker_volume", "--pad-speaker-volume", Tab::Controller, "", Kind::Int,
+	             "Speaker hardware level:",
+	             "The DualSense speaker's own hardware level (the raw report volume). The default "
+	             "is quiet.",
+	             EMU_INT(pad_speaker_volume), {}, 0, 100, "", " %"});
+	defs.append({"pad_speaker_os_sink", "--pad-speaker-os-sink", Tab::Controller, "", Kind::Bool,
+	             "Show the DualSense speaker as an OS volume control",
+	             "Linux: exposes a Bluetooth DualSense speaker as a PipeWire/PulseAudio sink so the "
+	             "system volume control can adjust it.",
+	             EMU_BOOL(pad_speaker_os_sink)});
+
+	// ---- Debug ----------------------------------------------------------------------------------
+	defs.append({"gpu_phase_stats", "--gpu-phase-stats", Tab::Debug, "Diagnostics", Kind::Int,
+	             "Phase statistics interval:",
+	             "Every N seconds print where the GPU thread spends its time (phase shares, submits "
+	             "per frame, drains by cause) and write _gpu_phase.csv. Adds timers: never use it "
+	             "for an fps comparison.",
+	             EMU_INT(gpu_phase_stats_s), {}, 0, 3600, "Off", " s"});
+	defs.append({"submit_stats", "--submit-stats", Tab::Debug, "Diagnostics", Kind::Int,
+	             "Submit statistics interval:",
+	             "Every N seconds print frames, Vulkan submits per frame and the coalescing "
+	             "counters (no timers; safe next to fps measurements).",
+	             EMU_INT(submit_stats_s), {}, 0, 3600, "Off", " s"});
+	defs.append({"hang_watchdog", "--debug-hang-watchdog", Tab::Debug, "Diagnostics", Kind::Int,
+	             "Hang watchdog:",
+	             "When no frame was presented for this long, write a thread, worker pool and "
+	             "look-ahead report to stderr and _hang_watchdog.txt.",
+	             EMU_INT(hang_watchdog_seconds), {}, 0, 3600, "Off", " s"});
+	defs.append({"texture_gc", "--debug-texture-gc", Tab::Debug, "Diagnostics", Kind::Choice,
+	             "Texture garbage collector:",
+	             "true: normal. false: disable the texture GC (tells whether a rendering difference "
+	             "comes from an evicted GPU-only image). log: log every free of a GPU-written "
+	             "image with the flags that decided it.",
+	             [](const C& c) {
+		             return QVariant(c.texture_gc_log ? QStringLiteral("log")
+		                             : c.texture_gc_enabled ? QStringLiteral("true")
+		                                                    : QStringLiteral("false"));
+	             },
+	             {"true", "false", "log"}});
+	defs.append({"pipeline_cache_key", "--pipeline-cache-key", Tab::Debug, "Diagnostics",
+	             Kind::Choice, "Driver pipeline cache key:",
+	             "schema: the driver pipeline cache survives emulator builds (keyed on a schema "
+	             "version and the GPU and driver). revision: keyed on the git revision, so every "
+	             "commit drops it and dirty builds have none (stock).",
+	             [](const C& c) {
+		             return QVariant(c.pipeline_cache_key == Config::PipelineCacheKey::Revision
+		                                 ? QStringLiteral("revision")
+		                                 : QStringLiteral("schema"));
+	             },
+	             {"schema", "revision"}});
+	defs.append({"lookahead_verify", "--debug-lookahead-verify", Tab::Debug, "Diagnostics",
+	             Kind::Bool, "Verify look-ahead (slow)",
+	             "Recompiles every prefetched program before its first use and compares the "
+	             "SPIR-V; mismatches are logged.",
+	             EMU_BOOL(lookahead_verify), {}, 0, 0, "", "", true});
+	defs.append({"draw_key_verify", "--debug-draw-key-verify", Tab::Debug, "Diagnostics",
+	             Kind::Bool, "Verify the draw key cache (slow)",
+	             "With the draw key cache, also runs the full lookup on every memo hit and stops if "
+	             "the two disagree.",
+	             EMU_BOOL(draw_key_verify)});
+	defs.append({"vram_audit", "--vram-audit", Tab::Debug, "Diagnostics", Kind::Int,
+	             "VRAM audit after:",
+	             "Once, this many seconds after start, log the resident image mix and the "
+	             "content-duplicate textures.",
+	             EMU_INT(vram_audit_s), {}, 0, 3600, "Off", " s"});
+	defs.append({"vram_ballast", "--vram-ballast-mb", Tab::Debug, "Diagnostics", Kind::Int,
+	             "VRAM ballast:",
+	             "Holds this much device-local memory to simulate a smaller GPU (for testing "
+	             "VRAM paging).",
+	             EMU_INT(vram_ballast_mb), {}, 0, 1048576, "Off", " MiB"});
+
+	QList<Option> table;
+	for (const auto& d: defs) {
+		Option o;
+		o.id          = QString::fromLatin1(d.id);
+		o.flag        = QString::fromLatin1(d.flag);
+		o.tab         = d.tab;
+		o.section     = tr(d.section);
+		o.kind        = d.kind;
+		o.label       = tr(d.label);
+		o.tooltip     = tr(d.tooltip);
+		o.def         = d.emulator_default ? d.emulator_default(C {}) : d.launcher_default;
+		o.choices     = d.choices;
+		o.min         = d.min;
+		o.max         = d.max;
+		o.special     = tr(d.special);
+		o.suffix      = QString::fromUtf8(d.suffix);
+		o.needs_async = d.needs_async;
+		o.flag_if_off = d.flag_if_off;
+		o.env         = QString::fromLatin1(d.env);
+		table.append(o);
+	}
+	return table;
+}
+
+} // namespace
+
+const QList<Option>& All() {
+	static const QList<Option> table = BuildTable();
+	return table;
+}
+
+const Option* Find(const QString& id) {
+	for (const auto& option: All()) {
+		if (option.id == id) {
+			return &option;
+		}
+	}
+	return nullptr;
+}
+
+QVariant Parse(const Option& option, const QVariant& raw, bool* ok) {
+	if (ok != nullptr) {
+		*ok = true;
+	}
+	const auto fail = [&]() {
+		if (ok != nullptr) {
+			*ok = false;
+		}
+		return option.def;
+	};
+	if (!raw.isValid()) {
+		return option.def;
+	}
+	switch (option.kind) {
+		case Kind::Bool: {
+			if (raw.typeId() == QMetaType::Bool) {
+				return raw;
+			}
+			const auto text = raw.toString().trimmed().toLower();
+			if (text == QLatin1String("true") || text == QLatin1String("1") ||
+			    text == QLatin1String("on")) {
+				return QVariant(true);
+			}
+			if (text == QLatin1String("false") || text == QLatin1String("0") ||
+			    text == QLatin1String("off")) {
+				return QVariant(false);
+			}
+			return fail();
+		}
+		case Kind::Choice: {
+			const auto text = raw.toString().trimmed().toLower();
+			return option.choices.contains(text) ? QVariant(text) : fail();
+		}
+		case Kind::Int: {
+			bool      converted = false;
+			const int value     = raw.toString().trimmed().toInt(&converted);
+			return converted && value >= option.min && value <= option.max ? QVariant(value)
+			                                                                : fail();
+		}
+	}
+	return fail();
+}
+
+QVariant Value(const QVariantMap& values, const Option& option) {
+	const auto it = values.constFind(option.id);
+	return it == values.constEnd() ? option.def : Parse(option, it.value());
+}
+
+QString ToText(const Option& option, const QVariant& value) {
+	switch (option.kind) {
+		case Kind::Bool: return value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+		case Kind::Choice: return value.toString();
+		case Kind::Int: return QString::number(value.toInt());
+	}
+	return {};
+}
+
+QStringList Args(const QVariantMap& values, bool controller) {
+	QStringList args;
+	for (const auto& option: All()) {
+		if (option.flag.isEmpty() || (option.tab == Tab::Controller) != controller) {
+			continue;
+		}
+		const auto value = Value(values, option);
+		switch (option.kind) {
+			case Kind::Bool:
+				if (option.flag_if_off) {
+					if (!value.toBool()) {
+						args << option.flag;
+					}
+				} else {
+					args << option.flag << ToText(option, value);
+				}
+				break;
+			case Kind::Choice: args << option.flag << ToText(option, value); break;
+			case Kind::Int:
+				if (value.toInt() != option.def.toInt()) {
+					args << option.flag << ToText(option, value);
+				}
+				break;
+		}
+	}
+	return args;
+}
+
+QStringList Environment(const QVariantMap& values) {
+	QStringList env;
+	for (const auto& option: All()) {
+		if (!option.env.isEmpty() && Value(values, option).toBool()) {
+			env << option.env + QStringLiteral("=1");
+		}
+	}
+	return env;
+}
+
+QVariantMap Recommended() {
+	// bench/config-play-next.json: async pipelines + look-ahead, submit coalescing with the frame
+	// GC clock, the three drain cuts, memory statistics and a hang watchdog. Everything else of
+	// that config is a classic setting (see Configuration::ApplyRecommendedForPlay).
+	QVariantMap values;
+	values.insert(QStringLiteral("async_pipelines"), QStringLiteral("stall"));
+	values.insert(QStringLiteral("pipeline_lookahead"), true);
+	values.insert(QStringLiteral("submit_coalesce"), true);
+	values.insert(QStringLiteral("gc_clock"), QStringLiteral("frames"));
+	values.insert(QStringLiteral("elide_barriers"), true);
+	values.insert(QStringLiteral("known_fills"), true);
+	values.insert(QStringLiteral("clean_guest_reads"), true);
+	values.insert(QStringLiteral("mem_stats"), true);
+	values.insert(QStringLiteral("hang_watchdog"), 15);
+	values.insert(QStringLiteral("splash"), false);
+	return values;
+}
+
+} // namespace EmulatorOptions
