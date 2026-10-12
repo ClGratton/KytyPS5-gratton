@@ -424,7 +424,8 @@ private:
 	void InitializeVariants();
 	// Worker side of a load job: queues the pipeline build for a program it just published.
 	void SubmitLoadedComputePipeline(const ShaderProgram& program, ShaderComputeInputInfo info,
-	                                 const ShaderRecompiler::IR::CompiledShaderInfo* compiled);
+	                                 const ShaderRecompiler::IR::CompiledShaderInfo* compiled,
+	                                 uint32_t priority);
 	std::function<std::string()> m_lookahead_thread_summary;
 	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
 	// (or starts) while the pool and the registries are torn down.

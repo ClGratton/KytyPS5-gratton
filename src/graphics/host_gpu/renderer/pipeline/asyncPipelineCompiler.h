@@ -113,6 +113,7 @@ private:
 	std::atomic<bool>         m_claimed {false};
 	std::atomic<bool>         m_submitted {false}; // Submit() accepted it (debug only)
 	bool                      m_low = false;       // SubmitLowPriority() job
+	uint32_t                  m_priority = 0;      // low-queue order (ascending)
 	bool                      m_idle_only = false; // low job that runs only while no normal job runs
 	int64_t                   m_created_ns = 0;
 	int64_t                   m_submit_ns = 0;
@@ -240,7 +241,9 @@ public:
 	// `idle_only` jobs (the load-time precompile) additionally start only while no normal job is
 	// running or queued, so they cannot slow the compile a draw is waiting for (the driver's
 	// compile throughput is shared: eight concurrent compiles double each one's time).
-	bool SubmitLowPriority(std::shared_ptr<AsyncJob> job, bool idle_only = false);
+	// Background jobs run in ascending `priority` (FIFO among equals): the load-time precompile
+	// passes the time its variant was first needed in the previous session.
+	bool SubmitLowPriority(std::shared_ptr<AsyncJob> job, bool idle_only = false, uint32_t priority = 0);
 	[[nodiscard]] uint32_t LowPriorityLimit() const { return m_low_limit; }
 
 	// Stops accepting jobs, cancels the queued ones (Cancel() + Wait() returns false), lets the

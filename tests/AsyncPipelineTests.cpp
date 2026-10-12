@@ -679,6 +679,33 @@ void TestIdleOnlyLowPriorityJobs() {
 		      return true;
 	      }),
 	      "idle-only jobs ran once the pool was idle");
+	// Background jobs run in ascending priority, FIFO among equals.
+	{
+		AsyncPipelineCompiler ordered(Config::AsyncPipelineMode::Stall, 1);
+		std::atomic<bool> gate_open {false};
+		std::atomic<int>  gate_running {0};
+		auto gate = std::make_shared<TestJob>(nullptr, 830, [&] {
+			gate_running.fetch_add(1);
+			Check(WaitUntil([&] { return gate_open.load(); }), "gate");
+		});
+		Check(ordered.Submit(gate), "submit gate");
+		Check(WaitUntil([&] { return gate_running.load() == 1; }), "gate running");
+		std::mutex       mutex;
+		std::vector<int> order;
+		const std::pair<int, uint32_t> specs[] = {{1, 50}, {2, 10}, {3, 50}, {4, 0xffffffffu}, {5, 10}};
+		std::vector<std::shared_ptr<TestJob>> jobs;
+		for (const auto& [id, priority]: specs) {
+			jobs.push_back(std::make_shared<TestJob>(nullptr, 840 + id, [&, id = id] {
+				std::lock_guard lock(mutex);
+				order.push_back(id);
+			}));
+			Check(ordered.SubmitLowPriority(jobs.back(), true, priority), "submit with priority");
+		}
+		gate_open.store(true);
+		Check(WaitUntil([&] { return jobs.back()->IsFinished() && jobs[3]->IsFinished(); }), "ordered jobs");
+		std::lock_guard lock(mutex);
+		Check((order == std::vector<int> {2, 5, 1, 3, 4}), "background jobs ran in priority order");
+	}
 	// A normal job submitted while idle-only jobs are queued runs at once and holds them back.
 	std::atomic<bool> hold {false};
 	auto again = std::make_shared<TestJob>(nullptr, 820, [&] {

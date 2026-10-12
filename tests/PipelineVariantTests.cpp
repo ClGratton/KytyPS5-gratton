@@ -39,6 +39,7 @@ ComputeVariant MakeVariant(uint64_t hash, uint32_t size, uint32_t lds, uint32_t 
 	v.state.threads_num[1]     = 8;
 	v.state.threads_num[2]     = 1;
 	v.state.flags              = 0x9;
+	v.first_use_ms             = 1234;
 	v.spec.buffers.push_back({.packed_stride = stride, .zero_stride_oob = stride == 0 ? 1u : 0u});
 	v.spec.buffers.push_back({.packed_stride = 16, .descriptor_format = 5, .descriptor_swizzle = 0x4567,
 	                          .indirect_root = 1, .indirect_mapping_offset = 3,
@@ -62,11 +63,18 @@ void TestEncodeRoundTrip() {
 	const auto bytes   = Encode(variant);
 	ComputeVariant decoded;
 	Check(Decode(bytes, decoded), "decode of an encoded variant");
-	Check(decoded == variant, "round trip keeps every field");
-	// Any truncation or extra byte is rejected.
+	Check(decoded == variant && decoded.first_use_ms == variant.first_use_ms,
+	      "round trip keeps every field");
+	// Any truncation or extra byte is rejected; only the payload without the optional trailing
+	// first-use field (a file written before it existed) is accepted, as "unknown".
 	for (size_t cut = 0; cut < bytes.size(); cut++) {
 		ComputeVariant partial;
-		Check(!Decode(std::span<const uint8_t>(bytes).first(cut), partial), "truncated payload rejected");
+		const bool ok = Decode(std::span<const uint8_t>(bytes).first(cut), partial);
+		Check(ok == (cut == bytes.size() - 4), "truncated payload rejected");
+		if (ok) {
+			Check(partial == variant && partial.first_use_ms == ComputeVariant::kUnknownFirstUse,
+			      "old-format payload reads with unknown first use");
+		}
 	}
 	auto longer = bytes;
 	longer.push_back(0);
@@ -91,7 +99,9 @@ void TestStoreFileRoundTrip(const std::filesystem::path& dir) {
 		Check(store.Add(MakeVariant(1, 100, 0, 0)), "first variant is new");
 		Check(store.Add(MakeVariant(1, 100, 512, 0)), "same binary, other LDS, is new");
 		Check(store.Add(MakeVariant(2, 100, 0, 16)), "other binary is new");
-		Check(!store.Add(MakeVariant(1, 100, 0, 0)), "an equal variant is a duplicate");
+		auto later = MakeVariant(1, 100, 0, 0);
+		later.first_use_ms = 99999;
+		Check(!store.Add(later), "an equal variant is a duplicate whatever its first use");
 		Check(store.Size() == 3, "three distinct variants");
 	}
 	VariantStore again;

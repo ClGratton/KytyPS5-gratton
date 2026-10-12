@@ -805,6 +805,7 @@ struct PipelineCache::ProgramCache {
 		std::vector<uint32_t> code;                     // copy of the binary
 		uint32_t              user_data_count = 0;
 		int64_t               register_ns     = 0;
+		uint32_t              priority        = 0;      // background queue order (first use last time)
 		bool                  guess           = true;   // false: `explicit_spec` is a stored variant
 		std::optional<ShaderRecompiler::IR::ResourceSpecialization> explicit_spec;
 
@@ -884,6 +885,7 @@ struct PipelineCache::ProgramCache {
 	Variants::VariantStore*   variants = nullptr;
 	LoadCounters*             load     = nullptr;
 	bool                      track_use = false;
+	int64_t                   clock_start_ns = 0; // first_use_ms of recorded variants counts from here
 
 	// First use of a compute permutation by a dispatch (GPU thread): records the variant for the
 	// next session and accounts a hit of the load-time build. The hot path is one relaxed
@@ -911,6 +913,8 @@ struct PipelineCache::ProgramCache {
 		variant.code_size_dwords = static_cast<uint32_t>(params.code.size());
 		variant.state            = ToVariantStatic(input_info, params.user_data_count);
 		variant.spec             = ToVariantSpec(permutation.specialization);
+		variant.first_use_ms     = static_cast<uint32_t>(std::min<int64_t>(
+		    (Bench::NowNs() - clock_start_ns) / 1000000, 0xfffffffeLL));
 		const bool added = variants != nullptr && variants->Add(variant);
 		if (added && load != nullptr) load->recorded.fetch_add(1, std::memory_order_relaxed);
 		if (timing) {
@@ -1481,6 +1485,7 @@ std::string PipelineCache::LoadCounters::Summary() const {
 // on, answers NoteShaderRegistered(). It holds keys only: no code, no SPIR-V.
 void PipelineCache::InitializeVariants() {
 	m_program_cache->load = &m_load;
+	m_program_cache->clock_start_ns = Bench::NowNs();
 	if (!Config::GetPipelineVariantsReplay() && !Config::GetPrecompileOnLoad()) {
 		return;
 	}
@@ -2231,7 +2236,7 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 		                         published->handle.id, dup ? 1 : 0, guess ? 1 : 0, frontend_ns,
 		                         backend_ns, module_ns, register_ns, code.size()));
 	}
-	owner.SubmitLoadedComputePipeline(published->handle, info, &published->program);
+	owner.SubmitLoadedComputePipeline(published->handle, info, &published->program, priority);
 	// Publish first, unregister last: a dispatch that no longer finds the job finds the program.
 	Unregister();
 }
@@ -2239,7 +2244,8 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 // Worker: queues the pipeline of a program a load job published, on the low-priority queue.
 void PipelineCache::SubmitLoadedComputePipeline(const ShaderProgram& program,
                                                 ShaderComputeInputInfo info,
-                                                const ShaderRecompiler::IR::CompiledShaderInfo* compiled) {
+                                                const ShaderRecompiler::IR::CompiledShaderInfo* compiled,
+                                                uint32_t priority) {
 	auto* pool = AsyncPool();
 	if (pool == nullptr) {
 		return;
@@ -2260,7 +2266,7 @@ void PipelineCache::SubmitLoadedComputePipeline(const ShaderProgram& program,
 	if (!inserted) {
 		return;
 	}
-	if (!pool->SubmitLowPriority(fresh, true)) {
+	if (!pool->SubmitLowPriority(fresh, true, priority)) {
 		m_compute_jobs.Erase(program.id);
 		return;
 	}
@@ -2306,7 +2312,8 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 
 	const uint32_t host_subgroup = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto submit = [&](ShaderComputeInputInfo info, uint32_t user_data_count,
-	                        std::optional<ShaderRecompiler::IR::ResourceSpecialization> spec) {
+	                        std::optional<ShaderRecompiler::IR::ResourceSpecialization> spec,
+	                        uint32_t priority) {
 		info.host_subgroup_size = host_subgroup;
 		ProgramCache::ProgramKey key;
 		key.stage           = ShaderType::Compute;
@@ -2320,13 +2327,14 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 		job->code            = code;
 		job->user_data_count = user_data_count;
 		job->register_ns     = register_ns;
+		job->priority        = priority;
 		job->guess           = !spec.has_value();
 		job->explicit_spec   = std::move(spec);
 		if (!m_program_cache->AddLoad(job)) {
 			return;
 		}
 		(job->guess ? m_load.jobs_guess : m_load.jobs_stored).fetch_add(1, std::memory_order_relaxed);
-		if (!pool->SubmitLowPriority(job, true)) {
+		if (!pool->SubmitLowPriority(job, true, priority)) {
 			m_program_cache->RemoveLoad(job.get());
 		}
 	};
@@ -2337,7 +2345,7 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 		for (const auto& variant: stored) {
 			ShaderComputeInputInfo info {};
 			ApplyVariantStatic(variant.state, info);
-			submit(info, variant.state.user_data_count, FromVariantSpec(variant.spec));
+			submit(info, variant.state.user_data_count, FromVariantSpec(variant.spec), variant.first_use_ms);
 		}
 		if (!stored.empty()) {
 			return;
@@ -2359,7 +2367,7 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 		m_load.skipped_registers.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
-	submit(info, params.user_data_count, std::nullopt);
+	submit(info, params.user_data_count, std::nullopt, Variants::ComputeVariant::kUnknownFirstUse);
 }
 
 bool PipelineCache::WaitLoadIdle(int timeout_ms) {

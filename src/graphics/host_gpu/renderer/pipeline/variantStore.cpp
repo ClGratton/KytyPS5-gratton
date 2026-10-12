@@ -98,6 +98,7 @@ std::vector<uint8_t> Encode(const ComputeVariant& variant) {
 			out.U32(value);
 		}
 	}
+	out.U32(variant.first_use_ms);
 	return out.Take();
 }
 
@@ -133,7 +134,10 @@ bool Decode(std::span<const uint8_t> payload, ComputeVariant& variant) {
 			if (!in.U32(*field)) return false;
 		}
 	}
-	if (!in.AtEnd()) return false;
+	// Optional trailing field (files written before it existed end here).
+	if (!in.AtEnd()) {
+		if (!in.U32(result.first_use_ms) || !in.AtEnd()) return false;
+	}
 	variant = std::move(result);
 	return true;
 }

@@ -148,7 +148,8 @@ bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job, bool urgent) {
 	return true;
 }
 
-bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job, bool idle_only) {
+bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job, bool idle_only,
+                                              uint32_t priority) {
 	{
 		std::unique_lock lock(m_mutex);
 		if (m_stopping.load(std::memory_order_relaxed)) {
@@ -162,7 +163,13 @@ bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job, boo
 		job->m_low       = true;
 		job->m_idle_only = idle_only;
 		job->m_submitted.store(true, std::memory_order_relaxed);
-		m_low_queue.push_back(std::move(job));
+		job->m_priority  = priority;
+		// Stable insert: after every job whose priority is not greater.
+		auto position = std::upper_bound(m_low_queue.begin(), m_low_queue.end(), priority,
+		                                 [](uint32_t value, const std::shared_ptr<AsyncJob>& other) {
+			                                 return value < other->m_priority;
+		                                 });
+		m_low_queue.insert(position, std::move(job));
 		m_stats.low_submitted.fetch_add(1, std::memory_order_relaxed);
 	}
 	m_signal.notify_one();

@@ -17,7 +17,7 @@
 // File format (little endian):
 //   "KYTYVAR1" | u32 schema | records...
 //   record = u32 payload_size | payload | u32 fnv1a32(payload)
-//   payload = u8 kind (1 = compute) | fields (see Encode)
+//   payload = u8 kind (1 = compute) | fields (see Encode) | optional u32 first_use_ms
 // A record that fails its checksum, has an unknown kind, or is cut short (a crash while appending)
 // ends the readable part of the file; Load() reports how many bytes were good and OpenAppend()
 // truncates the rest, so appends never land behind garbage.
@@ -88,11 +88,20 @@ struct ComputeStatic {
 };
 
 struct ComputeVariant {
+	// `first_use_ms` is when the first dispatch used the variant, in ms since the pipeline cache
+	// was created: the replay builds the earliest-needed variants first. It is not part of the
+	// variant's identity (equality, de-duplication) and old files without it read as "unknown".
+	static constexpr uint32_t kUnknownFirstUse = 0xffffffffu;
+
 	uint64_t       code_hash        = 0;
 	uint32_t       code_size_dwords = 0;
 	ComputeStatic  state;
 	SpecRecord     spec;
-	bool           operator==(const ComputeVariant&) const = default;
+	uint32_t       first_use_ms     = kUnknownFirstUse;
+	bool           operator==(const ComputeVariant& other) const {
+		return code_hash == other.code_hash && code_size_dwords == other.code_size_dwords &&
+		       state == other.state && spec == other.spec;
+	}
 
 	// Hash of the shader binary only: the lookup key of the store.
 	[[nodiscard]] static uint64_t BinaryKey(uint64_t code_hash, uint32_t code_size_dwords) {
