@@ -215,6 +215,8 @@ void WriteProgram(Writer& out, const ProgramVariant& p) {
 	WriteSpec(out, p.spec);
 	WriteBytes(out, p.input);
 	out.U32(p.input_layout);
+	out.U64(p.back_hash);
+	out.U32(p.back_size_dwords);
 }
 
 bool ReadProgram(Reader& in, ProgramVariant& p) {
@@ -228,7 +230,8 @@ bool ReadProgram(Reader& in, ProgramVariant& p) {
 	for (auto& word: p.static_state) {
 		if (!in.U32(word)) return false;
 	}
-	return ReadSpec(in, p.spec) && ReadBytes(in, p.input) && in.U32(p.input_layout);
+	return ReadSpec(in, p.spec) && ReadBytes(in, p.input) && in.U32(p.input_layout) &&
+	       in.U64(p.back_hash) && in.U32(p.back_size_dwords);
 }
 
 } // namespace

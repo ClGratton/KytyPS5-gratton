@@ -35,7 +35,7 @@ namespace Libs::Graphics::Variants {
 
 // Bump when the meaning of a stored field changes. A file with another schema is ignored (and
 // replaced by the next append): variants are only an accelerator, never needed for correctness.
-inline constexpr uint32_t kSchema = 1;
+inline constexpr uint32_t kSchema = 2;
 // Upper bound on the buffers or images of one stored specialization (a corrupt record cannot ask for
 // a huge allocation).
 inline constexpr uint32_t kMaxResources = 256;
@@ -125,9 +125,14 @@ struct ProgramVariant {
 	SpecRecord            spec;
 	std::vector<uint8_t>  input;
 	uint32_t              input_layout = 0;
+	// A separately compiled back half (an NGG vertex shader with its GS back): hash and size of
+	// its binary, 0 when the stage has none. The replay needs that binary registered as well.
+	uint64_t              back_hash        = 0;
+	uint32_t              back_size_dwords = 0;
 
 	bool operator==(const ProgramVariant& other) const {
-		return stage == other.stage && code_hash == other.code_hash &&
+		return stage == other.stage && code_hash == other.code_hash && back_hash == other.back_hash &&
+		       back_size_dwords == other.back_size_dwords &&
 		       code_size_dwords == other.code_size_dwords && user_data_count == other.user_data_count &&
 		       push_data_cursor == other.push_data_cursor && static_state == other.static_state &&
 		       spec == other.spec;

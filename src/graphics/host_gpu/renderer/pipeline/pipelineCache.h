@@ -308,6 +308,7 @@ public:
 		std::atomic<uint64_t> gfx_jobs {0};            // graphics load jobs started
 		std::atomic<uint64_t> gfx_pipelines {0};       // graphics pipeline jobs queued by them
 		std::atomic<uint64_t> gfx_skipped {0};         // undecodable, stale, known or not rebuildable
+		std::atomic<uint64_t> gfx_unrecorded {0};      // pipelines the first draw could not record
 		std::atomic<uint64_t> gfx_hit_ready {0};       // first draw found the pipeline finished
 		std::atomic<uint64_t> gfx_hit_inflight {0};    // first draw waited for it
 		std::atomic<uint64_t> lead_n {0};              // register-to-first-use lead of the hits
@@ -440,6 +441,7 @@ private:
 		Variants::GraphicsVariant                    variant;
 		std::shared_ptr<const std::vector<uint32_t>> vs_code;
 		std::shared_ptr<const std::vector<uint32_t>> ps_code;
+		std::shared_ptr<const std::vector<uint32_t>> vs_back_code;
 		bool                                         submitted = false;
 	};
 	std::mutex                                       m_gfx_mutex;
