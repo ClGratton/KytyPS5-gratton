@@ -656,7 +656,7 @@ void BufferCache::RunGarbageCollector() {
 	m_gc_stats.runs++;
 	m_gc_stats.aggressive += aggressive ? 1 : 0;
 	if (m_gc_stats.runs % 1024 == 0) {
-		// Cumulative; the difference between two lines is a window. One line per 4096 runs that
+		// Cumulative; the difference between two lines is a window. One line per 1024 runs that
 		// were past the trigger, so it only appears under memory pressure.
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "BufferGC: runs={} aggressive={} freed_clean={} downloaded_dirty={} drains={} "
