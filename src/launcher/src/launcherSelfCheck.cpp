@@ -412,6 +412,7 @@ int RunConfigure(const QStringList& args) {
 		info.controller.WriteSettings(&s);
 		s.endGroup();
 	}
+	RemoveObsoleteSettings(s);
 	s.sync();
 	QTextStream(stdout) << "settings written to " << s.fileName() << "\n";
 	return s.status() == QSettings::NoError ? 0 : 1;

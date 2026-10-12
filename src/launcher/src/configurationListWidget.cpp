@@ -433,6 +433,7 @@ void ConfigurationListWidget::ReadSettings() {
 
 	m_settings_file = s->fileName();
 
+	RemoveObsoleteSettings(*s);
 	MainDialog::ReadSettings(*s);
 	ConfigurationEditDialog::ReadSettings(*s);
 

@@ -177,3 +177,24 @@ bool Configuration::SetGameSettings(const QJsonObject& settings, QString& error)
 
 	return true;
 }
+
+// Keys of settings the launcher no longer has. Settings files saved by earlier builds still hold
+// them (the emulator flag was saved per configuration and did nothing).
+void RemoveObsoleteSettings(QSettings& s) {
+	static const char* const obsolete_keys[] = {"shader_optimization_type"};
+	const auto remove_keys = [&s] {
+		for (const char* key: obsolete_keys) {
+			s.remove(QLatin1String(key));
+		}
+	};
+	s.beginGroup(QStringLiteral("GlobalConfiguration"));
+	remove_keys();
+	s.endGroup();
+	const int size = s.beginReadArray(QStringLiteral("GameConfigurations"));
+	for (int i = 0; i < size; i++) {
+		s.setArrayIndex(i);
+		remove_keys();
+	}
+	s.endArray();
+	s.sync();
+}

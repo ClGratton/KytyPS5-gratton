@@ -251,4 +251,8 @@ private:
 
 Q_DECLARE_METATYPE(Configuration*)
 
+// Removes the keys of settings the launcher no longer has, from the global and the per-game
+// configurations. Idempotent: only keys that are present are removed.
+void RemoveObsoleteSettings(QSettings& s);
+
 #endif /* LAUNCHER_INCLUDE_CONFIGURATION_H_ */
