@@ -173,6 +173,14 @@ struct ConfigOptions {
 	// fifth of translate time; the output is byte-identical). Debug builds always validate and
 	// KYTY_IR_VALIDATE forces it on. Default off (= validate, stock behaviour).
 	bool                   skip_ir_validation          = false;
+	// --spirv-robust-bounds: leave storage-buffer loads to robustBufferAccess2 instead of emitting
+	// an `if (index < OpArrayLength)` block around each one (shorter SPIR-V, less driver compile
+	// time; an out-of-bounds load reads zero either way). Stores and atomics keep their checks.
+	// Needs a device with robustBufferAccess2 and robustStorageBufferAccessSizeAlignment <= 4;
+	// otherwise the explicit checks stay.
+	// Default on since the measurement in docs/emitter-shape-notes.md; --spirv-robust-bounds false
+	// restores the explicit checks.
+	bool                   spirv_robust_bounds         = true;
 	// --pipelines-unoptimized-first: a pipeline no cache holds is created with
 	// VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT so its draw can proceed, and the optimized build
 	// replaces it from a background worker. Needs --async-pipelines stall|skip; NVIDIA only unless
@@ -296,6 +304,7 @@ bool GpuAssistedValidationEnabled();
 bool RenderDocEnabled();
 bool ReadbackLinearImagesEnabled();
 bool SyncRawImageBuffersEnabled();
+bool SpirvRobustBoundsRequested();
 bool TessellationEnabled();
 bool TrophyEnabled();
 bool PlayGoHackEnabled();

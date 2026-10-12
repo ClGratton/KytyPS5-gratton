@@ -215,6 +215,13 @@ static void PrintUsage() {
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
+	::printf("  --spirv-robust-bounds <true|false>   Leave storage-buffer loads to the device's\n"
+	         "                                       robustBufferAccess2 instead of emitting a bounds-check\n"
+	         "                                       block around each one (shorter SPIR-V, faster driver\n"
+	         "                                       compiles; an out-of-bounds load reads zero either way).\n"
+	         "                                       Stores, atomics and typed accesses keep their checks.\n"
+	         "                                       Needs robustBufferAccess2 and a storage access\n"
+	         "                                       alignment <= 4; otherwise ignored. Default: true.\n");
 	::printf("  --skip-ir-validation <true|false>    Skip the shader IR consistency checks in release\n"
 	         "                                       translations (cuts translate time; output is\n"
 	         "                                       identical). KYTY_IR_VALIDATE=1 forces them on.\n"
@@ -825,6 +832,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			options.config.submit_stats_s = static_cast<uint32_t>(seconds);
 		} else if (arg == "--pipelines-unoptimized-first") {
 			if (!ParseBool(value, options.config.pipelines_unoptimized_first)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--spirv-robust-bounds") {
+			if (!ParseBool(value, options.config.spirv_robust_bounds)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

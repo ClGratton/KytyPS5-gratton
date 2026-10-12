@@ -996,6 +996,12 @@ template <typename F> auto RetryWhilePending(F &&get) {
   return programs;
 }
 
+// KYTY_TEST_ROBUST_BOUNDS=1: --spirv-robust-bounds on a device created with robustBufferAccess2.
+bool RobustBoundsRequested() {
+  const char *value = std::getenv("KYTY_TEST_ROBUST_BOUNDS");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
 void EnsureConfigInitialized() {
   static bool config_initialized = false;
   if (!config_initialized) {
@@ -1014,6 +1020,7 @@ void EnsureConfigInitialized() {
       options.async_pipelines = Config::AsyncPipelineMode::Stall;
       options.pipeline_workers = 4;
     }
+    options.spirv_robust_bounds = RobustBoundsRequested();
     if (const char *async_mode = std::getenv("KYTY_TEST_ASYNC_PIPELINES")) {
       if (std::strcmp(async_mode, "stall") == 0) {
         options.async_pipelines = Config::AsyncPipelineMode::Stall;
@@ -1660,6 +1667,14 @@ void CheckSpirvText(const TestCase &test, const std::vector<u32> &spirv) {
   }
 }
 
+// KYTY_TEST_ROBUST_BOUNDS=1: the whole suite runs with --spirv-robust-bounds on a device created
+// with robustBufferAccess2 (VulkanHarness sets the policy once the device exists), so every
+// out-of-bounds case below also checks that the device returns zero / drops the store.
+ShaderRecompiler::RobustBufferPolicy &TestRobustBufferPolicy() {
+  static ShaderRecompiler::RobustBufferPolicy policy;
+  return policy;
+}
+
 CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   auto user_data =
       MakeNativeUserData(test.has_user_data ? &test.user_data : nullptr);
@@ -1680,6 +1695,7 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   ShaderRecompiler::CompileOptions options;
   options.stage = ShaderType::Compute;
   options.dump_ir = true;
+  options.robust_buffers = TestRobustBufferPolicy();
   auto compute_info = test.compute_info;
   compute_info.host_subgroup_size = host_subgroup_size;
   options.input_info.compute = &compute_info;
@@ -1857,6 +1873,7 @@ CompiledShader CompileFragmentCase(const GraphicsCase &test) {
   ShaderRecompiler::CompileOptions options;
   options.stage = ShaderType::Pixel;
   options.dump_ir = false;
+  options.robust_buffers = TestRobustBufferPolicy();
   options.input_info.pixel = &pixel_info;
   options.user_data = user_data;
 
@@ -18736,6 +18753,8 @@ private:
     m_runtime_context.calibrated_timestamps_enabled = m_timestamps_supported;
     m_runtime_context.attachment_feedback_loop_enabled = m_rasterization_supported;
     m_runtime_context.provoking_vertex_last_enabled = m_rasterization_supported;
+    m_runtime_context.robust_buffer_access2_enabled = m_robust_buffer_access2;
+    m_runtime_context.robust_storage_buffer_alignment = m_robust_storage_alignment;
     const vk::PhysicalDeviceImageFormatInfo2 block_texel_view_info{
         .format = vk::Format::eBc1RgbaUnormBlock,
         .type = vk::ImageType::e2D,
@@ -19038,6 +19057,37 @@ private:
       device_extensions.push_back(
           VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
       device_extensions.push_back(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+    }
+    // KYTY_TEST_ROBUST_BOUNDS=1: create the device like the emulator does (robustBufferAccess +
+    // robustBufferAccess2) and give the compiler the matching policy.
+    vk::PhysicalDeviceRobustness2FeaturesEXT robustness2{};
+    vk::PhysicalDeviceRobustness2PropertiesEXT robustness2_properties{};
+    if (RobustBoundsRequested()) {
+      vk::PhysicalDeviceRobustness2FeaturesEXT available_robustness2{};
+      vk::PhysicalDeviceFeatures2 robust_query{};
+      robust_query.pNext = &available_robustness2;
+      m_physical_device.getFeatures2(&robust_query);
+      Require("VulkanHarness", "dispatch",
+              available_robustness2.robustBufferAccess2 == true &&
+                  available_features.robustBufferAccess == true,
+              "KYTY_TEST_ROBUST_BOUNDS=1 needs robustBufferAccess2");
+      vk::PhysicalDeviceProperties2 robust_properties{};
+      robust_properties.pNext = &robustness2_properties;
+      m_physical_device.getProperties2(&robust_properties);
+      robustness2.robustBufferAccess2 = true;
+      robustness2.pNext = const_cast<void *>(device_info.pNext);
+      device_info.pNext = &robustness2;
+      device_features.robustBufferAccess = true;
+      device_extensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+      m_robust_buffer_access2 = true;
+      m_robust_storage_alignment =
+          static_cast<u32>(robustness2_properties.robustStorageBufferAccessSizeAlignment);
+      TestRobustBufferPolicy() = ShaderRecompiler::MakeRobustBufferPolicy(
+          true, true, m_robust_storage_alignment);
+      std::printf("[host]    RobustBounds              robustBufferAccess2 alignment=%u dword=%d "
+                  "subdword=%d\n",
+                  m_robust_storage_alignment, TestRobustBufferPolicy().dword_elements,
+                  TestRobustBufferPolicy().subdword_elements);
     }
     device_info.enabledExtensionCount =
         static_cast<uint32_t>(device_extensions.size());
@@ -19366,6 +19416,8 @@ private:
   Buffer m_bda_pagetable_buffer;
   Buffer m_fault_buffer;
   GraphicContext m_runtime_context{};
+  bool m_robust_buffer_access2 = false;
+  u32 m_robust_storage_alignment = 0;
   std::unique_ptr<RenderContext> m_renderer;
 };
 
@@ -29967,6 +30019,112 @@ TestCase BufferStoreDwordx4DropsOnlyOutOfBoundsTail() {
   return test;
 }
 
+// Accesses far outside the descriptor range, and just past its end: loads read zero, stores are
+// dropped (the canary dwords behind the range stay), in-range neighbours are unaffected. With
+// KYTY_TEST_ROBUST_BOUNDS=1 the device does this instead of an explicit check.
+TestCase BufferOutOfBoundsLoadsZeroStoresDropped() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 4096); // far outside the range and the backing buffer
+  AppendVMovU32(&code, 21, 16);   // first byte past the range
+  AppendVMovU32(&code, 22, 4);    // inside
+  AppendVMovU32(&code, 23, 20);
+  AppendBufferLoadOpcode(&code, 0x0c, 0, 20);
+  AppendBufferLoadOpcode(&code, 0x0c, 1, 21);
+  AppendBufferLoadOpcode(&code, 0x08, 2, 21); // buffer_load_ubyte
+  AppendBufferLoadOpcode(&code, 0x0c, 3, 22);
+  AppendVMovLiteral(&code, 5, 0xdeadbeefu);
+  AppendBufferStoreOpcode(&code, 0x1c, 5, 20);
+  AppendBufferStoreOpcode(&code, 0x1c, 5, 21);
+  AppendBufferStoreOpcode(&code, 0x18, 5, 23); // buffer_store_byte past the end
+  for (u32 i = 0; i < 4; i++) {
+    AppendStoreVgpr(&code, i, i);
+  }
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "BufferOutOfBoundsLoadsZeroStoresDropped";
+  test.code = std::move(code);
+  test.initial = {0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u,
+                  0xc0ffee01u, 0xc0ffee02u, 0xc0ffee03u, 0xc0ffee04u};
+  test.expected = {0u, 0u, 0u, 0x22222222u, 0xc0ffee01u, 0xc0ffee02u, 0xc0ffee03u, 0xc0ffee04u};
+  test.storage_buffer_range_bytes = 16;
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::BUFFER_LOAD_UBYTE, O::BUFFER_STORE_DWORD,
+                  O::BUFFER_STORE_BYTE, O::S_ENDPGM};
+  return test;
+}
+
+// A dword that starts inside an odd-sized range but ends past it is out of bounds as a whole with
+// the explicit `index < OpArrayLength` check (the array length is the whole dwords of the range).
+// Known limit of --spirv-robust-bounds: the driver rounds such a range up to whole dwords (NVIDIA
+// 610.57 reports robustStorageBufferAccessSizeAlignment 1 but reads and writes the full dword), so
+// the case only runs with the explicit checks.
+TestCase BufferDwordStraddlingRangeEnd() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 12); // bytes 12..15 of a 14-byte range
+  AppendBufferLoadOpcode(&code, 0x0c, 0, 20);
+  AppendVMovLiteral(&code, 5, 0xdeadbeefu);
+  AppendBufferStoreOpcode(&code, 0x1c, 5, 20);
+  AppendStoreVgpr(&code, 0, 0);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "BufferDwordStraddlingRangeEnd";
+  test.code = std::move(code);
+  test.initial = {0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u};
+  test.expected = {0u, 0x22222222u, 0x33333333u, 0x44444444u};
+  test.storage_buffer_range_bytes = 14;
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_LOAD_DWORD, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  return test;
+}
+
+// Diagnostic probe (not in ctest): 32 lanes store to dword (or byte) `lane` of a buffer whose
+// descriptor range is `range` bytes; the backing buffer is 40 dwords of a canary. With the explicit
+// checks it passes for every range; with KYTY_TEST_ROBUST_BOUNDS=1 it shows where the device stops
+// accepting stores (NVIDIA rounds a dword range up to whole dwords, bytes are exact), which is why
+// --spirv-robust-bounds leaves stores to the explicit check. Run: --robust-store-probe dword|byte RANGE
+TestCase RobustStoreRangeProbe(u32 range, bool bytes) {
+  using O = ShaderOpcode;
+  std::vector<u32> code;
+  AppendVMovLiteral(&code, 30, 0xa000u);
+  code.push_back(EncodeVop2(0x25, 30, Vgpr(0), 30));
+  if (bytes) {
+    code.push_back(EncodeVop1(0x01, 31, Vgpr(0)));
+    AppendBufferStoreOpcode(&code, 0x18, 30, 31);
+  } else {
+    code.push_back(EncodeVop2(0x1a, 31, InlineU32(2), 0));
+    AppendBufferStoreOpcode(&code, 0x1c, 30, 31);
+  }
+  AppendEnd(&code);
+  TestCase test;
+  test.name = bytes ? "RobustStoreRangeProbeByte" : "RobustStoreRangeProbeDword";
+  test.code = std::move(code);
+  test.initial.assign(40, 0x77777777u);
+  test.expected = test.initial;
+  if (bytes) {
+    for (u32 lane = 0; lane < 32; lane++) {
+      if (lane < range) {
+        const u32 shift = (lane & 3u) * 8u;
+        test.expected[lane / 4] = (test.expected[lane / 4] & ~(0xffu << shift)) | ((lane & 0xffu) << shift);
+      }
+    }
+  } else {
+    for (u32 lane = 0; lane < 32; lane++) {
+      if (lane < range / 4u) test.expected[lane] = 0xa000u + lane;
+    }
+  }
+  test.storage_buffer_range_bytes = range;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.threads_num[0] = 32;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.has_compute_info = true;
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_STORE_DWORD, O::BUFFER_STORE_BYTE, O::S_ENDPGM};
+  return test;
+}
+
 TestCase BufferLoadFormatXyzwRejectsPartialRecord() {
   using O = ShaderOpcode;
 
@@ -37854,6 +38012,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(BufferLoadDwordx3GpuSelectedDescriptors);
   AddCase(BufferLoadFormatXGpuSelectedDescriptors);
   AddCase(BufferStoreDwordx4DropsOnlyOutOfBoundsTail);
+  AddCase(BufferOutOfBoundsLoadsZeroStoresDropped);
+  if (!RobustBoundsRequested()) AddCase(BufferDwordStraddlingRangeEnd);
   AddCase(BufferLoadFormatXyzwRejectsPartialRecord);
   AddCase(BufferStoreFormatXyzwDropsPartialRecord);
   AddCase(BufferLoadFormatXRejectsPartialRecord);
@@ -43595,6 +43755,13 @@ int main(int argc, char **argv) {
 
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
+  if (argc == 4 && std::strcmp(argv[1], "--robust-store-probe") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, RobustStoreRangeProbe(static_cast<u32>(std::atoi(argv[3])),
+                                           std::strcmp(argv[2], "byte") == 0));
+    std::printf("probe %s range %s: as expected\n", argv[2], argv[3]);
+    return 0;
+  }
   CheckLeastRecentlyUsedCacheOrdering();
   if (argc == 2 && std::strcmp(argv[1], "--thread-dimensions-only") == 0) {
     VulkanHarness vulkan;

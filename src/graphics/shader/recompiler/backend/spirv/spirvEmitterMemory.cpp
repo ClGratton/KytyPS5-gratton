@@ -293,6 +293,10 @@ uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& 
 uint32_t LoadWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
                           const MemoryResourceAccess& resource) {
 	const auto index = DwordIndex(ctx, inst, mem);
+	// --spirv-robust-bounds: an out-of-bounds load reads zero on the device, no check block needed.
+	if (MemoryBoundsAreRobust(ctx.state, resource)) {
+		return LoadWordInBounds(ctx, resource, index);
+	}
 	return EmitValueOrZeroIfCondition(
 	    ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index),
 	    [&]() { return LoadWordInBounds(ctx, resource, index); });
@@ -300,7 +304,7 @@ uint32_t LoadWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR:
 
 uint32_t LoadWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
+		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem, true);
 		return LoadWordPrepared(ctx, inst, mem, resource);
 	});
 }
@@ -312,6 +316,9 @@ uint32_t LoadSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const 
 	const auto index = Binary(
 	    ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), address,
 	    ConstantU32(ctx.state, std::countr_zero(resource.element_bits / 8u)));
+	if (MemoryBoundsAreRobust(ctx.state, resource)) {
+		return LoadSubwordInBounds(ctx, resource, address, index, bits, sign_extend);
+	}
 	return EmitValueOrZeroIfCondition(
 	    ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index), [&]() {
 		    return LoadSubwordInBounds(ctx, resource, address, index, bits, sign_extend);
@@ -357,7 +364,7 @@ uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& 
 uint32_t LoadSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem, uint32_t bits,
                      bool sign_extend) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
+		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem, true);
 		return LoadSubwordPrepared(ctx, inst, mem, resource, bits, sign_extend);
 	});
 }
@@ -474,6 +481,7 @@ void StoreSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR:
 	const auto index = Binary(
 	    ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), address,
 	    ConstantU32(ctx.state, std::countr_zero(resource.element_bits / 8u)));
+	// Stores keep their explicit check, see LoadWordPrepared.
 	EmitIfCondition(
 	    ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index), [&]() {
 		    StoreSubwordInBounds(ctx, mem, resource, address, index, bits, data);
@@ -541,6 +549,9 @@ void StoreLocalFlat(ValueEmitContext& ctx, const IR::Inst& inst) {
 void StoreWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
                        const MemoryResourceAccess& resource, uint32_t data) {
 	const auto index = DwordIndex(ctx, inst, mem);
+	// Stores keep their explicit check (RobustBufferPolicy): the driver rounds a dword access up to
+	// whole dwords of an odd-sized range and a store without the guard hangs the GPU in a real
+	// shader (docs/emitter-shape-notes.md), where an over-read is harmless.
 	EmitIfCondition(ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index), [&]() {
 		StoreWordInBounds(ctx, resource, index, data);
 	});
@@ -711,7 +722,7 @@ uint32_t FormattedOutOfBoundsValue(ValueEmitContext& ctx, const IR::MemoryInfo& 
 
 uint32_t FormattedLoad(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
+		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem, true);
 		const auto info = Format::GetFormatInfo(BufferFormat(ctx, mem));
 		if (info.type == Format::ComponentType::Unknown) {
 			return LoadWordPrepared(ctx, inst, RebaseRawComponent(mem, 0u), resource);
@@ -1031,7 +1042,7 @@ uint32_t LoadBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compon
 		    if (mem.kind == IR::ResourceKind::IndirectBuffer) {
 			    return LoadIndirectBuffer(ctx, inst, components);
 		    }
-		    const auto resource = PrepareMemoryResourceAccess(state, mem);
+		    const auto resource = PrepareMemoryResourceAccess(state, mem, true);
 		    const auto info = Format::GetFormatInfo(
 		        mem.formatted ? BufferFormat(ctx, mem) : Prospero::BufferFormat::kInvalid);
 		    if (info.type != Format::ComponentType::Unknown) {
@@ -1365,11 +1376,21 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (mem.offset >= 4u) {
 		index = Binary(state, spv::OpIAdd, TypeU32(state), index, ConstantU32(state, mem.offset >> 2u));
 	}
-	const auto access    = PrepareMemoryResourceAccess(state, mem);
+	const auto access    = PrepareMemoryResourceAccess(state, mem, true);
 	// Scalar buffer addressing aligns the base and each offset independently.
 	const auto element = Binary(
 	    state, spv::OpIAdd, TypeU32(state), index,
 	    Binary(state, spv::OpShiftRightLogical, TypeU32(state), access.byte_offset, ConstantU32(state, 2)));
+	if (MemoryBoundsAreRobust(state, access)) {
+		// The scalar index is a 32-bit sum of dword offsets and can exceed 2^30, where the driver's
+		// byte offset (index * 4) wraps around into the buffer. 0x3fffffff * 4 + 4 is past any
+		// storage buffer range, so clamping keeps every huge index out of bounds. The vector paths
+		// cannot reach it: their dword index is a 32-bit byte address shifted right by 2.
+		const auto clamped = EmitUMin32(state, element, ConstantU32(state, 0x3fffffffu));
+		ctx.Define(inst, EmitNative<spv::OpLoad, IR::Type::U32>(
+		                     state, EmitMemoryElementPointer(state, access, clamped)));
+		return;
+	}
 	const auto condition = EmitMemoryElementInBounds(state, access, element);
 	ctx.Define(inst, EmitValueOrZeroIfCondition(state, condition, [&]() {
 		           return EmitNative<spv::OpLoad, IR::Type::U32>(

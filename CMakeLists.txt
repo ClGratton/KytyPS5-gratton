@@ -721,6 +721,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_skip_ir_validation_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --skip-ir-validation maybe)
 	set_tests_properties(emulator_skip_ir_validation_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_spirv_robust_bounds_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --spirv-robust-bounds true)
+	add_test(NAME emulator_spirv_robust_bounds_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --spirv-robust-bounds maybe)
+	set_tests_properties(emulator_spirv_robust_bounds_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME emulator_unoptimized_first_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --pipelines-unoptimized-first true)
 	add_test(NAME emulator_unoptimized_first_invalid
@@ -835,6 +840,17 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --unoptimized-first-only)
 	set_tests_properties(pipeline_unoptimized_first_promotion PROPERTIES
 		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
+	# --spirv-robust-bounds: the whole suite with storage-buffer bounds left to robustBufferAccess2
+	# (device created with it; plain loads and stores carry no explicit check), directly compiled
+	# and through the async worker pool.
+	add_test(NAME shader_recompiler_compute_robust_bounds
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_robust_bounds PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ROBUST_BOUNDS=1")
+	add_test(NAME shader_recompiler_compute_robust_bounds_async_stall
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_robust_bounds_async_stall PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ROBUST_BOUNDS=1;KYTY_TEST_ASYNC_PIPELINES=stall")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME guest_stack_exit

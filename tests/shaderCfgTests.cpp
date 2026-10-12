@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
@@ -9990,6 +9991,147 @@ void TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic() {
   }
 }
 
+// --async-pipelines skip: a draw whose shaders write memory later frames read is never skipped
+// (rule from BryanKAdams/KytyPS5@17da0ad52, B30). Buffer atomics alone, LDS and plain ALU may be.
+void TestDrawSkipSafety() {
+  using ShaderRecompiler::Decoder::CodeMayBeSkipped;
+  using ShaderRecompiler::Decoder::DrawSkipSafetyCache;
+  struct Case {
+    const char *name;
+    std::vector<uint32_t> code;
+    bool may_skip;
+  };
+  const uint32_t end = EncodeSopp(0x01);
+  const std::vector<Case> cases = {
+      {"only s_endpgm", {end}, true},
+      {"buffer load", {EncodeMubuf0(0x0c), EncodeMubuf1(0, 0, 1), end}, true},
+      {"buffer_store_dword", {EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(0, 0, 1), end}, false},
+      {"buffer_store_byte", {EncodeMubuf0(0x18, 0, false), EncodeMubuf1(0, 0, 1), end}, false},
+      {"buffer_store_dwordx4", {EncodeMubuf0(0x1e, 0, false), EncodeMubuf1(0, 0, 1), end}, false},
+      {"buffer_atomic_add (atomics alone may be skipped)",
+       {EncodeMubuf0(0x32, 0, true, true), EncodeMubuf1(0, 0, 1), end}, true},
+      {"tbuffer_store_format_x", {EncodeMtbuf0(4, 4, 7), EncodeMtbuf1(4, 0, 0, 1), end}, false},
+      {"image_store", {EncodeMimg0(0x08, 0xf), EncodeMimg1(4, 0, 0, 1), end}, false},
+      {"image_atomic_umax (captured)", {0xf05c0308u, 0x00000200u, end}, false},
+      {"flat_store_dword", {EncodeFlat0(0x1c, 0, 0), EncodeFlat1(0, 0x7d, 3, 0), end}, false},
+      {"ds_write_b32 (LDS)", {EncodeDs0(0x0d), EncodeDs1(0, 0, 1), end}, true},
+      {"ds_add_u32 on GDS", {EncodeDs0(0x00) | (1u << 17u), EncodeDs1(0, 0, 1), end}, false},
+  };
+  DrawSkipSafetyCache cache;
+  uint64_t hash = 0x1234u;
+  for (const auto &test : cases) {
+    hash++;
+    Check(CodeMayBeSkipped(test.code) == test.may_skip, test.name);
+    bool newly_unsafe = false;
+    Check(cache.MayBeSkipped(test.code, hash, {}, false, &newly_unsafe) == test.may_skip &&
+              newly_unsafe == !test.may_skip,
+          test.name);
+    newly_unsafe = true;
+    // The verdict is remembered per (hash, size): asked again, nothing is newly unsafe.
+    Check(cache.MayBeSkipped(test.code, hash, {}, false, &newly_unsafe) == test.may_skip, test.name);
+  }
+}
+
+// --spirv-robust-bounds: which storage-buffer accesses may be left to robustBufferAccess2. Only a
+// device with robustBufferAccess2 and a known access alignment qualifies; sub-dword elements need
+// byte-exact checking (alignment 1).
+void TestRobustBufferPolicy() {
+  using namespace ShaderRecompiler;
+  const auto policy = [](bool requested, bool robust2, uint32_t alignment) {
+    return MakeRobustBufferPolicy(requested, robust2, alignment);
+  };
+  Check(!policy(false, true, 1).Any(), "robust bounds active without the flag");
+  Check(!policy(true, false, 1).Any(), "robust bounds active without robustBufferAccess2");
+  Check(!policy(true, true, 0).Any(), "robust bounds active with an unknown alignment");
+  Check(policy(true, true, 1) == RobustBufferPolicy {true, true},
+        "alignment 1 must cover dword and sub-dword elements");
+  Check(policy(true, true, 4) == RobustBufferPolicy {true, false},
+        "alignment 4 must cover dword elements only");
+  Check(policy(true, true, 2) == RobustBufferPolicy {true, false},
+        "alignment 2 must cover dword elements only");
+  Check(!policy(true, true, 8).Any(), "alignment above 4 must keep the explicit checks");
+  Check(CompileOptions {}.robust_buffers == RobustBufferPolicy {},
+        "compile options must default to explicit bounds checks");
+}
+
+// --spirv-robust-bounds: plain storage-buffer loads and stores lose their `index < OpArrayLength`
+// block (robustBufferAccess2 returns zero / drops the store); atomics and typed accesses keep it.
+void TestRobustBufferBoundsEmission() {
+  constexpr uint32_t OpArrayLength = 68u;
+  constexpr uint32_t OpBranchConditional = 250u;
+  using ShaderRecompiler::RobustBufferPolicy;
+
+  struct Case {
+    const char *name;
+    std::vector<uint32_t> shader;
+    bool dword_elements; // which policy bit applies: 32-bit or sub-dword storage elements
+    uint32_t removed;    // bounds checks the policy removes: 1 for the load of a load+store pair,
+                         // 0 for stores and atomics (typed accesses are covered by the GPU suite)
+  };
+  // Every load is followed by a store of its result so that it is not dead code.
+  const std::vector<Case> cases = {
+      {"buffer_load_dword+store", {EncodeMubuf0(0x0c), EncodeMubuf1(0, 0, 1), EncodeMubuf0(0x1c, 0, false),
+                                   EncodeMubuf1(0, 12, 0), EncodeSopp(0x01)}, true, 1},
+      {"buffer_store_dword", {EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
+       true, 0},
+      {"buffer_load_ubyte+store_byte", {EncodeMubuf0(0x08), EncodeMubuf1(0, 0, 1),
+                                        EncodeMubuf0(0x18, 0, false), EncodeMubuf1(0, 12, 0),
+                                        EncodeSopp(0x01)}, false, 1},
+      {"buffer_load_ushort+store_short", {EncodeMubuf0(0x0a), EncodeMubuf1(0, 0, 1),
+                                          EncodeMubuf0(0x1a, 0, false), EncodeMubuf1(0, 12, 0),
+                                          EncodeSopp(0x01)}, false, 1},
+      {"buffer_store_byte", {EncodeMubuf0(0x18, 0, false), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
+       false, 0},
+      {"buffer_store_short", {EncodeMubuf0(0x1a, 0, false), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
+       false, 0},
+      {"buffer_atomic_add", {EncodeMubuf0(0x32, 0, true, true), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
+       true, 0},
+  };
+
+  const auto compile = [](const Case &test, RobustBufferPolicy policy) {
+    auto options = MakeCompileOptions(ShaderType::Compute);
+    options.robust_buffers = policy;
+    auto result = RecompileForTest(test.shader, options);
+    CheckSpirvBinaryValidates(result.spirv);
+    return std::move(result.spirv);
+  };
+  for (const auto &test : cases) {
+    const auto say = [&](const std::string &what) { return std::string(test.name) + ": " + what; };
+    const auto off = compile(test, {});
+    const auto off_array_length = SpirvInstructionOpcodeCount(off, OpArrayLength);
+    const auto off_branches = SpirvInstructionOpcodeCount(off, OpBranchConditional);
+    Check(off_array_length >= 1u && off_branches >= 2u,
+          say("the explicit bounds check is missing without --spirv-robust-bounds (array lengths " +
+              std::to_string(off_array_length) + ", branches " + std::to_string(off_branches) + ")").c_str());
+
+    // The policy bit of the other element size does not touch this access, bit for bit.
+    Check(compile(test, test.dword_elements ? RobustBufferPolicy {false, true}
+                                            : RobustBufferPolicy {true, false}) == off,
+          say("a policy for the other element size changed the SPIR-V").c_str());
+
+    const auto on = compile(test, test.dword_elements ? RobustBufferPolicy {true, false}
+                                                      : RobustBufferPolicy {false, true});
+    const auto on_array_length = SpirvInstructionOpcodeCount(on, OpArrayLength);
+    const auto on_branches = SpirvInstructionOpcodeCount(on, OpBranchConditional);
+    const auto counts = std::string(" (array lengths ") + std::to_string(off_array_length) + " -> " +
+                        std::to_string(on_array_length) + ", branches " + std::to_string(off_branches) +
+                        " -> " + std::to_string(on_branches) + ")";
+    Check(on_array_length == off_array_length - test.removed &&
+              on_branches == off_branches - test.removed,
+          say("the policy removed the wrong bounds checks" + counts).c_str());
+    if (test.removed != 0u) {
+      Check(on.size() < off.size(), say("the robust load did not shrink the shader").c_str());
+    }
+    const auto both = compile(test, {true, true});
+    Check(SpirvInstructionOpcodeCount(both, OpArrayLength) == off_array_length - test.removed,
+          say("both-element policy removed the wrong bounds checks").c_str());
+    if (test.removed == 0u) {
+      // Stores and atomics are bit for bit what the explicit mode emits.
+      Check(both == off && on == off, say("a store or atomic changed under --spirv-robust-bounds").c_str());
+    }
+  }
+}
+
 // --skip-ir-validation: release translations may skip the IR consistency checks. The output must not
 // change, a broken program must still be caught when validation is on, and debug builds (and
 // KYTY_IR_VALIDATE) always validate.
@@ -15672,6 +15814,9 @@ int main() {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  TestRobustBufferPolicy();
+  TestDrawSkipSafety();
+  TestRobustBufferBoundsEmission();
   TestRayTracingInstructions();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();
