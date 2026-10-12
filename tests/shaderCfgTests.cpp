@@ -13138,6 +13138,62 @@ void TestNewShaderRecompilerPerInvocationMasksWithoutMirrors() {
         "ballot");
 }
 
+// Fragment helper invocations (quad padding) are active in a host subgroup ballot, but the host
+// drops their stores and atomics. A guest wave-aggregated append (ballot popcount, first lane does
+// the atomic, rank = bits below) that counted them gave the atomic to a helper lane whenever it was
+// the lowest lane, so the counter did not advance and every lane of the subgroup got the same stale
+// base: duplicate list nodes, cycles in a per-pixel linked list, a compute loop that never ends
+// (NVRM Xid 109 at a level load). Pixel-shader ballots now exclude helpers. Ported from
+// Jean-Philippe's KytyPS5#761 (as carried by BryanKAdams/BryKytyPS5 5b0479adb).
+void TestPixelBallotExcludesHelperInvocations() {
+  const uint32_t shader[] = {
+      EncodeVopc(0xc1, 5 + 256, 8),    // v_cmp_lt_u32 vcc, v5, v8
+      EncodeSop2(0x0f, 2, 126, 106),   // s_and_b64 s[2:3], exec, vcc
+      EncodeSop1(0x0a, 4, 2),          // s_wqm_b64 s[4:5], s[2:3]
+      EncodeVop1(0x01, 0, 4),          // v_mov_b32 v0, s4
+      EncodeExp0(0x00, 0x1), EncodeExp1(0, 0, 0, 0),
+      EncodeSopp(0x01),
+  };
+  auto options = MakeCompileOptions(ShaderType::Pixel);
+  const auto pixel = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(pixel.spirv);
+  const auto pixel_source = DisassembleSpirvBinary(pixel.spirv);
+  Check(pixel_source.find("OpGroupNonUniformBallot") != std::string::npos,
+        "the pixel fixture has no subgroup ballot");
+  Check(pixel_source.find("BuiltIn HelperInvocation") != std::string::npos,
+        "a pixel shader with a ballot does not read gl_HelperInvocation");
+  Check(pixel_source.find("OpLoad %bool %gl_HelperInvocation") != std::string::npos,
+        "the ballot does not load gl_HelperInvocation");
+  Check(pixel_source.find("OpLogicalNot %bool") != std::string::npos,
+        "the ballot predicate does not exclude helper invocations");
+
+  // Only pixel shaders have helper invocations.
+  const uint32_t vertex_shader[] = {
+      EncodeVopc(0xc1, 5 + 256, 8),  // v_cmp_lt_u32 vcc, v5, v8
+      EncodeSop2(0x0f, 2, 126, 106), // s_and_b64 s[2:3], exec, vcc
+      EncodeSop1(0x0a, 4, 2),        // s_wqm_b64 s[4:5], s[2:3]
+      EncodeVop1(0x01, 0, 4),        // v_mov_b32 v0, s4
+      EncodeExp0(0x0c, 0xf), EncodeExp1(0, 1, 2, 3), // POS0
+      EncodeSopp(0x01),
+  };
+  auto vertex_options = MakeCompileOptions(ShaderType::Vertex);
+  const auto vertex = RecompileForTest(vertex_shader, vertex_options);
+  CheckSpirvBinaryValidates(vertex.spirv);
+  Check(DisassembleSpirvBinary(vertex.spirv).find("HelperInvocation") == std::string::npos,
+        "a vertex shader reads gl_HelperInvocation");
+
+  // A pixel shader without ballots does not pay for the input.
+  const uint32_t plain_shader[] = {
+      EncodeVop1(0x01, 0, 242), // v_mov_b32 v0, 1.0
+      EncodeExp0(0x00, 0x1), EncodeExp1(0, 0, 0, 0),
+      EncodeSopp(0x01),
+  };
+  const auto plain = RecompileForTest(plain_shader, options);
+  CheckSpirvBinaryValidates(plain.spirv);
+  Check(DisassembleSpirvBinary(plain.spirv).find("HelperInvocation") == std::string::npos,
+        "a pixel shader without ballots reads gl_HelperInvocation");
+}
+
 void TestNewShaderRecompilerPerInvocationU64Complement() {
   const uint32_t shader[] = {
       EncodeVop1(0x01, 0, 0),        // v_mov_b32 v0, s0
@@ -15817,6 +15873,7 @@ int main() {
   TestNewShaderRecompilerVertexExportUsesInvocationExecMask();
   TestNewShaderRecompilerPerInvocationMasksWithoutMirrors();
   TestNewShaderRecompilerPerInvocationU64Complement();
+  TestPixelBallotExcludesHelperInvocations();
   TestNewShaderRecompilerExpPixelOutputs();
   TestRenderTargetReverseExportMapping();
   TestBlendMappingClassification();
