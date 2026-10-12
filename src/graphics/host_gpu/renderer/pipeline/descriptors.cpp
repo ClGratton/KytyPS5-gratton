@@ -1077,15 +1077,37 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			const ImageSubresourceRange range {view.base_level, view.level_count, view.base_layer,
 			                                   view.layer_count};
 			const bool storage = binding.desc.type == TextureCache::BindingType::Storage;
+			// AcquireRenderTargets gives every attachment of this draw a layout before this runs. An
+			// image flagged as a target without one is not written through the framebuffer here, so
+			// it is bound like any other sampled image (reported) instead of aborting.
+			const bool target_without_attachment =
+			    !image.info.data.Empty() && image.binding.is_target &&
+			    image.binding.attachment_layout == vk::ImageLayout::eUndefined;
+			if (target_without_attachment) {
+				static std::atomic<uint32_t> reported {0};
+				const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (count <= 16) {
+					std::printf("Texture: image flagged as render target is not an attachment of this "
+					            "draw, bound as a sampled image: id=%u gen=%u format=%d depth=%d "
+					            "storage=%d is_bound=%d shader_write=%d force_general=%d "
+					            "needs_rebind=%d data=0x%016" PRIx64 " (%" PRIu32 " so far)\n",
+					            binding.image_id.index, binding.image_id.generation,
+					            static_cast<int>(image.backing.format), image.info.IsDepth() ? 1 : 0,
+					            storage ? 1 : 0, image.binding.is_bound ? 1 : 0,
+					            image.binding.shader_write ? 1 : 0, image.binding.force_general ? 1 : 0,
+					            image.binding.needs_rebind ? 1 : 0,
+					            static_cast<uint64_t>(image.info.data.address), count);
+					std::fflush(stdout);
+				}
+			}
 			if (image.info.data.Empty()) {
 				image.Transit(vk::ImageLayout::eGeneral,
 				              storage ? vk::AccessFlagBits2::eShaderRead |
 				                            vk::AccessFlagBits2::eShaderWrite
 				                      : vk::AccessFlagBits2::eShaderRead,
 				              range, vk_buffer);
-			} else if (image.binding.is_target) {
+			} else if (image.binding.is_target && !target_without_attachment) {
 				const auto layout = image.binding.attachment_layout;
-				EXIT_IF(layout == vk::ImageLayout::eUndefined);
 				if (image.info.IsDepth()) {
 					const auto host_view =
 					    std::ranges::find(image.views, binding.image_view, &CachedImageView::view);
