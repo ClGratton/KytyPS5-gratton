@@ -199,6 +199,11 @@ static void PrintUsage() {
 	::printf("  --known-fills <true|false>           Remember ranges last written by one GPU uniform fill so\n"
 	         "                                       color-metadata clear discovery needs no GPU->CPU\n"
 	         "                                       readback for them. Default: false.\n");
+	::printf("  --draw-key-cache <true|false>        Remember the graphics pipelines of the last few draws and\n"
+	         "                                       find them by comparing keys, without hashing the key\n"
+	         "                                       and probing the pipeline map. Default: false.\n");
+	::printf("  --debug-draw-key-verify <true|false> With --draw-key-cache, also run the full lookup on every\n"
+	         "                                       memo hit and stop if the two disagree. Default: false.\n");
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
 	         "                                       the guest backing without faulting when none of the bytes\n"
 	         "                                       is GPU-written (no drain). Default: false.\n");
@@ -781,6 +786,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--known-fills") {
 			if (!ParseBool(value, options.config.known_fills)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--draw-key-cache") {
+			if (!ParseBool(value, options.config.draw_key_cache)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-draw-key-verify") {
+			if (!ParseBool(value, options.config.draw_key_verify)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

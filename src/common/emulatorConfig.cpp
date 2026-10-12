@@ -97,6 +97,14 @@ bool KnownFillsEnabled() {
 	return g_config->known_fills;
 }
 
+bool DrawKeyCacheEnabled() {
+	return g_config->draw_key_cache;
+}
+
+bool DrawKeyVerifyEnabled() {
+	return g_config->draw_key_cache && g_config->draw_key_verify;
+}
+
 bool CleanGuestReadsEnabled() {
 	return g_config->clean_guest_reads;
 }
