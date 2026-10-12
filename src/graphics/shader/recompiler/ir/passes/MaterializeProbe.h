@@ -17,14 +17,8 @@ enum Slot : uint32_t {
 	Total, Setup, FlatJit, FlatCtl, FlatPlain, Fill, Buffers, Images, Samplers, Specialize,
 	// Not timers: the sum of srt_reads over the calls of each flat class (ticks column).
 	ReadsJit, ReadsCtl, ReadsPlain,
-	// Inside the control-flow refresh: block bookkeeping, slot evaluation, branch conditions.
-	CtlAssign, CtlSlots, CtlCond,
-	// Counters (ticks column = count): per control-flow refresh, flushed at its end.
-	CntBlocks, CntSlots, CntWide, CntMemoHits, CntInst, CntRawReads,
 	Count
 };
-
-inline constexpr uint32_t kFirstCounter = ReadsJit; // slots from here print as averages per call
 
 inline std::atomic<bool>                             g_enabled {false};
 inline std::array<std::atomic<uint64_t>, Count>     g_ticks {};
@@ -32,16 +26,7 @@ inline std::array<std::atomic<uint64_t>, Count>     g_calls {};
 
 inline constexpr std::array<const char*, Count> kNames = {
     "total",   "setup",   "flat_jit_eligible", "flat_ctlflow", "flat_plain", "fill", "buffers",
-    "images",  "samplers", "specialize",       "reads_jit",    "reads_ctl",  "reads_plain",
-    "ctl_assign", "ctl_slots", "ctl_cond",     "blocks",       "slots",      "evaluate_wide",
-    "memo_hits",  "evaluate_inst", "raw_reads"};
-
-// Plain per-thread tallies, flushed into the globals once per refresh (no shared-line traffic in
-// the evaluator).
-inline thread_local std::array<uint64_t, Count> t_tally {};
-inline void Tally(Slot slot) noexcept {
-	++t_tally[slot];
-}
+    "images",  "samplers", "specialize",       "reads_jit",    "reads_ctl",  "reads_plain"};
 
 inline void Add(Slot slot, uint64_t n) noexcept {
 	if (g_enabled.load(std::memory_order_relaxed)) {
@@ -50,17 +35,6 @@ inline void Add(Slot slot, uint64_t n) noexcept {
 	}
 }
 
-
-inline void FlushTally() noexcept {
-	if (!g_enabled.load(std::memory_order_relaxed)) {
-		return;
-	}
-	for (uint32_t i = CntBlocks; i < Count; ++i) {
-		g_ticks[i].fetch_add(t_tally[i], std::memory_order_relaxed);
-		g_calls[i].fetch_add(1, std::memory_order_relaxed);
-		t_tally[i] = 0;
-	}
-}
 
 class Timer {
 public:

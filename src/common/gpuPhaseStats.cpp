@@ -408,7 +408,7 @@ void Report(detail::ThreadState& s, bool final_report) {
 			const auto ticks = Probe::g_ticks[i].load(std::memory_order_relaxed);
 			const auto calls = Probe::g_calls[i].load(std::memory_order_relaxed);
 			const auto dc    = calls - prev_calls[i];
-			if (i >= Probe::kFirstCounter) { // counters: average per call
+			if (i >= Probe::ReadsJit) { // counters: average SRT reads per call
 				line += fmt::format(" {}={:.1f}/call/{}", Probe::kNames[i],
 				                    dc != 0 ? static_cast<double>(ticks - prev_ticks[i]) /
 				                                  static_cast<double>(dc)

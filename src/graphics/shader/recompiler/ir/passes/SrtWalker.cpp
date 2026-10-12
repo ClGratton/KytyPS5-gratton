@@ -3,7 +3,6 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
-#include "graphics/shader/recompiler/ir/passes/MaterializeProbe.h"
 
 #include <xbyak/xbyak.h>
 
@@ -568,7 +567,6 @@ float SrtWalker::Float32(uint64_t bits) {
 }
 
 bool SrtWalker::EvaluateWide(Value value, uint64_t& result) {
-	MaterializeProbe::Tally(MaterializeProbe::CntWide);
 	value = value.Resolve();
 	if (value.IsImmediate()) {
 		switch (value.GetType()) {
@@ -598,7 +596,6 @@ bool SrtWalker::EvaluateWide(Value value, uint64_t& result) {
 		m_context.values.resize(m_program.evaluation_value_count);
 	}
 	if (m_context.values[index].generation == m_context.generation) {
-		MaterializeProbe::Tally(MaterializeProbe::CntMemoHits);
 		result = m_context.values[index].value;
 		return true;
 	}
@@ -608,7 +605,6 @@ bool SrtWalker::EvaluateWide(Value value, uint64_t& result) {
 	}
 	m_context.values[index].generation = m_context.generation | 1u;
 	uint64_t out = 0;
-	MaterializeProbe::Tally(MaterializeProbe::CntInst);
 	const bool evaluated = EvaluateInst(*inst, out);
 	// Recursive evaluation may grow the dense memo vector.
 	auto& memo = m_context.values[index];
@@ -735,7 +731,6 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	}
 	uint32_t word = 0;
-	MaterializeProbe::Tally(MaterializeProbe::CntRawReads);
 	const auto reader = vector ? m_runtime.read_specialization_memory : m_runtime.read_memory;
 	if (reader != nullptr) {
 		if (!reader(m_runtime.userdata, address, {&word, 1})) {
@@ -1222,7 +1217,6 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		}
 		return true;
 	}
-	MaterializeProbe::Timer probe_assign(MaterializeProbe::CtlAssign);
 	flat.assign(m_program.srt_reads.size(), 0u);
 	active.assign(m_program.descriptor_sources.size(), 1u);
 	for (const auto& block: m_program.control_flow) {
@@ -1233,26 +1227,18 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	visited.assign(m_program.control_flow.size(), 0u);
 	pending.clear();
 	pending.push_back(0u);
-	probe_assign.Stop();
-	struct Flush { ~Flush() { MaterializeProbe::FlushTally(); } } flush_tally;
 	while (!pending.empty()) {
 		const auto index = pending.back();
 		pending.pop_back();
 		if (visited.at(index)) continue;
 		visited[index] = 1u;
-		MaterializeProbe::Tally(MaterializeProbe::CntBlocks);
 		const auto& block = m_program.control_flow[index];
 		for (const auto source: block.sources) active[source] = 1u;
-		{
-			MaterializeProbe::Timer probe_slots(MaterializeProbe::CtlSlots);
-			for (const auto slot: block.srt_reads) {
-				MaterializeProbe::Tally(MaterializeProbe::CntSlots);
-				if (!refresh(slot)) return false;
-			}
+		for (const auto slot: block.srt_reads) {
+			if (!refresh(slot)) return false;
 		}
 		uint32_t condition = 0;
 		auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
-		MaterializeProbe::Timer probe_cond(MaterializeProbe::CtlCond);
 		if (!block.condition.IsEmpty() &&
 		    (m_runtime.read_specialization_memory != nullptr || !m_program.capture_specialization_reads) &&
 		    predicate.Evaluate(block.condition, condition)) {
