@@ -302,6 +302,28 @@ void TestAsyncDoesNotAccumulateDeadlines() {
 	Check(now == resumed, "async-to-blocking transition did not reset an emptied queue");
 }
 
+void TestAsyncQueueIsCapped() {
+	Fixture    f;
+	const auto port = f.Open();
+	// A device that stopped consuming must not let non-blocking pushes pile up latency: the queue
+	// stays within the 100 ms cap (plus the buffer that crossed it) and the surplus is dropped.
+	stalled = true;
+	for (int i = 0; i < 200; i++) {
+		f.Output(port, false);
+	}
+	const uint64_t cap_frames = uint64_t {48000} / 10 + 256;
+	Check(streams.front()->frames <= cap_frames * 1000000,
+	      "non-blocking pushes queued more than the latency cap");
+	Check(streams.front()->frames >= uint64_t {48000} / 10 * 1000000,
+	      "the latency cap dropped buffers while the queue was below it");
+	// Once the device drains, pushes are accepted again.
+	stalled = false;
+	now += 1000000;
+	f.Output(port, false);
+	Check(streams.front()->frames == uint64_t {256} * 1000000,
+	      "output did not resume after the queue drained");
+}
+
 void TestSynchronizedBatchAndInactivePorts() {
 	Fixture            f;
 	const auto         vibration  = f.Open(256, 10);
@@ -463,6 +485,7 @@ int main() {
 	TestUnderrunAndStalledQueueRecovery();
 	TestFallbackClockAndLongGap();
 	TestAsyncDoesNotAccumulateDeadlines();
+	TestAsyncQueueIsCapped();
 	TestSynchronizedBatchAndInactivePorts();
 	TestFallbackUsesEachPortsPeriod();
 	TestFailedQueueUsesFallbackClock();
