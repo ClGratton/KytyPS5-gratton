@@ -1,6 +1,7 @@
 #include "graphics/shader/shader.h"
 
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
@@ -24,6 +25,7 @@
 #include <atomic>
 #include <bit>
 #include <cstdio>
+#include <fmt/format.h>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -67,7 +69,7 @@ void ShaderInit() {
 	    nullptr);
 }
 
-void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
+uint64_t ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	EXIT_IF(g_shader_map == nullptr);
 
 	if (addr == 0 || data.code_size_bytes == 0 || data.code_size_bytes % sizeof(uint32_t) != 0) {
@@ -75,8 +77,19 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 		     addr, data.code_size_bytes);
 	}
 	const auto hash = XXH3_64bits(reinterpret_cast<const void*>(addr), data.code_size_bytes);
-	std::scoped_lock lock(g_shader_map_mutex);
-	(*g_shader_map)[addr] = {data, hash};
+	{
+		std::scoped_lock lock(g_shader_map_mutex);
+		(*g_shader_map)[addr] = {data, hash};
+	}
+	if (Bench::TimingEnabled()) {
+		// When the guest registers a shader (shader-load hook, docs/shader-load-notes.md). Joined
+		// with the first program_translate / pipeline rows of the same shader_hash this is the
+		// lead time a load-time precompile would have.
+		Bench::LogTiming("shader_register", hash, Bench::NowNs(), 0, GuestGpu::IsGpuThread(),
+		                 fmt::format("type={};code_dwords={};addr={:x}", static_cast<unsigned>(data.type),
+		                             data.code_size_bytes / 4u, addr));
+	}
+	return hash;
 }
 
 static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {

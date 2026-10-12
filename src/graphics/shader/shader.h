@@ -313,7 +313,8 @@ struct ShaderMappedData {
 };
 
 void ShaderInit();
-void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
+// Registers a guest shader binary; returns the hash of its code (the ProgramKey hash).
+uint64_t ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 uint32_t ShaderPixelExportTarget(uint32_t shader_mask, uint32_t export_index);
 
 void     ShaderDbgDumpInputInfo(const ShaderVertexInputInfo& info);
