@@ -929,6 +929,16 @@ void BufferCache::PollLoopGuard() {
 	}
 }
 
+void BufferCache::CollectResidencyRanges(MemResidency::Snapshot& snapshot) {
+	auto& ranges = snapshot.ranges[static_cast<size_t>(MemResidency::RangeClass::Buffer)];
+	for (const auto& [vaddr, id]: m_buffers) {
+		if (IsBufferInvalid(id)) {
+			continue;
+		}
+		ranges.emplace_back(vaddr, m_slot_buffers[id].Size());
+	}
+}
+
 void BufferCache::RunGarbageCollector() {
 	if ((m_gc_runs & 0xffu) == 0) {
 		PollLoopGuard();

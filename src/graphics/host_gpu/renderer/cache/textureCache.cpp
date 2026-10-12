@@ -1024,6 +1024,13 @@ void TextureCache::InitializeImage(ImageId id) {
 	if (image.IsCpuDirty()) {
 		image.RefreshComplete();
 	}
+	if (upload && MemResidency::Enabled() && image.IsTracked() && !image.IsGpuModified() &&
+	    UploadBinding(image) == BindingType::Texture) {
+		// --mem-residency: the guest copy of this texture is now redundant with the GPU copy.
+		// Watch for the first CPU read of each page.
+		MemResidency::NoteProbeArmed(
+		    m_page_manager.ArmReadProbes(image.info.data.address, image.info.data.size));
+	}
 }
 
 void TextureCache::MaterializeViewClear(ImageId id, const ImageDesc& desc) {
@@ -2273,6 +2280,49 @@ void TextureCache::AuditVram() {
 		VRAM_LOG("VRAM audit duplicate: %s x%u = %" PRIu64 " MiB total\n",
 		         exact_dups[i]->label.c_str(), exact_dups[i]->count, mib(exact_dups[i]->bytes));
 	}
+}
+
+void TextureCache::CollectResidencyRanges(MemResidency::Snapshot& snapshot) {
+	using MemResidency::RangeClass;
+	std::scoped_lock lock {m_lock};
+	m_slot_images.ForEach([&](ImageId, const Image& image) {
+		if (!image.registered || image.info.data.Empty() || image.backing.image == nullptr) {
+			return;
+		}
+		RangeClass cls = RangeClass::TextureOther;
+		if (image.usage.depth_target) {
+			cls = RangeClass::Depth;
+		} else if (image.usage.render_target || image.usage.video_out) {
+			cls = RangeClass::RenderTarget;
+		} else if (image.usage.texture && image.IsTracked() && !image.IsCpuDirty() &&
+		           !image.IsGpuModified()) {
+			cls = RangeClass::TextureClean;
+		}
+		snapshot.ranges[static_cast<size_t>(cls)].emplace_back(image.info.data.address,
+		                                                       image.info.data.size);
+	});
+}
+
+MemResidency::FaultClass TextureCache::ClassifyAddress(uint64_t address) {
+	using MemResidency::FaultClass;
+	if (m_lock.HeldByCurrentThread() || !GuestRange {address, 1}.Valid()) {
+		return FaultClass::NonImage;
+	}
+	std::scoped_lock lock {m_lock};
+	for (const auto id: FindImagesInRegion(address, 1, true)) {
+		const auto* image = m_slot_images.try_get(id);
+		if (image == nullptr) {
+			continue;
+		}
+		if (image->usage.depth_target) {
+			return FaultClass::Depth;
+		}
+		if (image->usage.render_target || image->usage.video_out) {
+			return FaultClass::RenderTarget;
+		}
+		return FaultClass::Texture;
+	}
+	return FaultClass::NonImage;
 }
 
 void TextureCache::ProcessDownloadImages() {

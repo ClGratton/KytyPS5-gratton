@@ -6,6 +6,7 @@
 #include "common/gpuPhaseStats.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
+#include "graphics/host_gpu/memResidency.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
@@ -117,6 +118,8 @@ public:
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
+	// --mem-residency. GPU thread: the guest ranges of the registered buffers.
+	void CollectResidencyRanges(MemResidency::Snapshot& snapshot);
 
 private:
 	friend struct BufferCacheTestAccess;
