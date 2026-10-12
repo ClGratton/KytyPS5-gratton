@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
+#include "graphics/host_gpu/renderer/pipeline/variantStore.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
@@ -12,8 +13,10 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <string>
 #include <memory>
 #include <shared_mutex>
@@ -142,6 +145,12 @@ public:
 		// the first draw/dispatch uses it (prediction hit accounting only).
 		bool prefetched = false;
 		bool claimed    = false;
+		// --precompile-on-load / --pipeline-variants-replay: built by a shader-load job. Same
+		// accounting as `prefetched`, kept apart so the two features can be told apart.
+		bool    loaded        = false;
+		bool    load_claimed  = false;
+		int64_t load_ready_ns = 0;
+		bool    gfx_recorded  = false; // GPU thread: this graphics pipeline's variant was recorded
 		// --pipelines-unoptimized-first: `pipeline` was created with DISABLE_OPTIMIZATION and
 		// `optimized` is the background build that replaces it (PromoteOptimized(), GPU thread
 		// only). Both are set before the Pipeline is published and cleared by the promotion.
@@ -276,8 +285,82 @@ public:
 	void PrefetchCompute(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
 	                     uint32_t mode, bool async_compute, const uint32_t (&groups)[3]);
 
+	// ---- --precompile-on-load / --pipeline-variants-replay (docs/shader-load-notes.md) -------
+	// Counters of the load-time build and the variant store. Everything the guest thread does at
+	// registration is counted here; hits are counted by the GPU thread at the first dispatch.
+	struct LoadCounters {
+		std::atomic<uint64_t> registered_cs {0};       // compute binaries the guest registered
+		std::atomic<uint64_t> registered_other {0};    // other stages (ignored)
+		std::atomic<uint64_t> stored_variants {0};     // variants found in the store for them
+		std::atomic<uint64_t> jobs_stored {0};         // load jobs for a stored variant
+		std::atomic<uint64_t> jobs_guess {0};          // load jobs for the guessed variant
+		std::atomic<uint64_t> skipped_unguessable {0}; // typed buffers, bindless, guest-memory specialization
+		std::atomic<uint64_t> skipped_call {0};        // S_SWAP_PC programs stay on the GPU thread
+		std::atomic<uint64_t> skipped_stale {0};       // a stored variant that no longer fits the translation
+		std::atomic<uint64_t> skipped_known {0};       // an equal permutation was already there
+		std::atomic<uint64_t> skipped_registers {0};   // the header had no usable compute registers
+		std::atomic<uint64_t> built {0};               // permutations published by load jobs
+		std::atomic<uint64_t> duplicates {0};          // equal permutation published first by someone else
+		std::atomic<uint64_t> pipelines {0};           // pipeline jobs queued by load jobs
+		std::atomic<uint64_t> program_hit {0};         // first dispatch found a load-built permutation
+		std::atomic<uint64_t> program_other {0};       // dispatch of a loaded binary with another variant
+		std::atomic<uint64_t> pipeline_hit_ready {0};  // pipeline was finished at the first dispatch
+		std::atomic<uint64_t> pipeline_hit_inflight {0}; // dispatch had to wait for it
+		std::atomic<uint64_t> recorded {0};            // new variants written to the store
+		std::atomic<uint64_t> recorded_graphics {0};   // ... of which graphics pipelines
+		std::atomic<uint64_t> gfx_stored {0};          // stored graphics pipelines waiting for their shaders
+		std::atomic<uint64_t> gfx_jobs {0};            // graphics load jobs started
+		std::atomic<uint64_t> gfx_pipelines {0};       // graphics pipeline jobs queued by them
+		std::atomic<uint64_t> gfx_skipped {0};         // undecodable, stale, known or not rebuildable
+		std::atomic<uint64_t> gfx_unrecorded {0};      // pipelines the first draw could not record
+		std::atomic<uint64_t> gfx_hit_ready {0};       // first draw found the pipeline finished
+		std::atomic<uint64_t> gfx_hit_inflight {0};    // first draw waited for it
+		std::atomic<uint64_t> lead_n {0};              // register-to-first-use lead of the hits
+		std::atomic<int64_t>  lead_sum_ns {0};
+		std::atomic<int64_t>  lead_min_ns {std::numeric_limits<int64_t>::max()};
+		std::atomic<int64_t>  lead_max_ns {0};
+		void NoteLead(int64_t ns) {
+			lead_n.fetch_add(1, std::memory_order_relaxed);
+			lead_sum_ns.fetch_add(ns, std::memory_order_relaxed);
+			auto lo = lead_min_ns.load(std::memory_order_relaxed);
+			while (ns < lo && !lead_min_ns.compare_exchange_weak(lo, ns, std::memory_order_relaxed)) {
+			}
+			auto hi = lead_max_ns.load(std::memory_order_relaxed);
+			while (ns > hi && !lead_max_ns.compare_exchange_weak(hi, ns, std::memory_order_relaxed)) {
+			}
+		}
+		[[nodiscard]] std::string Summary() const;
+	};
+	[[nodiscard]] LoadCounters& Load() { return m_load; }
+
+	// The guest registered a shader binary (AgcCreateShader). Guest thread; cheap: the code is
+	// copied and one low-priority job per variant is queued on the worker pool. Compute shaders
+	// only. With --pipeline-variants-replay every stored variant of the binary is built, else with
+	// --precompile-on-load the most likely one (GuessSpecialization, the dispatch modifier bits).
+	struct ShaderRegisterEntry {
+		uint32_t offset = 0;
+		uint32_t value  = 0;
+	};
+	struct ShaderRegistration {
+		uint8_t                              type              = 0; // Prospero::ShaderBinaryType
+		uint64_t                             address           = 0; // the code (ShaderMapUserData key)
+		uint64_t                             hash              = 0; // XXH3 of the code
+		uint32_t                             code_size_bytes   = 0;
+		uint32_t                             dispatch_modifier = 0; // ShaderSpecialRegs::dispatch_modifier
+		std::span<const ShaderRegisterEntry> sh_registers; // the header's register list
+	};
+	void NoteShaderRegistered(const ShaderRegistration& registration);
+	// Waits until no load job is queued or running (tests; shutdown cancels what is left).
+	bool WaitLoadIdle(int timeout_ms);
+	[[nodiscard]] const Variants::VariantStore* VariantsStore() const { return m_variants.get(); }
+	// Opens (creating it) the variant file at `path` and starts recording into / replaying from it.
+	// The constructor does this for _PipelineCache/<TITLE>.variants; tests pass their own path.
+	bool UseVariantStore(const std::filesystem::path& path);
+
 private:
 	struct ProgramCache;
+	class GuessThread;
+	struct LoadJob;
 	struct GraphicsPipelineJob;
 	struct ComputePipelineJob;
 	struct GraphicsOptimizeJob;
@@ -352,6 +435,33 @@ private:
 	LookaheadCounters m_lookahead;
 	// --async-pipelines skip: which shaders' draws may be skipped (DrawSkipSafety.h).
 	ShaderRecompiler::Decoder::DrawSkipSafetyCache m_skip_safety;
+	LoadCounters      m_load;
+	std::unique_ptr<Variants::VariantStore> m_variants; // --pipeline-variants-replay
+	// --precompile-on-load: translation of guessed variants runs here, in a speculation scope (see
+	// GuessThread), because it translates binaries the game may never use.
+	std::unique_ptr<GuessThread> m_guess_thread;
+	void InitializeVariants();
+	// Stored graphics pipelines wait here until the guest has registered the shaders they need
+	// (NoteShaderRegistered copies the code of those), then one background job builds each.
+	struct GfxPending {
+		Variants::GraphicsVariant                    variant;
+		std::shared_ptr<const std::vector<uint32_t>> vs_code;
+		std::shared_ptr<const std::vector<uint32_t>> ps_code;
+		std::shared_ptr<const std::vector<uint32_t>> vs_back_code;
+		bool                                         submitted = false;
+	};
+	std::mutex                                       m_gfx_mutex;
+	std::vector<GfxPending>                          m_gfx_pending;
+	std::unordered_map<uint64_t, std::vector<size_t>> m_gfx_by_hash; // built once, then read-only
+	std::atomic<uint32_t>                            m_gfx_load_active {0};
+	void CaptureGraphicsRegistration(const ShaderRegistration& registration, AsyncPipelineCompiler& pool);
+	// GPU thread: the first draw that uses this graphics pipeline records its variant.
+	void NoteGraphicsVariant(Pipeline& pipeline, const GraphicsPipelineKey& key,
+	                         const GraphicsPrograms& programs, bool ps_active);
+	// Worker side of a load job: queues the pipeline build for a program it just published.
+	void SubmitLoadedComputePipeline(const ShaderProgram& program, ShaderComputeInputInfo info,
+	                                 const ShaderRecompiler::IR::CompiledShaderInfo* compiled,
+	                                 uint32_t priority);
 	std::function<std::string()> m_lookahead_thread_summary;
 	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
 	// (or starts) while the pool and the registries are torn down.

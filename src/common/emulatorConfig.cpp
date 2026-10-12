@@ -89,6 +89,14 @@ bool GetPipelinesUnoptimizedFirst() {
 	return g_config->pipelines_unoptimized_first && g_config->async_pipelines != AsyncPipelineMode::Off;
 }
 
+bool GetPrecompileOnLoad() {
+	return g_config->precompile_on_load && g_config->async_pipelines != AsyncPipelineMode::Off;
+}
+
+bool GetPipelineVariantsReplay() {
+	return g_config->pipeline_variants_replay && g_config->async_pipelines != AsyncPipelineMode::Off;
+}
+
 bool ElideBarriersEnabled() {
 	return g_config->elide_barriers;
 }

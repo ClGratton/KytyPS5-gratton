@@ -148,7 +148,8 @@ bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job, bool urgent) {
 	return true;
 }
 
-bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job) {
+bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job, bool idle_only,
+                                              uint32_t priority) {
 	{
 		std::unique_lock lock(m_mutex);
 		if (m_stopping.load(std::memory_order_relaxed)) {
@@ -160,8 +161,15 @@ bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job) {
 		job->m_submit_ns = Bench::NowNs();
 		job->m_mode      = m_mode;
 		job->m_low       = true;
+		job->m_idle_only = idle_only;
 		job->m_submitted.store(true, std::memory_order_relaxed);
-		m_low_queue.push_back(std::move(job));
+		job->m_priority  = priority;
+		// Stable insert: after every job whose priority is not greater.
+		auto position = std::upper_bound(m_low_queue.begin(), m_low_queue.end(), priority,
+		                                 [](uint32_t value, const std::shared_ptr<AsyncJob>& other) {
+			                                 return value < other->m_priority;
+		                                 });
+		m_low_queue.insert(position, std::move(job));
 		m_stats.low_submitted.fetch_add(1, std::memory_order_relaxed);
 	}
 	m_signal.notify_one();
@@ -202,8 +210,26 @@ void AsyncPipelineCompiler::Shutdown() {
 
 void AsyncPipelineCompiler::Promote(AsyncJob& job) {
 	std::lock_guard lock(m_mutex);
-	if (job.GetState() != AsyncJob::State::Queued || m_queue.empty() ||
-	    m_queue.front().get() == &job) {
+	if (job.GetState() != AsyncJob::State::Queued) {
+		return;
+	}
+	if (job.m_low) {
+		// A draw now waits for a background job (load-time precompile, optimized rebuild): it
+		// becomes a normal job at the front of the queue, no longer limited to the low slots.
+		for (auto it = m_low_queue.begin(); it != m_low_queue.end(); ++it) {
+			if (it->get() == &job) {
+				auto moved = std::move(*it);
+				m_low_queue.erase(it);
+				moved->m_low = false;
+				m_queue.push_front(std::move(moved));
+				m_stats.low_promoted.fetch_add(1, std::memory_order_relaxed);
+				m_signal.notify_one();
+				return;
+			}
+		}
+		return;
+	}
+	if (m_queue.empty() || m_queue.front().get() == &job) {
 		return;
 	}
 	for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
@@ -243,7 +269,8 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 			std::unique_lock lock(m_mutex);
 			m_signal.wait(lock, [this] {
 				return m_stopping.load(std::memory_order_relaxed) || !m_queue.empty() ||
-				       (!m_low_queue.empty() && m_low_running < m_low_limit);
+				       (!m_low_queue.empty() && m_low_running < m_low_limit &&
+				        (!m_low_queue.front()->m_idle_only || m_normal_running == 0));
 			});
 			if (m_stopping.load(std::memory_order_relaxed)) {
 				// Shutdown() took the queue; nothing left for us.
@@ -252,10 +279,14 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 			if (!m_queue.empty()) {
 				job = std::move(m_queue.front());
 				m_queue.pop_front();
+				m_normal_running++;
 			} else {
 				job = std::move(m_low_queue.front());
 				m_low_queue.pop_front();
 				m_low_running++;
+				if (!m_low_queue.empty()) {
+					m_signal.notify_one(); // let the next background job start too, up to the limit
+				}
 			}
 			job->m_start_ns = Bench::NowNs();
 			job->m_state.store(AsyncJob::State::Running, std::memory_order_release);
@@ -287,6 +318,15 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 			m_signal.notify_one();
 		} else {
 			m_stats.completed.fetch_add(1, std::memory_order_relaxed);
+			bool idle = false;
+			{
+				std::lock_guard lock(m_mutex);
+				idle = --m_normal_running == 0;
+			}
+			// The pool went quiet: an idle-only background job may start now.
+			if (idle) {
+				m_signal.notify_one();
+			}
 		}
 	}
 }
@@ -297,12 +337,13 @@ std::string AsyncPipelineCompiler::Summary() const {
 	return fmt::format(
 	    "mode={};workers={};jobs_submitted={};jobs_completed={};jobs_cancelled={};peak_queue={};"
 	    "gpu_waits={};gpu_wait_ns={};skipped_draws={};skipped_program_draws={};"
-	    "skipped_pipeline_draws={};low_submitted={};low_completed={};low_cancelled={};low_run_ns={}",
+	    "skipped_pipeline_draws={};low_submitted={};low_completed={};low_cancelled={};low_run_ns={};"
+	    "low_promoted={}",
 	    AsyncModeName(m_mode), m_worker_count, m_stats.submitted.load(), m_stats.completed.load(),
 	    m_stats.cancelled.load(), m_stats.peak_queue.load(), m_stats.gpu_waits.load(),
 	    m_stats.gpu_wait_ns.load(), skipped_program + skipped_pipeline, skipped_program,
 	    skipped_pipeline, m_stats.low_submitted.load(), m_stats.low_completed.load(),
-	    m_stats.low_cancelled.load(), m_stats.low_run_ns.load());
+	    m_stats.low_cancelled.load(), m_stats.low_run_ns.load(), m_stats.low_promoted.load());
 }
 
 void AsyncPipelineCompiler::LogSummary() {

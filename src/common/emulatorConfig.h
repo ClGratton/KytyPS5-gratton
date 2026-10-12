@@ -186,6 +186,14 @@ struct ConfigOptions {
 	// replaces it from a background worker. Needs --async-pipelines stall|skip; NVIDIA only unless
 	// KYTY_PIPELINE_FAST_BUILD=1. Default off.
 	bool                   pipelines_unoptimized_first = false;
+	// --precompile-on-load: when the guest registers a compute shader (AgcCreateShader) its program
+	// and pipeline are built on the worker pool's low-priority queue for the most likely variant,
+	// seconds before the first dispatch. Needs --async-pipelines stall|skip. Default off.
+	bool                   precompile_on_load          = false;
+	// --pipeline-variants-replay: record the compute variants the game uses in
+	// _PipelineCache/<TITLE>.variants and, in the next session, build every stored variant of a
+	// shader when the guest registers it. Needs --async-pipelines stall|skip. Default off.
+	bool                   pipeline_variants_replay    = false;
 	// --debug-lookahead-verify: the GPU thread recompiles every program a prefetch built before
 	// its first use and compares the SPIR-V; mismatches are logged (finds prefetch inputs that
 	// differ from the real draw's). Slow, debug only.
@@ -278,6 +286,9 @@ uint32_t          GetPipelineWorkerCount();
 bool              GetPipelineLookahead();
 // The flag, effective only with --async-pipelines on (the optimized rebuilds run on the pool).
 bool              GetPipelinesUnoptimizedFirst();
+// Both effective only with --async-pipelines on (the builds run on the pool).
+bool              GetPrecompileOnLoad();
+bool              GetPipelineVariantsReplay();
 uint32_t          GetPipelineLookaheadKinds();
 bool              GetLookaheadVerify();
 bool              TextureGcEnabled();

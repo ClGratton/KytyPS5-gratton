@@ -3,12 +3,15 @@
 #include "common/stringUtils.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/csRegisters.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
+#include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -10135,6 +10138,177 @@ void TestRobustBufferBoundsEmission() {
 // --skip-ir-validation: release translations may skip the IR consistency checks. The output must not
 // change, a broken program must still be caught when validation is on, and debug builds (and
 // KYTY_IR_VALIDATE) always validate.
+// Persisted variants (--pipeline-variants-replay): a compute program's translator inputs and its
+// resource specialization survive the record conversion, and the rebuilt inputs give the same
+// ProgramKey static state, so a replayed variant lands on the entry the real dispatch looks up.
+void TestVariantKeyRoundTrip() {
+  ShaderComputeInputInfo info{};
+  info.workgroup_register = 6;
+  info.wave_size = 32;
+  info.float_mode = 0xc0;
+  info.host_subgroup_size = 32;
+  info.thread_ids_num = 3;
+  info.lds_size_dwords = 256;
+  info.scratch_size_dwords = 64;
+  info.threads_num[0] = 8;
+  info.threads_num[1] = 4;
+  info.threads_num[2] = 2;
+  info.group_id[0] = true;
+  info.group_id[2] = true;
+  info.tg_size_en = true;
+  info.dispatch_thread_dimensions = true;
+  info.async_compute = true;
+  // Runtime state is not part of a variant.
+  info.workgroup_counts[0] = 99;
+  info.lds_storage = true;
+  const auto statics = ToVariantStatic(info, 9);
+  ShaderComputeInputInfo rebuilt{};
+  ApplyVariantStatic(statics, rebuilt);
+  Check(MakeStageStaticKey(info) == MakeStageStaticKey(rebuilt),
+        "variant static state changes the compute program key");
+  Check(rebuilt.workgroup_counts[0] == 0 && !rebuilt.lds_storage && statics.user_data_count == 9,
+        "variant carries runtime state or loses the user data count");
+  for (const auto flip: {1u, 2u, 4u, 8u, 16u, 32u}) {
+    auto other = statics;
+    other.flags ^= flip;
+    ShaderComputeInputInfo changed{};
+    ApplyVariantStatic(other, changed);
+    Check(MakeStageStaticKey(changed) != MakeStageStaticKey(rebuilt),
+          "a flag of the variant does not reach the program key");
+  }
+
+  using Spec = ShaderRecompiler::IR::ResourceSpecialization;
+  Spec spec;
+  spec.buffers.push_back({.packed_stride = 16, .descriptor_format = Prospero::BufferFormat::k32Float,
+                          .descriptor_swizzle = 0x4567, .zero_stride_oob = true,
+                          .indirect_root = 0, .indirect_mapping_offset = 5,
+                          .indirect_search_iterations = 3});
+  spec.buffers.push_back({});
+  spec.images.push_back({.numeric_class = Prospero::TextureNumericClass::Uint,
+                         .dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2DArray,
+                         .mip_count = 5, .conversion_format = Prospero::BufferFormat::k32UInt,
+                         .shader_swizzle = 0x123, .indirect_root = 0, .indirect_mapping_offset = 7,
+                         .indirect_search_iterations = 2, .cube = true, .fmask = true});
+  spec.images.push_back({});
+  const auto record = ToVariantSpec(spec);
+  Check(FromVariantSpec(record) == spec, "specialization changed in the record round trip");
+  Variants::ComputeVariant variant;
+  variant.code_hash = 0x1234;
+  variant.code_size_dwords = 77;
+  variant.state = statics;
+  variant.spec = record;
+  Variants::ComputeVariant decoded;
+  Check(Variants::Decode(Variants::Encode(variant), decoded) && decoded == variant &&
+            FromVariantSpec(decoded.spec) == spec,
+        "variant did not survive encoding");
+}
+
+// Persisted graphics variants: the pipeline key and the stage input infos survive their canonical
+// byte forms, and anything that does not belong to this build is refused.
+void TestGraphicsVariantKeys() {
+  PipelineRenderingState rendering;
+  rendering.color_formats[0] = vk::Format::eB8G8R8A8Unorm;
+  rendering.color_formats[2] = vk::Format::eR16G16B16A16Sfloat;
+  rendering.depth_format = vk::Format::eD32Sfloat;
+  rendering.color_count = 3;
+  PipelineVertexInputState input;
+  input.binding_count = 2;
+  input.attribute_count = 3;
+  input.bindings[0] = {.stride = 32, .instance = false};
+  input.bindings[1] = {.stride = 16, .instance = true};
+  input.attributes[0] = {.offset = 0, .binding = 0};
+  input.attributes[2] = {.offset = 12, .binding = 1};
+  PipelineStaticParameters params;
+  params.topology = vk::PrimitiveTopology::eTriangleList;
+  params.samples = 4;
+  params.color_mask[0] = 0xf;
+  params.blend_enable[0] = true;
+  params.color_srcblend[0] = 5;
+  const auto bytes = EncodePipelineKey(rendering, input, params);
+  PipelineRenderingState r2;
+  PipelineVertexInputState i2;
+  PipelineStaticParameters p2;
+  Check(DecodePipelineKey(bytes, r2, i2, p2) && r2 == rendering && i2 == input && p2 == params,
+        "pipeline key did not survive its canonical form");
+  Check(EncodePipelineKey(r2, i2, p2) == bytes, "pipeline key encoding is not canonical");
+  auto shorter = bytes;
+  shorter.pop_back();
+  Check(!DecodePipelineKey(shorter, r2, i2, p2), "truncated pipeline key accepted");
+  auto zero_samples = bytes;
+  std::memset(zero_samples.data() + zero_samples.size() - sizeof(PipelineStaticParameters), 0,
+              sizeof(PipelineStaticParameters));
+  Check(!DecodePipelineKey(zero_samples, r2, i2, p2), "impossible fixed-function state accepted");
+
+  ShaderVertexInputInfo vertex;
+  vertex.resources_num = 3;
+  vertex.buffers_num = 2;
+  vertex.wave_size = 32;
+  vertex.logical_stage = ShaderType::Vertex;
+  vertex.buffers[1].stride = 48;
+  vertex.stage.program = reinterpret_cast<const ShaderRecompiler::IR::CompiledShaderInfo *>(0x1000);
+  const auto vbytes = EncodeVertexInfo(vertex);
+  ShaderVertexInputInfo vertex2;
+  Check(DecodeVertexInfo(vbytes, VertexInfoLayout(), vertex2) && vertex2.resources_num == 3 &&
+            vertex2.buffers_num == 2 && vertex2.wave_size == 32 && vertex2.buffers[1].stride == 48 &&
+            vertex2.stage.program == nullptr,
+        "vertex input info did not survive");
+  Check(!DecodeVertexInfo(vbytes, VertexInfoLayout() + 1, vertex2), "vertex info of another layout");
+  auto vshort = vbytes;
+  vshort.pop_back();
+  Check(!DecodeVertexInfo(vshort, VertexInfoLayout(), vertex2), "truncated vertex info");
+  vertex.resources_num = 99;
+  Check(!DecodeVertexInfo(EncodeVertexInfo(vertex), VertexInfoLayout(), vertex2),
+        "impossible vertex info accepted");
+
+  ShaderPixelInputInfo pixel;
+  pixel.input_num = 5;
+  pixel.interpolator_settings[3] = 0x77;
+  pixel.ps_early_z = true;
+  pixel.dual_source_blending = true;
+  ShaderPixelInputInfo pixel2;
+  Check(DecodePixelInfo(EncodePixelInfo(pixel), PixelInfoLayout(), pixel2) && pixel2.input_num == 5 &&
+            pixel2.interpolator_settings[3] == 0x77 && pixel2.ps_early_z && pixel2.dual_source_blending,
+        "pixel input info did not survive");
+  Check(!DecodePixelInfo(EncodePixelInfo(pixel), VertexInfoLayout(), pixel2),
+        "pixel info decoded with the vertex layout");
+}
+
+// The shader-load hook rebuilds a compute shader's stage registers from the register list in its
+// AGC header, with the same decoder the PM4 stream uses.
+void TestComputeShaderHeaderRegisters() {
+  HW::CsStageRegisters regs{};
+  const uint32_t rsrc2 = (6u << Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) |
+                         (1u << Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_SHIFT) |
+                         (1u << Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_SHIFT) |
+                         (2u << Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_SHIFT) |
+                         (4u << Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT);
+  const std::pair<uint32_t, uint32_t> list[] = {
+      {Pm4::COMPUTE_PGM_LO, 0x00123456u},
+      {Pm4::COMPUTE_PGM_HI, 0x00000012u},
+      {Pm4::COMPUTE_PGM_RSRC1, 0xc0u << Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT},
+      {Pm4::COMPUTE_PGM_RSRC2, rsrc2},
+      {Pm4::COMPUTE_NUM_THREAD_X, 8},
+      {Pm4::COMPUTE_NUM_THREAD_Y, 4},
+      {Pm4::COMPUTE_NUM_THREAD_Z, 2},
+      {Pm4::COMPUTE_RESOURCE_LIMITS, 0x1234}};
+  for (const auto &[offset, value]: list) {
+    const auto result = HW::ApplyComputeShaderRegister(regs, offset, value);
+    Check(result == (offset == Pm4::COMPUTE_RESOURCE_LIMITS ? HW::CsRegisterResult::Ignored
+                                                            : HW::CsRegisterResult::Applied),
+          "known compute register result");
+  }
+  Check(regs.data_addr == ((uint64_t{0x00123456u} << 8u) | (uint64_t{0x12u} << 40u)),
+        "COMPUTE_PGM address");
+  Check(regs.user_sgpr == 6 && regs.tgid_x_en && !regs.tgid_y_en && regs.tgid_z_en &&
+            regs.tidig_comp_cnt == 2 && regs.lds_size == 4 && regs.float_mode == 0xc0,
+        "COMPUTE_PGM_RSRC fields");
+  Check(regs.num_thread_x == 8 && regs.num_thread_y == 4 && regs.num_thread_z == 2,
+        "COMPUTE_NUM_THREAD");
+  Check(HW::ApplyComputeShaderRegister(regs, Pm4::COMPUTE_USER_DATA_0, 5) ==
+            HW::CsRegisterResult::Unsupported,
+        "user data is not a stage register");
+}
+
 void TestShaderIrValidationGate() {
   using namespace ShaderRecompiler;
 
@@ -15924,6 +16098,9 @@ int main() {
   TestNewShaderRecompilerDispatcherSpillsU32x3();
   TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic();
   TestShaderIrValidationGate();
+  TestVariantKeyRoundTrip();
+  TestGraphicsVariantKeys();
+  TestComputeShaderHeaderRegisters();
   TestNewShaderRecompilerPlanningOnlyLoads();
   TestNewShaderRecompilerNativeU64Translation();
   TestVertexMadU64UsesPortableProduct();

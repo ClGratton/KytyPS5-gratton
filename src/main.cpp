@@ -176,6 +176,15 @@ static void PrintUsage() {
 	         "                                       background worker and swapped in (needs\n"
 	         "                                       --async-pipelines stall|skip; NVIDIA only, other GPUs\n"
 	         "                                       need KYTY_PIPELINE_FAST_BUILD=1). Default: false.\n");
+	::printf("  --precompile-on-load <true|false>    Build a compute shader's program and pipeline on a\n"
+	         "                                       low-priority worker when the game registers it, for\n"
+	         "                                       the most likely variant (needs --async-pipelines\n"
+	         "                                       stall|skip). Default: false.\n");
+	::printf("  --pipeline-variants-replay <true|false>\n"
+	         "                                       Record the compute variants the game uses in\n"
+	         "                                       _PipelineCache/<TITLE>.variants and build the stored\n"
+	         "                                       ones when the game registers their shader (needs\n"
+	         "                                       --async-pipelines stall|skip). Default: false.\n");
 	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
 	         "                                       Default: min(8, hardware threads / 2).\n");
 	::printf("  --debug-texture-gc <true|false|log>  Debug: false disables the texture garbage collector;\n"
@@ -837,6 +846,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--spirv-robust-bounds") {
 			if (!ParseBool(value, options.config.spirv_robust_bounds)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--precompile-on-load") {
+			if (!ParseBool(value, options.config.precompile_on_load)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--pipeline-variants-replay") {
+			if (!ParseBool(value, options.config.pipeline_variants_replay)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

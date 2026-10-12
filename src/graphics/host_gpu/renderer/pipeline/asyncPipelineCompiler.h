@@ -113,6 +113,8 @@ private:
 	std::atomic<bool>         m_claimed {false};
 	std::atomic<bool>         m_submitted {false}; // Submit() accepted it (debug only)
 	bool                      m_low = false;       // SubmitLowPriority() job
+	uint32_t                  m_priority = 0;      // low-queue order (ascending)
+	bool                      m_idle_only = false; // low job that runs only while no normal job runs
 	int64_t                   m_created_ns = 0;
 	int64_t                   m_submit_ns = 0;
 	int64_t                   m_start_ns  = 0;
@@ -219,6 +221,7 @@ struct AsyncStats {
 	std::atomic<uint64_t> low_completed {0};
 	std::atomic<uint64_t> low_cancelled {0};
 	std::atomic<uint64_t> low_run_ns {0};
+	std::atomic<uint64_t> low_promoted {0}; // a draw waited for a low-priority job: moved up
 };
 
 class AsyncPipelineCompiler {
@@ -235,7 +238,12 @@ public:
 	// rebuild of a pipeline that already runs unoptimized). Workers take it only when the normal
 	// queue is empty, and at most LowPriorityLimit() of them run at once, so a burst of
 	// background builds can neither delay a draw's job nor occupy the whole pool.
-	bool SubmitLowPriority(std::shared_ptr<AsyncJob> job);
+	// `idle_only` jobs (the load-time precompile) additionally start only while no normal job is
+	// running or queued, so they cannot slow the compile a draw is waiting for (the driver's
+	// compile throughput is shared: eight concurrent compiles double each one's time).
+	// Background jobs run in ascending `priority` (FIFO among equals): the load-time precompile
+	// passes the time its variant was first needed in the previous session.
+	bool SubmitLowPriority(std::shared_ptr<AsyncJob> job, bool idle_only = false, uint32_t priority = 0);
 	[[nodiscard]] uint32_t LowPriorityLimit() const { return m_low_limit; }
 
 	// Stops accepting jobs, cancels the queued ones (Cancel() + Wait() returns false), lets the
@@ -249,7 +257,8 @@ public:
 	[[nodiscard]] AsyncStats& Stats() { return m_stats; }
 
 	// Waits for `job` on the calling (GPU) thread and accounts the blocked time. A job still in
-	// the queue is moved to the front first (the nearest draw wins).
+	// the queue is moved to the front first (the nearest draw wins); a low-priority one becomes a
+	// normal job.
 	bool WaitFor(AsyncJob& job);
 
 	// One-line summary (also written as a summary_async timing row when timing is on).
@@ -274,6 +283,7 @@ private:
 	std::deque<std::shared_ptr<AsyncJob>>  m_low_queue;
 	const uint32_t                         m_low_limit;
 	uint32_t                               m_low_running = 0;
+	uint32_t                               m_normal_running = 0; // normal jobs executing (m_mutex)
 	std::vector<std::thread>               m_workers;
 	std::atomic<bool>                      m_stopping {false};
 	bool                                   m_summary_logged = false;

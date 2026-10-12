@@ -535,6 +535,18 @@ add_executable(async_pipeline_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(async_pipeline_tests fmt::fmt common)
 target_include_directories(async_pipeline_tests PRIVATE ${inc_headers})
+add_executable(speculation_isolation_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SpeculationIsolationTests.cpp"
+	"${KYTY_SOURCE_DIR}/common/speculation.cpp"
+)
+target_include_directories(speculation_isolation_tests PRIVATE ${inc_headers})
+find_package(Threads REQUIRED)
+target_link_libraries(speculation_isolation_tests Threads::Threads)
+add_executable(pipeline_variant_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PipelineVariantTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/variantStore.cpp"
+)
+target_include_directories(pipeline_variant_tests PRIVATE ${inc_headers})
 add_executable(gpu_clock_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GpuClockTests.cpp"
 )
@@ -784,6 +796,8 @@ if(BUILD_TESTING)
 	set_tests_properties(sys_file_read_fallback_disabled PROPERTIES
 		ENVIRONMENT "KYTY_SYSFILE_NO_READ_FALLBACK=1")
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
+	add_test(NAME pipeline_variants COMMAND $<TARGET_FILE:pipeline_variant_tests>)
+	add_test(NAME speculation_isolation COMMAND $<TARGET_FILE:speculation_isolation_tests>)
 	add_test(NAME gpu_clock COMMAND $<TARGET_FILE:gpu_clock_tests>)
 	add_test(NAME frame_pacer COMMAND $<TARGET_FILE:frame_pacer_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
@@ -851,6 +865,22 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	set_tests_properties(shader_recompiler_compute_robust_bounds_async_stall PROPERTIES
 		ENVIRONMENT "KYTY_TEST_ROBUST_BOUNDS=1;KYTY_TEST_ASYNC_PIPELINES=stall")
+	# --precompile-on-load / --pipeline-variants-replay: the whole suite with variant tracking on
+	# (every first dispatch of a program), and the registration -> build -> hit flow itself.
+	add_test(NAME shader_recompiler_compute_shader_load
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_shader_load PROPERTIES
+		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
+	# ... and the graphics half: the pipelines of the pixel-wave test are recorded by one cache and
+	# rebuilt by a second one from the registrations.
+	add_test(NAME graphics_pipeline_shader_load
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(graphics_pipeline_shader_load PROPERTIES
+		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
+	add_test(NAME shader_load_precompile
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --shader-load-only)
+	set_tests_properties(shader_load_precompile PROPERTIES
+		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME guest_stack_exit
@@ -927,6 +957,8 @@ if(BUILD_TESTING)
 		bda_sync_gate_tests
 		sys_file_read_tests
 		async_pipeline_tests
+		pipeline_variant_tests
+		speculation_isolation_tests
 		gpu_clock_tests
 		frame_pacer_tests
 		shader_vertex_metadata_tests

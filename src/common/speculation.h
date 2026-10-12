@@ -13,6 +13,7 @@
 // (see the notes), so a parked thread cannot block the real GPU thread.
 
 #include <atomic>
+#include <cstdint>
 #include <shared_mutex>
 #include <string_view>
 
@@ -35,6 +36,15 @@ void               NoteFailure() noexcept;
 
 // Called by the fatal handlers when Active(). Never returns.
 [[noreturn]] void Abort(const char* file, int line, std::string_view text);
+
+// A speculative thread that owns its work (the load-time precompile) can ask for an *isolated*
+// abort: the fatal check still parks the calling thread, but the speculative features of the rest
+// of the process (the PM4 lookahead) stay on, and `handler(user)` runs on the parked thread first
+// so its owner can drop the job and start a replacement thread. Thread-local; null clears it.
+using AbortHandler = void (*)(void* user);
+void SetThreadAbortHandler(AbortHandler handler, void* user) noexcept;
+// Number of isolated aborts so far (all threads).
+[[nodiscard]] uint32_t IsolatedAborts() noexcept;
 
 // Registers a lock the calling (speculative) thread currently holds, so Abort() can release it
 // before parking the thread. Only the shared-mutex flavour is needed.

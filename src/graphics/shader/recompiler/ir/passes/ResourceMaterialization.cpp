@@ -1236,6 +1236,46 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	return BuildResourceSpecialization(program, snapshot, specialization);
 }
 
+bool GuessSpecialization(const ResourcePlan& program, ResourceSpecialization& specialization) {
+	if (!program.resource_tracking_complete || program.requires_specialization_memory ||
+	    !program.source_reads.empty()) {
+		return false;
+	}
+	specialization.buffers.assign(program.info.buffers.size(), {});
+	for (uint32_t i = 0; i < program.info.buffers.size(); ++i) {
+		const auto& base   = program.info.buffers[i];
+		const auto* source = Source(program, base.source);
+		if (source == nullptr || source->indirect_descriptor.has_value() || base.formatted ||
+		    base.indirect_root != BufferResource::NoIndirectBuffer) {
+			return false;
+		}
+		// A structured buffer of float4 elements (stride 16, no swizzle) with the in-bounds
+		// out-of-bounds mode and no format: the commonest shape of an untyped buffer descriptor.
+		// Measured on a real title (docs/shader-load-notes.md): 16-byte elements are 53 % of all
+		// buffer bindings, 4-byte ones 20 %, raw 11 %, and 99.5 % use OOB mode 0. Any other stride
+		// misses; the persisted variants cover those exactly.
+		specialization.buffers[i].packed_stride = 16;
+	}
+	specialization.images.assign(program.info.images.size(), {});
+	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
+		const auto& image = program.info.images[i];
+		const auto* source = Source(program, image.source);
+		if (source == nullptr || source->indirect_descriptor.has_value() ||
+		    image.indirect_root != ImageResource::NoIndirectImage ||
+		    image.resource_class == ImageResourceClass::None) {
+			return false;
+		}
+		auto& guess         = specialization.images[i];
+		guess.numeric_class = image.atomic ? Prospero::TextureNumericClass::Uint
+		                                   : Prospero::TextureNumericClass::Float;
+		guess.dimension     = image.dimension == Decoder::ImageDimension::Unknown
+		                          ? Decoder::ImageDimension::Dim2D
+		                          : image.dimension;
+		guess.mip_count     = 1;
+	}
+	return true;
+}
+
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
 	EXIT_IF(!program.resource_tracking_complete || program.shader_info_complete);
 	EXIT_IF(program.info.buffers.size() > specialization.buffers.size() ||
