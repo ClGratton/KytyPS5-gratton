@@ -51,14 +51,39 @@ what kyGpu pays.
    **`--debug-draw-key-verify true`** re-runs the map lookup on every memo hit (stops on a different pipeline)
    and redoes every table-walked refresh with the graph walk on a fresh memo (stops on a different flattened SRT).
 
+## Measured (flags on = `--draw-key-cache true`)
+Warm cache (each run warmed from the same fresh run of the same binary), 6 vs 6 alternated, window = checkpoint s01 to
+s14 of the route (42 s of desert), headless 60 Hz, pin as above. The route is bimodal (state A: the pause-menu sync
+waits under 4 s, state B: it waits 29-35 s and the window shows other content), so the like-for-like comparison is
+state A only:
+
+| | off (5 runs) | on (3 runs) |
+|---|---|---|
+| fps | 54.66 54.64 54.68 54.69 54.33, mean 54.60 | 55.04 55.09 55.21, mean 55.11 (+0.9 %) |
+| frame p50 / p99 | 16.67 ms / 35.7-37.4 ms | 16.67 ms / 36.1-36.3 ms |
+| frames at 16.7 ms | 87-88 % | 88-89 % |
+| kyGpu CPU median | 46-48 % | 44-45 % |
+
+State B (off 1 run: 54.16; on 3 runs: 57.43, 57.16, 54.57) is not comparable (other content, one arm only), so the
+all-runs mean (+2.2 %) is not claimed. The gain is real but small because kyGpu spends 30-40 % of its time waiting
+for the GPU: shorter CPU work moves its busy time, less its frame rate.
+
+kyGpu phase shares, warm desert windows with `--gpu-phase-stats 10` (timers on, never an fps baseline), off -> on:
+`pipe_materialize` 11.7 -> 9.3 %, `pipe_find` 0.7 -> 0.2 %, `pipe_entrylock` 0.5 -> 0.3 %, all `pipe_*` 16.7 -> 14.3 %
+(the old `pipeline` phase: 15 %); drain_tick 32.7 -> 30.6 %, pm4 17.2 -> 23.1 % (the waiting moved into work), the rest
+within 1 point. Per materialization on the GPU thread: 3.2 -> 2.5 us.
+
 ## Verification
 - Unit tests: `draw_key_memo` (hit returns the pipeline of an equal key, any single field changed misses, LRU,
   agreement with a map on a 20 000-draw random stream) and `resource_materialization` (table and fast reads
   against the graph walk on values, set of guest reads and captured ranges, for two inputs and for missing words,
   truncated user data, null root, 48-bit wrap, a computed pointer word that must stay on the graph walk).
-- Verify run (`config-pk-verify.json`, 130 s): 1.5 M memo hits all identical to the map, every table-walked
-  refresh equal to its graph walk, no stop.
-- Rendering checked by eye on the checkpoints of the A/B runs (see RESULTS.md).
+- Verify run (`config-pk-verify.json`, 127 s, binary of the A/B runs): 1.3 M memo hits all identical to the map, every
+  table-walked refresh equal to its graph walk, no stop.
+- Rendering checked by eye: checkpoints of off and on runs of the same route state show the same scenes
+  (state A: the same frames up to timing). The desert lemon colour, the known intermittent state, appeared in 5 of
+  6 off runs and 4 of 6 on runs; no other difference seen.
+- Full `ctest -j2` on the build of the A/B binary: 84/84.
 
 ## Known limits
 - The control-flow refresh still costs most of the old time: the fast reads cover the scalar reads, not the
