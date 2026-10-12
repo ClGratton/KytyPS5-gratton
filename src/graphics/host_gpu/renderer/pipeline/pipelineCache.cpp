@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCacheFile.h"
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
@@ -82,24 +83,23 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 	}
 }
 
-// Bump when the cache file layout or the meaning of the signature changes. Driver pipeline-cache
-// blobs are content-addressed and validated by the driver itself, so changes to the emulator's
-// pipeline creation do not need a bump: stale entries simply never match.
-constexpr uint32_t kPipelineCacheSchemaVersion = 1;
+constexpr uint32_t kPipelineCacheSchemaVersion = PipelineCacheFile::kSchemaVersion;
+
+PipelineCacheFile::KeyMode DriverCacheKeyMode() {
+	return Config::GetPipelineCacheKey() == Config::PipelineCacheKey::Schema
+	           ? PipelineCacheFile::KeyMode::Schema
+	           : PipelineCacheFile::KeyMode::Revision;
+}
 
 std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties) {
-	constexpr char hex[] = "0123456789abcdef";
-	std::string    uuid(VK_UUID_SIZE * 2, '0');
-	for (size_t i = 0; i < VK_UUID_SIZE; i++) {
-		uuid[i * 2]     = hex[properties.pipelineCacheUUID[i] >> 4u];
-		uuid[i * 2 + 1] = hex[properties.pipelineCacheUUID[i] & 0xfu];
+	PipelineCacheFile::DeviceIdentity device;
+	device.vendor_id      = properties.vendorID;
+	device.device_id      = properties.deviceID;
+	device.driver_version = properties.driverVersion;
+	for (size_t i = 0; i < device.uuid.size(); i++) {
+		device.uuid[i] = properties.pipelineCacheUUID[i];
 	}
-	if (Config::GetPipelineCacheKey() == Config::PipelineCacheKey::Schema) {
-		return fmt::format("KytyPCS:{}:{:08x}:{:08x}:{:08x}:{}\n", kPipelineCacheSchemaVersion,
-		                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
-	}
-	return fmt::format("KytyPC1:{}:{:08x}:{:08x}:{:08x}:{}\n", KYTY_GIT_REVISION,
-	                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
+	return PipelineCacheFile::Signature(DriverCacheKeyMode(), KYTY_GIT_REVISION, device);
 }
 
 std::string PipelineCacheTitleId() {
@@ -1483,23 +1483,14 @@ void PipelineCache::InitializeDriverCache() {
 	}
 	if (Config::GetPipelineCacheKey() == Config::PipelineCacheKey::Schema) {
 		// The signature does not involve the git revision, so none of the build-identity gates
-		// below apply: dev, dirty and unknown-revision builds may use (and share) the cache.
+		// apply: dev, dirty and unknown-revision builds may use (and share) the cache.
 		PipelineCacheLog("Vulkan pipeline cache: key=schema (version {})", kPipelineCacheSchemaVersion);
-	} else {
-		if (KYTY_BUILD != KYTY_BUILD_RELEASE) {
-			PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
-			return;
-		}
-		const std::string_view git_hash     = KYTY_GIT_HASH;
-		const std::string_view git_revision = KYTY_GIT_REVISION;
-		if (git_hash == "unknown" || git_revision == "unknown") {
-			PipelineCacheLog("Vulkan pipeline cache: disabled (unknown git revision)");
-			return;
-		}
-		if (git_hash.ends_with("-dirty")) {
-			PipelineCacheLog("Vulkan pipeline cache: disabled (dirty build)");
-			return;
-		}
+	}
+	if (const auto reason = PipelineCacheFile::DisabledReason(
+	        DriverCacheKeyMode(), KYTY_BUILD == KYTY_BUILD_RELEASE, KYTY_GIT_HASH,
+	        KYTY_GIT_REVISION)) {
+		PipelineCacheLog("Vulkan pipeline cache: disabled ({})", *reason);
+		return;
 	}
 
 	m_driver_cache_path     = std::filesystem::path("_PipelineCache") / (title_id + ".bin");
@@ -1514,28 +1505,21 @@ void PipelineCache::InitializeDriverCache() {
 	if (cache_exists) {
 		Common::File file(m_driver_cache_path, Common::File::Mode::Read);
 		const auto   file_size = file.IsInvalid() ? 0 : file.Size();
-		const auto   signature = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
-		if (file_size >= signature.size() + sizeof(uint64_t) &&
-		    file_size <= std::numeric_limits<uint32_t>::max()) {
-			std::string cached_signature(signature.size(), '\0');
-			uint64_t    payload_hash = 0;
-			initial_data.resize(file_size - signature.size() - sizeof(payload_hash));
-			uint32_t signature_read = 0;
-			uint32_t hash_read      = 0;
-			uint32_t payload_read   = 0;
-			file.Read(cached_signature.data(), static_cast<uint32_t>(cached_signature.size()),
-			          &signature_read);
-			file.Read(&payload_hash, sizeof(payload_hash), &hash_read);
-			file.Read(initial_data.data(), static_cast<uint32_t>(initial_data.size()),
-			          &payload_read);
+		if (file_size > 0 && file_size <= std::numeric_limits<uint32_t>::max()) {
+			std::vector<uint8_t> contents(file_size);
+			uint32_t             read = 0;
+			file.Read(contents.data(), static_cast<uint32_t>(contents.size()), &read);
 			file.Close();
-			if (signature_read != cached_signature.size() || hash_read != sizeof(payload_hash) ||
-			    payload_read != initial_data.size() || cached_signature != signature ||
-			    XXH3_64bits(initial_data.data(), initial_data.size()) != payload_hash) {
-				initial_data.clear();
-				PipelineCacheLog(
-				    "Vulkan pipeline cache: invalidating {} (driver, emulator, or data mismatch)",
-				    path);
+			const auto signature = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
+			const auto loaded =
+			    read == contents.size()
+			        ? PipelineCacheFile::Load(contents, signature)
+			        : PipelineCacheFile::LoadResult {PipelineCacheFile::LoadStatus::TooSmall, {}};
+			if (loaded.status == PipelineCacheFile::LoadStatus::Valid) {
+				initial_data.assign(loaded.payload.begin(), loaded.payload.end());
+			} else {
+				PipelineCacheLog("Vulkan pipeline cache: invalidating {} ({})", path,
+				                 PipelineCacheFile::ToString(loaded.status));
 			}
 		} else {
 			file.Close();
@@ -1601,9 +1585,8 @@ void PipelineCache::Save() {
 		return;
 	}
 	payload.resize(size);
-	auto       prefix       = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
-	const auto payload_hash = XXH3_64bits(payload.data(), payload.size());
-	prefix.append(reinterpret_cast<const char*>(&payload_hash), sizeof(payload_hash));
+	const auto contents = PipelineCacheFile::Store(
+	    DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties()), payload);
 	if (!Common::File::CreateDirectories(m_driver_cache_path.parent_path())) {
 		PipelineCacheLog("Vulkan pipeline cache: failed to create cache directory");
 		return;
@@ -1611,15 +1594,13 @@ void PipelineCache::Save() {
 	auto temp_path = m_driver_cache_path;
 	temp_path += ".tmp";
 	Common::File file;
-	uint32_t     prefix_written  = 0;
-	uint32_t     payload_written = 0;
+	uint32_t     written = 0;
 	if (file.Create(temp_path)) {
-		file.Write(prefix.data(), static_cast<uint32_t>(prefix.size()), &prefix_written);
-		file.Write(payload.data(), static_cast<uint32_t>(payload.size()), &payload_written);
+		file.Write(contents.data(), static_cast<uint32_t>(contents.size()), &written);
 	}
 	const bool flushed = !file.IsInvalid() && file.Flush();
 	file.Close();
-	if (prefix_written != prefix.size() || payload_written != payload.size() || !flushed ||
+	if (written != contents.size() || !flushed ||
 	    !Common::File::RenameFile(temp_path, m_driver_cache_path)) {
 		PipelineCacheLog("Vulkan pipeline cache: failed to write {}",
 		                 Common::PathToString(m_driver_cache_path));
