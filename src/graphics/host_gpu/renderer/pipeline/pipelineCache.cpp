@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/nullPageRead.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheFile.h"
+#include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
@@ -308,6 +309,104 @@ bool ReadShaderGuestMemorySpeculative(void*, uint64_t address, std::span<uint32_
 	       Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
 }
 
+// --srt-plan-shadow, lookahead thread: the same two readers, remembering what they returned.
+bool RecordingScalarRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	if (!ReadShaderScalarMemory(nullptr, address, values)) return false;
+	static_cast<SrtPlan::ReadRecorder*>(userdata)->Record(SrtPlan::ReadKind::Scalar, address, values);
+	return true;
+}
+
+bool RecordingSpecializationRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	if (!ReadShaderGuestMemorySpeculative(nullptr, address, values)) return false;
+	static_cast<SrtPlan::ReadRecorder*>(userdata)->Record(SrtPlan::ReadKind::Clean, address, values);
+	return true;
+}
+
+// --srt-plan-shadow, kyGpu: re-reads for the validity check. No phase scopes (the check is timed
+// on its own) and no synchronization: GPU-dirty memory is reported by ShadowDirty instead.
+bool ShadowRead(SrtPlan::ReadKind kind, uint64_t address, std::span<uint32_t> values, bool exact) {
+	if (values.empty()) return true;
+	if (exact) {
+		return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+	}
+	if (kind == SrtPlan::ReadKind::Scalar) {
+		if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
+			std::ranges::fill(values, 0u);
+		}
+		return true;
+	}
+	if (ReadGuestNullPage(address, values)) return true;
+	return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+}
+
+bool ShadowDirty(uint64_t address, uint64_t bytes) {
+	return Libs::LibKernel::Memory::HasGpuDirtyBytes(address, bytes);
+}
+
+// --srt-plan-shadow, kyGpu thread: kyGpu has materialized the draw's resources itself; look up the
+// plan the lookahead made for the same draw and record how it compares. Nothing from the plan is
+// used.
+void ShadowCompare(const SrtPlan::Key& key, bool nested, bool compute, uint32_t stage,
+                   uint64_t shader_hash, const ShaderRecompiler::IR::SrtRuntime& runtime,
+                   const ShaderRecompiler::IR::ResourceSnapshot&       resources,
+                   const ShaderRecompiler::IR::ResourceSpecialization& specialization,
+                   int64_t materialize_ns) {
+	Common::GpuPhase::Scope gpu_phase_shadow(Common::GpuPhase::Phase::SrtPlanShadow);
+	SrtPlan::Sample sample;
+	sample.compute        = compute;
+	sample.materialize_ns = materialize_ns;
+	if (nested) {
+		sample.outcome = SrtPlan::Outcome::SubDraw;
+		SrtPlan::Record(sample);
+		return;
+	}
+	std::unique_ptr<SrtPlan::Plan> plan;
+	const auto t_lookup = SrtPlan::NowNs();
+	const auto lookup   = SrtPlan::GetStore().Take(key, plan);
+	sample.lookup_ns    = SrtPlan::NowNs() - t_lookup;
+	switch (lookup) {
+		case SrtPlan::Lookup::NotReady: sample.outcome = SrtPlan::Outcome::NotReady; break;
+		case SrtPlan::Lookup::Missing: sample.outcome = SrtPlan::Outcome::Missing; break;
+		case SrtPlan::Lookup::Late: sample.outcome = SrtPlan::Outcome::Late; break;
+		case SrtPlan::Lookup::Evicted: sample.outcome = SrtPlan::Outcome::Evicted; break;
+		case SrtPlan::Lookup::Ready: sample.outcome = SrtPlan::Outcome::Ready; break;
+	}
+	if (lookup != SrtPlan::Lookup::Ready) {
+		SrtPlan::Record(sample);
+		return;
+	}
+	if (plan->stage != stage || plan->shader_hash != shader_hash) {
+		sample.outcome = SrtPlan::Outcome::Desync;
+		SrtPlan::Record(sample);
+		return;
+	}
+	const auto t_check = SrtPlan::NowNs();
+	sample.lead_ns     = t_check - plan->produced_ns;
+	const auto events  = SrtPlan::ProducerEvents();
+	sample.lead_draws  = events > plan->produced_serial ? events - plan->produced_serial : 0;
+	// The validity check: the inputs, then the guest memory the walk read.
+	const SrtPlan::Inputs inputs {runtime.user_data, runtime.shader_base, runtime.workgroup_counts};
+	if (!SrtPlan::InputsMatch(*plan, inputs)) {
+		sample.invalid = SrtPlan::Invalid::Inputs;
+	} else {
+		switch (plan->reads.Validate(ShadowRead, ShadowDirty)) {
+			case SrtPlan::ReadSet::Result::Valid: break;
+			case SrtPlan::ReadSet::Result::Changed: sample.invalid = SrtPlan::Invalid::Changed; break;
+			case SrtPlan::ReadSet::Result::Unreadable: sample.invalid = SrtPlan::Invalid::Unreadable; break;
+			case SrtPlan::ReadSet::Result::GpuDirty: sample.invalid = SrtPlan::Invalid::GpuDirty; break;
+		}
+	}
+	const auto t_compare = SrtPlan::NowNs();
+	sample.check_ns      = t_compare - t_check;
+	sample.diff          = SrtPlan::Diff(plan->snapshot, plan->specialization, resources, specialization);
+	sample.equal         = sample.diff == 0;
+	sample.compare_ns    = SrtPlan::NowNs() - t_compare;
+	sample.windows       = static_cast<uint32_t>(plan->reads.windows.size());
+	sample.runs          = static_cast<uint32_t>(plan->reads.runs.size());
+	sample.dwords        = static_cast<uint32_t>(plan->reads.values.size());
+	SrtPlan::Record(sample);
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
 	if (!Config::GraphicsDebugDumpEnabled() && !Config::DebugDumpShaderMatches(shader_hash)) {
@@ -540,12 +639,14 @@ struct PipelineCache::ProgramCache {
 		Permutation* PeekPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t                                push_data_cursor,
 		                             ShaderRecompiler::IR::ResourceSpecialization& specialization_out,
-		                             bool&                                   materialized) {
+		                             bool&                                   materialized,
+		                             ShaderRecompiler::IR::ResourceSnapshot* keep = nullptr) {
 			std::unique_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_lookahead");
 			Common::Speculation::HeldLock held(&mutex);
 			Common::Hang::Phase phase("lookahead_materialize");
-			ShaderRecompiler::IR::ResourceSnapshot snapshot;
+			ShaderRecompiler::IR::ResourceSnapshot discarded;
+			auto& snapshot = keep != nullptr ? *keep : discarded; // --srt-plan-shadow keeps it
 			materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
 			                                                       specialization_out);
 			if (!materialized) {
@@ -1132,6 +1233,10 @@ struct PipelineCache::ProgramCache {
 		}
 
 		const auto user_data = std::span(params.user_data).first(params.user_data_count);
+		// --srt-plan-shadow: which draw's Get() call this is (in the lookahead and on kyGpu alike).
+		SrtPlan::Key plan_key;
+		bool         plan_nested = false;
+		const bool   plan_active = SrtPlan::Enabled() && SrtPlan::NextCall(plan_key, plan_nested);
 		// Per-call key. A thread_local scratch object avoids a heap allocation per draw (the
 		// static_state vector keeps its capacity) while never being shared between threads or
 		// between calls: Get() is not re-entrant on one thread.
@@ -1181,6 +1286,18 @@ struct PipelineCache::ProgramCache {
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 		}
+		// --srt-plan-shadow, lookahead thread: the walk's reads go through recording readers.
+		SrtPlan::ReadRecorder* plan_recorder = nullptr;
+		std::optional<ShaderRecompiler::IR::ResourceSnapshot> plan_snapshot;
+		if (prefetch && plan_active) {
+			plan_snapshot.emplace();
+			thread_local SrtPlan::ReadRecorder recorder;
+			recorder.Clear();
+			plan_recorder                       = &recorder;
+			runtime.userdata                    = plan_recorder;
+			runtime.read_memory                 = RecordingScalarRead;
+			runtime.read_specialization_memory  = RecordingSpecializationRead;
+		}
 		// The draw/dispatch (not a prefetch) is about to use `p`: variant recording and load hits.
 		const uint32_t cursor_in = push_data_cursor;
 		const auto note_use = [&](Permutation& p) {
@@ -1192,8 +1309,16 @@ struct PipelineCache::ProgramCache {
 			}
 		};
 		bool source_changed = false;
+		int64_t materialize_t0 = 0;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		Permutation* verify_target = nullptr;
+		if (entry == nullptr && plan_active && !prefetch) {
+			// A shader kyGpu sees for the first time: the lookahead cannot have a plan for it.
+			SrtPlan::Sample sample;
+			sample.outcome = SrtPlan::Outcome::NewSource;
+			sample.compute = std::is_same_v<InputInfo, ShaderComputeInputInfo>;
+			SrtPlan::Record(sample);
+		}
 		if (entry != nullptr) {
 			Permutation* permutation = nullptr;
 			Common::GpuPhase::Scope gpu_phase_materialize(
@@ -1206,7 +1331,31 @@ struct PipelineCache::ProgramCache {
 				}
 				bool materialized = false;
 				permutation = entry->PeekPermutation(runtime, push_data_cursor, specialization,
-				                                     materialized);
+				                                     materialized,
+				                                     plan_recorder != nullptr ? &*plan_snapshot : nullptr);
+				if (plan_recorder != nullptr) {
+					if (materialized) {
+						const auto t_plan = SrtPlan::NowNs();
+						auto       plan   = std::make_unique<SrtPlan::Plan>();
+						plan->key         = plan_key;
+						plan->stage       = static_cast<uint32_t>(stage);
+						plan->shader_hash = params.hash;
+						plan->shader_base = runtime.shader_base;
+						plan->snapshot    = std::move(*plan_snapshot);
+						plan->specialization = specialization;
+						plan->workgroup_counts.assign(runtime.workgroup_counts.begin(),
+						                              runtime.workgroup_counts.end());
+						plan->reads           = plan_recorder->Finish();
+						plan->produced_serial = SrtPlan::ProducerEvents();
+						const auto bytes      = plan->Bytes();
+						SrtPlan::NoteProduceCost(SrtPlan::NowNs() - t_plan);
+						plan->produced_ns = SrtPlan::NowNs();
+						SrtPlan::GetStore().Put(std::move(plan));
+						SrtPlan::NoteProduced(bytes);
+					} else {
+						SrtPlan::NoteProduceFailed();
+					}
+				}
 				if (permutation != nullptr) {
 					input_info.stage = {.program = &permutation->program, .resources = &PrefetchResources()};
 					permutation->program.bindings.AdvancePushData(push_data_cursor);
@@ -1218,6 +1367,7 @@ struct PipelineCache::ProgramCache {
 					return {};
 				}
 			} else if (entry->call_source) {
+				materialize_t0 = plan_active ? SrtPlan::NowNs() : 0;
 				Stopwatch refresh_sw;
 				source_changed = entry->RefreshCallSource(runtime);
 				refresh_time.Add(refresh_sw, refresh_sw.Lap());
@@ -1225,10 +1375,17 @@ struct PipelineCache::ProgramCache {
 					permutation = entry->FindPermutation<true>(runtime, push_data_cursor, &materialize_time,
 					                                           &specialization);
 			} else {
+				materialize_t0 = plan_active ? SrtPlan::NowNs() : 0;
 				permutation = entry->FindPermutation<false>(runtime, push_data_cursor, &materialize_time,
 				                                            &specialization);
 			}
 			gpu_phase_materialize.End();
+			if (plan_active && !prefetch) {
+				// kyGpu has its own result in entry->resources / entry->specialization (sole writer).
+				ShadowCompare(plan_key, plan_nested, std::is_same_v<InputInfo, ShaderComputeInputInfo>,
+				              static_cast<uint32_t>(stage), params.hash, runtime, entry->resources,
+				              entry->specialization, SrtPlan::NowNs() - materialize_t0);
+			}
 			if (permutation != nullptr && !prefetch && Config::GetLookaheadVerify() &&
 			    permutation->prefetched && !permutation->verified) {
 				// --debug-lookahead-verify: recompile it here with the real draw's inputs and
@@ -1985,6 +2142,9 @@ void PipelineCache::ShutdownAsync() {
 			skips += fmt::format(";skip_{}={}", LookaheadCounters::SkipName(i), l.skip[i].load());
 		}
 		PipelineCacheLog("Pipeline lookahead: {}{}", summary, skips);
+		if (SrtPlan::Enabled()) {
+			::Log::WriteToConsoleAndLog(SrtPlan::SummaryText());
+		}
 		if (m_lookahead_thread_summary) {
 			PipelineCacheLog("Pipeline lookahead thread: {}", m_lookahead_thread_summary());
 		}

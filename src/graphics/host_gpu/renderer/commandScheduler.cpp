@@ -2,7 +2,9 @@
 
 #include "common/gpuPhaseStats.h"
 #include "common/profiler.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
+#include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -181,7 +183,13 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 	BeginNext();
 }
 
+// --srt-plan-shadow: a drain ends the span of draws whose plan lead is reported together.
+static void NoteShadowDrain() {
+	if (SrtPlan::Enabled() && GuestGpu::IsGpuThread()) SrtPlan::NoteDrain();
+}
+
 void CommandScheduler::FlushAndWait() {
+	NoteShadowDrain();
 	Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainFlush);
 	const auto tick = Submit();
 	m_master.Wait(tick);
@@ -189,6 +197,7 @@ void CommandScheduler::FlushAndWait() {
 }
 
 void CommandScheduler::Finish() {
+	NoteShadowDrain();
 	Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainFinish);
 	CheckActive();
 	if (!m_command.IsInvalid()) {
@@ -203,6 +212,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		Common::GpuPhase::NoteDrainFull(true);
+		NoteShadowDrain();
 		Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
 		CheckActive();
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
@@ -214,6 +224,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		BeginNext();
 	} else if (!m_master.IsFree(tick)) {
 		Common::GpuPhase::NoteDrainFull(false);
+		NoteShadowDrain();
 		Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
 		m_master.Wait(tick);
 	}
