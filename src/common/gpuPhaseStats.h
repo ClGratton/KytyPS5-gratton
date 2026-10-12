@@ -18,6 +18,8 @@
 // Idea from BryanKAdams/BryKytyPS5 (drain stats, draw-phase and PM4 opcode timers; GPL-2.0),
 // re-implemented around an exclusive-time stack.
 
+#include "common/drainCauses.h"
+
 #include <cstdint>
 
 namespace Common::GpuPhase {
@@ -63,6 +65,33 @@ void NoteFrame() noexcept;
 // and what finally submitted them.
 enum class Coalesce : uint8_t { Deferred, FlushBatch, FlushDeadline, FlushForced, Count };
 void NoteCoalesce(Coalesce kind, uint64_t count = 1) noexcept;
+
+// Why the next CommandScheduler::Wait happens (the innermost tagged call site wins). The report
+// lists drains per cause (count, full ones, time). Free when disabled: a thread_local store.
+using DrainCause = DrainCauses::Cause;
+
+namespace detail {
+extern thread_local DrainCause t_drain_cause;
+extern thread_local bool       t_drain_full;
+} // namespace detail
+
+class DrainCauseScope {
+public:
+	explicit DrainCauseScope(DrainCause cause) noexcept: m_previous(detail::t_drain_cause) {
+		detail::t_drain_cause = cause;
+	}
+	~DrainCauseScope() { detail::t_drain_cause = m_previous; }
+	DrainCauseScope(const DrainCauseScope&)            = delete;
+	DrainCauseScope& operator=(const DrainCauseScope&) = delete;
+
+private:
+	DrainCause m_previous;
+};
+
+// Set by CommandScheduler::Wait before its DrainTick scope: the wait forced a submit.
+inline void NoteDrainFull(bool full) noexcept {
+	detail::t_drain_full = full;
+}
 
 namespace detail {
 struct ThreadState;

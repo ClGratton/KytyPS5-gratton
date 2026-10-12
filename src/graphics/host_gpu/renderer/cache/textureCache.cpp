@@ -2058,6 +2058,7 @@ void TextureCache::ReclaimMemory() {
 	     bytes >> 20);
 	// Deferred deletions are released once the GPU is done with the current work.
 	const auto tick_now = m_scheduler.CurrentTick();
+	Common::GpuPhase::DrainCauseScope drain_cause(Common::GpuPhase::DrainCause::TextureReclaim);
 	m_scheduler.Wait(tick_now);
 	m_scheduler.PopPendingOperations();
 }

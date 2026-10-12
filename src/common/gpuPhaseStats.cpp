@@ -69,6 +69,8 @@ struct ThreadState {
 	std::array<uint64_t, 256>            packet_ticks {};
 	std::array<uint64_t, 256>            packet_count {};
 	std::array<uint64_t, 256>            drain_ticks_by_packet {};
+	DrainCauses::Table                   drain_causes;      // DrainTick waits, by cause
+	DrainCauses::Table                   window_drain_causes;
 
 	// Window start (previous report) and what the counters read then.
 	int64_t  window_wall_ns = 0;
@@ -90,6 +92,8 @@ struct ThreadState {
 };
 
 thread_local ThreadState* t_state = nullptr;
+thread_local DrainCause   t_drain_cause = DrainCause::Other;
+thread_local bool         t_drain_full  = false;
 
 uint64_t Now() noexcept {
 #if defined(__x86_64__) || defined(__i386__)
@@ -119,6 +123,9 @@ void Exit(ThreadState* state, Phase phase, uint64_t start) noexcept {
 	}
 	if (IsDrain(phase) && now > start) {
 		state->drain_ticks_by_packet[state->current_opcode & 0xffu] += now - start;
+		if (phase == Phase::DrainTick) {
+			state->drain_causes.Add(t_drain_cause, t_drain_full, now - start);
+		}
 	}
 }
 
@@ -199,6 +206,9 @@ void AttachGpuThread() {
 				header += fmt::format(",{}_pct,{}_calls", name, name);
 			}
 			header += ",unscoped_pct";
+			for (const auto* name: DrainCauses::kCauseNames) {
+				header += fmt::format(",drain_{}_ms,drain_{}_calls", name, name);
+			}
 		}
 		header += "\n";
 		std::fputs(header.c_str(), state->csv);
@@ -243,6 +253,8 @@ void Report(detail::ThreadState& s, bool final_report) {
 
 	std::array<double, kPhases>   pct {};
 	std::array<uint64_t, kPhases> calls {};
+	std::array<double, DrainCauses::kCauseNames.size()>   cause_ms {};
+	std::array<uint64_t, DrainCauses::kCauseNames.size()> cause_calls {};
 	double                        scoped = 0.0;
 	if (s.phases) {
 		for (size_t i = 0; i < kPhases; ++i) {
@@ -282,6 +294,25 @@ void Report(detail::ThreadState& s, bool final_report) {
 			                    static_cast<double>(drain_top[i].first) * ns_per_tick / 1e6);
 		}
 		line += "\n";
+		{
+			const auto causes = s.drain_causes.Since(s.window_drain_causes);
+			s.window_drain_causes = s.drain_causes;
+			line += "GpuPhase drain causes (calls/full/ms):";
+			for (size_t i = 0; i < DrainCauses::kCauseNames.size(); ++i) {
+				const auto& e = causes.Get(static_cast<DrainCause>(i));
+				if (e.calls != 0) {
+					line += fmt::format(" {}={}/{}/{:.1f}", DrainCauses::kCauseNames[i], e.calls,
+					                    e.full_calls,
+					                    static_cast<double>(e.ticks) * ns_per_tick / 1e6);
+				}
+			}
+			line += "\n";
+			for (size_t i = 0; i < DrainCauses::kCauseNames.size(); ++i) {
+				const auto& e = causes.Get(static_cast<DrainCause>(i));
+				cause_ms[i]    = static_cast<double>(e.ticks) * ns_per_tick / 1e6;
+				cause_calls[i] = e.calls;
+			}
+		}
 		const auto                count_base = s.window_packet_count;
 		const auto                packet_top = top(s.packet_ticks, s.window_packet_ticks);
 		line += "GpuPhase packets (inclusive):";
@@ -304,6 +335,9 @@ void Report(detail::ThreadState& s, bool final_report) {
 				row += fmt::format(",{:.2f},{}", pct[i], calls[i]);
 			}
 			row += fmt::format(",{:.2f}", std::max(0.0, 100.0 - scoped));
+			for (size_t i = 0; i < cause_ms.size(); ++i) {
+				row += fmt::format(",{:.2f},{}", cause_ms[i], cause_calls[i]);
+			}
 		}
 		row += "\n";
 		std::fputs(row.c_str(), s.csv);
