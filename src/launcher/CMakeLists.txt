@@ -51,6 +51,12 @@ add_custom_target(stage_updater
 	VERBATIM)
 add_dependencies(launcher kyty_emulator stage_updater)
 
+# Window-less check of the launcher's options against the emulator (defaults, flags, command lines).
+if(BUILD_TESTING AND LINUX)
+	add_test(NAME launcher_self_check
+		COMMAND launcher --self-check --emulator $<TARGET_FILE:kyty_emulator>)
+endif()
+
 if(KYTY_CLANG_CL)
 	add_custom_command(TARGET launcher POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_PDB_FILE:kyty_emulator> $<TARGET_FILE_DIR:launcher>/$<TARGET_PDB_FILE_NAME:kyty_emulator>
