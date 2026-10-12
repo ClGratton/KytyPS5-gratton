@@ -81,13 +81,14 @@ std::string FormatWindow(const char* title, double seconds, const Stats::Window&
 	line += fmt::format(
 	    "SrtPlanShadow   cost per ready draw: check {:.0f} ns (p50 {:.0f}) vs kyGpu materialize {:.0f} ns (p50 {:.0f}) => "
 	    "check/materialize {} (p50 ratio {}); store lookup {:.0f} ns/event, shadow compare {:.0f} ns; read set: {:.1f} "
-	    "windows, {:.1f} runs, {:.1f} dwords per plan\n",
+	    "windows ({:.2f} clean), {:.1f} runs, {:.1f} dwords per plan\n",
 	    static_cast<double>(t.check_ns) / n, w.check_ns.p50, static_cast<double>(t.materialize_ns) / n,
 	    w.materialize_ns.p50,
 	    t.materialize_ns != 0 ? fmt::format("{:.1f}%", 100.0 * static_cast<double>(t.check_ns) / static_cast<double>(t.materialize_ns)) : "n/a",
 	    w.materialize_ns.p50 != 0 ? fmt::format("{:.1f}%", 100.0 * w.check_ns.p50 / w.materialize_ns.p50) : "n/a",
 	    static_cast<double>(t.lookup_ns) / static_cast<double>(std::max<uint64_t>(t.events, 1)),
 	    static_cast<double>(t.compare_ns) / n, static_cast<double>(t.windows) / n,
+	    static_cast<double>(t.clean_windows) / n,
 	    static_cast<double>(t.runs) / n, static_cast<double>(t.dwords) / n);
 	return line;
 }
@@ -106,7 +107,7 @@ void WriteWindowRow(ConsumerState& c, const Stats::Window& w, double seconds) {
 		           "subdraw,new_source,valid,equal,valid_unequal,invalid_equal,inv_inputs,inv_changed,inv_unreadable,"
 		           "inv_dirty,lead_us_p10,lead_us_p50,lead_us_p90,lead_draws_p10,lead_draws_p50,lead_draws_p90,"
 		           "check_ns_sum,check_ns_p50,mat_ns_sum,mat_ns_p50,lookup_ns_sum,compare_ns_sum,windows_sum,runs_sum,"
-		           "dwords_sum,store_queued,store_evictions,produced,produce_failed,produce_ns_sum\n",
+		           "dwords_sum,store_queued,store_evictions,produced,produce_failed,produce_ns_sum,clean_windows_sum\n",
 		           c.wcsv);
 	}
 	const auto& t = w.totals;
@@ -116,7 +117,7 @@ void WriteWindowRow(ConsumerState& c, const Stats::Window& w, double seconds) {
 	std::fprintf(
 	    c.wcsv,
 	    "%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-	    "%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%lld,%.0f,%lld,%.0f,%lld,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%lld\n",
+	    "%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%lld,%.0f,%lld,%.0f,%lld,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%lld,%llu\n",
 	    WallS(), seconds, static_cast<unsigned long long>(t.events), eligible, o(Outcome::Ready),
 	    static_cast<unsigned long long>(t.ready_graphics), static_cast<unsigned long long>(t.ready_compute),
 	    o(Outcome::NotReady), o(Outcome::Missing), o(Outcome::Late), o(Outcome::Evicted), o(Outcome::Desync),
@@ -131,7 +132,7 @@ void WriteWindowRow(ConsumerState& c, const Stats::Window& w, double seconds) {
 	    static_cast<unsigned long long>(t.runs), static_cast<unsigned long long>(t.dwords),
 	    static_cast<unsigned long long>(store.queued), static_cast<unsigned long long>(store.evictions),
 	    static_cast<unsigned long long>(g_produced.load()), static_cast<unsigned long long>(g_produce_failed.load()),
-	    static_cast<long long>(g_produce_ns.load()));
+	    static_cast<long long>(g_produce_ns.load()), static_cast<unsigned long long>(t.clean_windows));
 	std::fflush(c.wcsv);
 }
 

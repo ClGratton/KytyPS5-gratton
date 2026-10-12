@@ -464,7 +464,7 @@ struct Sample {
 	int64_t  materialize_ns = 0;
 	int64_t  lookup_ns = 0;  // store lookup (Take)
 	int64_t  compare_ns = 0; // shadow-only byte comparison
-	uint32_t windows = 0, runs = 0, dwords = 0;
+	uint32_t windows = 0, runs = 0, dwords = 0, clean_windows = 0;
 };
 
 struct IntervalRecord {
@@ -482,7 +482,7 @@ public:
 		uint64_t valid = 0, equal = 0, valid_equal = 0, valid_unequal = 0, invalid_equal = 0;
 		std::array<uint64_t, 8> diff_bits {};
 		int64_t  check_ns = 0, materialize_ns = 0, lookup_ns = 0, compare_ns = 0;
-		uint64_t windows = 0, runs = 0, dwords = 0;
+		uint64_t windows = 0, runs = 0, dwords = 0, clean_windows = 0;
 		void Add(const Totals& o) {
 			events += o.events;
 			for (size_t i = 0; i < outcome.size(); ++i) outcome[i] += o.outcome[i];
@@ -502,6 +502,7 @@ public:
 			windows += o.windows;
 			runs += o.runs;
 			dwords += o.dwords;
+			clean_windows += o.clean_windows;
 		}
 	};
 
@@ -528,6 +529,7 @@ public:
 		m_window.windows += s.windows;
 		m_window.runs += s.runs;
 		m_window.dwords += s.dwords;
+		m_window.clean_windows += s.clean_windows;
 		const double lead_us = static_cast<double>(s.lead_ns) / 1000.0;
 		m_window_lead_us.Add(lead_us);
 		m_window_lead_draws.Add(static_cast<double>(s.lead_draws));

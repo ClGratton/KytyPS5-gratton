@@ -404,6 +404,9 @@ void ShadowCompare(const SrtPlan::Key& key, bool nested, bool compute, uint32_t 
 	sample.windows       = static_cast<uint32_t>(plan->reads.windows.size());
 	sample.runs          = static_cast<uint32_t>(plan->reads.runs.size());
 	sample.dwords        = static_cast<uint32_t>(plan->reads.values.size());
+	for (const auto& window: plan->reads.windows) {
+		sample.clean_windows += window.kind == SrtPlan::ReadKind::Clean;
+	}
 	SrtPlan::Record(sample);
 }
 
