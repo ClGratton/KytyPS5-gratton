@@ -235,6 +235,10 @@ static void PrintUsage() {
 	         "                                       hashes (see --debug-gpu-ops) to --shader-log-folder.\n");
 	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
 	         "                                       render passes since the last flip. Default: off.\n");
+	::printf("  --debug-hle-trace <true|false>       Debug: record the last HLE calls of every guest thread\n"
+	         "                                       (name, first arguments, caller, result for file and\n"
+	         "                                       memory calls) and print them in the fatal fault report.\n"
+	         "                                       Linux x86-64 only. Default: false.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -862,6 +866,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			} else {
 				::printf("invalid lookahead kinds (expected all, graphics, compute, programs, compute-programs, graphics-programs or none): %s\n",
 				         value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-hle-trace") {
+			if (!ParseBool(value, options.config.hle_trace)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--debug-hang-watchdog") {

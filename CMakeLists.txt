@@ -522,6 +522,12 @@ add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
 target_include_directories(lds_span_tests PRIVATE ${inc_headers})
+add_executable(hle_trace_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HleTraceTests.cpp"
+)
+target_link_libraries(hle_trace_tests common)
+target_include_directories(hle_trace_tests PRIVATE ${inc_headers})
+
 add_executable(async_pipeline_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AsyncPipelineTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.cpp"
@@ -748,6 +754,13 @@ if(BUILD_TESTING)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_fallback_disabled PROPERTIES
 		ENVIRONMENT "KYTY_SYSFILE_NO_READ_FALLBACK=1")
+	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
+	add_test(NAME sys_file_read_chaos COMMAND $<TARGET_FILE:sys_file_read_tests>)
+	set_tests_properties(sys_file_read_chaos PROPERTIES
+		ENVIRONMENT "KYTY_SYSFILE_CHAOS_EFAULT=1000")
+	add_test(NAME sys_file_read_chaos_no_fallback COMMAND $<TARGET_FILE:sys_file_read_tests>)
+	set_tests_properties(sys_file_read_chaos_no_fallback PROPERTIES
+		ENVIRONMENT "KYTY_SYSFILE_CHAOS_EFAULT=1000;KYTY_SYSFILE_NO_READ_FALLBACK=1")
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
 	add_test(NAME gpu_clock COMMAND $<TARGET_FILE:gpu_clock_tests>)
 	add_test(NAME frame_pacer COMMAND $<TARGET_FILE:frame_pacer_tests>)
@@ -884,6 +897,7 @@ if(BUILD_TESTING)
 		buffer_gc_gate_tests
 		bda_sync_gate_tests
 		sys_file_read_tests
+		hle_trace_tests
 		async_pipeline_tests
 		gpu_clock_tests
 		frame_pacer_tests

@@ -4,6 +4,7 @@
 #include "common/benchInstrument.h"
 #include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
+#include "common/hleTrace.h"
 
 #include <algorithm>
 #include <memory>
@@ -36,6 +37,7 @@ void Load(const ConfigOptions& cfg) {
 	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s != 0 ? cfg.gpu_phase_stats_s
 	                                                           : cfg.submit_stats_s,
 	                            cfg.gpu_phase_stats_s != 0);
+	Common::HleTrace::Enable(cfg.hle_trace);
 	Bench::Configure({
 	    .frames_csv        = cfg.bench_frames_csv,
 	    .exit_after_frames = cfg.bench_exit_after_frames,

@@ -158,6 +158,9 @@ struct ConfigOptions {
 	// --debug-dump-shader <hex[,hex...]>: write the SPIR-V and the guest binary of just these shader
 	// hashes (as printed by --debug-gpu-ops) to --shader-log-folder, without --graphics-debug-dump.
 	std::vector<uint64_t>  debug_dump_shaders;
+	// --debug-hle-trace: keep a per-thread ring of the last HLE calls and print it in the fatal
+	// fault report (common/hleTrace.h). Default off.
+	bool                   hle_trace                   = false;
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
 	// bit 2 = programs only (do not request pipelines).

@@ -1,6 +1,7 @@
 #include "loader/symbolDatabase.h"
 
 #include "common/file.h"
+#include "common/hleTrace.h"
 
 #include <fmt/format.h>
 #include <magic_enum.hpp>
@@ -36,6 +37,20 @@ void SymbolDatabase::Add(const SymbolResolve& s, uint64_t vaddr, const std::stri
 	r.dbg_name = dbg_name;
 	m_map.insert_or_assign(r.name, m_symbols.size());
 	m_symbols.push_back(r);
+}
+
+void SymbolDatabase::WrapFunctionsForTrace() {
+	if (!Common::HleTrace::Enabled()) {
+		return;
+	}
+	for (auto& sym: m_symbols) {
+		if (!sym.name.ends_with("[Func]")) {
+			continue;
+		}
+		const auto nid  = sym.name.substr(0, sym.name.find('['));
+		const auto name = sym.dbg_name.empty() ? nid : sym.dbg_name + "/" + nid;
+		sym.vaddr       = Common::HleTrace::Wrap(name.c_str(), sym.vaddr);
+	}
 }
 
 void SymbolDatabase::DbgDump(const std::string& folder, const std::string& file_name) {

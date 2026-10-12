@@ -71,6 +71,33 @@ int main() {
 		std::fclose(out);
 	}
 
+	// Fault injection (KYTY_SYSFILE_CHAOS_EFAULT=1000: every read of more than two pages stops at the
+	// next page boundary of the destination, as a kernel copy into a protected page does). Plain
+	// memory, no protection: the fallback must complete the read, and without it the read is short.
+	if (const char* chaos = std::getenv("KYTY_SYSFILE_CHAOS_EFAULT"); chaos != nullptr) {
+		const bool fallback_off = std::getenv("KYTY_SYSFILE_NO_READ_FALLBACK") != nullptr;
+		for (size_t offset: {size_t {0}, size_t {100}, size_t {4095}}) {
+			std::memset(g_region, 0, g_region_size);
+			auto* f = SysFileOpenR(path);
+			Check(f != nullptr, "open chaos");
+			uint32_t got = 0;
+			SysFileRead(g_region + offset, static_cast<uint32_t>(file_size - 4096), *f, &got);
+			SysFileClose(f);
+			if (fallback_off) {
+				const size_t boundary = static_cast<size_t>(g_page) - offset % static_cast<size_t>(g_page);
+				Check(got == boundary, "without the fallback the read stops at the page boundary");
+			} else {
+				Check(got == file_size - 4096, "the fallback completes an injected short read");
+				Check(std::memcmp(g_region + offset, content.data(), got) == 0,
+				      "the completed read delivers the right bytes");
+			}
+		}
+		Check(SysFileReadFallbackCount() == 3, "every injected failure was counted");
+		std::filesystem::remove(path);
+		std::printf("SysFileReadTests: fault-injection case passed (%s)\n", chaos);
+		return 0;
+	}
+
 	struct sigaction action {};
 	action.sa_sigaction = FaultHandler;
 	sigemptyset(&action.sa_mask);
