@@ -18,6 +18,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <fmt/format.h>
 #include <cinttypes>
 #include <cstring>
 #include <memory>
@@ -652,6 +653,18 @@ void BufferCache::RunGarbageCollector() {
 	const bool     aggressive = BufferGcGate::Aggressive(m_total_used_memory, m_critical_gc_memory,
 	                                                      m_registered_bytes,
 	                                                      Config::GcBufferOwnSharePercent());
+	m_gc_stats.runs++;
+	m_gc_stats.aggressive += aggressive ? 1 : 0;
+	if (m_gc_stats.runs % 4096 == 0) {
+		// Cumulative; the difference between two lines is a window. One line per 4096 runs that
+		// were past the trigger, so it only appears under memory pressure.
+		Log::Write(fmt::format(
+		    "BufferGC: runs={} aggressive={} freed_clean={} downloaded_dirty={} drains={} "
+		    "own={}MiB device={}MiB critical={}MiB share={}%\n",
+		    m_gc_stats.runs, m_gc_stats.aggressive, m_gc_stats.freed, m_gc_stats.downloads,
+		    m_gc_stats.drains, m_registered_bytes >> 20, m_total_used_memory >> 20,
+		    m_critical_gc_memory >> 20, Config::GcBufferOwnSharePercent()));
+	}
 	const auto     ages       = GcClock::BufferAgesFor(clock_mode, Config::GetVblankFrequency());
 	const uint64_t want_age   = aggressive ? ages.aggressive : ages.normal;
 	if (!GcClock::AgeReached(clock_mode, tick, want_age)) {
@@ -680,9 +693,12 @@ void BufferCache::RunGarbageCollector() {
 		}
 		return ++retire_count == limit;
 	});
+	m_gc_stats.freed += retire_count - dirty_buffers.size();
 	if (dirty_buffers.empty()) {
 		return;
 	}
+	m_gc_stats.downloads += dirty_buffers.size();
+	m_gc_stats.drains++;
 
 	// Publish all queued downloads before releasing their tracked pages and owners.
 	const auto completion_tick = m_scheduler.CurrentTick();

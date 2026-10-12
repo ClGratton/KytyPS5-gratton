@@ -147,6 +147,15 @@ private:
 	// when the driver reports it). Input of BufferGcGate.
 	uint64_t                                          m_registered_bytes   = 0;
 	std::atomic<uint64_t>                             m_buffer_set_generation {0};
+	// Cumulative garbage-collection counters (GPU thread only), logged under memory pressure.
+	struct GcStats {
+		uint64_t runs       = 0; // collector runs past the trigger
+		uint64_t aggressive = 0; // of those, aggressive ones
+		uint64_t freed      = 0; // clean buffers deleted
+		uint64_t downloads  = 0; // dirty buffers downloaded
+		uint64_t drains     = 0; // download batches, each a GPU drain
+	};
+	GcStats                                           m_gc_stats;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
