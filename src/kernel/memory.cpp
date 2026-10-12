@@ -780,6 +780,9 @@ public:
 	bool Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	bool CanMapDirect(uint64_t phys_addr, size_t len);
 	bool ReleasePoolExpansion(uint64_t phys_addr, size_t len);
+	// Returns the parts of a newly allocated range whose backing was used before. Fresh
+	// backing reads as zero, so only these parts need clearing; the claim removes them.
+	std::vector<std::pair<uint64_t, uint64_t>> ClaimStaleRanges(uint64_t start, uint64_t len);
 	bool GetAllocatedSpan(uint64_t phys_addr, size_t len, std::vector<AllocatedBlock>* blocks);
 	std::vector<AllocatedBlock> FindMappings(uint64_t phys_addr, size_t len);
 	void ProtectMapping(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode,
@@ -797,10 +800,14 @@ private:
 	                            uint64_t size);
 	static void AddFreeRange(std::map<uint64_t, uint64_t>& ranges, uint64_t start, uint64_t size);
 	void        ReclaimAutomatic(uint64_t start, uint64_t size);
+	// Every range returned to the free list was allocated before; unmap keeps its bytes.
+	void        ReturnToFree(uint64_t start, uint64_t size);
 
 	std::map<uint64_t, AllocatedBlock> m_physical;
 	std::map<uint64_t, uint64_t>       m_free;
 	std::map<uint64_t, uint64_t>       m_automatic_free;
+	// Free-list ranges that were handed out before and may hold a previous owner's bytes.
+	std::map<uint64_t, uint64_t>       m_stale;
 	std::vector<AllocatedBlock>        m_mappings;
 	Common::Mutex                      m_mutex;
 };
@@ -1416,6 +1423,42 @@ bool PhysicalMemory::ReserveAutomatic(uint64_t size, PhysicalRanges* ranges) {
 	return false;
 }
 
+void PhysicalMemory::ReturnToFree(uint64_t start, uint64_t size) {
+	AddFreeRange(m_free, start, size);
+	AddFreeRange(m_stale, start, size);
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> PhysicalMemory::ClaimStaleRanges(uint64_t start,
+                                                                            uint64_t len) {
+	Common::LockGuard lock(m_mutex);
+
+	std::vector<std::pair<uint64_t, uint64_t>> claimed;
+	const auto                                 end  = start + len;
+	auto                                       next = m_stale.upper_bound(start);
+	if (next != m_stale.begin()) {
+		--next;
+	}
+	while (next != m_stale.end() && next->first < end) {
+		const auto range_start = next->first;
+		const auto range_end   = next->first + next->second;
+		if (range_end <= start) {
+			++next;
+			continue;
+		}
+		const auto claim_start = std::max(range_start, start);
+		const auto claim_end   = std::min(range_end, end);
+		claimed.emplace_back(claim_start, claim_end - claim_start);
+		next = m_stale.erase(next);
+		if (range_start < claim_start) {
+			m_stale.emplace(range_start, claim_start - range_start);
+		}
+		if (claim_end < range_end) {
+			next = m_stale.emplace(claim_end, range_end - claim_end).first;
+		}
+	}
+	return claimed;
+}
+
 void PhysicalMemory::RestoreAutomatic(const PhysicalRanges& ranges) {
 	Common::LockGuard lock(m_mutex);
 	for (const auto& [start, size]: ranges) {
@@ -1480,7 +1523,7 @@ bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t* vaddr, uint64
 		*gpu_mode = b.gpu_mode;
 
 		m_physical.erase(it);
-		AddFreeRange(m_free, start, len);
+		ReturnToFree(start, len);
 		return true;
 	}
 	if (start > b.start_addr && start + len < b.start_addr + b.size) {
@@ -1505,7 +1548,7 @@ bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t* vaddr, uint64
 		}
 
 		m_physical.emplace(right.start_addr, right);
-		AddFreeRange(m_free, start, len);
+		ReturnToFree(start, len);
 		return true;
 	}
 	if (start == b.start_addr && len < b.size) {
@@ -1522,7 +1565,7 @@ bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t* vaddr, uint64
 			remaining.map_size -= len;
 		}
 		m_physical.emplace(remaining.start_addr, remaining);
-		AddFreeRange(m_free, start, len);
+		ReturnToFree(start, len);
 		return true;
 	}
 	if (start > b.start_addr && start + len == b.start_addr + b.size) {
@@ -1534,7 +1577,7 @@ bool PhysicalMemory::Release(uint64_t start, size_t len, uint64_t* vaddr, uint64
 		if (b.map_vaddr != 0) {
 			b.map_size = b.size;
 		}
-		AddFreeRange(m_free, start, len);
+		ReturnToFree(start, len);
 		return true;
 	}
 
@@ -1637,7 +1680,7 @@ bool PhysicalMemory::ReleasePoolExpansion(uint64_t phys_addr, size_t len) {
 		return false;
 	}
 	m_physical.erase(it);
-	AddFreeRange(m_free, phys_addr, len);
+	ReturnToFree(phys_addr, len);
 	return true;
 }
 
@@ -2908,6 +2951,17 @@ int KYTY_SYSV_ABI KernelGetPageTableStats(int* cpu_total, int* cpu_available, in
 	return OK;
 }
 
+// Clears only the parts of a new direct allocation that held a previous owner's bytes.
+// Fresh backing already reads as zero; clearing it would commit every page up front.
+static bool ZeroReusedDirectBacking(uint64_t start, uint64_t len) {
+	for (const auto& [stale_start, stale_len]: g_physical_memory->ClaimStaleRanges(start, len)) {
+		if (!g_guest_address_space->ZeroBacking(stale_start, stale_len)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 int KYTY_SYSV_ABI KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size) {
 	PRINT_NAME();
 
@@ -3015,8 +3069,10 @@ int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t len, s
 	// Hardware hands out zeroed pages for a new allocation. Unmap deliberately keeps the
 	// backing contents so that remapping the same range still sees them, so a range taken
 	// from the free list would otherwise expose the previous owner's bytes. Clear it here,
-	// at allocation, which leaves the unmap/remap contents contract untouched.
-	if (!g_guest_address_space->ZeroBacking(addr, len)) {
+	// at allocation, which leaves the unmap/remap contents contract untouched. Only the
+	// parts that were used before are cleared: fresh backing already reads as zero and
+	// clearing it would commit every page of a large reservation up front.
+	if (!ZeroReusedDirectBacking(addr, len)) {
 		uint64_t     released_vaddr    = 0;
 		uint64_t     released_map_size = 0;
 		GpuAccessMode released_gpu_mode = GpuAccessMode::NoAccess;
@@ -4311,7 +4367,7 @@ int KYTY_SYSV_ABI KernelMemoryPoolExpand(int64_t search_start, int64_t search_en
 	// Same reasoning as KernelAllocateDirectMemory: an expansion can reuse a range whose
 	// backing still holds the previous owner's bytes, and the pool hands that memory out
 	// before anything writes it.
-	if (!g_guest_address_space->ZeroBacking(phys_addr, len)) {
+	if (!ZeroReusedDirectBacking(phys_addr, len)) {
 		(void)g_physical_memory->ReleasePoolExpansion(phys_addr, len);
 		return KERNEL_ERROR_ENOMEM;
 	}
