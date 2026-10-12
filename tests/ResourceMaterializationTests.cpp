@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
