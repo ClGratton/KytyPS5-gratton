@@ -375,6 +375,34 @@ static bool ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 
 	const bool debug_dump = Config::GraphicsDebugDumpEnabled();
 
+	// --clean-guest-reads: read both tables with one clean copy each instead of a guest load per
+	// dword (a clean read costs a byte-range lookup and a texture-cache query).
+	std::array<uint32_t, 64>                                 attrib_local {};
+	std::array<uint32_t, ShaderVertexInputInfo::RES_MAX * 4> buffer_local {};
+	bool                                                     tables_local = false;
+	if (!Common::Speculation::Active() && Config::CleanGuestReadsEnabled() &&
+	    !input_semantics.empty()) {
+		uint32_t max_semantic = 0;
+		for (const auto& in: input_semantics) {
+			max_semantic = std::max<uint32_t>(max_semantic, in.semantic);
+		}
+		if (max_semantic < attrib_local.size() &&
+		    ShaderTryReadGuestClean(attrib_local.data(), attrib,
+		                            (max_semantic + 1u) * sizeof(uint32_t))) {
+			uint32_t max_index = 0;
+			for (const auto& in: input_semantics) {
+				max_index = std::max<uint32_t>(max_index, attrib_local[in.semantic] & 0x1fu);
+			}
+			if (max_index < ShaderVertexInputInfo::RES_MAX &&
+			    ShaderTryReadGuestClean(buffer_local.data(), buffer,
+			                            (max_index + 1u) * 4u * sizeof(uint32_t))) {
+				attrib       = attrib_local.data();
+				buffer       = buffer_local.data();
+				tables_local = true;
+			}
+		}
+	}
+
 	for (uint32_t i = 0; i < input_semantics.size(); i++) {
 		const auto& in = input_semantics[i];
 
@@ -384,7 +412,9 @@ static bool ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		uint32_t size = in.size_in_elements;
 
 		uint32_t attrib_word = 0;
-		if (!ReadVertexTableDwords(&attrib[in.semantic], 1, &attrib_word)) {
+		if (tables_local) {
+			attrib_word = attrib[in.semantic];
+		} else if (!ReadVertexTableDwords(&attrib[in.semantic], 1, &attrib_word)) {
 			return false;
 		}
 		if (debug_dump) {
@@ -403,7 +433,9 @@ static bool ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
 
 		uint32_t sharp[4] = {};
-		if (!ReadVertexTableDwords(&buffer[index * 4], 4, sharp)) {
+		if (tables_local) {
+			std::memcpy(sharp, &buffer[index * 4], sizeof(sharp));
+		} else if (!ReadVertexTableDwords(&buffer[index * 4], 4, sharp)) {
 			return false;
 		}
 
