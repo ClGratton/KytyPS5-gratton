@@ -228,8 +228,6 @@ void CheckDefaults(Report& r) {
 	check(static_cast<uint32_t>(info.console_language) == emu.console_language, "console language");
 	check(info.vulkan_validation_enabled == emu.vulkan_validation_enabled, "vulkan validation");
 	check(info.shader_validation_enabled == emu.shader_validation_enabled, "shader validation");
-	check(static_cast<int>(info.shader_optimization_type) == static_cast<int>(emu.shader_optimization_type),
-	      "shader optimization type");
 	check(static_cast<int>(info.shader_log_direction) == static_cast<int>(emu.shader_log_direction),
 	      "shader log direction");
 	check(info.shader_log_folder.toStdString() == emu.shader_log_folder.string(), "shader log folder");

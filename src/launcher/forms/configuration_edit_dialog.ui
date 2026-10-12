@@ -143,31 +143,21 @@
              </widget>
             </item>
             <item row="3" column="0">
-             <widget class="QLabel" name="label_shader_optimization">
-              <property name="text"><string>Shader optimization:</string></property>
-             </widget>
-            </item>
-            <item row="3" column="1">
-             <widget class="QComboBox" name="comboBox_shader_optimization_type">
-              <property name="toolTip"><string>Optimize shaders for code size or performance</string></property>
-             </widget>
-            </item>
-            <item row="4" column="0">
              <widget class="QLabel" name="label_gpu">
               <property name="text"><string>GPU:</string></property>
              </widget>
             </item>
-            <item row="4" column="1">
+            <item row="3" column="1">
              <widget class="QComboBox" name="comboBox_gpu">
               <property name="toolTip"><string>Graphics device used by the emulator</string></property>
              </widget>
             </item>
-            <item row="8" column="0">
+            <item row="7" column="0">
              <widget class="QLabel" name="label_fps_limit">
               <property name="text"><string>FPS limit:</string></property>
              </widget>
             </item>
-            <item row="8" column="1">
+            <item row="7" column="1">
              <layout class="QHBoxLayout" name="fpsLimitLayout">
               <item>
                <widget class="QSlider" name="slider_fps_limit">
@@ -187,12 +177,12 @@
               </item>
              </layout>
             </item>
-            <item row="9" column="0">
+            <item row="8" column="0">
              <widget class="QLabel" name="label_gpu_time_scale">
               <property name="text"><string>Dynamic resolution bias:</string></property>
              </widget>
             </item>
-            <item row="9" column="1">
+            <item row="8" column="1">
              <layout class="QHBoxLayout" name="gpuTimeScaleLayout">
               <item>
                <widget class="QSlider" name="slider_gpu_time_scale">
@@ -213,29 +203,29 @@
               </item>
              </layout>
             </item>
-            <item row="10" column="0">
+            <item row="9" column="0">
              <widget class="QLabel" name="label_gpu_timestamps">
               <property name="text"><string>GPU timestamps:</string></property>
              </widget>
             </item>
-            <item row="10" column="1">
+            <item row="9" column="1">
              <widget class="QComboBox" name="comboBox_gpu_timestamps">
               <property name="toolTip"><string>Where the GPU timings a game reads come from: Legacy is the time the emulator processes a command, Gpu is the host GPU's own timestamp. Dynamic-resolution games choose their resolution from these.</string></property>
              </widget>
             </item>
-            <item row="5" column="1">
+            <item row="4" column="1">
              <widget class="QCheckBox" name="checkBox_readback">
               <property name="toolTip"><string>Read back writable linear images</string></property>
               <property name="text"><string>Enable readback</string></property>
              </widget>
             </item>
-            <item row="6" column="1">
+            <item row="5" column="1">
              <widget class="QCheckBox" name="checkBox_tessellation">
               <property name="toolTip"><string>Draw tessellated geometry. Disabled by default; unsupported tessellation may cause crashes.</string></property>
               <property name="text"><string>Enable tessellation support (experimental)</string></property>
              </widget>
             </item>
-            <item row="7" column="1">
+            <item row="6" column="1">
              <widget class="QCheckBox" name="checkBox_sync_raw_image_buffers">
               <property name="toolTip"><string>Can fix missing textures and incorrect transparency in some games. May reduce performance.</string></property>
               <property name="text"><string>Accurate texture synchronization</string></property>
