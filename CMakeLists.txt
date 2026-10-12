@@ -679,6 +679,16 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_present_mode_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --present-mode Invalid)
 	set_tests_properties(emulator_present_mode_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_skip_ir_validation_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --skip-ir-validation true)
+	add_test(NAME emulator_skip_ir_validation_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --skip-ir-validation maybe)
+	set_tests_properties(emulator_skip_ir_validation_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_unoptimized_first_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --pipelines-unoptimized-first true)
+	add_test(NAME emulator_unoptimized_first_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --pipelines-unoptimized-first maybe)
+	set_tests_properties(emulator_unoptimized_first_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
@@ -743,6 +753,20 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
 	set_tests_properties(graphics_pipeline_prefetch_key PROPERTIES
 		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=stall;KYTY_TEST_PREFETCH_KEY=1")
+	# --pipelines-unoptimized-first: the whole suite on unoptimized pipelines that are swapped for
+	# their optimized builds while it runs, and the promotion check itself.
+	add_test(NAME shader_recompiler_compute_unoptimized_first
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_unoptimized_first PROPERTIES
+		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
+	add_test(NAME graphics_pipeline_rasterization_unoptimized_first
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(graphics_pipeline_rasterization_unoptimized_first PROPERTIES
+		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
+	add_test(NAME pipeline_unoptimized_first_promotion
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --unoptimized-first-only)
+	set_tests_properties(pipeline_unoptimized_first_promotion PROPERTIES
+		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME guest_stack_exit

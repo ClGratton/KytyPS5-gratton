@@ -19,6 +19,7 @@
 #include <span>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -104,6 +105,15 @@ struct ShaderProgram {
 	explicit operator bool() const { return id != 0 && module != nullptr; }
 };
 
+// How CreatePipelineInternal gets the VkPipeline (--pipelines-unoptimized-first):
+//  Full      the usual create on the driver cache (stock behaviour);
+//  Fast      the driver cache when it already holds the pipeline (probed with
+//            FAIL_ON_PIPELINE_COMPILE_REQUIRED, nothing is compiled), else compiled with
+//            DISABLE_OPTIMIZATION and no cache (Pipeline::unoptimized);
+//  Optimize  the optimized build of a Fast pipeline: its layouts are already in `pipeline`, only
+//            `pipeline.pipeline` (null) is created, on the driver cache.
+enum class PipelineBuild { Full, Fast, Optimize };
+
 // The owning renderer serializes access, including saves while the GPU is running. With
 // --async-pipelines on, worker threads also touch the cache: they only publish into the program
 // cache (per-entry locks) and into the two pipeline maps (m_pipelines_mutex); see
@@ -115,6 +125,13 @@ public:
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
 
+	// The background optimized build of an unoptimized Pipeline (--pipelines-unoptimized-first):
+	// a worker stores `pipeline` (null when the build failed) and then sets `done`.
+	struct OptimizedBuild {
+		std::atomic<bool> done {false};
+		vk::Pipeline      pipeline = nullptr;
+	};
+
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;
 		vk::Pipeline            pipeline              = nullptr;
@@ -124,6 +141,11 @@ public:
 		// the first draw/dispatch uses it (prediction hit accounting only).
 		bool prefetched = false;
 		bool claimed    = false;
+		// --pipelines-unoptimized-first: `pipeline` was created with DISABLE_OPTIMIZATION and
+		// `optimized` is the background build that replaces it (PromoteOptimized(), GPU thread
+		// only). Both are set before the Pipeline is published and cleared by the promotion.
+		bool                                            unoptimized = false;
+		std::shared_ptr<OptimizedBuild>                 optimized;
 	};
 
 	struct GraphicsPrograms {
@@ -179,6 +201,32 @@ public:
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	                             const ShaderProgram&          compute_program);
 
+	// ---- --pipelines-unoptimized-first (docs/unoptimized-first-notes.md) ---------------------
+	// True when new pipelines are created unoptimized and rebuilt optimized in the background:
+	// the flag, async pipelines on, an NVIDIA device (or KYTY_PIPELINE_FAST_BUILD=1) and a way
+	// to ask the driver cache without compiling.
+	[[nodiscard]] bool UnoptimizedFirstActive() const { return m_unoptimized_first; }
+	// GPU thread: swaps in the optimized build of `pipeline` when a worker finished it (a no-op
+	// otherwise). The replaced VkPipeline may still be used by command buffers in flight; it goes to
+	// the retire handler (or is destroyed with the cache). Called by GetGraphicsPipeline /
+	// GetComputePipeline before they return, so every draw binds the best handle that is ready.
+	void PromoteOptimized(Pipeline& pipeline);
+	// The handler gets each replaced VkPipeline and must destroy it once the GPU is done with it;
+	// it returns false when it cannot take it now (then the cache keeps it until it is destroyed).
+	void SetRetireHandler(std::function<bool(vk::Pipeline)> handler) {
+		m_retire_handler = std::move(handler);
+	}
+	struct UnoptimizedFirstCounters {
+		std::atomic<uint64_t> unoptimized_created {0}; // created with DISABLE_OPTIMIZATION
+		std::atomic<uint64_t> served_from_cache {0};   // the driver cache held it (probe hit)
+		std::atomic<uint64_t> optimized_done {0};      // background builds finished
+		std::atomic<uint64_t> swapped {0};             // promoted into the Pipeline
+		std::atomic<uint64_t> retired {0};             // replaced handles given to the handler
+	};
+	[[nodiscard]] const UnoptimizedFirstCounters& UnoptimizedFirst() const {
+		return m_unoptimized_counters;
+	}
+
 	// ---- --pipeline-lookahead (lookahead thread only, docs/lookahead-notes.md) ---------------
 	// Counters of the prediction accounting. Predictions are made by the lookahead thread, hits
 	// and misses are counted by the GPU thread when a draw/dispatch needs its pipeline.
@@ -228,6 +276,8 @@ private:
 	struct ProgramCache;
 	struct GraphicsPipelineJob;
 	struct ComputePipelineJob;
+	struct GraphicsOptimizeJob;
+	struct ComputeOptimizeJob;
 
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
@@ -289,6 +339,12 @@ private:
 	InFlightRegistry<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_graphics_jobs;
 	InFlightRegistry<uint64_t>                                     m_compute_jobs;
 
+	// --pipelines-unoptimized-first (fixed at construction, after the driver cache is set up).
+	bool                       m_unoptimized_first = false;
+	UnoptimizedFirstCounters   m_unoptimized_counters;
+	std::function<bool(vk::Pipeline)> m_retire_handler;
+	std::vector<vk::Pipeline>  m_retired_pipelines; // no handler took them: destroyed with the cache
+
 	LookaheadCounters m_lookahead;
 	std::function<std::string()> m_lookahead_thread_summary;
 	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
@@ -310,6 +366,12 @@ private:
 	Pipeline* PublishComputePipeline(uint64_t program_id, std::unique_ptr<Pipeline>& pipeline,
 	                                 bool& inserted);
 	void      DestroyPipeline(Pipeline& pipeline);
+	// Worker side: the build mode for a new job, and the follow-up of an unoptimized pipeline.
+	[[nodiscard]] PipelineBuild FirstBuild() const {
+		return m_unoptimized_first ? PipelineBuild::Fast : PipelineBuild::Full;
+	}
+	void DecideUnoptimizedFirst();
+	void NoteFirstBuild(const Pipeline& created);
 };
 
 void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pixel_program_id);
@@ -320,10 +382,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderPixelInputInfo*            ps_input_info,
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache);
+                            vk::PipelineCache                      driver_cache,
+                            PipelineBuild                          build = PipelineBuild::Full);
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache);
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
+                            PipelineBuild build = PipelineBuild::Full);
 
 } // namespace Libs::Graphics
 

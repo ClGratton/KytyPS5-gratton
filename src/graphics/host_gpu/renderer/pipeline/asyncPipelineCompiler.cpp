@@ -35,6 +35,7 @@ const char* KindName(AsyncJob::Kind kind) {
 		case AsyncJob::Kind::Program: return "prog";
 		case AsyncJob::Kind::Graphics: return "gfx";
 		case AsyncJob::Kind::Compute: return "cs";
+		case AsyncJob::Kind::Optimize: return "opt";
 	}
 	return "?";
 }
@@ -99,6 +100,7 @@ void AsyncJob::Finish(State final_state) {
 AsyncPipelineCompiler::AsyncPipelineCompiler(Config::AsyncPipelineMode mode,
                                              uint32_t                  worker_count)
     : m_mode(mode), m_worker_count(std::max(1u, worker_count)),
+      m_low_limit(std::max(1u, std::max(1u, worker_count) / 2u)),
       m_worker_state(std::make_unique<WorkerState[]>(std::max(1u, worker_count))) {
 	m_workers.reserve(m_worker_count);
 	for (uint32_t i = 0; i < m_worker_count; i++) {
@@ -112,9 +114,7 @@ AsyncPipelineCompiler::~AsyncPipelineCompiler() {
 
 bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job, bool urgent) {
 	if (Bench::TraceEnabled()) {
-		const char* kind = job->GetKind() == AsyncJob::Kind::Program    ? "prog"
-		                   : job->GetKind() == AsyncJob::Kind::Graphics ? "gfx"
-		                                                                : "cs";
+		const char* kind = KindName(job->GetKind());
 		Bench::LogTiming("gpu_miss", job->KeyHash(), Bench::NowNs(), 0, true,
 		                 fmt::format("job={};seq={};draw={};disp={}", kind, Bench::TraceSubmission(),
 		                             Bench::TraceDrawCount(), Bench::TraceDispatchCount()));
@@ -148,14 +148,36 @@ bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job, bool urgent) {
 	return true;
 }
 
+bool AsyncPipelineCompiler::SubmitLowPriority(std::shared_ptr<AsyncJob> job) {
+	{
+		std::unique_lock lock(m_mutex);
+		if (m_stopping.load(std::memory_order_relaxed)) {
+			lock.unlock();
+			job->Cancel();
+			job->Finish(AsyncJob::State::Cancelled);
+			return false;
+		}
+		job->m_submit_ns = Bench::NowNs();
+		job->m_mode      = m_mode;
+		job->m_low       = true;
+		job->m_submitted.store(true, std::memory_order_relaxed);
+		m_low_queue.push_back(std::move(job));
+		m_stats.low_submitted.fetch_add(1, std::memory_order_relaxed);
+	}
+	m_signal.notify_one();
+	return true;
+}
+
 void AsyncPipelineCompiler::Shutdown() {
 	std::deque<std::shared_ptr<AsyncJob>> cancelled;
+	std::deque<std::shared_ptr<AsyncJob>> low_cancelled;
 	std::vector<std::thread>              workers;
 	{
 		std::lock_guard lock(m_mutex);
 		// Idempotent: a second call finds the queue and the worker list already moved out.
 		m_stopping.store(true, std::memory_order_release);
 		cancelled.swap(m_queue);
+		low_cancelled.swap(m_low_queue);
 		workers.swap(m_workers);
 	}
 	m_signal.notify_all();
@@ -165,6 +187,12 @@ void AsyncPipelineCompiler::Shutdown() {
 		m_stats.cancelled.fetch_add(1, std::memory_order_relaxed);
 	}
 	cancelled.clear();
+	for (auto& job: low_cancelled) {
+		job->Cancel();
+		job->Finish(AsyncJob::State::Cancelled);
+		m_stats.low_cancelled.fetch_add(1, std::memory_order_relaxed);
+	}
+	low_cancelled.clear();
 	for (auto& worker: workers) {
 		if (worker.joinable()) {
 			worker.join();
@@ -214,14 +242,21 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 		{
 			std::unique_lock lock(m_mutex);
 			m_signal.wait(lock, [this] {
-				return m_stopping.load(std::memory_order_relaxed) || !m_queue.empty();
+				return m_stopping.load(std::memory_order_relaxed) || !m_queue.empty() ||
+				       (!m_low_queue.empty() && m_low_running < m_low_limit);
 			});
 			if (m_stopping.load(std::memory_order_relaxed)) {
 				// Shutdown() took the queue; nothing left for us.
 				return;
 			}
-			job = std::move(m_queue.front());
-			m_queue.pop_front();
+			if (!m_queue.empty()) {
+				job = std::move(m_queue.front());
+				m_queue.pop_front();
+			} else {
+				job = std::move(m_low_queue.front());
+				m_low_queue.pop_front();
+				m_low_running++;
+			}
 			job->m_start_ns = Bench::NowNs();
 			job->m_state.store(AsyncJob::State::Running, std::memory_order_release);
 		}
@@ -239,7 +274,20 @@ void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
 		}
 		m_worker_state[index].kind.store(0, std::memory_order_release);
 		job->Finish(AsyncJob::State::Done);
-		m_stats.completed.fetch_add(1, std::memory_order_relaxed);
+		if (job->m_low) {
+			m_stats.low_completed.fetch_add(1, std::memory_order_relaxed);
+			m_stats.low_run_ns.fetch_add(
+			    static_cast<uint64_t>(std::max<int64_t>(0, Bench::NowNs() - job->m_start_ns)),
+			    std::memory_order_relaxed);
+			{
+				std::lock_guard lock(m_mutex);
+				m_low_running--;
+			}
+			// A slot opened: another background job may start now.
+			m_signal.notify_one();
+		} else {
+			m_stats.completed.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 }
 
@@ -249,11 +297,12 @@ std::string AsyncPipelineCompiler::Summary() const {
 	return fmt::format(
 	    "mode={};workers={};jobs_submitted={};jobs_completed={};jobs_cancelled={};peak_queue={};"
 	    "gpu_waits={};gpu_wait_ns={};skipped_draws={};skipped_program_draws={};"
-	    "skipped_pipeline_draws={}",
+	    "skipped_pipeline_draws={};low_submitted={};low_completed={};low_cancelled={};low_run_ns={}",
 	    AsyncModeName(m_mode), m_worker_count, m_stats.submitted.load(), m_stats.completed.load(),
 	    m_stats.cancelled.load(), m_stats.peak_queue.load(), m_stats.gpu_waits.load(),
 	    m_stats.gpu_wait_ns.load(), skipped_program + skipped_pipeline, skipped_program,
-	    skipped_pipeline);
+	    skipped_pipeline, m_stats.low_submitted.load(), m_stats.low_completed.load(),
+	    m_stats.low_cancelled.load(), m_stats.low_run_ns.load());
 }
 
 void AsyncPipelineCompiler::LogSummary() {
@@ -283,7 +332,8 @@ std::string AsyncPipelineCompiler::DebugState() {
 		if (!lock.owns_lock()) {
 			text += " queue=<pool mutex locked>";
 		} else {
-			text += fmt::format(" queue={}", m_queue.size());
+			text += fmt::format(" queue={} low_queue={} low_running={}", m_queue.size(),
+			                    m_low_queue.size(), m_low_running);
 			size_t shown = 0;
 			for (const auto& job: m_queue) {
 				if (shown++ >= 8) {

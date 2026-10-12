@@ -13,6 +13,7 @@
 #include "common/threads.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window.h"
+#include "graphics/shader/recompiler/ir/Value.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -130,6 +131,7 @@ static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& 
 
 	subsystems.Initialize<Config::Lifecycle>();
 	Config::Load(cfg);
+	Libs::Graphics::ShaderRecompiler::IR::SetValidationEnabled(!cfg.skip_ir_validation);
 	subsystems.Initialize<Log::Lifecycle>();
 
 	if (Common::File::IsFileExisting(param_json)) {

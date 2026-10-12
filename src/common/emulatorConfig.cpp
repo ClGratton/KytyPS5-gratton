@@ -84,6 +84,10 @@ uint32_t GetSubmitCoalesceUs() {
 	return g_config->submit_coalesce_us;
 }
 
+bool GetPipelinesUnoptimizedFirst() {
+	return g_config->pipelines_unoptimized_first && g_config->async_pipelines != AsyncPipelineMode::Off;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

@@ -29,6 +29,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -1242,6 +1243,73 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 			});
 		}
 	}
+	DecideUnoptimizedFirst();
+}
+
+// --pipelines-unoptimized-first is active only where it is safe and effective:
+//  * async pipelines are on (the optimized rebuilds run on the pool);
+//  * NVIDIA, the only vendor it was measured on. An AMD RDNA2 driver crashed in the fork that
+//    introduced it, so other vendors need KYTY_PIPELINE_FAST_BUILD=1 (and =0 turns it off);
+//  * the driver cache can be asked without compiling (pipelineCreationCacheControl), or there is no
+//    driver cache at all. Otherwise a warm cache would be ignored in favour of unoptimized code.
+void PipelineCache::DecideUnoptimizedFirst() {
+	m_unoptimized_first = false;
+	if (!Config::GetPipelinesUnoptimizedFirst()) {
+		return;
+	}
+	const char* env = std::getenv("KYTY_PIPELINE_FAST_BUILD");
+	if (env != nullptr && std::string_view(env) == "0") {
+		PipelineCacheLog("Unoptimized-first pipelines: off (KYTY_PIPELINE_FAST_BUILD=0)");
+		return;
+	}
+	constexpr uint32_t NvidiaVendor = 0x10DE;
+	const bool         forced       = env != nullptr && std::string_view(env) == "1";
+	if (m_graphics.GetPhysicalDeviceProperties().vendorID != NvidiaVendor && !forced) {
+		PipelineCacheLog("Unoptimized-first pipelines: off (only measured on NVIDIA; "
+		                 "KYTY_PIPELINE_FAST_BUILD=1 forces it)");
+		return;
+	}
+	if (m_driver_cache != nullptr && !m_graphics.pipeline_cache_control_enabled) {
+		PipelineCacheLog("Unoptimized-first pipelines: off (the driver cannot probe its pipeline "
+		                 "cache without compiling: pipelineCreationCacheControl)");
+		return;
+	}
+	m_unoptimized_first = true;
+	PipelineCacheLog("Unoptimized-first pipelines: on (driver cache {})",
+	                 m_driver_cache != nullptr ? "probed first" : "disabled");
+}
+
+void PipelineCache::NoteFirstBuild(const Pipeline& created) {
+	if (!m_unoptimized_first) {
+		return;
+	}
+	(created.unoptimized ? m_unoptimized_counters.unoptimized_created
+	                     : m_unoptimized_counters.served_from_cache)
+	    .fetch_add(1, std::memory_order_relaxed);
+}
+
+// GPU thread. Swaps the optimized pipeline in once a worker has built it.
+void PipelineCache::PromoteOptimized(Pipeline& pipeline) {
+	if (pipeline.optimized == nullptr || !pipeline.optimized->done.load(std::memory_order_acquire)) {
+		return;
+	}
+	const auto optimized = std::move(pipeline.optimized);
+	pipeline.optimized.reset();
+	pipeline.unoptimized = false;
+	if (optimized->pipeline == nullptr) {
+		return;
+	}
+	const auto replaced = pipeline.pipeline;
+	pipeline.pipeline   = optimized->pipeline;
+	m_unoptimized_counters.swapped.fetch_add(1, std::memory_order_relaxed);
+	if (replaced == nullptr) {
+		return;
+	}
+	if (m_retire_handler && m_retire_handler(replaced)) {
+		m_unoptimized_counters.retired.fetch_add(1, std::memory_order_relaxed);
+	} else {
+		m_retired_pipelines.push_back(replaced);
+	}
 }
 
 AsyncPipelineCompiler* PipelineCache::AsyncPool() {
@@ -1268,6 +1336,17 @@ void PipelineCache::ShutdownAsync() {
 	m_compute_jobs.Clear();
 	PipelineCacheLog("Async pipelines: stopped ({})", m_async->Summary());
 	m_async->LogSummary();
+	if (m_unoptimized_first) {
+		const auto& c = m_unoptimized_counters;
+		const auto  summary = fmt::format(
+		    "unoptimized_created={};served_from_cache={};optimized_done={};swapped={};retired={}",
+		    c.unoptimized_created.load(), c.served_from_cache.load(), c.optimized_done.load(),
+		    c.swapped.load(), c.retired.load());
+		PipelineCacheLog("Unoptimized-first pipelines: {}", summary);
+		if (Bench::TimingEnabled()) {
+			Bench::LogTiming("summary_unoptimized_first", 0, Bench::NowNs(), 0, false, summary);
+		}
+	}
 	if (Config::GetPipelineLookahead()) {
 		const auto& l = m_lookahead;
 		const auto  summary = fmt::format(
@@ -1360,6 +1439,20 @@ PipelineCache::~PipelineCache() {
 			m_graphics.device.destroyDescriptorSetLayout(pipeline->descriptor_set_layout, nullptr);
 		}
 	};
+	// Optimized builds that finished after the pipeline's last lookup were never swapped in.
+	auto destroy_unclaimed = [this](const auto& pipelines) {
+		for (const auto& [key, pipeline]: pipelines) {
+			(void)key;
+			if (pipeline->optimized != nullptr && pipeline->optimized->pipeline != nullptr) {
+				m_graphics.device.destroyPipeline(pipeline->optimized->pipeline, nullptr);
+			}
+		}
+	};
+	destroy_unclaimed(m_graphics_pipelines);
+	destroy_unclaimed(m_compute_pipelines);
+	for (const auto retired: m_retired_pipelines) {
+		m_graphics.device.destroyPipeline(retired, nullptr);
+	}
 	destroy(m_graphics_pipelines);
 	destroy(m_compute_pipelines);
 	if (m_driver_cache != nullptr) {
@@ -1544,6 +1637,40 @@ void PipelineCache::Save() {
 // the shared driver VkPipelineCache, which is created without EXTERNALLY_SYNCHRONIZED) on a worker
 // and publishes the result into the pipeline map. All inputs are copies taken on the GPU thread.
 
+// The optimized build of a pipeline that runs unoptimized (--pipelines-unoptimized-first). Runs on
+// the pool's low-priority queue; nobody waits for it. It only fills `build`: the GPU thread swaps
+// the result into the Pipeline at its next lookup (PromoteOptimized).
+struct PipelineCache::GraphicsOptimizeJob final: AsyncJob {
+	GraphicsOptimizeJob(PipelineCache& owner, uint64_t key_hash)
+	    : AsyncJob(Kind::Optimize, key_hash), cache(owner) {}
+
+	void Execute() override {
+		Stopwatch create_sw;
+		CreatePipelineInternal(cache.m_graphics, layouts, key.rendering, key.vertex_input,
+		                       vertex_info, ps_input_info ? &*ps_input_info : nullptr, programs,
+		                       key.static_params, driver_cache, PipelineBuild::Optimize);
+		if (create_sw.On()) {
+			AddTimingRow("pipeline_optimize_gfx", KeyHash(), create_sw.Start(), create_sw.Elapsed(),
+			             fmt::format("vs_id={};ps_id={};driver_ns={}", vs_id, ps_id,
+			                         Bench::TakeDriverCreateNs()));
+		}
+		build->pipeline = layouts.pipeline;
+		build->done.store(true, std::memory_order_release);
+		cache.m_unoptimized_counters.optimized_done.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	PipelineCache&                      cache;
+	GraphicsPipelineKey                 key;
+	std::vector<ShaderVertexInputInfo>  vertex_info;
+	std::optional<ShaderPixelInputInfo> ps_input_info;
+	GraphicsPrograms                    programs;
+	vk::PipelineCache                   driver_cache = nullptr;
+	Pipeline                            layouts; // the unoptimized pipeline's layouts; .pipeline is the result
+	std::shared_ptr<OptimizedBuild>     build;
+	uint64_t                            vs_id = 0;
+	uint64_t                            ps_id = 0;
+};
+
 struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 	GraphicsPipelineJob(PipelineCache& owner, GraphicsPipelineKey job_key, uint64_t key_hash)
 	    : AsyncJob(Kind::Graphics, key_hash), cache(owner), key(std::move(job_key)) {}
@@ -1560,24 +1687,51 @@ struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 		Stopwatch create_sw;
 		CreatePipelineInternal(cache.m_graphics, *cached, key.rendering, key.vertex_input,
 		                       vertex_info, ps_input_info ? &*ps_input_info : nullptr, programs,
-		                       key.static_params, driver_cache);
+		                       key.static_params, driver_cache, cache.FirstBuild());
 		if (create_sw.On()) {
 			const auto create_ns = create_sw.Elapsed();
 			AddTimingRow("pipeline_create_gfx", KeyHash(), create_sw.Start(), create_ns,
-			             fmt::format("vs_id={};ps_id={};tess={};driver_cache={};driver_ns={}", vs_id,
-			                         ps_id, programs.VertexStageCount() == 3 ? 1 : 0,
-			                         driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs()));
+			             fmt::format("vs_id={};ps_id={};tess={};driver_cache={};driver_ns={};unopt={}",
+			                         vs_id, ps_id, programs.VertexStageCount() == 3 ? 1 : 0,
+			                         driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs(),
+			                         cached->unoptimized ? 1 : 0));
 		}
 		LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 		EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 		EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
+		cache.NoteFirstBuild(*cached);
+		// An unoptimized pipeline gets its optimized build queued once it is published. The
+		// follow-up copies everything it needs now: after the publish only the GPU thread may touch
+		// the Pipeline.
+		std::shared_ptr<GraphicsOptimizeJob> optimize;
+		if (cached->unoptimized) {
+			cached->optimized = std::make_shared<OptimizedBuild>();
+			optimize          = std::make_shared<GraphicsOptimizeJob>(cache, KeyHash());
+			optimize->key           = key;
+			optimize->vertex_info   = vertex_info;
+			optimize->ps_input_info = ps_input_info;
+			optimize->programs      = programs;
+			optimize->driver_cache  = driver_cache;
+			optimize->build         = cached->optimized;
+			optimize->layouts.pipeline_layout       = cached->pipeline_layout;
+			optimize->layouts.descriptor_set_layout = cached->descriptor_set_layout;
+			optimize->layouts.uses_push_descriptors = cached->uses_push_descriptors;
+			optimize->vs_id = vs_id;
+			optimize->ps_id = ps_id;
+		}
 		bool inserted = false;
 		cache.PublishGraphicsPipeline(key, cached, inserted);
 		if (!inserted) {
 			cache.DestroyPipeline(*cached); // an equal pipeline was published first
+			optimize.reset();
 		}
 		// Publish first, unregister last: "not registered" must imply "published".
 		cache.m_graphics_jobs.Erase(key);
+		if (optimize != nullptr) {
+			if (auto* pool = cache.AsyncPool()) {
+				pool->SubmitLowPriority(std::move(optimize));
+			}
+		}
 	}
 
 	void Cancel() override { cache.m_graphics_jobs.Erase(key); }
@@ -1592,6 +1746,32 @@ struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 	uint64_t                           ps_id        = 0;
 };
 
+struct PipelineCache::ComputeOptimizeJob final: AsyncJob {
+	ComputeOptimizeJob(PipelineCache& owner, uint64_t id)
+	    : AsyncJob(Kind::Optimize, id), cache(owner), program_id(id) {}
+
+	void Execute() override {
+		Stopwatch create_sw;
+		CreatePipelineInternal(cache.m_graphics, layouts, input_info, module, driver_cache,
+		                       PipelineBuild::Optimize);
+		if (create_sw.On()) {
+			AddTimingRow("pipeline_optimize_cs", program_id, create_sw.Start(), create_sw.Elapsed(),
+			             fmt::format("cs_id={};driver_ns={}", program_id, Bench::TakeDriverCreateNs()));
+		}
+		build->pipeline = layouts.pipeline;
+		build->done.store(true, std::memory_order_release);
+		cache.m_unoptimized_counters.optimized_done.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	PipelineCache&                  cache;
+	uint64_t                        program_id;
+	ShaderComputeInputInfo          input_info;
+	vk::ShaderModule                module       = nullptr;
+	vk::PipelineCache               driver_cache = nullptr;
+	Pipeline                        layouts;
+	std::shared_ptr<OptimizedBuild> build;
+};
+
 struct PipelineCache::ComputePipelineJob final: AsyncJob {
 	ComputePipelineJob(PipelineCache& owner, uint64_t id)
 	    : AsyncJob(Kind::Compute, id), cache(owner), program_id(id) {}
@@ -1604,21 +1784,42 @@ struct PipelineCache::ComputePipelineJob final: AsyncJob {
 		auto      cached = std::make_unique<Pipeline>();
 		cached->prefetched = IsPrefetched();
 		Stopwatch create_sw;
-		CreatePipelineInternal(cache.m_graphics, *cached, input_info, module, driver_cache);
+		CreatePipelineInternal(cache.m_graphics, *cached, input_info, module, driver_cache,
+		                       cache.FirstBuild());
 		if (create_sw.On()) {
 			const auto create_ns = create_sw.Elapsed();
 			AddTimingRow("pipeline_create_cs", program_id, create_sw.Start(), create_ns,
-			             fmt::format("cs_id={};driver_cache={};driver_ns={}", program_id,
-			                         driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs()));
+			             fmt::format("cs_id={};driver_cache={};driver_ns={};unopt={}", program_id,
+			                         driver_cache != nullptr ? 1 : 0, Bench::TakeDriverCreateNs(),
+			                         cached->unoptimized ? 1 : 0));
 		}
 		EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 		EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
+		cache.NoteFirstBuild(*cached);
+		std::shared_ptr<ComputeOptimizeJob> optimize;
+		if (cached->unoptimized) {
+			cached->optimized = std::make_shared<OptimizedBuild>();
+			optimize          = std::make_shared<ComputeOptimizeJob>(cache, program_id);
+			optimize->input_info   = input_info;
+			optimize->module       = module;
+			optimize->driver_cache = driver_cache;
+			optimize->build        = cached->optimized;
+			optimize->layouts.pipeline_layout       = cached->pipeline_layout;
+			optimize->layouts.descriptor_set_layout = cached->descriptor_set_layout;
+			optimize->layouts.uses_push_descriptors = cached->uses_push_descriptors;
+		}
 		bool inserted = false;
 		cache.PublishComputePipeline(program_id, cached, inserted);
 		if (!inserted) {
 			cache.DestroyPipeline(*cached);
+			optimize.reset();
 		}
 		cache.m_compute_jobs.Erase(program_id);
+		if (optimize != nullptr) {
+			if (auto* pool = cache.AsyncPool()) {
+				pool->SubmitLowPriority(std::move(optimize));
+			}
+		}
 	}
 
 	void Cancel() override { cache.m_compute_jobs.Erase(program_id); }
@@ -2090,6 +2291,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 
 	if (auto* found = FindGraphicsPipeline(key)) {
 		NoteDrawUse(*found, true, false);
+		PromoteOptimized(*found);
 		return found;
 	}
 
@@ -2105,6 +2307,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 			// publishes before it unregisters.
 			if (auto* published = FindGraphicsPipeline(key)) {
 				NoteDrawUse(*published, true, false);
+				PromoteOptimized(*published);
 				return published;
 			}
 			auto fresh = std::make_shared<GraphicsPipelineJob>(*this, key,
@@ -2142,6 +2345,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 			if (pool->WaitFor(*job)) {
 				if (auto* published = FindGraphicsPipeline(key)) {
 					NoteDrawUse(*published, true, joined_prefetch);
+					PromoteOptimized(*published);
 					return published;
 				}
 			}
@@ -2247,6 +2451,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 
 	if (auto* found = FindComputePipeline(compute_program.id)) {
 		NoteDrawUse(*found, false, false);
+		PromoteOptimized(*found);
 		return *found;
 	}
 
@@ -2257,6 +2462,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 		if (job == nullptr) {
 			if (auto* published = FindComputePipeline(compute_program.id)) {
 				NoteDrawUse(*published, false, false);
+				PromoteOptimized(*published);
 				return *published;
 			}
 			auto fresh = std::make_shared<ComputePipelineJob>(*this, compute_program.id);
@@ -2278,6 +2484,7 @@ PipelineCache::GetComputePipeline(const ShaderComputeInputInfo& input_info,
 		if (job != nullptr && pool->WaitFor(*job)) {
 			if (auto* published = FindComputePipeline(compute_program.id)) {
 				NoteDrawUse(*published, false, joined_prefetch);
+				PromoteOptimized(*published);
 				return *published;
 			}
 		}

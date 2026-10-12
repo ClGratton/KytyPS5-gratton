@@ -21,6 +21,17 @@ RenderContext::RenderContext(GraphicContext& graphics)
       m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
       m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	// --pipelines-unoptimized-first: a pipeline replaced by its optimized build may still be used
+	// by command buffers in flight, so it is destroyed once the GPU finished the current tick.
+	m_pipeline_cache.SetRetireHandler([this](vk::Pipeline replaced) {
+		if (!m_command_scheduler.Active()) {
+			return false;
+		}
+		m_command_scheduler.DeferOperation([device = m_graphics.device, replaced] {
+			device.destroyPipeline(replaced, nullptr);
+		});
+		return true;
+	});
 }
 
 RenderContext::~RenderContext() {

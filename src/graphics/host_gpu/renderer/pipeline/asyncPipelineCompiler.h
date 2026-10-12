@@ -40,7 +40,7 @@ const char* AsyncModeName(Config::AsyncPipelineMode mode);
 // executed on a worker, waited on or polled by the GPU thread.
 class AsyncJob {
 public:
-	enum class Kind { Program, Graphics, Compute };
+	enum class Kind { Program, Graphics, Compute, Optimize };
 	enum class State { Queued, Running, Done, Cancelled };
 
 	AsyncJob(Kind kind, uint64_t key_hash);
@@ -112,6 +112,7 @@ private:
 	std::atomic<bool>         m_prefetched {false};
 	std::atomic<bool>         m_claimed {false};
 	std::atomic<bool>         m_submitted {false}; // Submit() accepted it (debug only)
+	bool                      m_low = false;       // SubmitLowPriority() job
 	int64_t                   m_created_ns = 0;
 	int64_t                   m_submit_ns = 0;
 	int64_t                   m_start_ns  = 0;
@@ -214,6 +215,10 @@ struct AsyncStats {
 	std::atomic<uint64_t> skipped_pipeline_draws {0};
 	std::atomic<uint64_t> gpu_waits {0};
 	std::atomic<int64_t>  gpu_wait_ns {0};
+	std::atomic<uint64_t> low_submitted {0};
+	std::atomic<uint64_t> low_completed {0};
+	std::atomic<uint64_t> low_cancelled {0};
+	std::atomic<uint64_t> low_run_ns {0};
 };
 
 class AsyncPipelineCompiler {
@@ -226,6 +231,12 @@ public:
 	// Queues `job`. Returns false (and does not queue it) once Shutdown() has begun. `urgent`
 	// jobs (a draw is waiting on them) go to the front of the queue.
 	bool Submit(std::shared_ptr<AsyncJob> job, bool urgent = false);
+	// Queues background work nobody waits for (--pipelines-unoptimized-first: the optimized
+	// rebuild of a pipeline that already runs unoptimized). Workers take it only when the normal
+	// queue is empty, and at most LowPriorityLimit() of them run at once, so a burst of
+	// background builds can neither delay a draw's job nor occupy the whole pool.
+	bool SubmitLowPriority(std::shared_ptr<AsyncJob> job);
+	[[nodiscard]] uint32_t LowPriorityLimit() const { return m_low_limit; }
 
 	// Stops accepting jobs, cancels the queued ones (Cancel() + Wait() returns false), lets the
 	// running ones finish and joins the workers. Idempotent. Must be called before the Vulkan
@@ -258,6 +269,11 @@ private:
 	std::mutex                             m_mutex;
 	std::condition_variable                m_signal;
 	std::deque<std::shared_ptr<AsyncJob>>  m_queue;
+	// SubmitLowPriority(): served only while m_queue is empty and fewer than m_low_limit of them
+	// run (m_low_running, guarded by m_mutex).
+	std::deque<std::shared_ptr<AsyncJob>>  m_low_queue;
+	const uint32_t                         m_low_limit;
+	uint32_t                               m_low_running = 0;
 	std::vector<std::thread>               m_workers;
 	std::atomic<bool>                      m_stopping {false};
 	bool                                   m_summary_logged = false;

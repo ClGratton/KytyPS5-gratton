@@ -158,6 +158,12 @@ static void PrintUsage() {
 	::printf("  --pipeline-lookahead <true|false>    Prefetch shader programs and pipelines from submitted\n"
 	         "                                       command buffers into the worker pool (needs\n"
 	         "                                       --async-pipelines stall|skip). Default: false.\n");
+	::printf("  --pipelines-unoptimized-first <true|false>\n"
+	         "                                       A pipeline no cache holds is created unoptimized so\n"
+	         "                                       its draw does not wait, then rebuilt optimized on a\n"
+	         "                                       background worker and swapped in (needs\n"
+	         "                                       --async-pipelines stall|skip; NVIDIA only, other GPUs\n"
+	         "                                       need KYTY_PIPELINE_FAST_BUILD=1). Default: false.\n");
 	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
 	         "                                       Default: min(8, hardware threads / 2).\n");
 	::printf("  --debug-texture-gc <true|false|log>  Debug: false disables the texture garbage collector;\n"
@@ -185,6 +191,10 @@ static void PrintUsage() {
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
+	::printf("  --skip-ir-validation <true|false>    Skip the shader IR consistency checks in release\n"
+	         "                                       translations (cuts translate time; output is\n"
+	         "                                       identical). KYTY_IR_VALIDATE=1 forces them on.\n"
+	         "                                       Default: false.\n");
 	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
 	         "                                       its first use and compare the SPIR-V. Default: false.\n");
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
@@ -752,6 +762,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.submit_stats_s = static_cast<uint32_t>(seconds);
+		} else if (arg == "--pipelines-unoptimized-first") {
+			if (!ParseBool(value, options.config.pipelines_unoptimized_first)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--skip-ir-validation") {
+			if (!ParseBool(value, options.config.skip_ir_validation)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
 		} else if (arg == "--debug-lookahead-verify") {
 			if (!ParseBool(value, options.config.lookahead_verify)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

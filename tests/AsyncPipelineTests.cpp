@@ -483,6 +483,113 @@ void TestWaitForFinishedJobAndStats() {
 	Check(queued->cancelled.load() == 1 && queued->ran.load() == 0, "Cancel() ran once");
 }
 
+// --pipelines-unoptimized-first: background (low priority) jobs run only while the normal queue
+// is empty, never more than LowPriorityLimit() at once, and a normal job submitted behind a pile
+// of them is not delayed by them.
+void TestLowPriorityJobs() {
+	AsyncPipelineCompiler pool(Config::AsyncPipelineMode::Stall, 4);
+	Check(pool.LowPriorityLimit() == 2, "low priority limit is half the workers");
+
+	// 1. Occupy all four workers with normal jobs, queue low jobs and then more normal ones.
+	std::atomic<bool> release {false};
+	std::atomic<int>  blockers_running {0};
+	std::vector<std::shared_ptr<TestJob>> blockers;
+	for (int i = 0; i < 4; i++) {
+		blockers.push_back(std::make_shared<TestJob>(nullptr, 100 + i, [&] {
+			blockers_running.fetch_add(1);
+			Check(WaitUntil([&] { return release.load(); }), "release blockers");
+		}));
+		Check(pool.Submit(blockers.back()), "submit blocker");
+	}
+	Check(WaitUntil([&] { return blockers_running.load() == 4; }), "all workers busy");
+
+	std::mutex       order_mutex;
+	std::vector<int> order;
+	std::atomic<int> low_now {0};
+	std::atomic<int> low_peak {0};
+	std::vector<std::shared_ptr<TestJob>> lows;
+	std::vector<std::shared_ptr<TestJob>> normals;
+	std::atomic<bool> low_ran_early {false};
+	for (int i = 0; i < 6; i++) {
+		lows.push_back(std::make_shared<TestJob>(nullptr, 200 + i, [&, i] {
+			// A worker takes a low job only when the normal queue is empty: every normal job has
+			// left the queue by now (the three were queued after all six low jobs).
+			for (const auto& normal: normals) {
+				if (normal->GetState() == AsyncJob::State::Queued) {
+					low_ran_early.store(true);
+				}
+			}
+			const int now = low_now.fetch_add(1) + 1;
+			int       peak = low_peak.load();
+			while (now > peak && !low_peak.compare_exchange_weak(peak, now)) {
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			{
+				std::lock_guard lock(order_mutex);
+				order.push_back(200 + i);
+			}
+			low_now.fetch_sub(1);
+		}));
+		Check(pool.SubmitLowPriority(lows.back()), "submit low");
+	}
+	for (int i = 0; i < 3; i++) {
+		normals.push_back(std::make_shared<TestJob>(nullptr, 300 + i, [&, i] {
+			std::lock_guard lock(order_mutex);
+			order.push_back(300 + i);
+		}));
+		Check(pool.Submit(normals.back()), "submit normal behind the low jobs");
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	for (const auto& low: lows) {
+		Check(low->ran.load() == 0, "low jobs wait while all workers are busy");
+	}
+	release.store(true);
+	Check(WaitUntil([&] {
+		      for (const auto& job: lows) {
+			      if (!job->IsFinished()) return false;
+		      }
+		      for (const auto& job: normals) {
+			      if (!job->IsFinished()) return false;
+		      }
+		      return true;
+	      }),
+	      "everything finished");
+	{
+		std::lock_guard lock(order_mutex);
+		Check(order.size() == 9, "nine jobs ran");
+	}
+	Check(!low_ran_early.load(), "a low job started while a normal job was still queued");
+	Check(low_peak.load() <= 2, "no more than LowPriorityLimit() low jobs at once");
+	Check(low_peak.load() >= 1, "low jobs ran");
+	Check(pool.Stats().low_submitted.load() == 6 && pool.Stats().low_completed.load() == 6,
+	      "low job stats");
+
+	// 2. Shutdown cancels queued low jobs (Wait() == false) and refuses new ones.
+	std::atomic<bool> hold {false};
+	std::atomic<int>  holders {0};
+	std::vector<std::shared_ptr<TestJob>> hold_jobs;
+	for (int i = 0; i < 4; i++) {
+		hold_jobs.push_back(std::make_shared<TestJob>(nullptr, 400 + i, [&] {
+			holders.fetch_add(1);
+			WaitUntil([&] { return hold.load(); });
+		}));
+		Check(pool.Submit(hold_jobs.back()), "submit holder");
+	}
+	Check(WaitUntil([&] { return holders.load() == 4; }), "holders running");
+	auto queued_low = std::make_shared<TestJob>(nullptr, 500, nullptr);
+	Check(pool.SubmitLowPriority(queued_low), "queue a low job behind busy workers");
+	std::thread stopper([&] { pool.Shutdown(); });
+	Check(WaitUntil([&] { return queued_low->IsFinished(); }), "queued low job cancelled");
+	Check(!queued_low->Wait() && queued_low->cancelled.load() == 1 && queued_low->ran.load() == 0,
+	      "cancelled low job never ran");
+	hold.store(true);
+	stopper.join();
+	auto late = std::make_shared<TestJob>(nullptr, 501, nullptr);
+	Check(!pool.SubmitLowPriority(late) && late->cancelled.load() == 1,
+	      "low submit after shutdown is refused and cancelled");
+	Check(pool.Stats().low_cancelled.load() == 1, "low cancel count");
+}
+
 int main() {
 	TestJobsRunOnWorkersConcurrently();
 	TestDedupeSharesOneJob();
@@ -494,6 +601,7 @@ int main() {
 	TestPrefetchClaimCountsOnce();
 	TestConcurrentInsertSameKeyRunsOnce();
 	TestWaitForFinishedJobAndStats();
+	TestLowPriorityJobs();
 	std::printf("AsyncPipelineTests: all cases passed\n");
 	return 0;
 }
