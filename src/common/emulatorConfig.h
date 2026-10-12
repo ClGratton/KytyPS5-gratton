@@ -173,8 +173,9 @@ struct ConfigOptions {
 	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
 	bool                   clean_guest_reads           = false;
 	// --gpu-indirect-draws (K21): indirect draws whose argument block a GPU pass wrote are built on
-	// the GPU (vkCmdDrawMeshTasksIndirectEXT from a one-thread argument pass) instead of being read
-	// on the CPU after a full drain. Default off.
+	// the GPU instead of being read on the CPU after a full drain: a one-thread argument pass, then
+	// vkCmdDrawIndexedIndirect (point/line/triangle lists) or vkCmdDrawMeshTasksIndirectEXT
+	// (mesh-emulated draws). Default off.
 	bool                   gpu_indirect_draws          = false;
 	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
 	// rendering family and wait only for the work that wrote the data. Default off.

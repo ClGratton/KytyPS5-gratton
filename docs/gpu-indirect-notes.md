@@ -60,4 +60,38 @@ Ported from BryanKAdams/BryKytyPS5@1a6817502 (mesh-emulated draws built on the G
 check and tests.
 
 ## Verification
-(see the end of this file after the measurement)
+Unit tests (all in ctest, 72/72 with the shared lock, -j2):
+- `indirect_draw_args`: the CPU model (clamp, grids, host limits, record offsets, 64-bit address carry,
+  plain command).
+- `indirect_draw_policy`: routing table, packet-register to SGPR mapping, patched-SGPR-read check.
+- `shader_recompiler_compute` (`--mesh-indirect-only`, and in the full run): the argument pass on the
+  GPU against the model for 11 argument blocks (mesh and plain).
+- `shader_recompiler_compute --polygon-mode-only`: an indexed draw built from a GPU-args block gives
+  the CPU path's pixels; a packet that patches a read user SGPR is refused with nothing recorded.
+- `shader_cfg`: the by-address mesh shader validates and loads through a pointer; the default one does not.
+
+Bench (Astro Bot, headless 60 Hz, pin `--gpu-timestamps gpu --gpu-time-scale 1.0`, skip3 to s15, fresh
+cache, `--submit-coalesce true --gc-clock frames --elide-barriers true --known-fills true
+--clean-guest-reads true` in both arms, binary `1bbe95a6`): see `bench/RESULTS.md`. Summary: full drains
+per frame 5.1 -> 2.6 (the GPU thread's argument read is gone: the GPU-thread fault site and the
+DRAW_INDEX_INDIRECT drain, 0.2-0.3 s per 10 s window, are gone), but the `drain_tick` share of kyGpu is
+**31.3 % in both arms** and **fps is unchanged within noise** (47.7 -> 48.0, 3 vs 3). Why: the frame still
+needs a GPU-written table on the CPU a little earlier (the DISPATCH_INDIRECT dependency read below,
+1.1-2.4 s of drain per 10 s window, the largest wait in both arms), so the CPU still waits for the GPU
+backlog once per frame; removing the later wait only moves where the GPU thread blocks. At the pin the
+game also already sits at the 60 Hz cap in 90 % of frames, and the losses are pipeline-compile spikes.
+
+## Known limits
+- Astro Bot's one GPU-args draw per frame is a plain indexed list draw; its mesh-emulated indirect draws
+  have CPU-written arguments, so the mesh path is covered by unit and GPU tests and exercised for
+  parameter loading only (every mesh draw with the flag on), not for GPU-written mesh arguments.
+- The remaining GPU-thread drain per frame is a shader-dependency read (`SrtReadCapture::ReadStrict`
+  of a 0.1 KiB GPU-written table, drained during a DISPATCH_INDIRECT, 3.3 ms per call in the last
+  windows); it is not an argument read. Removing it needs the descriptor table resolved on the GPU
+  (a dynamic SRT walk), a much larger feature. Until it goes, K21 is a prerequisite with no fps of its
+  own on this title.
+- Game-thread faults on GPU-written memory (2-3 per frame) are unchanged and take longer when the GPU
+  queue is deeper, so part of the saved wait reappears on the game thread.
+- `DISPATCH_INDIRECT`: arguments are already used GPU-resident (`vkCmdDispatchIndirect`) unless the
+  packet asks for thread dimensions or the shader keeps LDS in a storage buffer sized from the
+  workgroup counts (`BindSharedMemory`); those two read the arguments on the CPU and are not changed.
