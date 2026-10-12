@@ -266,6 +266,7 @@ std::string DescribeVariant(const Variants::ComputeVariant& v) {
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
+	Common::GpuPhase::Scope gpu_phase_read(Common::GpuPhase::Phase::PipeSrtRead);
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
@@ -273,6 +274,7 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 }
 
 bool ReadShaderScalarMemory(void*, uint64_t address, std::span<uint32_t> values) {
+	Common::GpuPhase::Scope gpu_phase_read(Common::GpuPhase::Phase::PipeSrtRead);
 	// The walk evaluates loads the shader may never execute, e.g. through a null SRT pointer, so
 	// unmapped guest memory reads as zeros instead of faulting the host.
 	if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
@@ -589,6 +591,7 @@ struct PipelineCache::ProgramCache {
 	private:
 		// Takes the entry lock, publishing "waiting for the entry lock" for the hang watchdog.
 		void LockEntry(std::unique_lock<std::shared_mutex>& lock, const char* what) {
+			Common::GpuPhase::Scope gpu_phase_lock(Common::GpuPhase::Phase::PipeEntryLock);
 			Common::Hang::Phase phase(what);
 			lock.lock();
 		}
@@ -606,6 +609,7 @@ struct PipelineCache::ProgramCache {
 		Permutation* FindExistingLocked(uint32_t push_data_cursor,
 		                                const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                                std::span<const uint32_t> function_code) {
+			Common::GpuPhase::Scope gpu_phase_search(Common::GpuPhase::Phase::PipePermSearch);
 			for (auto& candidate: permutations) {
 				const auto& layout = candidate.program.bindings;
 				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
@@ -1125,6 +1129,7 @@ struct PipelineCache::ProgramCache {
 			key.static_state.reserve(MaxStaticKeyWords);
 			return key;
 		}();
+		Common::GpuPhase::Scope gpu_phase_key(Common::GpuPhase::Phase::PipeProgramKey);
 		lookup_key.stage           = stage;
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = params.user_data_count;
@@ -1151,6 +1156,7 @@ struct PipelineCache::ProgramCache {
 			report("materialize", Bench::HitSlot::Materialize, materialize_time);
 		};
 		SourceEntry* entry = FindEntry(lookup_key);
+		gpu_phase_key.End();
 		const bool prefetch = async != nullptr && async->prefetch;
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
@@ -1159,6 +1165,8 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory =
 		        prefetch ? ReadShaderGuestMemorySpeculative : ReadShaderGuestMemory,
 		};
+		runtime.table_walk   = Config::SrtTableWalkEnabled();
+		runtime.table_verify = runtime.table_walk && Config::DrawKeyVerifyEnabled();
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 		}
@@ -1177,6 +1185,8 @@ struct PipelineCache::ProgramCache {
 		Permutation* verify_target = nullptr;
 		if (entry != nullptr) {
 			Permutation* permutation = nullptr;
+			Common::GpuPhase::Scope gpu_phase_materialize(
+			    Common::GpuPhase::Phase::PipeMaterialize);
 			if (prefetch) {
 				// Lookahead thread: call-source (S_SWAP_PC) programs are left to the GPU thread
 				// (refreshing the linked callee reads live guest memory).
@@ -1207,6 +1217,7 @@ struct PipelineCache::ProgramCache {
 				permutation = entry->FindPermutation<false>(runtime, push_data_cursor, &materialize_time,
 				                                            &specialization);
 			}
+			gpu_phase_materialize.End();
 			if (permutation != nullptr && !prefetch && Config::GetLookaheadVerify() &&
 			    permutation->prefetched && !permutation->verified) {
 				// --debug-lookahead-verify: recompile it here with the real draw's inputs and
@@ -1737,6 +1748,8 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		                 m_program_cache->robust_buffers.dword_elements,
 		                 m_program_cache->robust_buffers.subdword_elements);
 	}
+	m_draw_key_cache  = Config::DrawKeyCacheEnabled();
+	m_draw_key_verify = Config::DrawKeyVerifyEnabled();
 	InitializeDriverCache();
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
 		const auto workers = Config::GetPipelineWorkerCount();
@@ -1979,6 +1992,40 @@ PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const GraphicsPipel
 	}
 	const auto iter = m_graphics_pipelines.find(key);
 	return iter != m_graphics_pipelines.end() ? iter->second.get() : nullptr;
+}
+
+// GPU thread: FindGraphicsPipeline() behind the --draw-key-cache memo. A memo hit needs a key equal
+// to a remembered one (the map's own equality), so it can only return what the map returned for
+// that key. --debug-draw-key-verify runs the real lookup on every hit and stops on a disagreement.
+PipelineCache::Pipeline* PipelineCache::FindGraphicsPipelineMemo(const GraphicsPipelineKey& key) {
+	if (!m_draw_key_cache) {
+		return FindGraphicsPipeline(key);
+	}
+	++m_draw_key_lookups;
+	if ((m_draw_key_lookups & 0x3ffffu) == 0) {
+		const auto& stats = m_draw_key_memo.GetStats();
+		PipelineCacheLog("DrawKeyCache: lookups={} memo_hits={} ({:.1f}%) verified={}",
+		                 m_draw_key_lookups, stats.hits,
+		                 100.0 * static_cast<double>(stats.hits) /
+		                     static_cast<double>(m_draw_key_lookups),
+		                 m_draw_key_verified);
+	}
+	if (auto* hit = m_draw_key_memo.Find(key)) {
+		if (m_draw_key_verify) {
+			auto* const real = FindGraphicsPipeline(key);
+			if (real != *hit) {
+				EXIT("DrawKeyCache: memo returned pipeline %p but the pipeline map has %p\n",
+				     static_cast<void*>(*hit), static_cast<void*>(real));
+			}
+			++m_draw_key_verified;
+		}
+		return *hit;
+	}
+	auto* const found = FindGraphicsPipeline(key);
+	if (found != nullptr) {
+		m_draw_key_memo.Remember(key, found);
+	}
+	return found;
 }
 
 PipelineCache::Pipeline* PipelineCache::FindComputePipeline(uint64_t program_id) {
@@ -3282,9 +3329,13 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 	Common::GpuPhase::Scope gpu_phase_pipeline(Common::GpuPhase::Phase::Pipeline);
 
-	const auto  key = BuildGraphicsKey(colors, depth, vertex_info, command.GetRegisters(),
-	                                   command.GetUserConfig(), ps_input_info, topology,
-	                                   primitive_restart_enable, programs);
+	GraphicsPipelineKey key;
+	{
+		Common::GpuPhase::Scope gpu_phase_key(Common::GpuPhase::Phase::PipeKeyBuild);
+		key = BuildGraphicsKey(colors, depth, vertex_info, command.GetRegisters(),
+		                       command.GetUserConfig(), ps_input_info, topology,
+		                       primitive_restart_enable, programs);
+	}
 	const bool  ps_active      = ps_input_info != nullptr;
 	const auto  vs_id          = programs.vertex[0].id;
 	const auto  ps_id          = ps_active ? programs.pixel.id : 0;
@@ -3294,7 +3345,12 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	const auto& rendering      = key.rendering;
 	const auto& static_params  = key.static_params;
 
-	if (auto* found = FindGraphicsPipeline(key)) {
+	Pipeline* found = nullptr;
+	{
+		Common::GpuPhase::Scope gpu_phase_find(Common::GpuPhase::Phase::PipeFind);
+		found = FindGraphicsPipelineMemo(key);
+	}
+	if (found != nullptr) {
 		NoteDrawUse(*found, true, false);
 		NoteGraphicsVariant(*found, key, programs, ps_active);
 		PromoteOptimized(*found);

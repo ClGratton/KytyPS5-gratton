@@ -1,7 +1,11 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
+#include <algorithm>
+#include <array>
 #include <bit>
+#include <map>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -277,6 +281,261 @@ void TestNativeNestedSrtRefresh() {
   pointer_high.Instruction()->SetArg(1, Value(8u));
   Check(ExtractResourcePlan(program).srt_code == nullptr,
         "native SRT accepted nonadjacent nested pointer words");
+}
+
+
+// --srt-table-walk: the table form of the native walk must give the graph walk's answer on every
+// input, through a reader callback: same flattened SRT, same guest reads, same failures.
+void TestTableWalkMatchesTheGraphWalk() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  auto program = SrtProgram(0u);
+  program.user_data_base = 4;
+  program.user_data_count = 2;
+  auto &block = *program.blocks[0];
+  const auto emit = [&](ValueOpcode opcode, std::initializer_list<Value> args) {
+    return Value(&block.AppendNewInst(opcode, args));
+  };
+  const auto low = emit(ValueOpcode::GetUserData, {Value(ScalarReg(4))});
+  const auto high = emit(ValueOpcode::GetUserData, {Value(ScalarReg(5))});
+  const auto root = emit(ValueOpcode::GetAddressResource, {low, high});
+  const auto read = [&](Value address, uint32_t offset) {
+    const auto value = emit(ValueOpcode::LoadAddressU32,
+                            {address, Value(offset), Value(0u), Value(true)});
+    value.Instruction()->SetFlags(MemoryFlags{.index = 0});
+    program.srt_reads.push_back(
+        {value, static_cast<uint32_t>(program.srt_reads.size())});
+    return value;
+  };
+  const auto pointer_low = read(root, 0u);
+  const auto pointer_high = read(root, 4u);
+  auto *leaf = program.srt_reads[0].value.Instruction();
+  leaf->Arg(0).Instruction()->SetArg(0, pointer_low);
+  leaf->Arg(0).Instruction()->SetArg(1, pointer_high);
+  leaf->SetArg(1, Value(7u));
+  read(leaf->Arg(0), 11u);
+  auto plan = ExtractResourcePlan(program);
+  Check(plan.srt_code != nullptr && plan.srt_table.nodes.size() == 2 &&
+            plan.srt_table.steps.size() == 4,
+        "the nested tree should have a two-level table with four reads");
+
+  struct Memory {
+    std::map<uint64_t, uint32_t> words;
+    std::vector<uint64_t>        log;
+  };
+  const auto reader = +[](void *data, uint64_t address, std::span<uint32_t> out) {
+    auto &memory = *static_cast<Memory *>(data);
+    memory.log.push_back(address);
+    const auto found = memory.words.find(address);
+    if (found == memory.words.end()) return false;
+    out[0] = found->second;
+    return true;
+  };
+  struct Outcome {
+    bool                  ok = false;
+    std::vector<uint32_t> flat;
+    std::vector<uint64_t> reads;
+    std::vector<std::pair<uint64_t, uint64_t>> captured;
+  };
+  const auto run = [&](Memory memory, std::span<const uint32_t> user_data, bool table) {
+    Outcome out;
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    const SrtRuntime runtime{.user_data = user_data,
+                             .read_memory = reader,
+                             .userdata = &memory,
+                             .table_walk = table};
+    out.ok = MaterializeResources(plan, runtime, snapshot, specialization);
+    out.flat = snapshot.flattened_srt;
+    out.reads = memory.log;
+    out.captured = snapshot.specialization_reads;
+    return out;
+  };
+  const std::array<uint32_t, 2> user_data{0x1003u, 0xabcd0000u};
+  const Memory good{{{0x1000u, 0x2003u}, {0x1004u, 0xabcd0000u}, {0x2004u, 0x1234u}, {0x2008u, 0x5678u}}, {}};
+  const auto expect_same = [&](const Memory &memory, std::span<const uint32_t> data,
+                               bool expect_ok, const char *what) {
+    const auto graph = run(memory, data, false);
+    const auto table = run(memory, data, true);
+    Check(graph.ok == expect_ok, what);
+    Check(table.ok == graph.ok, what);
+    Check(graph.ok ? table.flat == graph.flat : true, what);
+    auto sorted = [](std::vector<uint64_t> v) { std::sort(v.begin(), v.end()); return v; };
+    Check(graph.ok ? sorted(table.reads) == sorted(graph.reads) : true, what);
+    auto sorted_pairs = [](std::vector<std::pair<uint64_t, uint64_t>> v) { std::sort(v.begin(), v.end()); return v; };
+    Check(graph.ok ? sorted_pairs(table.captured) == sorted_pairs(graph.captured) : true, what);
+    return table;
+  };
+  const auto ok = expect_same(good, user_data, true, "table walk differs from the graph walk");
+  Check(ok.flat == std::vector<uint32_t>{0x1234u, 0x2003u, 0xabcd0000u, 0x5678u} &&
+            ok.reads.size() == 4,
+        "table walk values or number of guest reads");
+
+  // Other data, same shape: the table must follow the current memory, not remember anything.
+  const std::array<uint32_t, 2> user_data2{0x3003u, 0xabcd0000u};
+  const Memory other{{{0x3000u, 0x4003u}, {0x3004u, 0xabcd0000u}, {0x4004u, 0x9u}, {0x4008u, 0xau}}, {}};
+  const auto ok2 = expect_same(other, user_data2, true, "second input differs");
+  Check(ok2.flat == std::vector<uint32_t>{0x9u, 0x4003u, 0xabcd0000u, 0xau},
+        "table walk did not read the second input");
+
+  // Failures: a missing word at each level, truncated user data, a null root, pointer underflow
+  // and 48-bit overflow of the signed offsets. The table path must fail exactly when the graph
+  // walk does (it falls back to it).
+  Memory no_leaf = good;
+  no_leaf.words.erase(0x2004u);
+  expect_same(no_leaf, user_data, false, "missing leaf word");
+  Memory no_pointer = good;
+  no_pointer.words.erase(0x1004u);
+  expect_same(no_pointer, user_data, false, "missing pointer word");
+  expect_same(good, std::span(user_data).first(1), false, "truncated user data");
+  const std::array<uint32_t, 2> null_root{0u, 0u};
+  expect_same(good, null_root, false, "null root pointer");
+  const std::array<uint32_t, 2> wrap_root{0xfffffffcu, 0xffffu};
+  expect_same(good, wrap_root, false, "root at the top of the 48-bit space");
+
+  // Verify mode (graph walk on a fresh memo after the table walk) passes on good inputs.
+  {
+    Memory memory = good;
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    const SrtRuntime runtime{.user_data = user_data, .read_memory = reader, .userdata = &memory,
+                             .table_walk = true, .table_verify = true};
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              snapshot.flattened_srt == ok.flat,
+          "verify mode changed the table walk's result");
+  }
+
+  // The values a table walk seeds are not read again by descriptor evaluation.
+  {
+    Memory memory = good;
+    SrtRuntime runtime{.user_data = user_data, .read_memory = reader, .userdata = &memory,
+                       .table_walk = true};
+    SrtWalker walker(plan, runtime);
+    std::vector<uint32_t> flat;
+    Check(walker.RefreshFlatBuffer(flat), "walker refresh");
+    const auto reads = memory.log.size();
+    uint32_t value = 0;
+    Check(walker.Evaluate(plan.srt_reads[0].value, value) && value == 0x1234u &&
+              memory.log.size() == reads,
+          "a seeded read was loaded again");
+  }
+}
+
+
+// The same pointer tree in a plan with control flow (the usual case): reads go through the graph
+// evaluator, or with table_walk through SrtFastRead. Answers must agree on every input; a source
+// that is not a plain pointer word (here an IAdd32 of user data) keeps its slot on the graph walk.
+void TestFastReadsMatchTheGraphWalk() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  for (const bool computed_pointer : {false, true}) {
+    auto program = SrtProgram(0u);
+    program.user_data_base = 4;
+    program.user_data_count = 2;
+    auto &block = *program.blocks[0];
+    const auto emit = [&](ValueOpcode opcode, std::initializer_list<Value> args) {
+      return Value(&block.AppendNewInst(opcode, args));
+    };
+    auto low = emit(ValueOpcode::GetUserData, {Value(ScalarReg(4))});
+    const auto high = emit(ValueOpcode::GetUserData, {Value(ScalarReg(5))});
+    if (computed_pointer) {
+      low = emit(ValueOpcode::IAdd32, {low, Value(0u)});
+    }
+    const auto root = emit(ValueOpcode::GetAddressResource, {low, high});
+    const auto read = [&](Value address, uint32_t offset) {
+      const auto value = emit(ValueOpcode::LoadAddressU32,
+                              {address, Value(offset), Value(0u), Value(true)});
+      value.Instruction()->SetFlags(MemoryFlags{.index = 0});
+      program.srt_reads.push_back(
+          {value, static_cast<uint32_t>(program.srt_reads.size())});
+      return value;
+    };
+    const auto pointer_low = read(root, 0u);
+    const auto pointer_high = read(root, 4u);
+    auto *leaf = program.srt_reads[0].value.Instruction();
+    leaf->Arg(0).Instruction()->SetArg(0, pointer_low);
+    leaf->Arg(0).Instruction()->SetArg(1, pointer_high);
+    leaf->SetArg(1, Value(7u));
+    read(leaf->Arg(0), 11u);
+    // Make the flat reads visible to the control-flow plan: one ReadConst per slot.
+    auto &srt = block.AppendNewInst(ValueOpcode::GetSrtResource);
+    for (uint32_t slot = 0; slot < program.srt_reads.size(); ++slot) {
+      block.AppendNewInst(ValueOpcode::ReadConst, {Value(&srt), Value(slot)});
+    }
+    // A plan only keeps its control flow when some branch has an evaluable condition.
+    auto &condition = block.AppendNewInst(ValueOpcode::IEqual32, {high, Value(0xabcd0000u)});
+    auto &taken = AddValueBlock(program);
+    auto &fallthrough = AddValueBlock(program);
+    using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+    block.condition = Value(&condition);
+    block.terminator.kind = TerminatorKind::ConditionalBranch;
+    block.terminator.true_block = &taken;
+    block.terminator.false_block = &fallthrough;
+    taken.terminator.kind = TerminatorKind::Return;
+    fallthrough.terminator.kind = TerminatorKind::Return;
+    auto plan = ExtractResourcePlan(program);
+    Check(!plan.control_flow.empty() && plan.control_flow[0].srt_reads.size() >= 4,
+          "the plan should have a control-flow block listing its SRT reads");
+    uint32_t fast = 0;
+    for (const auto &entry : plan.fast_reads) fast += entry.valid ? 1u : 0u;
+    Check(computed_pointer ? fast == 2 : fast == 4,
+          "unexpected number of fast reads (a computed pointer word keeps its readers on the graph walk)");
+
+    struct Memory {
+      std::map<uint64_t, uint32_t> words;
+      std::vector<uint64_t>        log;
+    };
+    const auto reader = +[](void *data, uint64_t address, std::span<uint32_t> out) {
+      auto &memory = *static_cast<Memory *>(data);
+      memory.log.push_back(address);
+      const auto found = memory.words.find(address);
+      if (found == memory.words.end()) return false;
+      out[0] = found->second;
+      return true;
+    };
+    struct Outcome {
+      bool                  ok = false;
+      std::vector<uint32_t> flat;
+      std::vector<uint64_t> reads;
+    };
+    const auto run = [&](Memory memory, std::span<const uint32_t> user_data, bool table, bool verify) {
+      Outcome out;
+      ResourceSnapshot snapshot;
+      ResourceSpecialization specialization;
+      const SrtRuntime runtime{.user_data = user_data, .read_memory = reader,
+                               .userdata = &memory, .table_walk = table, .table_verify = verify};
+      out.ok = MaterializeResources(plan, runtime, snapshot, specialization);
+      out.flat = snapshot.flattened_srt;
+      out.reads = memory.log;
+      return out;
+    };
+    const auto sorted = [](std::vector<uint64_t> v) { std::sort(v.begin(), v.end()); return v; };
+    const auto expect_same = [&](const Memory &memory, std::span<const uint32_t> data, bool expect_ok,
+                                 const char *what) {
+      const auto graph = run(memory, data, false, false);
+      const auto table = run(memory, data, true, false);
+      const auto verified = run(memory, data, true, true);
+      Check(graph.ok == expect_ok && table.ok == graph.ok && verified.ok == graph.ok, what);
+      if (graph.ok) {
+        Check(table.flat == graph.flat && verified.flat == graph.flat, what);
+        Check(sorted(table.reads) == sorted(graph.reads), what);
+      }
+      return table;
+    };
+    const std::array<uint32_t, 2> user_data{0x1003u, 0xabcd0000u};
+    const Memory good{{{0x1000u, 0x2003u}, {0x1004u, 0xabcd0000u}, {0x2004u, 0x1234u}, {0x2008u, 0x5678u}}, {}};
+    const auto ok = expect_same(good, user_data, true, "control-flow plan: fast reads differ from the graph walk");
+    Check(ok.flat == std::vector<uint32_t>{0x1234u, 0x2003u, 0xabcd0000u, 0x5678u} &&
+              ok.reads.size() == 4,
+          "control-flow plan: values or number of guest reads");
+    const std::array<uint32_t, 2> user_data2{0x3003u, 0xabcd0000u};
+    const Memory other{{{0x3000u, 0x4003u}, {0x3004u, 0xabcd0000u}, {0x4004u, 0x9u}, {0x4008u, 0xau}}, {}};
+    expect_same(other, user_data2, true, "control-flow plan: second input");
+    Memory no_leaf = good;
+    no_leaf.words.erase(0x2004u);
+    expect_same(no_leaf, user_data, false, "control-flow plan: missing leaf word");
+    expect_same(good, std::span(user_data).first(1), false, "control-flow plan: truncated user data");
+    const std::array<uint32_t, 2> wrap_root{0xfffffffcu, 0xffffu};
+    expect_same(good, wrap_root, false, "control-flow plan: root at the top of the address space");
+  }
 }
 
 void TestIntegerRuntimeValueFollowsSrtReads() {
@@ -891,6 +1150,8 @@ void TestGuessSpecialization() {
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
   TestNativeNestedSrtRefresh();
+  TestTableWalkMatchesTheGraphWalk();
+  TestFastReadsMatchTheGraphWalk();
   TestIntegerRuntimeValueFollowsSrtReads();
   TestSrtAliasesRetainReadPolicy();
   TestUniformVectorDescriptorRead();

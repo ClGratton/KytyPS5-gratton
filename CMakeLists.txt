@@ -486,6 +486,11 @@ add_executable(known_fills_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(known_fills_tests PRIVATE ${inc_headers})
 
+add_executable(draw_key_memo_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/DrawKeyMemoTests.cpp"
+)
+target_include_directories(draw_key_memo_tests PRIVATE ${inc_headers})
+
 add_executable(readback_plan_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ReadbackPlanTests.cpp"
 )
@@ -784,6 +789,7 @@ if(BUILD_TESTING)
 	add_test(NAME drain_causes COMMAND $<TARGET_FILE:drain_causes_tests>)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
 	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
+	add_test(NAME draw_key_memo COMMAND $<TARGET_FILE:draw_key_memo_tests>)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
@@ -948,6 +954,7 @@ if(BUILD_TESTING)
 		drain_causes_tests
 		barrier_elision_tests
 		known_fills_tests
+		draw_key_memo_tests
 		readback_plan_tests
 		gc_clock_tests
 		buffer_gc_gate_tests

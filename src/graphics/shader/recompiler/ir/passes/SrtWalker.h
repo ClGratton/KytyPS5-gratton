@@ -18,6 +18,13 @@ struct SrtRuntime {
 	void*                     userdata                   = nullptr;
 	SrtMemoryReader           read_specialization_memory = nullptr;
 	std::span<const uint32_t> workgroup_counts;
+	// --srt-table-walk: refresh the flattened SRT of a native-eligible plan from its SrtTable, reading
+	// through read_memory, instead of walking the value graph. Falls back to the graph walk when a
+	// check or a read fails, so the result is the graph walk's.
+	bool                      table_walk = false;
+	// --debug-draw-key-verify: after a table walk, redo the refresh with the graph walk on a fresh
+	// memo and stop if the two flattened SRTs differ (reads happen twice).
+	bool                      table_verify = false;
 };
 
 class SrtReadCapture {
@@ -46,6 +53,9 @@ enum class RuntimeValueType { Any, Integer, ImmutableInteger };
 bool ValidateRuntimeValue(const ResourcePlan& program, Value value,
                           RuntimeValueType type = RuntimeValueType::Any);
 void CompileSrtWalker(ResourcePlan& program);
+// Fills program.fast_reads: for each scalar SRT read whose pointer comes from constants, user data
+// or other reads, the data SrtWalker needs to compute it without the graph walk (table_walk).
+void BuildFastReads(ResourcePlan& program);
 // Uses the strict reader for values that affect shader specialization.
 SrtRuntime CleanRuntime(SrtRuntime runtime);
 
@@ -64,6 +74,10 @@ public:
 	bool RefreshFlatBuffer(std::vector<uint32_t>& flat);
 
 private:
+	bool RefreshFlatTable(std::vector<uint32_t>& flat);
+	bool FastSource(const SrtFastRead::Source& source, uint64_t& result);
+	bool FastRead(const SrtFastRead& fast, const SrtRead& read, std::vector<uint32_t>& flat);
+	void VerifyFlatTable(const std::vector<uint32_t>& flat);
 	static ResourcePlan::EvaluationContext& AcquireContext(const ResourcePlan& program);
 	static float Float32(uint64_t bits);
 	bool EvaluateWide(Value value, uint64_t& result);

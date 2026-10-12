@@ -228,6 +228,14 @@ struct ConfigOptions {
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
 	// clear discovery needs no GPU->CPU readback for them. Default off.
 	bool                   known_fills                 = false;
+	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
+	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
+	// full lookup on every memo hit and stops on a disagreement.
+	bool                   draw_key_cache              = false;
+	// --srt-table-walk: refresh a native-eligible shader's flattened SRT from a table through the
+	// guest-memory callback instead of walking the value graph. Default off.
+	bool                   srt_table_walk              = false;
+	bool                   draw_key_verify             = false;
 	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
 	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
 	bool                   clean_guest_reads           = false;
@@ -301,6 +309,9 @@ uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
 bool              CleanGuestReadsEnabled();
+bool              DrawKeyCacheEnabled();
+bool              SrtTableWalkEnabled();
+bool              DrawKeyVerifyEnabled();
 bool              ReadbackQueueEnabled();
 
 LogDirection          GetPrintfDirection();
