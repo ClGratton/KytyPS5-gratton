@@ -1038,6 +1038,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		        (pipeline_bind_point == vk::PipelineBindPoint::eCompute &&
 		         shader_stage != vk::ShaderStageFlagBits::eCompute));
 	}
+	Common::GpuPhase::Scope gpu_phase_hazard(Common::GpuPhase::Phase::DescHazard);
 	for (const auto* reader: prepared_bindings) {
 		const auto& reads = reader->runtime->resources->specialization_reads;
 		if (reads.empty()) continue;
@@ -1078,12 +1079,14 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			}
 		}
 	}
+	gpu_phase_hazard.End();
 	m_descriptor_images.resize(image_descriptor_count);
 	m_descriptor_writes.clear();
 	m_descriptor_writes.reserve(write_count);
 	size_t image_cursor = 0;
 	std::array<vk::DescriptorBufferInfo, 2> address_buffers;
 
+	Common::GpuPhase::Scope gpu_phase_writes(Common::GpuPhase::Phase::DescWrites);
 	for (auto* prepared: prepared_bindings) {
 		const auto& program       = *prepared->runtime->program;
 		auto&       descriptors   = *prepared;
@@ -1254,6 +1257,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 	}
 
+	gpu_phase_writes.End();
 	if (has_push_data) {
 		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0, sizeof(push_data),
