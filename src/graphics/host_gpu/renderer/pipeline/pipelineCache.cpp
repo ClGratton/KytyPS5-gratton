@@ -518,8 +518,26 @@ struct PipelineCache::ProgramCache {
 		void MaterializeLocked(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                       StepTime*                                materialize_time) {
 			Stopwatch  materialize_sw;
+			const bool measuring = Common::GpuPhase::Measuring();
+			ShaderRecompiler::IR::ResourceSnapshot        previous;
+			ShaderRecompiler::IR::ResourceSpecialization previous_specialization;
+			if (measuring) {
+				previous                = resources;
+				previous_specialization = specialization;
+			}
 			const bool materialized = ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization);
+			if (measuring && materialized) {
+				uint32_t equal = 0;
+				equal |= previous.user_data == resources.user_data ? Common::GpuPhase::kMatUserData : 0u;
+				equal |= previous.flattened_srt == resources.flattened_srt ? Common::GpuPhase::kMatFlat : 0u;
+				equal |= (previous.buffers == resources.buffers && previous.images == resources.images &&
+				          previous.samplers == resources.samplers)
+				             ? Common::GpuPhase::kMatDescriptors : 0u;
+				equal |= previous.uniform_fill == resources.uniform_fill ? Common::GpuPhase::kMatFill : 0u;
+				equal |= previous_specialization == specialization ? Common::GpuPhase::kMatSpecialization : 0u;
+				Common::GpuPhase::NoteMaterialize(equal);
+			}
 			if (materialize_time != nullptr) materialize_time->Add(materialize_sw, materialize_sw.Lap());
 			EXIT_IF(!materialized);
 		}

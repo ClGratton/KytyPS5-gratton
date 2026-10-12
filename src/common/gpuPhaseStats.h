@@ -73,6 +73,14 @@ enum class KnownFill : uint8_t { Hit, Readback, Discarded, DiscardRefused, Count
 void NoteKnownFill(KnownFill kind) noexcept;
 // --clean-guest-reads: a read served from the guest backing (clean) or by a plain load (direct).
 void NoteCleanRead(bool clean) noexcept;
+// True on the thread that is measured (the GPU thread) while stats are on.
+[[nodiscard]] bool Measuring() noexcept;
+// Program resource materialization on the GPU thread compared with the previous result of the same
+// program (only when measuring): bit 0 user data equal, 1 flattened SRT equal, 2 descriptors equal,
+// 3 uniform fill equal, 4 specialization equal. Totals are reported as "materialize (total)".
+constexpr uint32_t kMatUserData = 1u, kMatFlat = 2u, kMatDescriptors = 4u, kMatFill = 8u,
+                   kMatSpecialization = 16u, kMatAll = 31u;
+void NoteMaterialize(uint32_t equal_mask) noexcept;
 // --readback-queue: one second-queue readback; `flushed` the producer was still in the open
 // command buffer, `lag_ticks` how many submitted ticks lie between the producer and now.
 void NoteQueueReadback(bool flushed, uint64_t lag_ticks) noexcept;
