@@ -68,6 +68,7 @@
 #endif
 
 #include <algorithm>
+#include <filesystem>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -16563,6 +16564,17 @@ public:
       std::array<ShaderVertexInputInfo, 3> native_vertex_info{};
       std::array<uint64_t, 2> wave_ids{};
       std::array<std::vector<u32>, 2> wave_keys;
+      // KYTY_TEST_SHADER_LOAD=1: this cache records every graphics pipeline it uses; a second cache
+      // rebuilds them from the file after the loop below.
+      const bool check_graphics_replay = std::getenv("KYTY_TEST_SHADER_LOAD") != nullptr;
+      const auto graphics_variants_path =
+          std::filesystem::temp_directory_path() / "kyty_shader_load_graphics_test.variants";
+      if (check_graphics_replay) {
+        std::filesystem::remove(graphics_variants_path);
+        Require(name, "open graphics variant store",
+                context.GetPipelineCache().UseVariantStore(graphics_variants_path),
+                "variant file");
+      }
       struct PixelWaveCase { uint32_t control, width, color; };
       for (const auto wave : {PixelWaveCase{0x0008, 64, 0},
                               PixelWaveCase{0x8008, 32, 0x3e800000},
@@ -16600,6 +16612,65 @@ public:
       Require(name, "pixel wave cache distinction",
               wave_ids[0] != wave_ids[1] && wave_keys[0] != wave_keys[1],
               "wave32 and wave64 pixel programs shared a cache key");
+
+      if (check_graphics_replay) {
+        // Record: both pixel-wave pipelines were stored at their first draw.
+        auto &recorded_store = *context.GetPipelineCache().VariantsStore();
+        Require(name, "graphics variants recorded",
+                recorded_store.GraphicsSize() == 2 &&
+                    context.GetPipelineCache().Load().recorded_graphics == 2,
+                "the first draw of each graphics pipeline must store its variant");
+        // Replay in a second cache: the guest "registers" the two binaries, the pipelines are
+        // built in the background, and the same draws find them ready.
+        PipelineCache replay(context.GetGraphics());
+        Require(name, "reopen graphics variant store",
+                replay.UseVariantStore(graphics_variants_path) &&
+                    replay.VariantsStore()->GraphicsSize() == 2,
+                "variant file lost its graphics records");
+        const auto vertex_hash = ShaderMapUserData(vertex_address,
+            {.type = Prospero::ShaderBinaryType::kGs, .user_data = &native_user_data,
+             .code_size_bytes = static_cast<uint32_t>(native_vertex.size() * sizeof(u32))});
+        const auto pixel_hash = ShaderMapUserData(pixel_address,
+            {.type = Prospero::ShaderBinaryType::kPs,
+             .code_size_bytes = static_cast<uint32_t>(native_pixel.size() * sizeof(u32))});
+        replay.NoteShaderRegistered({.type = static_cast<uint8_t>(Prospero::ShaderBinaryType::kGs),
+                                     .address = vertex_address, .hash = vertex_hash,
+                                     .code_size_bytes = static_cast<uint32_t>(native_vertex.size() * 4u)});
+        Require(name, "no job before both binaries are known", replay.Load().gfx_jobs == 0,
+                "a graphics pipeline started before its pixel shader was registered");
+        replay.NoteShaderRegistered({.type = static_cast<uint8_t>(Prospero::ShaderBinaryType::kPs),
+                                     .address = pixel_address, .hash = pixel_hash,
+                                     .code_size_bytes = static_cast<uint32_t>(native_pixel.size() * 4u)});
+        Require(name, "replay idle", replay.WaitLoadIdle(120000), "graphics load jobs did not finish");
+        Require(name, "graphics jobs",
+                replay.Load().gfx_jobs == 2 && replay.Load().gfx_pipelines == 2 &&
+                    replay.Load().gfx_skipped == 0,
+                "both stored pipelines must be built from the registrations");
+        for (const uint32_t control : {0x0008u, 0x8008u}) {
+          registers.SetPsInControl(control);
+          std::array<ShaderVertexInputInfo, 3> replay_vertex_info{};
+          ShaderPixelInputInfo replay_pixel{};
+          const auto replay_programs = RetryWhilePending([&] {
+            return replay.GetGraphicsPrograms(
+                native_vertex_regs, native_pixel_regs, registers.GetShaderRegisters(), registers,
+                user_config, export_mapping, true, replay_vertex_info, replay_pixel);
+          });
+          HW::ModeControl replay_mode{};
+          replay_mode.poly_mode = true;
+          replay_mode.polymode_front_ptype = 2;
+          replay_mode.polymode_back_ptype = 2;
+          registers.SetModeControl(replay_mode);
+          const auto before_hits = replay.Load().gfx_hit_ready + replay.Load().gfx_hit_inflight;
+          auto *replayed = replay.GetGraphicsPipeline(
+              std::span{&color, 1u}, depth, std::span{&replay_vertex_info[0], 1u},
+              scheduler.Current(), &replay_pixel, vk::PrimitiveTopology::eTriangleList, false,
+              replay_programs);
+          Require(name, "replayed pipeline",
+                  replayed != nullptr && replayed->pipeline != nullptr &&
+                      replay.Load().gfx_hit_ready + replay.Load().gfx_hit_inflight == before_hits + 1,
+                  "the draw did not find the pipeline built from the stored variant");
+        }
+      }
 
       static const auto waterfall_vertex = [&] {
         std::vector<u32> code;

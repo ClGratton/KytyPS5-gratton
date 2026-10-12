@@ -803,6 +803,12 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	set_tests_properties(shader_recompiler_compute_shader_load PROPERTIES
 		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
+	# ... and the graphics half: the pipelines of the pixel-wave test are recorded by one cache and
+	# rebuilt by a second one from the registrations.
+	add_test(NAME graphics_pipeline_shader_load
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(graphics_pipeline_shader_load PROPERTIES
+		ENVIRONMENT "KYTY_TEST_SHADER_LOAD=1")
 	add_test(NAME shader_load_precompile
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --shader-load-only)
 	set_tests_properties(shader_load_precompile PROPERTIES
