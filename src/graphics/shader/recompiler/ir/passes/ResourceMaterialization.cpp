@@ -4,7 +4,6 @@
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
-#include "graphics/shader/recompiler/ir/passes/MaterializeProbe.h"
 #include "graphics/shader/shaderBindings.h"
 
 #include <algorithm>
@@ -1077,8 +1076,6 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
-	MaterializeProbe::Timer probe_total(MaterializeProbe::Total);
-	MaterializeProbe::Timer probe_setup(MaterializeProbe::Setup);
 	if (!program.resource_tracking_complete ||
 	    ((program.requires_specialization_memory || !program.source_reads.empty()) &&
 	     runtime.read_specialization_memory == nullptr)) {
@@ -1092,13 +1089,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed,
 	                 capture_reads || program.requires_specialization_memory ? &clean : nullptr);
-	probe_setup.Stop();
-	MaterializeProbe::Timer probe_flat(MaterializeProbe::Flat);
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
 		return false;
 	}
-	probe_flat.Stop();
-	MaterializeProbe::Timer probe_fill(MaterializeProbe::Fill);
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	snapshot.uniform_fill = {};
 	const auto& fill = program.uniform_fill;
@@ -1112,8 +1105,6 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		snapshot.uniform_fill = fill.fill;
 		snapshot.uniform_fill.value = stored[0];
 	}
-	probe_fill.Stop();
-	MaterializeProbe::Timer probe_buffers(MaterializeProbe::Buffers);
 	const auto evaluate = [&](uint32_t source, DescriptorValue& value, bool written = false) {
 		if (source >= program.descriptor_sources.size()) {
 			return false;
@@ -1172,8 +1163,6 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		buffer.descriptor_swizzle = base.formatted ? descriptor.DstSelXYZW() : DstSel(4, 5, 6, 7);
 		buffer.zero_stride_oob    = descriptor.OutOfBounds() == 0u && stride == 0u;
 	}
-	probe_buffers.Stop();
-	MaterializeProbe::Timer probe_images(MaterializeProbe::Images);
 	snapshot.images.resize(program.info.images.size());
 	specialization.images.resize(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
@@ -1220,8 +1209,6 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			}
 		}
 	}
-	probe_images.Stop();
-	MaterializeProbe::Timer probe_samplers(MaterializeProbe::Samplers);
 	snapshot.samplers.resize(program.info.samplers.size());
 	for (uint32_t i = 0; i < program.info.samplers.size(); ++i) {
 		auto source = program.info.samplers[i].source;
@@ -1246,8 +1233,6 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
-	probe_samplers.Stop();
-	MaterializeProbe::Timer probe_specialize(MaterializeProbe::Specialize);
 	return BuildResourceSpecialization(program, snapshot, specialization);
 }
 
