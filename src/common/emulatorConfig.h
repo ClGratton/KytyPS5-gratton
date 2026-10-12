@@ -117,6 +117,10 @@ struct ConfigOptions {
 	bool                   spirv_debug_printf_enabled  = false;
 	bool                   gpu_assisted_validation_enabled = false;
 	bool                   renderdoc_enabled           = false;
+	// Stays false: downloading every GPU-written linear image on submit makes a game that renders
+	// into linear memory a GPU drain per frame (Astro Bot: 49 -> 19 fps, 16.7 -> 50 ms frames, same
+	// binary). A game whose CPU reads GPU-written linear memory (GTA V vehicle deformation) needs it;
+	// the real fix is to download only what the CPU actually touches. docs/defaults.md.
 	bool                   readback_linear_images      = false;
 	bool                   sync_raw_image_buffers      = false;
 	bool                   tessellation_enabled        = false;

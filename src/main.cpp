@@ -103,7 +103,10 @@ static void PrintUsage() {
 	::printf("  --profile                            Enable the Tracy profiler.\n");
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
-	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
+	    "  --readback-linear-images <true|false> Read back writable linear images on submit, for\n"
+	    "                                       games whose CPU reads GPU-written linear memory. Costs a\n"
+	    "                                       GPU drain per frame where a game renders into linear\n"
+	    "                                       memory. Default: false.\n");
 	::printf(
 	    "  --sync-raw-image-buffers <true|false> Synchronize raw reads of GPU images. Default: false.\n");
 	::printf(

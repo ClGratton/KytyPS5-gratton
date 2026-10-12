@@ -122,6 +122,21 @@ void TestVramPagingDefault() {
 	Check(!Config::VramPagingEnabled(), "--vram-paging off still opts out");
 }
 
+// Measured, not assumed: readback of every GPU-written linear image on submit cost Astro Bot
+// 60 % of its frame rate (49 -> 19 fps), so it stays opt-in until it downloads only what the CPU
+// reads. A title that needs it (GTA V) passes --readback-linear-images true.
+void TestReadbackLinearImagesStaysOff() {
+	const Config::ConfigOptions options;
+	Check(!options.readback_linear_images, "readback_linear_images defaults to off");
+	Apply(options);
+	Check(!Config::ReadbackLinearImagesEnabled(), "an unconfigured emulator does not read linear images back");
+
+	Config::ConfigOptions on;
+	on.readback_linear_images = true;
+	Apply(on);
+	Check(Config::ReadbackLinearImagesEnabled(), "--readback-linear-images true still enables it");
+}
+
 } // namespace
 
 int main() {
@@ -129,6 +144,7 @@ int main() {
 
 	TestGpuTimestampsDefault();
 	TestBufferGcOwnShare();
+	TestReadbackLinearImagesStaysOff();
 	TestPipelineCacheKeyDefault();
 	TestVramStatsAreIndependentOfPaging();
 	TestVramPagingDefault();
