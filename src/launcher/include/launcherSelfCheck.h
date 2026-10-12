@@ -15,9 +15,14 @@
 //       the saved global settings (or, with --preset, the recommended set on top of the defaults).
 //       --shell prints it as export/exec lines for eval (the kyty-gratton run wrapper).
 //
-// Both return the process exit code.
+//   launcher --configure [--game-dir <dir>] [--preset]
+//       Adds a game folder to the saved settings and/or applies the "Recommended for play" set to
+//       the saved global settings (used by the install script on a first install).
+//
+// All return the process exit code.
 int RunSelfCheck(const QStringList& args);
 int RunPrintCommand(const QStringList& args);
+int RunConfigure(const QStringList& args);
 // launcher --grab-settings <dir> [--global] [--preset]: saves one PNG per tab of the settings dialog.
 int RunGrabSettings(const QStringList& args);
 

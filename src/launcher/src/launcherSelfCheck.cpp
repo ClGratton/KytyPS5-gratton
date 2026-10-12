@@ -375,6 +375,46 @@ int RunGrabSettings(const QStringList& args) {
 	return 0;
 }
 
+int RunConfigure(const QStringList& args) {
+	const auto dir_at = args.indexOf(QStringLiteral("--game-dir"));
+	const bool preset = args.contains(QStringLiteral("--preset"));
+	if (dir_at < 0 && !preset) {
+		QTextStream(stderr) << "usage: launcher --configure [--game-dir <dir>] [--preset]\n";
+		return 2;
+	}
+	// The same file and keys as the launcher's own settings (ConfigurationListWidget).
+	QSettings s(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("Kyty"),
+	            QStringLiteral("Kyty"));
+	if (dir_at >= 0 && dir_at + 1 < args.size()) {
+		const auto dir = QDir::cleanPath(QDir(args.at(dir_at + 1)).absolutePath());
+		s.beginGroup(QStringLiteral("Launcher"));
+		auto dirs = s.value(QStringLiteral("game_dirs")).toStringList();
+		if (!dirs.contains(dir)) {
+			dirs << dir;
+		}
+		s.setValue(QStringLiteral("game_dirs"), dirs);
+		s.endGroup();
+	}
+	if (preset) {
+		Configuration info;
+		s.beginGroup(QStringLiteral("GlobalConfiguration"));
+		if (!s.childKeys().isEmpty()) {
+			info.ReadSettings(&s);
+		}
+		info.controller.ReadSettings(&s);
+		s.endGroup();
+		info.ApplyRecommendedForPlay();
+		s.remove(QStringLiteral("GlobalConfiguration"));
+		s.beginGroup(QStringLiteral("GlobalConfiguration"));
+		info.WriteSettings(&s);
+		info.controller.WriteSettings(&s);
+		s.endGroup();
+	}
+	s.sync();
+	QTextStream(stdout) << "settings written to " << s.fileName() << "\n";
+	return s.status() == QSettings::NoError ? 0 : 1;
+}
+
 int RunPrintCommand(const QStringList& args) {
 	const auto game_at = args.indexOf(QStringLiteral("--game"));
 	if (game_at < 0 || game_at + 1 >= args.size()) {
