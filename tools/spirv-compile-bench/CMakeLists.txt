@@ -23,7 +23,6 @@ find_library(KYTY_VULKAN_LOADER NAMES vulkan libvulkan.so.1 REQUIRED)
 
 add_executable(spirv-compile-bench main.cpp)
 target_include_directories(spirv-compile-bench SYSTEM PRIVATE "${KYTY_THIRD_PARTY_DIR}/Vulkan-Headers/include")
-target_compile_definitions(spirv-compile-bench PRIVATE VK_NO_PROTOTYPES=0)
 target_link_libraries(spirv-compile-bench PRIVATE "${KYTY_VULKAN_LOADER}")
 find_package(Threads REQUIRED)
 target_link_libraries(spirv-compile-bench PRIVATE Threads::Threads)
