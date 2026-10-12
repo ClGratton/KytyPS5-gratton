@@ -460,7 +460,17 @@ void TestFastReadsMatchTheGraphWalk() {
     for (uint32_t slot = 0; slot < program.srt_reads.size(); ++slot) {
       block.AppendNewInst(ValueOpcode::ReadConst, {Value(&srt), Value(slot)});
     }
-    block.terminator.kind = Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind::Return;
+    // A plan only keeps its control flow when some branch has an evaluable condition.
+    auto &condition = block.AppendNewInst(ValueOpcode::IEqual32, {high, Value(0xabcd0000u)});
+    auto &taken = AddValueBlock(program);
+    auto &fallthrough = AddValueBlock(program);
+    using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+    block.condition = Value(&condition);
+    block.terminator.kind = TerminatorKind::ConditionalBranch;
+    block.terminator.true_block = &taken;
+    block.terminator.false_block = &fallthrough;
+    taken.terminator.kind = TerminatorKind::Return;
+    fallthrough.terminator.kind = TerminatorKind::Return;
     auto plan = ExtractResourcePlan(program);
     Check(!plan.control_flow.empty() && plan.control_flow[0].srt_reads.size() >= 4,
           "the plan should have a control-flow block listing its SRT reads");
