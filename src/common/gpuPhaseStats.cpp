@@ -65,8 +65,6 @@ std::atomic<uint64_t> g_clean_reads {0};
 std::atomic<uint64_t> g_direct_reads {0};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
 std::array<std::atomic<uint64_t>, kCoalesce> g_coalesce {};
-std::atomic<uint64_t> g_mat_calls {0};
-std::array<std::atomic<uint64_t>, 6> g_mat_equal {}; // per bit, then all bits
 
 int64_t WallNs() {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -256,22 +254,6 @@ void NoteKnownFill(KnownFill kind) noexcept {
 	g_known_fills[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 }
 
-bool Measuring() noexcept {
-	return detail::t_state != nullptr;
-}
-
-void NoteMaterialize(uint32_t equal_mask) noexcept {
-	g_mat_calls.fetch_add(1, std::memory_order_relaxed);
-	for (size_t i = 0; i < 5; ++i) {
-		if ((equal_mask & (1u << i)) != 0) {
-			g_mat_equal[i].fetch_add(1, std::memory_order_relaxed);
-		}
-	}
-	if ((equal_mask & kMatAll) == kMatAll) {
-		g_mat_equal[5].fetch_add(1, std::memory_order_relaxed);
-	}
-}
-
 void NoteCleanRead(bool clean) noexcept {
 	(clean ? g_clean_reads : g_direct_reads).fetch_add(1, std::memory_order_relaxed);
 }
@@ -396,13 +378,6 @@ void Report(detail::ThreadState& s, bool final_report) {
 		line += fmt::format("clean guest reads (total): clean={} direct={}\n",
 		                    g_clean_reads.load(std::memory_order_relaxed),
 		                    g_direct_reads.load(std::memory_order_relaxed));
-	}
-	if (const auto calls = g_mat_calls.load(std::memory_order_relaxed); calls != 0) {
-		const auto eq = [&](size_t i) { return g_mat_equal[i].load(std::memory_order_relaxed); };
-		line += fmt::format("materialize (total): calls={} equal to the previous result of the same "
-		                    "program: user_data={} flat_srt={} descriptors={} fill={} "
-		                    "specialization={} all={}\n",
-		                    calls, eq(0), eq(1), eq(2), eq(3), eq(4), eq(5));
 	}
 	if (g_qr_calls.load(std::memory_order_relaxed) != 0) {
 		const auto calls = g_qr_calls.load(std::memory_order_relaxed);
