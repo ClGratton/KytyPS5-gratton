@@ -63,7 +63,7 @@ void StartOnThisThread() {
 	g_samples = new uint64_t[kMaxSamples];
 	struct sigaction action {};
 	action.sa_sigaction = OnSample;
-	action.sa_flags     = SA_SIGINFO | SA_RESTART;
+	action.sa_flags     = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
 	sigemptyset(&action.sa_mask);
 	if (sigaction(SIGPROF, &action, nullptr) != 0) {
 		return;
