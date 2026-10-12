@@ -141,7 +141,9 @@ static void PrintUsage() {
 	         "                                       this percentage of the critical budget before it\n"
 	         "                                       downloads dirty buffers (each batch is a GPU drain);\n"
 	         "                                       the texture cache can keep the whole device above the\n"
-	         "                                       mark on its own. 0 = stock. Default: 0.\n");
+	         "                                       mark on its own. 0 = the old rule (device usage\n"
+	         "                                       alone decides). 25 suits cards where those drains\n"
+	         "                                       hurt and --vram-paging is off. Default: 0.\n");
 	::printf("  --keymap <Control=Input>             DualSense mapping; may be repeated.\n");
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"

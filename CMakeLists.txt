@@ -720,6 +720,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_gpu_timestamps_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --gpu-timestamps maybe)
 	set_tests_properties(emulator_gpu_timestamps_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_gc_buffer_own_share_set_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --gc-buffer-own-share 25)
+	add_test(NAME emulator_gc_buffer_own_share_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --gc-buffer-own-share 101)
+	set_tests_properties(emulator_gc_buffer_own_share_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)

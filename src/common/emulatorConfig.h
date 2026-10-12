@@ -48,6 +48,9 @@ enum class AsyncPipelineMode { Off, Stall, Skip };
 // the parse-time value when the device cannot calibrate timestamps (logged once).
 enum class GpuTimestampMode { Legacy, Gpu };
 
+// The share --gc-buffer-own-share is meant to be set to (K42); not the default, see below.
+constexpr uint32_t RECOMMENDED_GC_BUFFER_OWN_SHARE_PCT = 25;
+
 constexpr double MIN_GPU_TIME_SCALE = 0.1;
 constexpr double MAX_GPU_TIME_SCALE = 16.0;
 constexpr uint32_t MAX_FPS_LIMIT    = 1000;
@@ -130,8 +133,12 @@ struct ConfigOptions {
 	uint32_t               gc_buffer_trigger_mb        = 0;
 	uint32_t               gc_buffer_critical_mb       = 0;
 	// --gc-buffer-own-share <pct> (K42): the buffer GC only goes aggressive (downloads dirty buffers,
-	// a full drain each) when the buffer cache itself holds this share of the critical budget.
-	// 0 = stock (device usage alone decides).
+	// a full drain each) when the buffer cache itself holds this share of the critical budget, a
+	// share of the budget-derived mark so it scales with the card. 0 (default) = the old rule: whole-
+	// device usage alone decides, which the texture cache can pin above the mark. Stays 0 because
+	// with --vram-paging (default) the gate keeps ~370 MiB more buffers resident and, at a forced
+	// 5.7 GB budget, Astro Bot drops from 35 to 12.5 fps (docs/defaults.md); 25 is for cards where
+	// the old rule's drains are the problem and paging is off.
 	uint32_t               gc_buffer_own_share_pct     = 0;
 	// Observation-only benchmark instrumentation (see common/benchInstrument.h). Off by default.
 	std::filesystem::path  bench_frames_csv;
