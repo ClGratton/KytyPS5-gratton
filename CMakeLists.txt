@@ -479,6 +479,13 @@ add_executable(buffer_gc_gate_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(buffer_gc_gate_tests PRIVATE ${inc_headers})
 
+add_executable(bda_sync_gate_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BdaSyncGateTests.cpp"
+)
+target_include_directories(bda_sync_gate_tests PRIVATE ${inc_headers})
+find_package(Threads REQUIRED)
+target_link_libraries(bda_sync_gate_tests Threads::Threads)
+
 add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
@@ -688,6 +695,7 @@ if(BUILD_TESTING)
 	add_test(NAME submit_coalescer COMMAND $<TARGET_FILE:submit_coalescer_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
+	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
 	add_test(NAME gpu_clock COMMAND $<TARGET_FILE:gpu_clock_tests>)
@@ -788,6 +796,7 @@ if(BUILD_TESTING)
 		submit_coalescer_tests
 		gc_clock_tests
 		buffer_gc_gate_tests
+		bda_sync_gate_tests
 		sys_file_read_tests
 		async_pipeline_tests
 		gpu_clock_tests
