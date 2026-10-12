@@ -2503,11 +2503,19 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 		counters.built.fetch_add(1, std::memory_order_relaxed);
 	}
 	if (timing) {
+		// The variant this job built, in the compute_variant row's format, so the guess can be
+		// compared with what the dispatch used.
+		Variants::ComputeVariant built_variant;
+		built_variant.code_hash        = key.hash;
+		built_variant.code_size_dwords = key.code_size;
+		built_variant.state            = ToVariantStatic(info, user_data_count);
+		built_variant.spec             = ToVariantSpec(wanted);
 		AddTimingRow("load_program", key.hash, sw.Start(), sw.Elapsed(),
 		             fmt::format("shader_id={};dup={};guess={};frontend_ns={};backend_ns={};"
-		                         "module_ns={};register_ns={};code_dwords={}",
+		                         "module_ns={};register_ns={};code_dwords={};{}",
 		                         published->handle.id, dup ? 1 : 0, guess ? 1 : 0, frontend_ns,
-		                         backend_ns, module_ns, register_ns, code.size()));
+		                         backend_ns, module_ns, register_ns, code.size(),
+		                         DescribeVariant(built_variant)));
 	}
 	owner.SubmitLoadedComputePipeline(published->handle, info, &published->program, priority);
 	// Publish first, unregister last: a dispatch that no longer finds the job finds the program.
