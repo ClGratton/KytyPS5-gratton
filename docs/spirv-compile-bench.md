@@ -38,3 +38,10 @@ Hold the shared bench lock while timing (the harness compiles on the GPU).
   `--exec` + `run_matrix.py selfcheck` compares results of the rewritten hand-written shader on the GPU.
 - `ldsclamp`: loads become `select(in_bounds, lds[clamped], 0)`, stores go to a dummy slot (array length + 1);
   exact for loads, stores and atomics.
+
+## Results (2026-10-12, RTX 3080 Ti, NVIDIA 610.57)
+See `bench/RESULTS.md` section "Compile harness". Summary: compile ms = 7.2 x kwords + 324 x kblocks - 760;
+removing the buffer bounds-check ifs (robustBufferAccess2) cuts cs98 by 37 % and the top-12 compute total by 18 %;
+spirv-opt and VK_EXT_shader_object change nothing; parallel compiles scale 1.5x (2 threads) / 2.2x (4).
+Known limits: graphics timing uses minimal fixed state (no blend/depth variants); `--exec` supports storage
+buffers only; the top-level `KYTY_BUILD_TOOLS` hook and the ctest entry were not exercised (standalone build is).
