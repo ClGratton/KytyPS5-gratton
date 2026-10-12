@@ -153,7 +153,7 @@ struct ConfigOptions {
 	// --shader-loop-limit <N>: every shader invocation gets N loop-header executions (all loops
 	// together); when they are used up the loops are left and the shader is reported loudly. A
 	// guard against a GPU hang from a loop that never ends because of an emulation bug (see
-	// docs/level-hang.md, common/loopGuard.h). On by default; 0 = off.
+	// common/loopGuard.h). On by default; 0 = off.
 	uint32_t               shader_loop_limit           = Common::LoopGuard::DefaultLimit;
 	// --debug-dump-shader <hex[,hex...]>: write the SPIR-V and the guest binary of just these shader
 	// hashes (as printed by --debug-gpu-ops) to --shader-log-folder, without --graphics-debug-dump.
