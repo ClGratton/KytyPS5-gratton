@@ -35,4 +35,14 @@ void Report(const char* why, uint64_t completed_tick);
 
 } // namespace Libs::Graphics::GpuOps
 
+namespace Libs::Graphics {
+struct ShaderStageRuntime;
+}
+namespace Libs::Graphics::GpuOps {
+// Once per shader hash (and stage), prints the guest buffers it is bound to (address, size, read or
+// read-write) the first time the shader is seen: finds which shader writes a buffer that a hung
+// shader reads. No-op unless --debug-gpu-ops is on.
+void LogShaderBuffers(const char* stage, const ShaderStageRuntime& stage_runtime);
+} // namespace Libs::Graphics::GpuOps
+
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_GPUOPS_H_

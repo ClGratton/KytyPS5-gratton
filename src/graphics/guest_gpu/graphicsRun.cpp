@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/renderer/gpuOps.h"
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
@@ -506,6 +507,15 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 		EXIT("unsupported dmaData destination selector 0x%02" PRIx8 "\n", dst_sel);
 	}
 	auto& buffer_cache = m_renderer.GetBufferCache();
+	if ((dst_gds || src_sel == 1) && GpuOps::Enabled()) {
+		// --debug-gpu-ops: GDS counters (A-buffer node allocators, ...) are reset and read with
+		// these; a reset in the middle of a pass shows up here.
+		std::printf("gpu-ops: gds dma submit=%" PRIu64 " dst=%s 0x%" PRIx64 " src=%s 0x%" PRIx64
+		            " bytes=%u\n",
+		            m_submit_id, dst_gds ? "gds" : "mem", static_cast<uint64_t>(dst_address_or_offset),
+		            src_sel == 2 ? "imm" : (src_sel == 1 ? "gds" : "mem"),
+		            static_cast<uint64_t>(src_address_or_offset_or_immediate), num_bytes);
+	}
 	if (src_sel == 2) {
 		buffer_cache.FillBuffer(
 		    dst_address_or_offset, num_bytes,
@@ -1379,6 +1389,10 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					SynchronizeGpu();
 					Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, value & 0xffffu,
 					              value >> 16u);
+					if (GpuOps::Enabled()) {
+						std::printf("gpu-ops: gds eop read submit=%" PRIu64 " dword_offset=%u dwords=%u first=%u\n",
+						            m_submit_id, value & 0xffffu, value >> 16u, dst[0]);
+					}
 					Sync::WriteAtEndOfPipeGds32(m_submit_id, command, dst, value & 0xffffu,
 					                            value >> 16u);
 					if (with_interrupt) {

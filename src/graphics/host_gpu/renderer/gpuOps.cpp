@@ -4,10 +4,14 @@
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/shader/shader.h"
+#include "graphics/shader/shaderBindings.h"
 
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <set>
 
 namespace Libs::Graphics::GpuOps {
 
@@ -115,6 +119,41 @@ void Report(const char* why, uint64_t completed_tick) {
 	}
 	std::string text = std::string("gpu-ops: report (") + why + ")\n" + s.ring->Report(completed_tick, ReportOps);
 	text += CheckpointReport(s);
+	Emit(text);
+}
+
+} // namespace Libs::Graphics::GpuOps
+
+namespace Libs::Graphics::GpuOps {
+
+void LogShaderBuffers(const char* stage, const ShaderStageRuntime& runtime) {
+	if (!Enabled() || runtime.program == nullptr || runtime.resources == nullptr) {
+		return;
+	}
+	static std::mutex                                  mutex;
+	static std::set<std::pair<uint64_t, std::string>> seen;
+	const auto& program = *runtime.program;
+	{
+		std::lock_guard lock(mutex);
+		if (!seen.emplace(program.shader_hash, stage).second) {
+			return;
+		}
+	}
+	std::string text = std::string("gpu-ops: shader ") + stage + " " + [&] {
+		char hash[20];
+		std::snprintf(hash, sizeof(hash), "%016llx", static_cast<unsigned long long>(program.shader_hash));
+		return std::string(hash);
+	}() + " buffers:";
+	for (size_t i = 0; i < program.info.buffers.size() && i < runtime.resources->buffers.size(); i++) {
+		const auto r = DecodeNativeDescriptor<ShaderBufferResource>(runtime.resources->buffers[i]);
+		char       item[160];
+		std::snprintf(item, sizeof(item), " [%zu]%s@0x%llx+%llu", i,
+		              program.info.buffers[i].written ? "RW" : "ro",
+		              static_cast<unsigned long long>(r.Base48()),
+		              static_cast<unsigned long long>(r.GetSize()));
+		text += item;
+	}
+	text += "\n";
 	Emit(text);
 }
 

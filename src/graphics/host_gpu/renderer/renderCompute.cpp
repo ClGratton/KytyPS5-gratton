@@ -28,6 +28,8 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstdio>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -227,6 +229,66 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+
+// --debug-gpu-ops with --debug-dump-shader <hash>: before each dispatch of that shader, read the
+// head of every bound buffer back (a full drain, so the values are what the GPU will see) and append
+// it to _dispatch_inputs.log. Names the data a hung shader loops on.
+static void DebugLogDispatchInputs(RenderContext& context, const ShaderStageRuntime& stage,
+                                   uint64_t submit_id, uint32_t gx, uint32_t gy, uint32_t gz) {
+	static std::FILE* file = std::fopen("_dispatch_inputs.log", "a");
+	if (file == nullptr) {
+		return;
+	}
+	const auto& program   = *stage.program;
+	const auto& resources = *stage.resources;
+	std::fprintf(file, "dispatch cs=%016" PRIx64 " submit=%" PRIu64 " tick=%" PRIu64
+	                   " groups=%ux%ux%u buffers=%zu\n",
+	             program.shader_hash, submit_id, context.GetCommandScheduler().CurrentTick(), gx, gy, gz,
+	             program.info.buffers.size());
+	for (uint32_t i = 0; i < program.info.buffers.size() && i < resources.buffers.size(); i++) {
+		const auto r      = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
+		const auto stride = std::max<uint32_t>(r.Stride(), 1u);
+		const auto size   = uint64_t {r.NumRecords()} * (r.Stride() == 0 ? 1u : stride);
+		const auto bytes  = std::min<uint64_t>(size, 256);
+		std::fprintf(file, " buffer[%u] %s addr=0x%012" PRIx64 " stride=%u records=%u size=%" PRIu64 ":",
+		             i, program.info.buffers[i].written ? "rw" : "ro", r.Base48(), r.Stride(),
+		             r.NumRecords(), size);
+		if (r.Base48() != 0 && bytes >= 4) {
+			context.GetBufferCache().ReadMemory(r.Base48(), bytes, false,
+			                                    Common::GpuPhase::DrainCause::ReadbackIndirect);
+			const auto* dwords = reinterpret_cast<const uint32_t*>(r.Base48());
+			for (uint64_t k = 0; k < bytes / 4; k++) {
+				std::fprintf(file, "%s%08x", k % 16 == 0 ? "\n   " : " ", dwords[k]);
+			}
+			if (size > 2 * bytes) {
+				// The tail too: tables and counters are often at the end of a buffer.
+				const uint64_t tail = std::min<uint64_t>(size - bytes, 128) & ~uint64_t {3};
+				const uint64_t from = size - tail;
+				context.GetBufferCache().ReadMemory(r.Base48() + from, tail, false,
+				                                    Common::GpuPhase::DrainCause::ReadbackIndirect);
+				std::fprintf(file, "\n   tail @dword %" PRIu64 ":", from / 4);
+				for (uint64_t k = 0; k < tail / 4; k++) {
+					std::fprintf(file, "%s%08x", k % 16 == 0 ? "\n   " : " ", dwords[from / 4 + k]);
+				}
+			}
+		}
+		std::fprintf(file, "\n");
+		if (r.Base48() != 0 && size >= 4 && size <= (16u << 20)) {
+			// The whole buffer, overwritten at every dispatch: after a hang the files hold the
+			// inputs of the dispatch that hung.
+			context.GetBufferCache().ReadMemory(r.Base48(), size, false,
+			                                    Common::GpuPhase::DrainCause::ReadbackIndirect);
+			char name[64];
+			std::snprintf(name, sizeof(name), "_dispatch_latest_buf%u.bin", i);
+			if (std::FILE* dump = std::fopen(name, "wb")) {
+				std::fwrite(reinterpret_cast<const void*>(r.Base48()), 1, size, dump);
+				std::fclose(dump);
+			}
+		}
+	}
+	std::fflush(file);
+}
+
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
@@ -348,6 +410,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		}
 	}
 
+	if (GpuOps::Enabled() && Config::DebugDumpShaderMatches(program.shader_hash)) {
+		// Drains the GPU: must run before anything is recorded for this dispatch.
+		DebugLogDispatchInputs(m_context, input_info.stage, submit_id, thread_group_x,
+		                       thread_group_y, thread_group_z);
+	}
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
@@ -457,6 +524,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			op.n[2]      = thread_group_z;
 			op.n[3]      = mode;
 			GpuOps::Record(vk_buffer, op, m_context.GetCommandScheduler().CurrentTick());
+			GpuOps::LogShaderBuffers("cs", input_info.stage);
 		}
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}

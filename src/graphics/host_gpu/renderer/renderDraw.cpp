@@ -1259,6 +1259,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			op.n[11]         = mesh.max_vertices;
 		}
 		GpuOps::Record(vk_buffer, op, m_context.GetCommandScheduler().CurrentTick());
+		for (const auto& vertex_stage: vertex_stages) {
+			GpuOps::LogShaderBuffers("vs", vertex_stage.stage);
+		}
+		if (state.ps_active) {
+			GpuOps::LogShaderBuffers("ps", state.ps_input_info.stage);
+		}
 	}
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
