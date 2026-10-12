@@ -417,11 +417,24 @@ struct MemoryResourceAccess {
 
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,
                                    uint32_t search_iterations, uint32_t default_resource);
-MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem);
+// `load`: the access is a load, so a storage buffer's bounds check may be left to the device
+// (RobustBufferPolicy); its OpArrayLength is then only emitted if a check asks for it.
+MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem,
+                                                 bool load = false);
 
+// `robust_candidate`: the caller may leave the bounds check to robustBufferAccess2, so the
+// OpArrayLength is only emitted if a check asks for it (EmitMemoryElementInBounds).
 MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState&         state,
                                                         const IR::MemoryInfo& mem,
-                                                        BufferDefinition& buffer);
+                                                        BufferDefinition& buffer,
+                                                        bool robust_candidate = false);
+
+// True when this access to a storage buffer needs no explicit bounds check because the device
+// (VK_EXT_robustness2 robustBufferAccess2, --spirv-robust-bounds) returns zero for an
+// out-of-bounds load and drops an out-of-bounds store. Atomics, typed accesses and everything
+// that is not a storage buffer still check explicitly.
+bool BufferBoundsAreRobust(const EmitterState& state, IR::ResourceKind kind, uint32_t element_bits);
+bool MemoryBoundsAreRobust(const EmitterState& state, const MemoryResourceAccess& access);
 
 uint32_t EmitMemoryElementInBounds(EmitterState& state, const MemoryResourceAccess& access,
                                    uint32_t index);

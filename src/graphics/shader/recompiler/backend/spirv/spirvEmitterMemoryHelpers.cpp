@@ -167,9 +167,23 @@ void EnsureLdsStorage(EmitterState& state) {
 	state.builder.AddName(state.lds_variable, "lds_dwords");
 }
 
+bool BufferBoundsAreRobust(const EmitterState& state, IR::ResourceKind kind,
+                           uint32_t element_bits) {
+	if (kind != IR::ResourceKind::Buffer && kind != IR::ResourceKind::ScalarBuffer) {
+		return false;
+	}
+	return element_bits < 32u ? state.robust_buffers.subdword_elements
+	                          : state.robust_buffers.dword_elements;
+}
+
+bool MemoryBoundsAreRobust(const EmitterState& state, const MemoryResourceAccess& access) {
+	return BufferBoundsAreRobust(state, access.kind, access.element_bits);
+}
+
 MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
                                                          const IR::MemoryInfo& mem,
-                                                         BufferDefinition& buffer) {
+                                                         BufferDefinition& buffer,
+                                                         bool robust_candidate) {
 	if (buffer.variable == 0) {
 		ExitDescriptorBindingFailure(state, IR::DescriptorBindingKind::Buffers, mem.resource,
 		                             "storage buffer descriptor array was not emitted");
@@ -186,13 +200,16 @@ MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
 	state.builder.AddFunction(spv::OpAccessChain, buffer.pointer_type, access.object_pointer,
 	                          buffer.variable, ConstantU32(state, array_index));
 	access.byte_offset = state.memory_byte_offsets[array_index];
-	access.length      = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpArrayLength, TypeU32(state), access.length,
-	                          access.object_pointer, 0);
+	if (!robust_candidate) {
+		access.length = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpArrayLength, TypeU32(state), access.length,
+		                          access.object_pointer, 0);
+	}
 	return access;
 }
 
-MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem) {
+MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem,
+                                                 bool load) {
 	MemoryResourceAccess access {.kind = mem.kind};
 	switch (mem.kind) {
 		case IR::ResourceKind::Lds:
@@ -232,7 +249,8 @@ MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::
 			} else if (bits == 16u) {
 				buffer = &state.storage_buffers[1];
 			}
-			access = PrepareStorageBufferResourceAccess(state, mem, *buffer);
+			access = PrepareStorageBufferResourceAccess(
+			    state, mem, *buffer, load && BufferBoundsAreRobust(state, mem.kind, bits));
 			access.element_bits = bits;
 			return access;
 		}
@@ -245,8 +263,15 @@ uint32_t EmitMemoryElementInBounds(EmitterState& state, const MemoryResourceAcce
 	if (access.kind == IR::ResourceKind::Lds && FunctionLdsIsWrapped(state)) {
 		return ConstantBool(state, true); // addresses wrap inside the reduced array
 	}
+	auto length = access.length;
+	if (length == 0u) {
+		// Prepared as a robust candidate, but this access (an atomic, a typed access) checks.
+		length = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpArrayLength, TypeU32(state), length, access.object_pointer,
+		                          0);
+	}
 	const auto in_bounds = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpULessThan, TypeBool(state), in_bounds, index, access.length);
+	state.builder.AddFunction(spv::OpULessThan, TypeBool(state), in_bounds, index, length);
 	return in_bounds;
 }
 
