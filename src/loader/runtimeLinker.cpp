@@ -4,6 +4,7 @@
 #include "common/enomemTrace.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
+#include "common/hleTrace.h"
 #include "common/file.h"
 #include "common/hostException.h"
 #include "common/logging/log.h"
@@ -648,6 +649,28 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+// Text form of a code address as " <module>+0x<offset>", or nothing when it is outside every module.
+static void LocateAddressText(uint64_t address, char* out, size_t size) {
+	auto* linker = Common::Singleton<Loader::RuntimeLinker>::Instance();
+	if (linker == nullptr || size == 0) {
+		return;
+	}
+	if (auto* program = linker->FindProgramByAddr(address)) {
+		std::snprintf(out, size, " %s+0x%" PRIx64,
+		              Common::FilenameWithoutDirectory(
+		                  Common::PathToGenericString(program->file_name)).c_str(),
+		              address - program->base_vaddr);
+	}
+}
+
+static void LocateAddress(uint64_t address, const char* label) {
+	char text[160] = {};
+	LocateAddressText(address, text, sizeof(text));
+	if (text[0] != '\0') {
+		std::printf("%s %016" PRIx64 " =%s\n", label, address, text);
+	}
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -684,22 +707,19 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		std::printf("kernel ENOMEM returned so far: %llu\n",
 		            static_cast<unsigned long long>(Common::EnomemCount()));
 		{
-			// module + offset of the faulting pc and of the code addresses on the stack, so the
-			// fault can be located in the (decrypted) eboot without a symbol file.
-			auto*      linker = Common::Singleton<Loader::RuntimeLinker>::Instance();
-			const auto locate = [&](uint64_t address, const char* label) {
-				if (auto* program = linker->FindProgramByAddr(address)) {
-					std::printf("%s %016" PRIx64 " = %s+0x%" PRIx64 "\n", label, address,
-					            Common::FilenameWithoutDirectory(
-					                Common::PathToGenericString(program->file_name)).c_str(),
-					            address - program->base_vaddr);
-				}
-			};
-			locate(info->exception_address, "pc  ");
-			if (IsReadableRange(info->rsp, 64 * sizeof(uint64_t))) {
+			// module + offset of the faulting pc and of the return addresses on the frame-pointer
+			// chain, so the fault can be located in the (decrypted) eboot without a symbol file.
+			LocateAddress(info->exception_address, "pc  ");
+			void* frames[32] = {};
+			const int depth  = WalkGuestStack(info->rbp, info->rsp, frames, 32);
+			for (int i = 0; i < depth; i++) {
+				LocateAddress(reinterpret_cast<uint64_t>(frames[i]), "call");
+			}
+			if (depth == 0 && IsReadableRange(info->rsp, 64 * sizeof(uint64_t))) {
+				// No usable frame chain: list the code addresses found on the stack instead.
 				const auto* stack = reinterpret_cast<const uint64_t*>(info->rsp);
 				for (int i = 0; i < 64; i++) {
-					locate(stack[i], "ret?");
+					LocateAddress(stack[i], "ret?");
 				}
 			}
 		}
@@ -727,6 +747,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			std::printf("\n");
 		}
 		std::fflush(stdout);
+		Common::HleTrace::Dump(stdout, 96, 400, &LocateAddressText);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",
