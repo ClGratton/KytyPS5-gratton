@@ -5,6 +5,7 @@
 #include "emulatorArgs.h"
 #include "configurationEditDialog.h"
 #include "emulatorOptions.h"
+#include "mainDialog.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -18,6 +19,9 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTabWidget>
+#include <QTimer>
+#include <QTreeWidget>
+#include <QEventLoop>
 #include <QSettings>
 #include <QTextStream>
 
@@ -413,6 +417,33 @@ int RunConfigure(const QStringList& args) {
 	s.sync();
 	QTextStream(stdout) << "settings written to " << s.fileName() << "\n";
 	return s.status() == QSettings::NoError ? 0 : 1;
+}
+
+int RunGrabMain(const QStringList& args) {
+	const auto png_at = args.indexOf(QStringLiteral("--grab-main"));
+	if (png_at < 0 || png_at + 1 >= args.size()) {
+		QTextStream(stderr) << "usage: launcher --grab-main <png>\n";
+		return 2;
+	}
+	MainDialog window;
+	window.emit Start();
+	window.resize(1100, 700);
+	window.show();
+	// The game folders are scanned on start; give the scan (and the title lookups) time to finish.
+	QEventLoop loop;
+	QTimer::singleShot(4000, &loop, &QEventLoop::quit);
+	loop.exec();
+	QTextStream out(stdout);
+	if (auto* list = window.findChild<QTreeWidget*>(QStringLiteral("cfgs_list")); list != nullptr) {
+		out << "games listed: " << list->topLevelItemCount() << "\n";
+		for (int i = 0; i < list->topLevelItemCount(); i++) {
+			const auto* item = list->topLevelItem(i);
+			out << "  " << item->text(0) << " | " << item->text(1) << " | " << item->text(5) << "\n";
+		}
+	}
+	window.grab().save(args.at(png_at + 1));
+	out << "saved " << args.at(png_at + 1) << "\n";
+	return 0;
 }
 
 int RunPrintCommand(const QStringList& args) {

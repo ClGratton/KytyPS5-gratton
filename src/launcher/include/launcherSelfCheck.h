@@ -23,6 +23,8 @@
 int RunSelfCheck(const QStringList& args);
 int RunPrintCommand(const QStringList& args);
 int RunConfigure(const QStringList& args);
+// launcher --grab-main <png>: starts the main window, lists the games it found and saves a PNG.
+int RunGrabMain(const QStringList& args);
 // launcher --grab-settings <dir> [--global] [--preset]: saves one PNG per tab of the settings dialog.
 int RunGrabSettings(const QStringList& args);
 
