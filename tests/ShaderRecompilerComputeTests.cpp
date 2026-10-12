@@ -16645,7 +16645,8 @@ public:
         Require(name, "graphics jobs",
                 replay.Load().gfx_jobs == 2 && replay.Load().gfx_pipelines == 2 &&
                     replay.Load().gfx_skipped == 0,
-                "both stored pipelines must be built from the registrations");
+                "both stored pipelines must be built from the registrations: " +
+                    replay.Load().Summary());
         for (const uint32_t control : {0x0008u, 0x8008u}) {
           registers.SetPsInControl(control);
           std::array<ShaderVertexInputInfo, 3> replay_vertex_info{};
