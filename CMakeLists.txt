@@ -675,6 +675,20 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
 	set_tests_properties(graphics_pipeline_rasterization_async_skip PROPERTIES
 		ENVIRONMENT "KYTY_TEST_ASYNC_PIPELINES=skip")
+	# --pipelines-unoptimized-first: the whole suite on unoptimized pipelines that are swapped for
+	# their optimized builds while it runs, and the promotion check itself.
+	add_test(NAME shader_recompiler_compute_unoptimized_first
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_unoptimized_first PROPERTIES
+		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
+	add_test(NAME graphics_pipeline_rasterization_unoptimized_first
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --polygon-mode-only)
+	set_tests_properties(graphics_pipeline_rasterization_unoptimized_first PROPERTIES
+		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
+	add_test(NAME pipeline_unoptimized_first_promotion
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --unoptimized-first-only)
+	set_tests_properties(pipeline_unoptimized_first_promotion PROPERTIES
+		ENVIRONMENT "KYTY_TEST_UNOPTIMIZED_FIRST=1")
 	add_test(NAME graphics_draw_offsets
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --draw-offset-only)
 	add_test(NAME virtual_memory_allocation

@@ -1005,6 +1005,14 @@ void EnsureConfigInitialized() {
     options.printf_direction = Config::LogDirection::Silent;
     // ctest runs the suite once more with KYTY_TEST_ASYNC_PIPELINES=stall (everything through
     // the worker pool) and the polygon-mode check with =skip.
+    // ... and with =1 the unoptimized-first mode (pipelines built unoptimized, then rebuilt on a
+    // worker and swapped in), which needs a worker pool.
+    if (const char *first = std::getenv("KYTY_TEST_UNOPTIMIZED_FIRST");
+        first != nullptr && std::strcmp(first, "1") == 0) {
+      options.pipelines_unoptimized_first = true;
+      options.async_pipelines = Config::AsyncPipelineMode::Stall;
+      options.pipeline_workers = 4;
+    }
     if (const char *async_mode = std::getenv("KYTY_TEST_ASYNC_PIPELINES")) {
       if (std::strcmp(async_mode, "stall") == 0) {
         options.async_pipelines = Config::AsyncPipelineMode::Stall;
@@ -37991,6 +37999,84 @@ void CheckComputeLdsLimit(VulkanHarness &vulkan) {
   std::printf("[gpu]     %-32s ok\n", name);
 }
 
+// --pipelines-unoptimized-first (KYTY_TEST_UNOPTIMIZED_FIRST=1, mode --unoptimized-first-only):
+// a new compute pipeline is created unoptimized, the background build finishes, the next lookup
+// swaps it in on the same layouts and hands the replaced VkPipeline to the retire handler.
+void CheckUnoptimizedFirstPromotion(VulkanHarness &vulkan) {
+  constexpr const char *name = "UnoptimizedFirstPromotion";
+  std::vector<u32> code;
+  AppendVMovU32(&code, 1, 7);
+  code.push_back(EncodeDs0(0x0d)); // ds_write_b32 v0, v1
+  code.push_back(EncodeDs1(0, 1, 0));
+  AppendEnd(&code);
+  ShaderMapUserData(reinterpret_cast<uint64_t>(code.data()),
+      {.type = Prospero::ShaderBinaryType::kCs,
+       .code_size_bytes = static_cast<u32>(code.size() * sizeof(u32))});
+
+  GraphicContext graphics;
+  graphics.device = vulkan.Device();
+  graphics.physical_device_properties =
+      vulkan.RuntimeContext().GetPhysicalDeviceProperties();
+  HW::ComputeShaderInfo regs{};
+  regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(code.data());
+  regs.cs_regs.num_thread_x = 1;
+  regs.cs_regs.num_thread_y = 1;
+  regs.cs_regs.num_thread_z = 1;
+  regs.cs_regs.wave_size = 32;
+  regs.cs_regs.lds_size = 4;
+  std::vector<vk::Pipeline> retired;
+  {
+    PipelineCache cache(graphics);
+    cache.SetRetireHandler([&](vk::Pipeline replaced) {
+      retired.push_back(replaced);
+      return true;
+    });
+    ShaderComputeInputInfo input{};
+    const auto program = cache.GetComputeProgram(regs, {}, input);
+    auto &pipeline = cache.GetComputePipeline(input, program);
+    Require(name, "creation", pipeline.pipeline != nullptr,
+            "no Vulkan compute pipeline");
+    const bool active = cache.UnoptimizedFirstActive();
+    Require(name, "unoptimized flag", pipeline.unoptimized == active,
+            "the first build must be unoptimized exactly when the mode is active");
+    if (!active) {
+      std::printf("[gpu]     %-32s ok (mode inactive on this device)\n", name);
+    } else {
+      const auto first_handle = pipeline.pipeline;
+      const auto layout = pipeline.pipeline_layout;
+      const auto set_layout = pipeline.descriptor_set_layout;
+      Require(name, "background build queued", pipeline.optimized != nullptr,
+              "an unoptimized pipeline has no optimized build");
+      for (uint32_t attempt = 0; attempt < 120000 && pipeline.unoptimized; attempt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        (void)cache.GetComputePipeline(input, program); // the lookup promotes a finished build
+      }
+      Require(name, "promotion", !pipeline.unoptimized && pipeline.optimized == nullptr,
+              "the optimized build was not swapped in within 120 s");
+      Require(name, "new handle, same layouts",
+              pipeline.pipeline != nullptr && pipeline.pipeline != first_handle &&
+                  pipeline.pipeline_layout == layout &&
+                  pipeline.descriptor_set_layout == set_layout,
+              "promotion must replace only the VkPipeline");
+      Require(name, "retired handle", retired.size() == 1 && retired[0] == first_handle,
+              "the replaced VkPipeline was not handed to the retire handler");
+      const auto &counters = cache.UnoptimizedFirst();
+      Require(name, "counters",
+              counters.unoptimized_created == 1 && counters.swapped == 1 &&
+                  counters.optimized_done == 1,
+              "unoptimized-first counters do not match one promoted pipeline");
+      // A second lookup after the swap is a plain hit.
+      Require(name, "stable after swap",
+              cache.GetComputePipeline(input, program).pipeline == pipeline.pipeline,
+              "lookup after the swap returned another handle");
+      std::printf("[gpu]     %-32s ok\n", name);
+    }
+  }
+  for (const auto handle : retired) {
+    vulkan.Device().destroyPipeline(handle, nullptr);
+  }
+}
+
 void CheckPs5GameExampleImageClearRuntimeShape() {
   const auto MakeCode = [] {
     std::vector<u32> code;
@@ -43947,6 +44033,11 @@ int main(int argc, char **argv) {
     vulkan.CheckRenderExecutorStencilBindingDiscovery();
     vulkan.CheckUnifiedTextureCacheFlow();
     vulkan.CheckBgra16Readback();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--unoptimized-first-only") == 0) {
+    VulkanHarness vulkan;
+    CheckUnoptimizedFirstPromotion(vulkan);
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--draw-offset-only") == 0) {
