@@ -834,6 +834,7 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory =
 		        prefetch ? ReadShaderGuestMemorySpeculative : ReadShaderGuestMemory,
 		};
+		runtime.table_walk = Config::SrtTableWalkEnabled();
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 		}

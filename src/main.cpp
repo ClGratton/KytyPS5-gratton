@@ -202,6 +202,9 @@ static void PrintUsage() {
 	::printf("  --draw-key-cache <true|false>        Remember the graphics pipelines of the last few draws and\n"
 	         "                                       find them by comparing keys, without hashing the key\n"
 	         "                                       and probing the pipeline map. Default: false.\n");
+	::printf("  --srt-table-walk <true|false>        Refresh a shader's flattened SRT (pointer tree reads) from a\n"
+	         "                                       precomputed table instead of walking the value graph.\n"
+	         "                                       Default: false.\n");
 	::printf("  --debug-draw-key-verify <true|false> With --draw-key-cache, also run the full lookup on every\n"
 	         "                                       memo hit and stop if the two disagree. Default: false.\n");
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
@@ -791,6 +794,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--draw-key-cache") {
 			if (!ParseBool(value, options.config.draw_key_cache)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--srt-table-walk") {
+			if (!ParseBool(value, options.config.srt_table_walk)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

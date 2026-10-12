@@ -196,6 +196,9 @@ struct ConfigOptions {
 	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.
 	bool                   draw_key_cache              = false;
+	// --srt-table-walk: refresh a native-eligible shader's flattened SRT from a table through the
+	// guest-memory callback instead of walking the value graph. Default off.
+	bool                   srt_table_walk              = false;
 	bool                   draw_key_verify             = false;
 	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
 	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
@@ -268,6 +271,7 @@ bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
 bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();
+bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              ReadbackQueueEnabled();
 

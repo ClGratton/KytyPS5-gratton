@@ -101,6 +101,10 @@ bool DrawKeyCacheEnabled() {
 	return g_config->draw_key_cache;
 }
 
+bool SrtTableWalkEnabled() {
+	return g_config->srt_table_walk;
+}
+
 bool DrawKeyVerifyEnabled() {
 	return g_config->draw_key_cache && g_config->draw_key_verify;
 }
