@@ -1,0 +1,114 @@
+; Hand-written compute shader with the emitter's bounds-check shapes (buffer load/store, LDS
+; store/load with a barrier in between).  64 invocations, bindings: 0 = in, 1 = out, 2 = st.
+; Used by test_variants.py (structure, spirv-val) and by --exec for result comparison on the GPU.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %lid
+               OpExecutionMode %main LocalSize 64 1 1
+               OpName %main "main"
+               OpName %lds "lds_dwords"
+               OpDecorate %lid BuiltIn LocalInvocationId
+               OpDecorate %rt ArrayStride 4
+               OpMemberDecorate %blk 0 Offset 0
+               OpDecorate %blk Block
+               OpDecorate %b_in DescriptorSet 0
+               OpDecorate %b_in Binding 0
+               OpDecorate %b_out DescriptorSet 0
+               OpDecorate %b_out Binding 1
+               OpDecorate %b_st DescriptorSet 0
+               OpDecorate %b_st Binding 2
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+       %bool = OpTypeBool
+      %uvec3 = OpTypeVector %uint 3
+   %ptr_in3  = OpTypePointer Input %uvec3
+        %lid = OpVariable %ptr_in3 Input
+         %rt = OpTypeRuntimeArray %uint
+        %blk = OpTypeStruct %rt
+   %ptr_blk  = OpTypePointer StorageBuffer %blk
+   %ptr_u    = OpTypePointer StorageBuffer %uint
+       %b_in = OpVariable %ptr_blk StorageBuffer
+      %b_out = OpVariable %ptr_blk StorageBuffer
+       %b_st = OpVariable %ptr_blk StorageBuffer
+   %ptr_in_u = OpTypePointer Input %uint
+        %c0  = OpConstant %uint 0
+        %c3  = OpConstant %uint 3
+        %c16 = OpConstant %uint 16
+        %c64 = OpConstant %uint 64
+      %c1000 = OpConstant %uint 1000
+        %c1  = OpConstant %uint 1
+        %sem = OpConstant %uint 264
+     %c2s = OpConstant %uint 2
+     %lds_arr = OpTypeArray %uint %c16
+   %ptr_lds  = OpTypePointer Workgroup %lds_arr
+   %ptr_lds_u = OpTypePointer Workgroup %uint
+        %lds = OpVariable %ptr_lds Workgroup
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+     %lidp   = OpAccessChain %ptr_in_u %lid %c0
+          %i = OpLoad %uint %lidp
+               OpBranch %L0
+         %L0 = OpLabel
+      %len_in = OpArrayLength %uint %b_in 0
+          %g0 = OpULessThan %bool %i %len_in
+               OpSelectionMerge %M0 None
+               OpBranchConditional %g0 %T0 %M0
+         %T0 = OpLabel
+         %p0 = OpAccessChain %ptr_u %b_in %c0 %i
+         %v0 = OpLoad %uint %p0
+               OpBranch %M0
+         %M0 = OpLabel
+         %r0 = OpPhi %uint %v0 %T0 %c0 %L0
+     %len_out = OpArrayLength %uint %b_out 0
+          %g1 = OpULessThan %bool %i %len_out
+               OpSelectionMerge %M1 None
+               OpBranchConditional %g1 %T1 %M1
+         %T1 = OpLabel
+         %p1 = OpAccessChain %ptr_u %b_out %c0 %i
+               OpStore %p1 %r0
+               OpBranch %M1
+         %M1 = OpLabel
+     %len_st = OpArrayLength %uint %b_st 0
+          %g2 = OpULessThan %bool %i %len_st
+               OpSelectionMerge %M2 None
+               OpBranchConditional %g2 %T2 %M2
+         %T2 = OpLabel
+         %p2 = OpAccessChain %ptr_u %b_st %c0 %i
+         %sv = OpIAdd %uint %i %c1000
+               OpStore %p2 %sv
+               OpBranch %M2
+         %M2 = OpLabel
+          %g3 = OpULessThan %bool %i %c16
+               OpSelectionMerge %M3 None
+               OpBranchConditional %g3 %T3 %M3
+         %T3 = OpLabel
+         %p3 = OpAccessChain %ptr_lds_u %lds %i
+         %lv = OpIAdd %uint %i %c1
+               OpStore %p3 %lv
+               OpBranch %M3
+         %M3 = OpLabel
+               OpControlBarrier %c2s %c2s %sem
+               OpBranch %M4h
+        %M4h = OpLabel
+           %j = OpIAdd %uint %i %c3
+          %g4 = OpULessThan %bool %j %c16
+               OpSelectionMerge %M4 None
+               OpBranchConditional %g4 %T4 %M4
+         %T4 = OpLabel
+         %p4 = OpAccessChain %ptr_lds_u %lds %j
+         %v4 = OpLoad %uint %p4
+               OpBranch %M4
+         %M4 = OpLabel
+         %r4 = OpPhi %uint %v4 %T4 %c0 %M4h
+          %o = OpIAdd %uint %i %c64
+          %g5 = OpULessThan %bool %o %len_out
+               OpSelectionMerge %M5 None
+               OpBranchConditional %g5 %T5 %M5
+         %T5 = OpLabel
+         %p5 = OpAccessChain %ptr_u %b_out %c0 %o
+               OpStore %p5 %r4
+               OpBranch %M5
+         %M5 = OpLabel
+               OpReturn
+               OpFunctionEnd

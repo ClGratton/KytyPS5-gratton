@@ -1116,3 +1116,9 @@ endif()
 if(KYTY_CLANG_CL)
 	install(FILES "${KYTY_THIRD_PARTY_DIR}/winpthread/bin/libwinpthread-1.dll" DESTINATION .)
 endif()
+
+# Offline developer tools (not part of the emulator): driver shader-compile timing harness.
+option(KYTY_BUILD_TOOLS "Build developer tools from tools/ (spirv-compile-bench)" OFF)
+if(KYTY_BUILD_TOOLS AND LINUX)
+	add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/tools/spirv-compile-bench" "${CMAKE_CURRENT_BINARY_DIR}/tools/spirv-compile-bench")
+endif()
