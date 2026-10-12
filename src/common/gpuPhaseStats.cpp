@@ -6,6 +6,11 @@
 #include <tracy/Tracy.hpp>
 #include <tracy/TracyC.h>
 
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -81,6 +86,12 @@ struct ThreadState {
 		DrainCause cause = DrainCause::Other; // of the latest readback of this region
 	};
 	std::unordered_map<uint64_t, Readback> readbacks; // by guest address of the first copy
+	struct FaultSite {
+		uint64_t              hits = 0;
+		std::vector<uint64_t> offsets; // return addresses relative to the main binary
+	};
+	std::unordered_map<uint64_t, FaultSite> fault_sites; // by hash of the stack
+	std::unordered_map<uint64_t, uint64_t>  fault_reported; // hits already listed
 
 	// Window start (previous report) and what the counters read then.
 	int64_t  window_wall_ns = 0;
@@ -147,13 +158,15 @@ void Exit(ThreadState* state, Phase phase, uint64_t start) noexcept {
 }
 
 void NoteReadbackImpl(ThreadState* state, uint64_t address, uint64_t bytes) noexcept {
-	if (state->readbacks.size() < 8192 || state->readbacks.contains(address)) {
-		auto& r = state->readbacks[address];
+	// Keyed by region and cause (cause in the top byte; guest addresses use 48 bits).
+	const uint64_t key = address | (static_cast<uint64_t>(t_drain_cause) << 56);
+	if (state->readbacks.size() < 8192 || state->readbacks.contains(key)) {
+		auto& r = state->readbacks[key];
 		++r.calls;
 		r.bytes += bytes;
 		r.cause = t_drain_cause;
 	}
-	t_readback_key = address;
+	t_readback_key = key;
 }
 
 void SetPacket(ThreadState* state, uint32_t opcode) noexcept {
@@ -183,6 +196,37 @@ void Configure(uint32_t interval_seconds, bool phases) {
 
 bool Enabled() noexcept {
 	return g_interval_s.load(std::memory_order_relaxed) != 0;
+}
+
+void NoteGpuThreadFault() noexcept {
+#if defined(__linux__)
+	auto* state = detail::t_state;
+	if (state == nullptr) {
+		return;
+	}
+	void*     frames[24];
+	const int n = backtrace(frames, 24);
+	uint64_t  hash = 1469598103934665603ull;
+	std::vector<uint64_t> offsets;
+	Dl_info               info {};
+	for (int i = 0; i < n; ++i) {
+		const auto address = reinterpret_cast<uint64_t>(frames[i]);
+		uint64_t   offset  = address;
+		if (dladdr(frames[i], &info) != 0 && info.dli_fbase != nullptr) {
+			offset = address - reinterpret_cast<uint64_t>(info.dli_fbase);
+		}
+		hash = (hash ^ offset) * 1099511628211ull;
+		offsets.push_back(offset);
+	}
+	if (state->fault_sites.size() >= 64 && !state->fault_sites.contains(hash)) {
+		return;
+	}
+	auto& site = state->fault_sites[hash];
+	++site.hits;
+	if (site.offsets.empty()) {
+		site.offsets = std::move(offsets);
+	}
+#endif
 }
 
 void NoteReadback(uint64_t address, uint64_t bytes) noexcept {
@@ -387,7 +431,8 @@ void Report(detail::ThreadState& s, bool final_report) {
 				                    order.size());
 				for (size_t i = 0; i < keep; ++i) {
 					const auto& r = order[i].second;
-					line += fmt::format(" 0x{:x}[{}] {}x {:.1f}KiB {:.1f}ms", order[i].first,
+					line += fmt::format(" 0x{:x}[{}] {}x {:.1f}KiB {:.1f}ms",
+					                    order[i].first & ((1ull << 56) - 1),
 					                    DrainCauses::kCauseNames[static_cast<size_t>(r.cause)], r.calls,
 					                    r.calls != 0 ? static_cast<double>(r.bytes) / 1024.0 /
 					                                       static_cast<double>(r.calls)
@@ -396,6 +441,26 @@ void Report(detail::ThreadState& s, bool final_report) {
 				}
 				line += "\n";
 				s.readbacks.clear();
+			}
+			if (!s.fault_sites.empty()) {
+				std::vector<std::pair<uint64_t, uint64_t>> order; // hits, hash
+				for (const auto& [hash, site]: s.fault_sites) {
+					const auto before = s.fault_reported[hash];
+					if (site.hits > before) {
+						order.emplace_back(site.hits - before, hash);
+					}
+					s.fault_reported[hash] = site.hits;
+				}
+				std::sort(order.rbegin(), order.rend());
+				for (size_t i = 0; i < std::min<size_t>(order.size(), 4); ++i) {
+					const auto& site = s.fault_sites[order[i].second];
+					line += fmt::format("GpuPhase GPU-thread fault site {:016x} hits={} frames:",
+					                    order[i].second, order[i].first);
+					for (size_t f = 2; f < std::min<size_t>(site.offsets.size(), 14); ++f) {
+						line += fmt::format(" +0x{:x}", site.offsets[f]);
+					}
+					line += "\n";
+				}
 			}
 			for (size_t i = 0; i < DrainCauses::kCauseNames.size(); ++i) {
 				const auto& e = causes.Get(static_cast<DrainCause>(i));

@@ -97,6 +97,11 @@ private:
 // the report lists the regions that cost the most drain time (hot regions). GPU thread only.
 void NoteReadback(uint64_t address, uint64_t bytes) noexcept;
 
+// The GPU thread took a page fault on guest memory (it read bytes that share a page with
+// GPU-written data). Records the call stack (unique stacks, with hit counts, are listed in the
+// report as raw offsets for addr2line). GPU thread only; a no-op unless stats are enabled.
+void NoteGpuThreadFault() noexcept;
+
 // Set by CommandScheduler::Wait before its DrainTick scope: the wait forced a submit.
 inline void NoteDrainFull(bool full) noexcept {
 	detail::t_drain_full = full;

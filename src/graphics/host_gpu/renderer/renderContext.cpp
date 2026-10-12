@@ -66,6 +66,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
+		if (GuestGpu::IsGpuThread()) {
+			Common::GpuPhase::NoteGpuThreadFault();
+		}
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size, false,
 		                          Common::GpuPhase::DrainCause::ReadbackFault);
 	}
