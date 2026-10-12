@@ -96,5 +96,36 @@ The idea of a persisted shader/pipeline journal replayed on background threads a
 surveyed in `forks/` (TheCruZ 6101f2da6 / 47f13b286, BryanKAdams 9a458e104 / f79a100d5, Jetsku `shaderPrecompile` / `KYPLST1`,
 cx recipes). Nothing is ported: this is a re-implementation around Kyty's own program cache, with its own file format.
 
-## Measured
-(see `bench/RESULTS.md`, section "shader-load prefetch")
+## Findings (details and run directories: `bench/RESULTS.md`, section "shader-load prefetch")
+* **Lead is there.** The game registers 1123 shaders (795 compute registrations, 660 distinct compute binaries) in the first second
+  and uses 79 compute binaries in the measured route. Registration to first request: median 14 s, 58 of 79 above 5 s, 33 above 20 s;
+  21 are under 1 s (the boot-critical ones, which no registration hook can help).
+* **`--pipeline-variants-replay` works.** With the previous session's variants and empty driver and NVIDIA caches, 77 of 84 compute
+  programs and 130 of 143 graphics pipelines were ready before their first dispatch or draw (a few more were joined in flight).
+  Frames over 50 ms in the whole run: 30 s down to 6.5 s, the post-skip window 8.6 s down to 0.9 s, worst frame outside the first second
+  165 ms. What is left is the first second: the shaders the boot needs are registered less than 0.4 s before the first frame needs them.
+* **Background work must stay out of the way.** The first replay slowed the boot compile (7.2 s instead of 3.7 s) because the
+  replay jobs competed for the driver; idle-only jobs fixed that (see above).
+* **Two pitfalls found by running it:** an NGG vertex program with a GS back half has a program-key hash combining both binaries (the
+  guest registers the front one under its own hash), and a graphics pipeline's expensive vertex programs are exactly these.
+* **`--precompile-on-load` (the guess) does not pay on this title.** Every compute binary the route uses has typed buffers, bindless
+  descriptors or a specialization that needs guest memory, so `GuessSpecialization` refuses all 79 of them; the 170 guesses it did build
+  were for binaries the route never dispatches. 0 hits, no stutter change, and it translates binaries the game may never use (8
+  of 685 hit translator checks; they run on an isolated speculative thread so they cannot end the emulator or the lookahead). Default
+  off, kept as an experiment; the persisted variants are the mechanism that works.
+* **Sharing.** The variants file holds keys only (hashes, translator state, specializations, stage input structs), no code and no
+  SPIR-V, and nothing title-specific in the code; a file recorded on one machine is a valid starting point for another with the same
+  game build, so it could be distributed as optional data.
+
+## Limits
+* The first frames are not covered: the boot needs a handful of compute pipelines (3.7 s the longest) within 0.4 s of their
+  registration. Earlier knowledge would need the shader code or a persisted driver cache (`--pipeline-cache-key schema`).
+* Recording happens at first use of a variant, so only what a session actually used is replayed; a new level's shaders are
+  recorded on that first visit.
+* Tessellation pipelines and S_SWAP_PC programs are not recorded or replayed.
+* The replay builds every stored variant that the guest registers, used again or not; with idle-only jobs the cost is spare CPU and
+  driver time. A very large library may want an ageing policy (the store itself is capped at 50000 variants).
+* Variant records are tied to the translator's static-key layout and to the input-info struct layouts through fingerprints
+  (`kSchema`, `VertexInfoLayout()`, `PixelInfoLayout()`); a mismatch skips the record. Anything the translator changes in what
+  it puts in the program key (BuildStageStaticKey) without changing that layout makes old records stop matching, which wastes
+  work and never changes what is drawn.
