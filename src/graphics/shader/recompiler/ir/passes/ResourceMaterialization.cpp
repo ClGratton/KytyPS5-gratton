@@ -1321,6 +1321,7 @@ const char* GenericRefusalName(GenericRefusal refusal) {
 		case GenericRefusal::ImageDimension: return "image_dimension";
 		case GenericRefusal::ImageBinding: return "image_binding";
 		case GenericRefusal::TooManyImages: return "too_many_images";
+		case GenericRefusal::CallSource: return "call_source";
 		case GenericRefusal::Count: break;
 	}
 	return "?";
@@ -1501,11 +1502,10 @@ uint32_t GenericImageWord(const ResourceSpecialization::Image& live) {
 	       ((live.shader_swizzle & 0xfffu) << GenericImageSwizzleShift);
 }
 
-void BuildGenericBinding(const CompiledShaderInfo& program, const ResourceSpecialization& live,
-                         ResourceSnapshot& snapshot) {
-	const auto& info = program.info;
+void BuildGenericBinding(const ShaderInfo& info, const Bindings& bindings,
+                         const ResourceSpecialization& live, ResourceSnapshot& snapshot) {
 	EXIT_IF(!info.generic || live.buffers.size() != info.buffers.size());
-	snapshot.generic_data.assign(program.bindings.dynamic_dwords, 0u);
+	snapshot.generic_data.assign(bindings.dynamic_dwords, 0u);
 	for (uint32_t i = 0; i < info.buffers.size(); ++i) {
 		const auto index = info.buffers[i].descriptor_index;
 		if (index == UINT32_MAX) continue;
@@ -1527,7 +1527,7 @@ void BuildGenericBinding(const CompiledShaderInfo& program, const ResourceSpecia
 			                                    : DescriptorValue {.dword_count = 8u};
 		}
 		if (image.dynamic_slot != ImageResource::NoDynamicSlot) {
-			const auto word = program.bindings.dynamic_image_base + image.dynamic_slot;
+			const auto word = bindings.dynamic_image_base + image.dynamic_slot;
 			EXIT_IF(word >= snapshot.generic_data.size() || i >= live.images.size());
 			snapshot.generic_data[word] = GenericImageWord(live.images[i]);
 		}
@@ -1582,6 +1582,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		image.class_root                 = source.class_root;
 		image.class_resources.clear();
 		image.dynamic_slot               = ImageResource::NoDynamicSlot;
+		image.generic                    = specialization.generic;
 		image.numeric_class              = source.numeric_class;
 		image.dimension                  = source.dimension;
 		image.mip_count                  = source.mip_count;

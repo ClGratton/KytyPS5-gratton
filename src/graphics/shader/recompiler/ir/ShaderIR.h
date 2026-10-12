@@ -168,6 +168,9 @@ struct ImageResource {
 	// Dword of the run-time section of the shader data that holds this image's cube flag, class and
 	// swizzle (NoDynamicSlot: none needed).
 	uint32_t                      dynamic_slot      = NoDynamicSlot;
+	// Part of a generic variant: `cube` and the swizzle are whatever the descriptor says, not what
+	// this resource was specialized for.
+	bool                          generic           = false;
 
 	bool operator==(const ImageResource& other) const = default;
 };
@@ -451,7 +454,7 @@ struct Bindings {
 	uint32_t push_data_start_dword = PushData::NoStart;
 	uint32_t dispatch_thread_dword = PushData::NoStart;
 	uint32_t memory_offset_dword = 0;
-	// Generic variants: the per-dispatch fields follow the memory offsets (docs: generic compute).
+	// Generic variants: the per-dispatch fields follow the memory offsets.
 	// One dword per live buffer (its descriptor index), then the images' slots.
 	// The buffers' words are indexed by descriptor index, the images' by dynamic_image_base plus
 	// their ImageResource::dynamic_slot.

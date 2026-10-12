@@ -1462,7 +1462,7 @@ void TestGenericSpecialization() {
       snapshot.images.push_back(value);
     }
     auto live2 = LiveSpecialization(generic);
-    BuildGenericBinding(compiled, live2, snapshot);
+    BuildGenericBinding(compiled.info, compiled.bindings, live2, snapshot);
     Check(snapshot.generic_images.size() == 7, "binding image count");
     Check(snapshot.generic_images[0].dwords[0] == 100 && snapshot.generic_images[3].dwords[0] == 103,
           "ordinary images keep their descriptor");

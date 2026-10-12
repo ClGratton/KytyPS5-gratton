@@ -91,6 +91,7 @@ enum class GenericRefusal : uint8_t {
 	ImageDimension,
 	ImageBinding,      // a group member that has no binding (for instance an MSAA storage image)
 	TooManyImages,
+	CallSource,        // an S_SWAP_PC program: its callee is linked at run time (set by the cache)
 	Count,
 };
 
@@ -141,8 +142,8 @@ constexpr uint32_t GenericImageSwizzleShift = 8u; // twelve bits
 /// the descriptors in the program's image order (inactive group members get an empty descriptor)
 /// and the dynamic section of the shader data. `live` is the specialization materialized from the
 /// same call as `snapshot`.
-void BuildGenericBinding(const CompiledShaderInfo& program, const ResourceSpecialization& live,
-                         ResourceSnapshot& snapshot);
+void BuildGenericBinding(const ShaderInfo& info, const Bindings& bindings,
+                         const ResourceSpecialization& live, ResourceSnapshot& snapshot);
 
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);
