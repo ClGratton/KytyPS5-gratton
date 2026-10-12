@@ -157,6 +157,7 @@ void InitSubsystems() {
 	// also checks that punching never breaks a mapping that is still in use.
 	options.mem_stats         = true;
 	options.mem_release_punch = true;
+	options.mem_residency     = true;
 	Config::Load(options);
 
 	subsystems.Initialize<Log::Lifecycle>();
@@ -1671,6 +1672,36 @@ void TestMemStatsAccounting() {
 	}
 	CheckOk(test, K::KernelMunmap(reinterpret_cast<uint64_t>(view2), size), "KernelMunmap(again)");
 	CheckOk(test, K::KernelReleaseDirectMemory(again, size), "KernelReleaseDirectMemory(again)");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestBackingReadResidencyStats() {
+	const char* test = "BackingReadResidencyStats";
+	Check(test, Config::MemResidencyEnabled(), "this suite runs with --mem-residency on");
+	Libs::LibKernel::Memory::TestBackingScan scan;
+	Libs::LibKernel::Memory::TestBackingReadScan(&scan, false);
+	if (!scan.ran) {
+		std::printf("%s: skipped (not supported on this host)\n", test);
+		return;
+	}
+	constexpr uint64_t mib = 1u << 20;
+	Check(test, scan.data_ok, "the scanning read changed the bytes read");
+	Check(test, scan.resident_before == 2 * mib, "written MiBs are not exactly the resident ones");
+	Check(test, scan.delta.reads == 1 && scan.delta.bytes == 4 * mib, "read size was not counted");
+	Check(test, scan.delta.nonresident == 2 * mib, "non-resident bytes were not counted");
+	Check(test, scan.delta.hole == 2 * mib, "never-written bytes were not counted");
+	// A mapped read of holes creates zero pages: the cost --mem-hole-reads removes.
+	Check(test, scan.delta.pread_bytes == 0 && scan.resident_after == 4 * mib,
+	      "mapped read of holes did not make them resident");
+
+	Libs::LibKernel::Memory::TestBackingScan preads;
+	Libs::LibKernel::Memory::TestBackingReadScan(&preads, true);
+	Check(test, preads.ran && preads.data_ok, "pread of holes returned different bytes");
+	Check(test, preads.resident_before == 2 * mib, "second store did not start with 2 MiB resident");
+	Check(test, preads.delta.pread_bytes == 2 * mib && preads.pread_failures == 0,
+	      "holes were not read with pread");
+	Check(test, preads.resident_after == 2 * mib, "pread of holes made pages resident");
+	Check(test, preads.delta.hole == 2 * mib, "never-written bytes were not counted with pread");
 	std::printf("[host]    %-48s ok\n", test);
 }
 
@@ -5112,6 +5143,7 @@ int main(int argc, char** argv) {
 	RunTest(TestMemoryPoolAlignmentContracts);
 	RunTest(TestReleasedDirectMemoryPunchKeepsNeighbors);
 	RunTest(TestMemStatsAccounting);
+	RunTest(TestBackingReadResidencyStats);
 	RunTest(TestProsperoSampleMemoryPoolExpandCommit);
 	RunTest(TestFragmentedMemoryPoolBacking);
 	RunTest(TestMemoryPoolMultiRangeDecommit);

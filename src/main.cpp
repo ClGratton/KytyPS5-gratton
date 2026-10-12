@@ -132,6 +132,15 @@ static void PrintUsage() {
 	::printf("  --mem-release-punch <on|off>         Return guest memory the game released (and no view\n"
 	         "                                      maps) to the host with fallocate(PUNCH_HOLE). Whole\n"
 	         "                                      host pages only. Default: off.\n");
+	::printf("  --mem-residency <on|off>             Log-only host RAM diagnostics every 10 s: resident guest\n"
+	         "                                      memory per GPU range class (textures, render targets,\n"
+	         "                                      buffers, other), CPU faults on clean uploaded pages\n"
+	         "                                      (one-shot read probes on textures), and bytes Kyty reads\n"
+	         "                                      from never-written guest memory. Default: off.\n");
+	::printf("  --mem-hole-reads <on|off>            Read guest memory that was never written with pread\n"
+	         "                                      instead of through the writable mapping, so the read\n"
+	         "                                      does not allocate zero pages (reads of 16 KiB or more).\n"
+	         "                                      Default: off.\n");
 	::printf("  --vram-audit <seconds>               Debug: once, this many seconds after start, log the\n"
 	         "                                      resident image mix and content-duplicate textures.\n");
 	::printf("  --vram-ballast-mb <MiB>              Debug: hold this much device-local memory to\n"
@@ -704,6 +713,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--mem-release-punch") {
 			if (!ParseBool(value, options.config.mem_release_punch)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--mem-residency") {
+			if (!ParseBool(value, options.config.mem_residency)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--mem-hole-reads") {
+			if (!ParseBool(value, options.config.mem_hole_reads)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

@@ -226,6 +226,33 @@ struct MemStats {
 static MemStats g_mem_stats;
 static bool     g_mem_stats_on = false;
 static bool     g_mem_punch_on = false;
+static bool     g_mem_residency_on = false;
+static bool     g_mem_hole_reads_on = false;
+
+// --mem-residency: reads of the guest backing through the writable alias (see BackingReadStats).
+struct BackingReadCounters {
+	struct Counts {
+		std::atomic<uint64_t> reads {0};
+		std::atomic<uint64_t> bytes {0};
+		std::atomic<uint64_t> nonresident {0};
+		std::atomic<uint64_t> hole {0};
+		std::atomic<uint64_t> pread_bytes {0};
+	};
+	Counts                image;
+	Counts                other;
+	std::atomic<uint64_t> pread_failures {0};
+};
+static BackingReadCounters g_backing_reads;
+static thread_local BackingReadTag g_backing_read_tag = BackingReadTag::Other;
+
+ScopedBackingReadTag::ScopedBackingReadTag(BackingReadTag tag) noexcept
+    : m_previous(g_backing_read_tag) {
+	g_backing_read_tag = tag;
+}
+
+ScopedBackingReadTag::~ScopedBackingReadTag() {
+	g_backing_read_tag = m_previous;
+}
 
 static void MemStatAdd(MemStats::Pair& pair, uint64_t bytes) {
 	if (g_mem_stats_on) {
@@ -254,6 +281,21 @@ MemStatsSnapshot KernelMemStatsSnapshot() {
 	s.realloc_after_punch_bytes = g_mem_stats.realloc_after_punch_bytes.load(std::memory_order_relaxed);
 	s.punch_failures            = g_mem_stats.punch_failures.load(std::memory_order_relaxed);
 	return s;
+}
+
+BackingReadStats KernelBackingReadStats() {
+	const auto counts = [](const BackingReadCounters::Counts& c) {
+		return BackingReadStats::Counts {c.reads.load(std::memory_order_relaxed),
+		                                 c.bytes.load(std::memory_order_relaxed),
+		                                 c.nonresident.load(std::memory_order_relaxed),
+		                                 c.hole.load(std::memory_order_relaxed),
+		                                 c.pread_bytes.load(std::memory_order_relaxed)};
+	};
+	BackingReadStats stats;
+	stats.image          = counts(g_backing_reads.image);
+	stats.other          = counts(g_backing_reads.other);
+	stats.pread_failures = g_backing_reads.pread_failures.load(std::memory_order_relaxed);
+	return stats;
 }
 
 enum class VirtualRangeType {
@@ -1204,6 +1246,18 @@ static bool IsInPrtAperture(uint64_t address, uint64_t size = 1) {
 	return false;
 }
 
+uint64_t KernelGuestResidentBytes(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr
+	           ? g_guest_address_space->GetBacking().ResidentGuestBytes(vaddr, size)
+	           : 0;
+}
+
+uint64_t KernelGuestResidentTotalBytes() {
+	return g_guest_address_space != nullptr
+	           ? g_guest_address_space->GetBacking().ResidentTotalBytes()
+	           : 0;
+}
+
 bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space->TryReadSparseBacking(vaddr, data, size);
 }
@@ -1346,6 +1400,8 @@ void Initialize() {
 	VirtualMemory::Init();
 	g_mem_stats_on = Config::MemStatsEnabled();
 	g_mem_punch_on = Config::MemReleasePunchEnabled();
+	g_mem_residency_on = Config::MemResidencyEnabled();
+	g_mem_hole_reads_on = Config::MemHoleReadsEnabled();
 	g_guest_address_space = std::make_unique<GuestAddressSpace>(PhysicalMemory::TotalSize());
 	g_physical_memory     = std::make_unique<PhysicalMemory>();
 	g_flexible_memory     = std::make_unique<FlexibleMemory>();
@@ -4115,6 +4171,61 @@ bool TestWindowsBackingViewModes() {
 	return VirtualFree(placeholder, 0, MEM_RELEASE) != 0 && valid;
 }
 #endif
+
+void TestBackingReadScan(TestBackingScan* out, bool hole_reads) {
+	*out = {};
+	const bool saved_hole_reads = g_mem_hole_reads_on;
+	g_mem_hole_reads_on         = hole_reads;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	constexpr uint64_t size = 4u << 20;
+	constexpr uint64_t mib  = 1u << 20;
+	GuestBackingStore  backing(size);
+	if (!backing.IsAvailable()) {
+		g_mem_hole_reads_on = saved_hole_reads;
+		return;
+	}
+	void* reservation = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (reservation == MAP_FAILED) {
+		g_mem_hole_reads_on = saved_hole_reads;
+		return;
+	}
+	const auto address = reinterpret_cast<uint64_t>(reservation);
+	if (!backing.MapFixed(address, size, 0, VirtualMemory::Mode::ReadWrite)) {
+		munmap(reservation, size);
+		g_mem_hole_reads_on = saved_hole_reads;
+		return;
+	}
+	std::vector<uint8_t> pattern(mib);
+	for (size_t i = 0; i < pattern.size(); i++) {
+		pattern[i] = static_cast<uint8_t>(0xA5 ^ (i * 31));
+	}
+	bool ok = backing.TryWriteBacking(address, pattern.data(), mib) &&
+	          backing.TryWriteBacking(address + 2 * mib, pattern.data(), mib);
+	out->resident_before = backing.ResidentGuestBytes(address, size);
+	const auto before    = KernelBackingReadStats();
+	std::vector<uint8_t> read(size, 0xEE);
+	ok = ok && backing.TryReadBacking(address, read.data(), size);
+	const auto after = KernelBackingReadStats();
+	out->resident_after = backing.ResidentGuestBytes(address, size);
+	bool data_ok = ok;
+	for (size_t i = 0; i < size && data_ok; i++) {
+		const uint64_t mb = i / mib;
+		const uint8_t want = (mb == 0 || mb == 2) ? pattern[i % mib] : uint8_t {0};
+		data_ok = read[i] == want;
+	}
+	out->data_ok = data_ok;
+	out->delta.reads       = after.other.reads - before.other.reads;
+	out->delta.bytes       = after.other.bytes - before.other.bytes;
+	out->delta.nonresident = after.other.nonresident - before.other.nonresident;
+	out->delta.hole        = after.other.hole - before.other.hole;
+	out->delta.pread_bytes = after.other.pread_bytes - before.other.pread_bytes;
+	out->pread_failures    = after.pread_failures - before.pread_failures;
+	EXIT_IF(!backing.Unmap(address, size));
+	munmap(reservation, size);
+	out->ran = true;
+#endif
+	g_mem_hole_reads_on = saved_hole_reads;
+}
 
 bool TestGuestFreeRangeBounds() {
 	return GuestFreeRangeContains(0x10000, 0x20000, 0x18000, 0x4000) &&

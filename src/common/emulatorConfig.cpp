@@ -348,6 +348,14 @@ bool MemReleasePunchEnabled() {
 	return g_config != nullptr && g_config->mem_release_punch;
 }
 
+bool MemResidencyEnabled() {
+	return g_config != nullptr && g_config->mem_residency;
+}
+
+bool MemHoleReadsEnabled() {
+	return g_config != nullptr && g_config->mem_hole_reads;
+}
+
 uint32_t VramAuditSeconds() {
 	return g_config->vram_audit_s;
 }

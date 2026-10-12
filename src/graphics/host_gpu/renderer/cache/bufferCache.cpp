@@ -779,6 +779,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 }
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t size) {
+	// --mem-residency attributes the guest reads below to GPU image uploads.
+	const Libs::LibKernel::Memory::ScopedBackingReadTag read_tag(
+	    Libs::LibKernel::Memory::BackingReadTag::Image);
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid image source\n");
 	}

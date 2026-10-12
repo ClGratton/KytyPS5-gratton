@@ -182,6 +182,40 @@ struct MemStatsSnapshot {
 	uint64_t punch_failures                = 0;
 };
 MemStatsSnapshot KernelMemStatsSnapshot();
+
+// --mem-residency (Linux). Reads of the guest backing of at least 16 KiB are classified by whether
+// their pages are resident (mincore) and, for the ones that are not, whether the page was ever
+// written (a hole in the backing file) or is swapped out.
+enum class BackingReadTag : uint8_t { Other, Image };
+class ScopedBackingReadTag {
+public:
+	explicit ScopedBackingReadTag(BackingReadTag tag) noexcept;
+	~ScopedBackingReadTag();
+	KYTY_CLASS_NO_COPY(ScopedBackingReadTag);
+
+private:
+	BackingReadTag m_previous;
+};
+
+struct BackingReadStats {
+	struct Counts {
+		uint64_t reads            = 0; // reads of at least 16 KiB
+		uint64_t bytes            = 0;
+		uint64_t nonresident      = 0; // bytes on pages that were not resident when read
+		uint64_t hole             = 0; // ... of which never written (no data in the backing file)
+		uint64_t pread_bytes      = 0; // bytes read with pread instead of a mapping (--mem-hole-reads)
+	};
+	Counts   image; // reads for GPU image uploads
+	Counts   other;
+	uint64_t pread_failures = 0;
+};
+BackingReadStats KernelBackingReadStats();
+// Bytes of [vaddr, vaddr + size) whose backing pages are resident in RAM now (mincore on the
+// backing file; swapped-out pages do not count). Gaps in the guest mapping count as zero.
+uint64_t         KernelGuestResidentBytes(uint64_t vaddr, uint64_t size);
+// Resident bytes of the whole guest backing file.
+uint64_t         KernelGuestResidentTotalBytes();
+
 int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int flags,
                                         int64_t direct_memory_start, size_t alignment);
 int KYTY_SYSV_ABI KernelMapDirectMemory2(void** addr, size_t len, int type, int prot, int flags,
@@ -244,6 +278,17 @@ bool     TestGuestAddressRangeIsOwned(uint64_t vaddr, uint64_t size);
 bool     TestGuestBackingOutsideAddressSpace();
 uint64_t TestGuestBackingSize();
 bool     TestGuestFreeRangeBounds();
+// Reads a 4 MiB backing store whose 1st and 3rd MiB were written and whose other MiB are holes,
+// with --mem-hole-reads switched on or off for the call.
+struct TestBackingScan {
+	bool                      ran             = false; // false where the scan is not supported
+	bool                      data_ok         = false; // the read returned the bytes (zeros on holes)
+	uint64_t                  resident_before = 0;
+	uint64_t                  resident_after  = 0;
+	BackingReadStats::Counts  delta;                    // 'other' counters changed by the read
+	uint64_t                  pread_failures  = 0;
+};
+void     TestBackingReadScan(TestBackingScan* out, bool hole_reads);
 #endif
 
 } // namespace Libs::LibKernel::Memory

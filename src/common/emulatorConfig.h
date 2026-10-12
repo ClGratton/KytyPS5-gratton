@@ -136,6 +136,12 @@ struct ConfigOptions {
 	bool                   vram_stats                  = false;
 	bool                   mem_stats                   = false;
 	bool                   mem_release_punch           = false;
+	// Log-only host RAM residency diagnostics (mincore per GPU-registered range class, CPU faults on
+	// clean uploaded pages, reads of never-written guest memory). Costs a few read-probe faults.
+	bool                   mem_residency               = false;
+	// Read never-written guest memory with pread instead of through the writable mapping, so the read
+	// does not make the zero pages resident (a read of a hole in a shared mapping allocates them).
+	bool                   mem_hole_reads              = false;
 	uint32_t               vram_ballast_mb             = 0;
 	uint32_t               vram_audit_s                = 0;
 	// GC thresholds in MiB; 0 keeps the budget-derived stock value.
@@ -362,6 +368,8 @@ bool VramStatsEnabled();
 // safe to call before the config exists (they report false).
 bool MemStatsEnabled();
 bool MemReleasePunchEnabled();
+bool MemResidencyEnabled();
+bool MemHoleReadsEnabled();
 uint32_t VramBallastMb();
 uint32_t VramAuditSeconds();
 uint32_t GcTextureTriggerMb();
