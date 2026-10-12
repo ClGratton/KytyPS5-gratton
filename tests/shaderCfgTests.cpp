@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
@@ -9990,6 +9991,47 @@ void TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic() {
   }
 }
 
+// --async-pipelines skip: a draw whose shaders write memory later frames read is never skipped
+// (rule from BryanKAdams/KytyPS5@17da0ad52, B30). Buffer atomics alone, LDS and plain ALU may be.
+void TestDrawSkipSafety() {
+  using ShaderRecompiler::Decoder::CodeMayBeSkipped;
+  using ShaderRecompiler::Decoder::DrawSkipSafetyCache;
+  struct Case {
+    const char *name;
+    std::vector<uint32_t> code;
+    bool may_skip;
+  };
+  const uint32_t end = EncodeSopp(0x01);
+  const std::vector<Case> cases = {
+      {"only s_endpgm", {end}, true},
+      {"buffer load", {EncodeMubuf0(0x0c), EncodeMubuf1(0, 0, 1), end}, true},
+      {"buffer_store_dword", {EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(0, 0, 1), end}, false},
+      {"buffer_store_byte", {EncodeMubuf0(0x18, 0, false), EncodeMubuf1(0, 0, 1), end}, false},
+      {"buffer_store_dwordx4", {EncodeMubuf0(0x1e, 0, false), EncodeMubuf1(0, 0, 1), end}, false},
+      {"buffer_atomic_add (atomics alone may be skipped)",
+       {EncodeMubuf0(0x32, 0, true, true), EncodeMubuf1(0, 0, 1), end}, true},
+      {"tbuffer_store_format_x", {EncodeMtbuf0(4, 4, 7), EncodeMtbuf1(4, 0, 0, 1), end}, false},
+      {"image_store", {EncodeMimg0(0x08, 0xf), EncodeMimg1(4, 0, 0, 1), end}, false},
+      {"image_atomic_umax (captured)", {0xf05c0308u, 0x00000200u, end}, false},
+      {"flat_store_dword", {EncodeFlat0(0x1c, 0, 0), EncodeFlat1(0, 0x7d, 3, 0), end}, false},
+      {"ds_write_b32 (LDS)", {EncodeDs0(0x0d), EncodeDs1(0, 0, 1), end}, true},
+      {"ds_add_u32 on GDS", {EncodeDs0(0x00) | (1u << 17u), EncodeDs1(0, 0, 1), end}, false},
+  };
+  DrawSkipSafetyCache cache;
+  uint64_t hash = 0x1234u;
+  for (const auto &test : cases) {
+    hash++;
+    Check(CodeMayBeSkipped(test.code) == test.may_skip, test.name);
+    bool newly_unsafe = false;
+    Check(cache.MayBeSkipped(test.code, hash, {}, false, &newly_unsafe) == test.may_skip &&
+              newly_unsafe == !test.may_skip,
+          test.name);
+    newly_unsafe = true;
+    // The verdict is remembered per (hash, size): asked again, nothing is newly unsafe.
+    Check(cache.MayBeSkipped(test.code, hash, {}, false, &newly_unsafe) == test.may_skip, test.name);
+  }
+}
+
 // --spirv-robust-bounds: which storage-buffer accesses may be left to robustBufferAccess2. Only a
 // device with robustBufferAccess2 and a known access alignment qualifies; sub-dword elements need
 // byte-exact checking (alignment 1).
@@ -15773,6 +15815,7 @@ int main() {
 
   EnsureConfigInitialized();
   TestRobustBufferPolicy();
+  TestDrawSkipSafety();
   TestRobustBufferBoundsEmission();
   TestRayTracingInstructions();
   TestResourceDescriptorClassification();

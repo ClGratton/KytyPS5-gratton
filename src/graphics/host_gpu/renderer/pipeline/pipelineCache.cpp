@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "kytyGitVersion.h"
@@ -1975,9 +1976,29 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 	// Off mode: `async.pool` is null and every Get() below is the stock synchronous call. In skip
 	// mode a stage whose program is not ready stops the whole lookup: the stages after it cannot
 	// be captured because their push-data start depends on the earlier stages' compiled layouts.
+	// A draw whose shaders write memory later frames read (buffer/image stores, image atomics, GDS)
+	// is never skipped: it waits for its pipeline like in stall mode (DrawSkipSafety.h).
+	bool allow_skip = !prefetch && m_async_mode == Config::AsyncPipelineMode::Skip;
+	if (allow_skip) {
+		const auto stage_may_skip = [&](const ShaderParams& params, ShaderType stage) {
+			bool newly_unsafe = false;
+			const bool safe = m_skip_safety.MayBeSkipped(params.code, params.hash, params.back_code,
+			                                             stage == ShaderType::Local, &newly_unsafe);
+			if (newly_unsafe) {
+				PipelineCacheLog("Async pipelines: shader 0x{:016x} writes memory, its draws are never skipped",
+				                 params.hash);
+			}
+			return safe;
+		};
+		allow_skip = (!pixel_active || stage_may_skip(pixel_params, ShaderType::Pixel));
+		for (uint32_t i = 0; allow_skip && i < (tess_active ? 3u : 1u); i++) {
+			allow_skip = stage_may_skip(vertex_params[i], vertex_info[i].logical_stage);
+		}
+	}
+	result.may_skip = !prefetch && allow_skip;
 	ProgramCache::AsyncContext async {
 	    .pool       = AsyncPool(),
-	    .allow_skip = !prefetch && m_async_mode == Config::AsyncPipelineMode::Skip,
+	    .allow_skip = allow_skip,
 	    .prefetch   = prefetch,
 	    .counters   = &m_lookahead};
 	if (pixel_active) {
@@ -2312,7 +2333,8 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	// input info (by value), the compiled program handles and the driver cache handle; the
 	// stages' CompiledShaderInfo pointers it carries point at published, immutable permutations.
 	if (auto* pool = AsyncPool()) {
-		const bool                may_skip = m_async_mode == Config::AsyncPipelineMode::Skip;
+		const bool                may_skip =
+		    m_async_mode == Config::AsyncPipelineMode::Skip && programs.may_skip;
 		std::shared_ptr<AsyncJob> job      = m_graphics_jobs.Find(key, may_skip);
 		bool joined_prefetch = job != nullptr && job->IsPrefetched();
 		if (job == nullptr) {

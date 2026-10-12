@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
 #include "graphics/shader/shader.h"
 
 #include <atomic>
@@ -155,6 +156,9 @@ public:
 		// --async-pipelines skip: a program was not ready, nothing else in here is valid and
 		// the draw must be skipped.
 		bool pending = false;
+		// --async-pipelines skip: false when a shader of the draw writes memory later frames read
+		// (DrawSkipSafety.h); such a draw waits for its pipeline instead of being skipped.
+		bool may_skip = true;
 
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
@@ -346,6 +350,8 @@ private:
 	std::vector<vk::Pipeline>  m_retired_pipelines; // no handler took them: destroyed with the cache
 
 	LookaheadCounters m_lookahead;
+	// --async-pipelines skip: which shaders' draws may be skipped (DrawSkipSafety.h).
+	ShaderRecompiler::Decoder::DrawSkipSafetyCache m_skip_safety;
 	std::function<std::string()> m_lookahead_thread_summary;
 	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
 	// (or starts) while the pool and the registries are torn down.
