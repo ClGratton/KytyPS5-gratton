@@ -50,7 +50,8 @@ QList<Option> BuildTable() {
 	defs.append({"overlay", "", Tab::Display, "Overlay and window", Kind::Bool,
 	             "Performance overlay (MangoHud)",
 	             "Show MangoHud's fps, frame-time graph, CPU, GPU and memory overlay over the game. "
-	             "Needs the mangohud package; the launcher only sets MANGOHUD=1 for the emulator.",
+	             "Needs the mangohud package. The launcher sets MANGOHUD=1 and MANGOHUD_CONFIGFILE to the "
+             "mangohud.conf installed with the emulator (per-frame logging is off there).",
 	             nullptr, {}, 0, 0, "", "", false, false, "MANGOHUD", QVariant(false)});
 	defs.append({"splash", "--no-splash", Tab::Display, "Overlay and window", Kind::Bool,
 	             "Show the startup splash screen",

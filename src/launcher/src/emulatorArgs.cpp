@@ -13,6 +13,9 @@ static QString BoolArg(bool value) {
 	return value ? QStringLiteral("true") : QStringLiteral("false");
 }
 
+// The overlay settings file, installed next to the emulator (src/launcher/mangohud/mangohud.conf.in).
+static const QString MANGOHUD_CONFIG_FILE = QStringLiteral("mangohud.conf");
+
 QStringList CreateEmulatorArgs(const Configuration& info) {
 	QStringList args;
 	auto        r = EnumToText(info.screen_resolution).split('x');
@@ -107,6 +110,14 @@ QStringList CreateEmulatorArgs(const Configuration& info) {
 	return args;
 }
 
-QStringList CreateEmulatorEnvironment(const Configuration& info) {
-	return EmulatorOptions::Environment(info.emulator_options);
+QStringList CreateEmulatorEnvironment(const Configuration& info, const QString& install_dir) {
+	auto env = EmulatorOptions::Environment(info.emulator_options);
+	// MangoHud reads its settings from the file named by MANGOHUD_CONFIGFILE. MANGOHUD_CONFIG would
+	// replace the file with a settings string, so it is not used. The file is installed next to the
+	// emulator (src/launcher/mangohud/mangohud.conf.in).
+	if (env.contains(QStringLiteral("MANGOHUD=1"))) {
+		env << QStringLiteral("MANGOHUD_CONFIGFILE=") +
+		           QDir(install_dir).filePath(MANGOHUD_CONFIG_FILE);
+	}
+	return env;
 }

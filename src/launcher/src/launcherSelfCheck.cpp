@@ -476,9 +476,10 @@ int RunPrintCommand(const QStringList& args) {
 		value.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
 		return QStringLiteral("'") + value + QStringLiteral("'");
 	};
+	const auto environment = CreateEmulatorEnvironment(info, QCoreApplication::applicationDirPath());
 	if (args.contains(QStringLiteral("--shell"))) {
 		// For `eval "$(launcher --print-command --shell ...)"`: the exact command the Run button starts.
-		for (const auto& assignment: CreateEmulatorEnvironment(info)) {
+		for (const auto& assignment: environment) {
 			const auto split = assignment.indexOf(QLatin1Char('='));
 			out << "export " << assignment.left(split) << "=" << quote(assignment.mid(split + 1)) << "\n";
 		}
@@ -489,7 +490,7 @@ int RunPrintCommand(const QStringList& args) {
 		out << "\n";
 		return 0;
 	}
-	for (const auto& assignment: CreateEmulatorEnvironment(info)) {
+	for (const auto& assignment: environment) {
 		out << assignment << "\n";
 	}
 	out << "kyty_emulator";

@@ -1,0 +1,51 @@
+# MangoHud overlay of the emulator. The launcher points MANGOHUD_CONFIGFILE at the installed copy
+# when "Performance overlay (MangoHud)" is on. The installer (notes/play-install.sh) writes that copy
+# and replaces @GPU_PCI_DEV@ with the NVIDIA GPU's PCI address (nvidia-smi), so the GPU lines show the
+# GPU the emulator runs on. Reinstalling regenerates the file.
+#
+# Per-frame CSV logging is off. To log, add these lines (the output folder must exist):
+#   output_folder=/path/to/folder
+#   log_interval=0
+#   autostart_log=1
+legacy_layout=0
+position=top-left
+font_size=22
+background_alpha=0.50
+round_corners=0
+table_columns=1
+width=380
+no_small_font=0
+pci_dev=@GPU_PCI_DEV@
+
+# frame rate + frametime graph
+fps
+fps_color_change
+fps_value=30,55
+frametime
+frame_timing
+frame_timing_detailed=0
+
+# CPU: load, per-core bars, temperature, clock
+cpu_stats
+cpu_load_change
+cpu_temp
+cpu_mhz
+core_load
+core_bars
+
+# GPU: load, temperature, clocks, power, VRAM
+gpu_stats
+gpu_load_change
+gpu_temp
+gpu_core_clock
+gpu_mem_clock
+gpu_power
+vram
+
+# memory: system RAM + swap, emulator process (RSS, shared = guest memfd), process IO
+ram
+swap
+procmem
+procmem_shared
+io_read
+io_write

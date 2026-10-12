@@ -354,7 +354,7 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 	auto      dir = f.absoluteDir();
 
 	auto args        = CreateEmulatorArgs(info);
-	auto environment = CreateEmulatorEnvironment(info);
+	auto environment = CreateEmulatorEnvironment(info, dir.path());
 	if (args.isEmpty()) {
 		QMessageBox::critical(this, tr("Error"), tr("Invalid emulator configuration"));
 		QApplication::quit();
