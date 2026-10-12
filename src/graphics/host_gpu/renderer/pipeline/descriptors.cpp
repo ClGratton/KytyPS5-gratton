@@ -398,7 +398,12 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 			break;
 		default: EXIT("null image has unsupported numeric class\n");
 	}
-	desc.info.pixel_format    = VulkanFormat(desc.info.guest_format);
+	desc.info.pixel_format = VulkanFormat(desc.info.guest_format);
+	if (resource.depth_compare) {
+		if (const auto* depth_format = FindGuestDepthFormatPolicy(desc.info.guest_format)) {
+			desc.info.pixel_format = depth_format->depth_attachment_format;
+		}
+	}
 	desc.info.type            = Prospero::ImageType::kColor2D;
 	desc.info.extent          = {1, 1, 1};
 	desc.info.resources       = {1, 1};
@@ -407,7 +412,8 @@ static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::Image
 	desc.info.mip_layout[0]   = {0, 0, 1, 1};
 	desc.view_info.format     = resource.atomic64 ? vk::Format::eR64Uint : desc.info.pixel_format;
 	desc.view_info.type       = vk::ImageViewType::e2D;
-	desc.view_info.aspect     = vk::ImageAspectFlagBits::eColor;
+	desc.view_info.aspect     = resource.depth_compare ? vk::ImageAspectFlagBits::eDepth
+	                                                   : vk::ImageAspectFlagBits::eColor;
 	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
 	                                ? vk::ImageUsageFlagBits::eStorage
 	                                : vk::ImageUsageFlagBits::eSampled;
