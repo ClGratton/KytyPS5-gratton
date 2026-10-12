@@ -237,10 +237,22 @@ void TestManyJobsAllRunOnce() {
 	std::mutex                threads_mutex;
 	std::vector<std::shared_ptr<TestJob>> jobs;
 	for (int i = 0; i < count; i++) {
-		jobs.push_back(std::make_shared<TestJob>(nullptr, i, [&] {
+		jobs.push_back(std::make_shared<TestJob>(nullptr, i, [&, i] {
 			ran.fetch_add(1);
-			std::lock_guard lock(threads_mutex);
-			threads.insert(std::this_thread::get_id());
+			{
+				std::lock_guard lock(threads_mutex);
+				threads.insert(std::this_thread::get_id());
+			}
+			// The first jobs wait for a second worker, so the spread check does not depend on
+			// how the scheduler happens to hand out 2000 tiny jobs (a loaded machine can let
+			// one worker take them all).
+			if (i < 2) {
+				Check(WaitUntil([&] {
+					      std::lock_guard lock(threads_mutex);
+					      return threads.size() > 1;
+				      }),
+				      "a second worker picked up a job");
+			}
 		}));
 		Check(pool.Submit(jobs.back()), "submit");
 	}
@@ -250,8 +262,9 @@ void TestManyJobsAllRunOnce() {
 	}
 	Check(ran.load() == count, "all jobs ran");
 	Check(threads.size() > 1, "work was spread over several workers");
-	Check(pool.Stats().submitted.load() == count && pool.Stats().completed.load() == count,
-	      "stats");
+	// completed is counted after the job is published, so WaitFor can return just before it.
+	Check(WaitUntil([&] { return pool.Stats().completed.load() == count; }), "completed count");
+	Check(pool.Stats().submitted.load() == count, "submitted count");
 	pool.Shutdown();
 }
 
@@ -385,6 +398,91 @@ void TestRejectedSubmitReleasesWaiter() {
 	Check(registry.Size() == 0, "refused job unregistered");
 }
 
+// Prefetch accounting (--pipeline-lookahead): only a prefetched job can be claimed, and only the
+// first claim of it counts as a prediction hit.
+void TestPrefetchClaimCountsOnce() {
+	TestJob plain(nullptr, 1, nullptr);
+	Check(!plain.IsPrefetched() && !plain.ClaimByDraw(), "a plain job is never a hit");
+	TestJob prefetched(nullptr, 2, nullptr);
+	prefetched.SetPrefetched();
+	Check(prefetched.IsPrefetched(), "prefetched flag");
+	Check(prefetched.ClaimByDraw(), "first claim is a hit");
+	Check(!prefetched.ClaimByDraw() && !prefetched.ClaimByDraw(), "later claims are not");
+}
+
+// Many threads race to register the same key: exactly one wins, everyone sees the winner's job,
+// and the job runs once (the lookahead thread and the GPU thread do this for the same pipeline).
+void TestConcurrentInsertSameKeyRunsOnce() {
+	AsyncPipelineCompiler pool(Config::AsyncPipelineMode::Stall, 4);
+	TestJob::Registry     registry;
+	std::atomic<int>      winners {0};
+	std::atomic<int>      go {0};
+	std::atomic<int>      attempts {0};
+	std::vector<std::shared_ptr<AsyncJob>> seen(8);
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 8; t++) {
+		threads.emplace_back([&, t] {
+			// The job stays registered until every thread has tried to register its own, so the
+			// outcome does not depend on how fast the pool runs it.
+			auto mine = std::make_shared<TestJob>(&registry, 42, [&] {
+				Check(WaitUntil([&] { return attempts.load() == 8; }), "all threads tried");
+			});
+			while (go.load() == 0) {
+				std::this_thread::yield();
+			}
+			bool inserted = false;
+			seen[static_cast<size_t>(t)] = registry.Insert(42, mine, inserted);
+			attempts.fetch_add(1);
+			if (inserted) {
+				winners.fetch_add(1);
+				Check(pool.Submit(mine), "winner submits");
+			}
+		});
+	}
+	go.store(1);
+	for (auto& thread: threads) {
+		thread.join();
+	}
+	Check(winners.load() == 1, "exactly one registration wins");
+	for (const auto& job: seen) {
+		Check(job == seen[0], "every thread sees the same registered job");
+	}
+	Check(pool.WaitFor(*seen[0]), "the winner ran");
+	Check(static_cast<TestJob&>(*seen[0]).ran.load() == 1, "the shared job ran once");
+	Check(registry.Size() == 0, "unregistered after publishing");
+	pool.Shutdown();
+}
+
+// WaitFor() on a job that already finished returns at once and is accounted as a GPU wait.
+void TestWaitForFinishedJobAndStats() {
+	AsyncPipelineCompiler pool(Config::AsyncPipelineMode::Stall, 1);
+	auto job = std::make_shared<TestJob>(nullptr, 3, [] {});
+	Check(pool.Submit(job), "submit");
+	Check(WaitUntil([&] { return job->IsFinished(); }), "job finished");
+	const auto before = pool.Stats().gpu_waits.load();
+	Check(pool.WaitFor(*job), "wait on a finished job succeeds");
+	Check(pool.Stats().gpu_waits.load() == before + 1, "the wait is counted");
+	Check(WaitUntil([&] { return pool.Stats().completed.load() == 1; }),
+	      "completed counter");
+	Check(pool.Stats().submitted.load() == 1, "submitted counter");
+	// A cancelled job's Cancel() runs exactly once even if Shutdown() is called twice.
+	AsyncPipelineCompiler second(Config::AsyncPipelineMode::Stall, 1);
+	std::atomic<bool> release {false};
+	auto blocker = std::make_shared<TestJob>(nullptr, 4, [&] {
+		Check(WaitUntil([&] { return release.load(); }), "release blocker");
+	});
+	auto queued = std::make_shared<TestJob>(nullptr, 5, [] {});
+	Check(second.Submit(blocker) && second.Submit(queued), "submit both");
+	Check(WaitUntil([&] { return blocker->GetState() == AsyncJob::State::Running; }),
+	      "blocker running");
+	std::thread stopper([&] { second.Shutdown(); });
+	Check(WaitUntil([&] { return queued->IsFinished(); }), "queued job cancelled");
+	second.Shutdown();
+	release.store(true);
+	stopper.join();
+	Check(queued->cancelled.load() == 1 && queued->ran.load() == 0, "Cancel() ran once");
+}
+
 int main() {
 	TestJobsRunOnWorkersConcurrently();
 	TestDedupeSharesOneJob();
@@ -393,6 +491,9 @@ int main() {
 	TestShutdownCancelsQueuedAndJoinsRunning();
 	TestUrgentSubmitAndPromote();
 	TestRejectedSubmitReleasesWaiter();
+	TestPrefetchClaimCountsOnce();
+	TestConcurrentInsertSameKeyRunsOnce();
+	TestWaitForFinishedJobAndStats();
 	std::printf("AsyncPipelineTests: all cases passed\n");
 	return 0;
 }

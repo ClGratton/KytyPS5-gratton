@@ -114,6 +114,14 @@ int main() {
 		uint32_t got = 0;
 		SysFileRead(g_region, static_cast<uint32_t>(file_size), *f, &got);
 		SysFileClose(f);
+		if (std::getenv("KYTY_SYSFILE_NO_READ_FALLBACK") != nullptr) {
+			// Debug switch: the pre-fallback behaviour (short count) for A/B runs of a crash.
+			Check(got < file_size, "with the fallback disabled the read is short");
+			Check(SysFileReadFallbackCount() == 1, "the short read was counted");
+			std::filesystem::remove(path);
+			std::printf("SysFileReadTests: fallback-disabled case passed\n");
+			return 0;
+		}
 		Check(got == file_size, "read into protected pages returns every byte");
 		Check(std::memcmp(g_region, content.data(), file_size) == 0,
 		      "read into protected pages delivers the right bytes");
