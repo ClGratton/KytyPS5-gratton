@@ -63,6 +63,9 @@ std::atomic<uint64_t> g_clean_reads {0};
 std::atomic<uint64_t> g_direct_reads {0};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
 std::array<std::atomic<uint64_t>, kCoalesce> g_coalesce {};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(IndirectDraw::Route::Count)>
+    g_indirect_routes {};
+std::atomic<uint32_t> g_indirect_logged {0};
 
 int64_t WallNs() {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -252,6 +255,17 @@ void NoteKnownFill(KnownFill kind) noexcept {
 	g_known_fills[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 }
 
+void NoteIndirectDraw(IndirectDraw::Route route, uint32_t draws) noexcept {
+	const auto index = static_cast<size_t>(route);
+	g_indirect_routes[index].fetch_add(draws, std::memory_order_relaxed);
+	if (IndirectDraw::IsFallbackWorthLogging(route) &&
+	    (g_indirect_logged.fetch_or(1u << index, std::memory_order_relaxed) & (1u << index)) == 0) {
+		std::printf("gpu-indirect-draws: %s (further draws of this kind are only counted)\n",
+		            IndirectDraw::kRouteNames[index]);
+		std::fflush(stdout);
+	}
+}
+
 void NoteCleanRead(bool clean) noexcept {
 	(clean ? g_clean_reads : g_direct_reads).fetch_add(1, std::memory_order_relaxed);
 }
@@ -370,6 +384,23 @@ void Report(detail::ThreadState& s, bool final_report) {
 			line += fmt::format(
 			    "known fills (total): hit={} readback={} discarded={} discard_refused={}\n", now[0],
 			    now[1], now[2], now[3]);
+		}
+	}
+	{
+		std::array<uint64_t, g_indirect_routes.size()> routes {};
+		uint64_t                                       total = 0;
+		for (size_t i = 0; i < routes.size(); ++i) {
+			routes[i] = g_indirect_routes[i].load(std::memory_order_relaxed);
+			total += routes[i];
+		}
+		if (total != 0) {
+			std::string text;
+			for (size_t i = 0; i < routes.size(); ++i) {
+				if (routes[i] != 0) {
+					text += fmt::format(" [{}]={}", IndirectDraw::kRouteNames[i], routes[i]);
+				}
+			}
+			line += fmt::format("indirect draws (total):{}\n", text);
 		}
 	}
 	if (g_clean_reads.load(std::memory_order_relaxed) + g_direct_reads.load(std::memory_order_relaxed) != 0) {

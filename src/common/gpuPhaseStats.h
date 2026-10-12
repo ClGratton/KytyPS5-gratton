@@ -19,6 +19,7 @@
 // re-implemented around an exclusive-time stack.
 
 #include "common/drainCauses.h"
+#include "common/indirectDrawPolicy.h"
 
 #include <cstdint>
 
@@ -62,6 +63,9 @@ void NoteBarrier(bool elided) noexcept;
 // --known-fills: color-metadata clear discovery outcomes (see TextureCache::MaterializeColorClear).
 enum class KnownFill : uint8_t { Hit, Readback, Discarded, DiscardRefused, Count };
 void NoteKnownFill(KnownFill kind) noexcept;
+// --gpu-indirect-draws: how `draws` indirect draws of one packet were routed. The first time each
+// fallback reason is seen it is printed once.
+void NoteIndirectDraw(IndirectDraw::Route route, uint32_t draws) noexcept;
 // --clean-guest-reads: a read served from the guest backing (clean) or by a plain load (direct).
 void NoteCleanRead(bool clean) noexcept;
 // --readback-queue: one second-queue readback; `flushed` the producer was still in the open
