@@ -157,7 +157,8 @@ public:
 	int                    console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
-	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::Performance;
+	// The emulator's own default (kyty_emulator --shader-optimization-type): None.
+	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::None;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	QString                shader_log_folder           = "_Shaders";
 	bool                   command_buffer_dump_enabled = false;
