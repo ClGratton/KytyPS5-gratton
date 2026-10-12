@@ -1622,73 +1622,98 @@ struct PipelineCache::ProgramCache {
 // lower scheduling priority than the game's threads.
 class PipelineCache::GuessThread {
 public:
-	GuessThread() { m_thread = std::thread([this] { Run(); }); }
+	GuessThread(): m_state(std::make_shared<State>()) { SpawnWorker(m_state); }
 	~GuessThread() { Stop(); }
 	GuessThread(const GuessThread&)            = delete;
 	GuessThread& operator=(const GuessThread&) = delete;
 
 	void Push(std::shared_ptr<ProgramCache::LoadJob> job) {
 		{
-			std::lock_guard lock(m_mutex);
-			if (m_stopping) return;
-			m_queue.push_back(std::move(job));
+			std::lock_guard lock(m_state->mutex);
+			if (m_state->stopping || m_state->workers_lost > kMaxLostWorkers) return;
+			m_state->queue.push_back(std::move(job));
 		}
-		m_cv.notify_one();
+		m_state->cv.notify_one();
 	}
 
+	// Stops accepting work and waits for the running job to finish. A worker parked by a fatal
+	// check is not waited for (it no longer touches the cache).
 	void Stop() {
 		{
-			std::lock_guard lock(m_mutex);
-			if (m_stopping) return;
-			m_stopping = true;
-			m_queue.clear();
+			std::lock_guard lock(m_state->mutex);
+			if (m_state->stopping) return;
+			m_state->stopping = true;
+			m_state->queue.clear();
 		}
-		m_cv.notify_all();
-		if (!m_thread.joinable()) return;
-		// A thread parked by a speculative abort never exits: do not wait for it.
-		for (int i = 0; i < 2000 && !m_exited.load(std::memory_order_acquire) &&
-		                !Common::Speculation::Aborted();
-		     i++) {
+		m_state->cv.notify_all();
+		for (int i = 0; i < 4000 && m_state->active.load(std::memory_order_acquire) != 0; i++) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
-		}
-		if (m_exited.load(std::memory_order_acquire)) {
-			m_thread.join();
-		} else {
-			m_thread.detach();
 		}
 	}
 
 private:
-	void Run() {
+	static constexpr uint32_t kMaxLostWorkers = 64;
+
+	struct State {
+		std::mutex                                         mutex;
+		std::condition_variable                            cv;
+		std::deque<std::shared_ptr<ProgramCache::LoadJob>> queue;
+		bool                                               stopping     = false;
+		uint32_t                                           workers_lost = 0;
+		std::atomic<uint32_t>                              active {0}; // workers that can touch the cache
+	};
+	struct Context {
+		std::shared_ptr<State>                  state;
+		std::shared_ptr<ProgramCache::LoadJob> job;
+	};
+
+	// Workers are detached and own a share of the state, so a worker parked by a fatal check
+	// never refers to memory that is gone.
+	static void SpawnWorker(const std::shared_ptr<State>& state) {
+		state->active.fetch_add(1, std::memory_order_acq_rel);
+		std::thread([state] { Run(state); }).detach();
+	}
+
+	// A fatal check on the worker: the job is dropped, a replacement starts, this thread parks.
+	static void OnAbort(void* user) {
+		auto* context = static_cast<Context*>(user);
+		if (context->job != nullptr) {
+			context->job->Unregister();
+			context->job.reset();
+		}
+		bool respawn = false;
+		{
+			std::lock_guard lock(context->state->mutex);
+			context->state->workers_lost++;
+			respawn = !context->state->stopping && context->state->workers_lost <= kMaxLostWorkers;
+		}
+		if (respawn) SpawnWorker(context->state);
+		context->state->active.fetch_sub(1, std::memory_order_acq_rel);
+	}
+
+	static void Run(std::shared_ptr<State> state) {
 #if defined(__linux__)
 		pthread_setname_np(pthread_self(), "kyty-precompile");
 		(void)setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
 #endif
+		Context context {state, nullptr};
+		Common::Speculation::SetThreadAbortHandler(&OnAbort, &context);
 		Common::Speculation::Scope speculation;
 		for (;;) {
-			std::shared_ptr<ProgramCache::LoadJob> job;
 			{
-				std::unique_lock lock(m_mutex);
-				m_cv.wait(lock, [this] { return m_stopping || !m_queue.empty(); });
-				if (m_stopping) break;
-				job = std::move(m_queue.front());
-				m_queue.pop_front();
+				std::unique_lock lock(state->mutex);
+				state->cv.wait(lock, [&] { return state->stopping || !state->queue.empty(); });
+				if (state->stopping) break;
+				context.job = std::move(state->queue.front());
+				state->queue.pop_front();
 			}
-			if (!Common::Speculation::Aborted()) {
-				job->Execute();
-			} else {
-				job->Unregister();
-			}
+			context.job->Execute();
+			context.job.reset();
 		}
-		m_exited.store(true, std::memory_order_release);
+		state->active.fetch_sub(1, std::memory_order_acq_rel);
 	}
 
-	std::mutex                                          m_mutex;
-	std::condition_variable                             m_cv;
-	std::deque<std::shared_ptr<ProgramCache::LoadJob>>  m_queue;
-	bool                                                m_stopping = false;
-	std::atomic<bool>                                   m_exited {false};
-	std::thread                                         m_thread;
+	std::shared_ptr<State> m_state;
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
@@ -2589,7 +2614,7 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 		if (job->guess) {
 			// Not a pool job: nothing can wait for it, and its translation is speculative.
 			job->joinable = false;
-			if (m_guess_thread == nullptr || Common::Speculation::Aborted()) {
+			if (m_guess_thread == nullptr) {
 				m_program_cache->RemoveLoad(job.get());
 			} else {
 				m_guess_thread->Push(job);
