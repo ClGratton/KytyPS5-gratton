@@ -12,12 +12,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
-#include <mutex>
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
@@ -118,6 +119,16 @@ static size_t ReadFileViaBounceBuffer(FILE* f, void* data, size_t size) {
 	return total;
 }
 
+// Debug aid: KYTY_SYSFILE_NO_READ_FALLBACK=1 returns the short count as plain fread did before
+// the fallback existed, so a crash can be A/B-tested on one binary.
+static bool ReadFallbackDisabled() {
+	static const bool disabled = [] {
+		const char* value = std::getenv("KYTY_SYSFILE_NO_READ_FALLBACK");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return disabled;
+}
+
 static size_t ReadFileIntoMemory(FILE* f, void* data, size_t size) {
 	const size_t w = fread(data, 1, size, f);
 	if (w == size || feof(f) != 0 || ferror(f) == 0) {
@@ -125,13 +136,24 @@ static size_t ReadFileIntoMemory(FILE* f, void* data, size_t size) {
 	}
 	const int error = errno;
 	clearerr(f);
-	static std::once_flag once;
-	std::call_once(once, [error] {
+	const auto index = g_read_fallback_count.fetch_add(1, std::memory_order_relaxed);
+	if (index == 0) {
 		printf("SysFileRead: read into guest memory failed (errno %d), reading through a host "
-		       "buffer\n",
-		       error);
-	});
-	g_read_fallback_count.fetch_add(1, std::memory_order_relaxed);
+		       "buffer%s\n",
+		       error, ReadFallbackDisabled() ? " (DISABLED: returning the short count)" : "");
+	}
+	if (index < 16) {
+		char path[64];
+		char target[512] = {};
+		snprintf(path, sizeof(path), "/proc/self/fd/%d", fileno(f));
+		const auto length = readlink(path, target, sizeof(target) - 1);
+		printf("SysFileRead: short read #%" PRIu64 ": %zu of %zu bytes before the failing page, "
+		       "file %s\n",
+		       index + 1, w, size, length > 0 ? target : "?");
+	}
+	if (ReadFallbackDisabled()) {
+		return w;
+	}
 	return w + ReadFileViaBounceBuffer(f, static_cast<uint8_t*>(data) + w, size - w);
 }
 
