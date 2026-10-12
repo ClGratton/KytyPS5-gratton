@@ -8897,7 +8897,11 @@ public:
               "GC discarded the current depth plane of a depth/stencil "
               "image");
 
-      constexpr size_t gc_depth_pair_count = 6;
+      // The collector's walk spends its ten-entry deletion budget on frees only: the stencil
+      // association entries of the LRU list are passed over without using it (textureGcPolicy.h),
+      // so twelve pairs leave exactly the last two alive.
+      constexpr size_t gc_depth_pair_count = 12;
+      constexpr size_t gc_depth_budget_frees = 10;
       constexpr uint64_t gc_depth_pair_offset = 0x350000;
       constexpr uint64_t gc_depth_pair_stride = 0x1000;
       std::array<ImageId, gc_depth_pair_count> gc_depth_images{};
@@ -8931,13 +8935,13 @@ public:
                               [](ImageId image) { return bool{image}; }) &&
               std::ranges::all_of(gc_stencil_images,
                                   [](ImageId image) { return bool{image}; }),
-          "failed to create six depth/stencil association pairs");
+          "failed to create twelve depth/stencil association pairs");
       TextureCacheTestAccess::ConfigureGarbageCollection(
           texture_cache, gc_depth_lru, 81, UINT64_MAX);
       texture_cache.RunGarbageCollector();
       bool gc_depth_budget = true;
       for (size_t index = 0; index < gc_depth_pair_count; index++) {
-        const bool expected_live = index == gc_depth_pair_count - 1;
+        const bool expected_live = index >= gc_depth_budget_frees;
         gc_depth_budget &=
             TextureCacheTestAccess::Contains(
                 texture_cache, gc_depth_images[index]) == expected_live &&
