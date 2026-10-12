@@ -610,6 +610,18 @@ int KYTY_SYSV_ABI KernelFcntl(int d, int command, int arg) {
 	}
 }
 
+// --debug-hle-trace: note the tail of the file name on the read being served, so a short read
+// in the trace can be matched to a file.
+static void NoteFileForTrace(const File* file) {
+	if (!Common::HleTrace::Enabled() || file == nullptr) {
+		return;
+	}
+	const auto name = Common::PathToString(file->real_name);
+	constexpr size_t keep = 58;
+	Common::HleTrace::NoteString(name.size() > keep ? name.c_str() + (name.size() - keep) :
+	                                                    name.c_str());
+}
+
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	PRINT_NAME();
 
@@ -672,6 +684,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
+	NoteFileForTrace(file);
 	LOGF("\tRead %u bytes from: %s\n", bytes_read, Common::PathToString(file->real_name).c_str());
 
 	return Common::HleTrace::Ret(bytes_read);
@@ -799,6 +812,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 		return Common::HleTrace::Ret(KERNEL_ERROR_EIO);
 	}
 
+	NoteFileForTrace(file);
 	LOGF("\tRead %u bytes (pos = %" PRId64 ") from: %s\n", bytes_read, offset,
 	     Common::PathToString(file->real_name).c_str());
 
