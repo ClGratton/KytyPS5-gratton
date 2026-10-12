@@ -1030,9 +1030,18 @@ uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 
 	const auto clamped_size = g_virtual_ranges->ClampRangeSize(vaddr, size);
 	if (clamped_size == 0) {
-		EXIT("Memory: attempted to access invalid address 0x%016" PRIx64 " with size 0x%016" PRIx64
-		     "\n",
-		     vaddr, size);
+		// A descriptor over memory the guest has released (a dispatch in a newly streamed area, or
+		// a stale descriptor the shader never reads): the caller binds a null buffer, which reads
+		// zero and drops writes. A shader that really accessed it would fault on the console.
+		static std::atomic<uint32_t> logged {0};
+		const auto                   count = logged.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count <= 32) {
+			std::printf("Memory: buffer range at an unmapped address bound as a null buffer, "
+			            "addr=0x%016" PRIx64 " size=0x%016" PRIx64 " (%" PRIu32 " so far)\n",
+			            vaddr, size, count);
+			std::fflush(stdout);
+		}
+		return 0;
 	}
 	if (clamped_size != size) {
 		LOGF("Memory: clamped buffer range addr=0x%016" PRIx64 " size=0x%016" PRIx64

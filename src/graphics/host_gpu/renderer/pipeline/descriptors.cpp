@@ -796,6 +796,10 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				}
 			}
 			size = Libs::LibKernel::Memory::ClampRangeSize(address, size);
+			if (size == 0) { // unmapped: bound as a null buffer
+				source = {};
+				continue;
+			}
 			source = {address, size, cache.FindBuffer(address, size)};
 		}
 	}

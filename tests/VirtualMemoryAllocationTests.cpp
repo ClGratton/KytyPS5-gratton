@@ -1278,6 +1278,21 @@ void TestWriteBackingToPartlyUnmappedAndPrivateMemory() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestClampRangeSizeOfUnmappedMemoryBindsNothing() {
+	const char*        test = "ClampRangeSizeOfUnmappedMemoryBindsNothing";
+	constexpr uint64_t page = SceKernelPageSize;
+	const auto         base = MapNamedFlexible(test, page * 2, SceKernelProtCpuRw, "clamp_range");
+	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page * 2) == page * 2,
+	      "a mapped range was clamped");
+	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base + page, page * 4) == page,
+	      "a range reaching past the mapping was not clamped to it");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base, page * 2), "KernelMunmap");
+	// A descriptor over released memory: no buffer (0), not an exit.
+	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page) == 0,
+	      "a range at an unmapped address did not return 0");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestRuntimeMemoryOwnerLifecycle() {
 	const char* test = "RuntimeMemoryOwnerLifecycle";
 	Check(test,
@@ -5030,6 +5045,7 @@ int main(int argc, char** argv) {
 	RunTest(TestFragmentedBackingUnmapRollback);
 	RunTest(TestRuntimeMemoryOwnerLifecycle);
 	RunTest(TestWriteBackingToPartlyUnmappedAndPrivateMemory);
+	RunTest(TestClampRangeSizeOfUnmappedMemoryBindsNothing);
 	RunTest(TestFlexibleMapQueryAndWholeMunmap);
 	RunTest(TestPartialFlexibleMunmapAndFindNext);
 	RunTest(TestReserveMapFixedAndNoOverwrite);
