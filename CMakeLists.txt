@@ -474,6 +474,11 @@ add_executable(drain_causes_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(drain_causes_tests PRIVATE ${inc_headers})
 
+add_executable(barrier_elision_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BarrierElisionTests.cpp"
+)
+target_include_directories(barrier_elision_tests PRIVATE ${inc_headers})
+
 add_executable(gc_clock_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GcClockTests.cpp"
 )
@@ -687,6 +692,7 @@ if(BUILD_TESTING)
 	add_test(NAME phase_timers COMMAND $<TARGET_FILE:phase_timers_tests>)
 	add_test(NAME submit_coalescer COMMAND $<TARGET_FILE:submit_coalescer_tests>)
 	add_test(NAME drain_causes COMMAND $<TARGET_FILE:drain_causes_tests>)
+	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
@@ -785,6 +791,7 @@ if(BUILD_TESTING)
 		phase_timers_tests
 		submit_coalescer_tests
 		drain_causes_tests
+		barrier_elision_tests
 		gc_clock_tests
 		sys_file_read_tests
 		async_pipeline_tests

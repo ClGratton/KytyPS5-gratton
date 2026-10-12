@@ -163,6 +163,9 @@ struct ConfigOptions {
 	uint32_t               submit_coalesce_max         = 16;
 	// 0 = derive from the vblank frequency (period / 8); otherwise microseconds.
 	uint32_t               submit_coalesce_us          = 0;
+	// --elide-barriers (K14): leave out a guest global barrier when nothing was recorded since the
+	// previous one in the same command buffer. Default off.
+	bool                   elide_barriers              = false;
 	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
@@ -218,6 +221,7 @@ bool              SubmitCoalesceEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
+bool              ElideBarriersEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

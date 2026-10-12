@@ -80,6 +80,10 @@ uint32_t GetSubmitCoalesceUs() {
 	return g_config->submit_coalesce_us;
 }
 
+bool ElideBarriersEnabled() {
+	return g_config->elide_barriers;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

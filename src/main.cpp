@@ -173,6 +173,9 @@ static void PrintUsage() {
 	         "                                       events: submit after --submit-coalesce-max events or\n"
 	         "                                       when the oldest is older than --submit-coalesce-us,\n"
 	         "                                       and at every drain or end of submission. Default: false.\n");
+	::printf("  --elide-barriers <true|false>        Leave out a guest cache-flush/partial-flush global memory\n"
+	         "                                       barrier when nothing was recorded since the previous\n"
+	         "                                       one in the same command buffer. Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -707,6 +710,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--submit-coalesce") {
 			if (!ParseBool(value, options.config.submit_coalesce)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--elide-barriers") {
+			if (!ParseBool(value, options.config.elide_barriers)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

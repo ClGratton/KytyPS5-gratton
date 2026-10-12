@@ -27,7 +27,12 @@ bool CommandBuffer::IsInvalid() const {
 
 vk::CommandBuffer CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	++m_recorded_work;
 	return m_buffer;
+}
+
+void CommandBuffer::AssertRecording() const {
+	EXIT_IF(IsInvalid());
 }
 
 void CommandBuffer::Begin() {
