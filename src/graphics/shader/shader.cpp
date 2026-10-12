@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
+#include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/speculation.h"
@@ -55,6 +56,15 @@ void ShaderInit() {
 	EXIT_IF(g_shader_map != nullptr);
 
 	g_shader_map = std::make_unique<std::unordered_map<uint64_t, ShaderMapEntry>>();
+	ShaderSetCleanGuestReader(
+	    [](void*, uint64_t vaddr, void* data, uint64_t size) {
+		    const bool clean = LibKernel::Memory::TryReadCleanBacking(vaddr, data, size);
+		    if (Config::CleanGuestReadsEnabled() && GuestGpu::IsGpuThread()) {
+			    Common::GpuPhase::NoteCleanRead(clean);
+		    }
+		    return clean;
+	    },
+	    nullptr);
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
@@ -352,7 +362,7 @@ static bool ReadVertexTableDwords(const uint32_t* source, uint32_t count, uint32
 		return LibKernel::Memory::TryReadBacking(reinterpret_cast<uint64_t>(source), out,
 		                                         static_cast<uint64_t>(count) * sizeof(uint32_t));
 	}
-	std::memcpy(out, source, static_cast<size_t>(count) * sizeof(uint32_t));
+	ShaderReadGuest(out, source, static_cast<size_t>(count) * sizeof(uint32_t));
 	return true;
 }
 
@@ -531,7 +541,15 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 			     shader_addr);
 			return false;
 		}
-		if (!ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer)) {
+		// The semantics live in the shader header in guest memory; copy them once per draw (clean
+		// when the renderer can prove their bytes current, see ShaderReadGuest).
+		std::array<ShaderSemantic, ShaderVertexInputInfo::RES_MAX> semantic_copy {};
+		EXIT_IF(metadata.input_semantics.size() > semantic_copy.size());
+		ShaderReadGuest(semantic_copy.data(), metadata.input_semantics.data(),
+		                metadata.input_semantics.size_bytes());
+		if (!ShaderApplyAttribSemantics(
+		        info, std::span<const ShaderSemantic> {semantic_copy.data(), metadata.input_semantics.size()},
+		        attrib, buffer)) {
 			return false;
 		}
 		ShaderDetectBuffers(info);

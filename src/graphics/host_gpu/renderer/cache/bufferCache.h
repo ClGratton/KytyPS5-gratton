@@ -93,6 +93,10 @@ public:
 	// caller is about to overwrite completely from the CPU. Refuses (false, nothing changed) when
 	// GPU-modified bytes outside the range share its tracking pages. GPU thread only.
 	[[nodiscard]] bool TryDiscardGpuModified(uint64_t vaddr, uint64_t size);
+	// Copies [vaddr, vaddr + size) from the guest backing when guest memory is authoritative for
+	// exactly those bytes: none is GPU-modified, and no GPU-modified image overlaps. Otherwise false
+	// and nothing is read. Never faults and never waits for the GPU. GPU thread only.
+	[[nodiscard]] bool TryReadCleanBytes(uint64_t vaddr, void* data, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();

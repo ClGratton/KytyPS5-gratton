@@ -314,6 +314,16 @@ bool BufferCache::TryDiscardGpuModified(uint64_t vaddr, uint64_t size) {
 	return true;
 }
 
+bool BufferCache::TryReadCleanBytes(uint64_t vaddr, void* data, uint64_t size) {
+	if (size == 0 || size > UINT64_MAX - vaddr || m_gpu_modified_ranges.Intersects(vaddr, size)) {
+		return false;
+	}
+	if (m_texture_cache.HasGpuModifiedImage(vaddr, size)) {
+		return false;
+	}
+	return Libs::LibKernel::Memory::TryReadBacking(vaddr, data, size);
+}
+
 void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");

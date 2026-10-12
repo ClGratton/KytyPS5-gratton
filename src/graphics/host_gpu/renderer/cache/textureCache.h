@@ -67,6 +67,9 @@ public:
 	[[nodiscard]] bool IsMeta(uint64_t address);
 	[[nodiscard]] bool IsMetaCleared(uint64_t address, uint32_t slice);
 	[[nodiscard]] bool ClearMeta(uint64_t address);
+	// True when a GPU-modified image overlaps [address, address + size), or when that cannot be
+	// told without waiting (the calling thread holds the cache lock). GPU thread.
+	[[nodiscard]] bool HasGpuModifiedImage(uint64_t address, uint64_t size);
 	[[nodiscard]] bool TouchMeta(uint64_t address, uint32_t slice, bool is_clear);
 
 	void UnmapMemory(uint64_t address, uint64_t size);

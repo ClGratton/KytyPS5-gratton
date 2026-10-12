@@ -1809,6 +1809,20 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	return true;
 }
 
+bool TextureCache::HasGpuModifiedImage(uint64_t address, uint64_t size) {
+	if (m_lock.HeldByCurrentThread()) {
+		return true;
+	}
+	std::scoped_lock lock {m_lock};
+	for (const auto id: FindImagesInRegion(address, size, true)) {
+		const auto* image = m_slot_images.try_get(id);
+		if (image != nullptr && image->IsGpuModified()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
 	if (!GuestRange {address, size}.Valid()) {
 		return;

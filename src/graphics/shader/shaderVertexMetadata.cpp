@@ -5,6 +5,28 @@
 
 namespace Libs::Graphics {
 
+namespace {
+ShaderCleanGuestReader g_clean_reader         = nullptr;
+void*                  g_clean_reader_context = nullptr;
+} // namespace
+
+void ShaderSetCleanGuestReader(ShaderCleanGuestReader reader, void* context) {
+	g_clean_reader_context = context;
+	g_clean_reader         = reader;
+}
+
+bool ShaderTryReadGuestClean(void* dst, const void* src, size_t size) {
+	return size != 0 && g_clean_reader != nullptr &&
+	       g_clean_reader(g_clean_reader_context, reinterpret_cast<uint64_t>(src), dst, size);
+}
+
+void ShaderReadGuest(void* dst, const void* src, size_t size) {
+	if (size == 0 || ShaderTryReadGuestClean(dst, src, size)) {
+		return;
+	}
+	std::memcpy(dst, src, size);
+}
+
 bool ShaderReadVertexMetadata(const ShaderMappedData& data, uint32_t max_user_sgprs,
                               ShaderVertexMetadata& metadata, std::string* error) {
 	if (data.user_data == nullptr) {
@@ -12,7 +34,7 @@ bool ShaderReadVertexMetadata(const ShaderMappedData& data, uint32_t max_user_sg
 	}
 
 	ShaderUserData user_data {};
-	std::memcpy(&user_data, data.user_data, sizeof(user_data));
+	ShaderReadGuest(&user_data, data.user_data, sizeof(user_data));
 
 	constexpr uint32_t DirectResourceCount =
 	    static_cast<uint32_t>(AgcDirectResourceType::Last) + 1u;
@@ -28,7 +50,7 @@ bool ShaderReadVertexMetadata(const ShaderMappedData& data, uint32_t max_user_sg
 		if (user_data.direct_resource_offset == nullptr) {
 			return ShaderError::Fail(error, "missing AGC direct-resource offsets");
 		}
-		std::memcpy(direct_offsets.data(), user_data.direct_resource_offset, direct_size);
+		ShaderReadGuest(direct_offsets.data(), user_data.direct_resource_offset, direct_size);
 	}
 
 	ShaderVertexMetadata next;

@@ -169,6 +169,9 @@ struct ConfigOptions {
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
 	// clear discovery needs no GPU->CPU readback for them. Default off.
 	bool                   known_fills                 = false;
+	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
+	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
+	bool                   clean_guest_reads           = false;
 	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
@@ -226,6 +229,7 @@ uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
+bool              CleanGuestReadsEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

@@ -88,6 +88,10 @@ bool KnownFillsEnabled() {
 	return g_config->known_fills;
 }
 
+bool CleanGuestReadsEnabled() {
+	return g_config->clean_guest_reads;
+}
+
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }

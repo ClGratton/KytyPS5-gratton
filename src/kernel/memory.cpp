@@ -962,6 +962,14 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return TryReadBacking(vaddr, data, size);
 }
 
+bool TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size) {
+	if (!Config::CleanGuestReadsEnabled() || g_gpu_resources == nullptr ||
+	    !Graphics::GuestGpu::IsGpuThread() || !IsGpuAddressRange(vaddr, size)) {
+		return false;
+	}
+	return GetGpuResources().GetBufferCache().TryReadCleanBytes(vaddr, data, size);
+}
+
 uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 	EXIT_IF(g_virtual_ranges == nullptr);
 
