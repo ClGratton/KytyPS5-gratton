@@ -16621,7 +16621,12 @@ public:
                     context.GetPipelineCache().Load().recorded_graphics == 2,
                 "the first draw of each graphics pipeline must store its variant");
         // Replay in a second cache: the guest "registers" the two binaries, the pipelines are
-        // built in the background, and the same draws find them ready.
+        // built in the background, and the same draws find them ready. (Part of the whole-suite
+        // run executes with async pipelines off; the replay needs the worker pool and is
+        // checked by the polygon-mode-only run.)
+        if (Config::GetAsyncPipelineMode() == Config::AsyncPipelineMode::Off) {
+          std::printf("[gpu]     %-32s record ok, replay skipped (async pipelines off here)\n", name);
+        } else {
         PipelineCache replay(context.GetGraphics());
         Require(name, "reopen graphics variant store",
                 replay.UseVariantStore(graphics_variants_path) &&
@@ -16670,6 +16675,7 @@ public:
                   replayed != nullptr && replayed->pipeline != nullptr &&
                       replay.Load().gfx_hit_ready + replay.Load().gfx_hit_inflight == before_hits + 1,
                   "the draw did not find the pipeline built from the stored variant");
+        }
         }
       }
 
