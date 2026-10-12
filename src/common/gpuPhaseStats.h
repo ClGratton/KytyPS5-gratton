@@ -64,6 +64,9 @@ enum class KnownFill : uint8_t { Hit, Readback, Discarded, DiscardRefused, Count
 void NoteKnownFill(KnownFill kind) noexcept;
 // --clean-guest-reads: a read served from the guest backing (clean) or by a plain load (direct).
 void NoteCleanRead(bool clean) noexcept;
+// --readback-queue: one second-queue readback; `flushed` the producer was still in the open
+// command buffer, `lag_ticks` how many submitted ticks lie between the producer and now.
+void NoteQueueReadback(bool flushed, uint64_t lag_ticks) noexcept;
 void NoteFrame() noexcept;
 [[nodiscard]] uint64_t Submits() noexcept;
 [[nodiscard]] uint64_t Frames() noexcept;

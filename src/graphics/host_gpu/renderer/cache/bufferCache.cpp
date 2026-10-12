@@ -279,6 +279,8 @@ bool BufferCache::ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_ti
 	Common::GpuPhase::NoteDrainFull(false);
 	Common::GpuPhase::Scope gpu_phase_drain(Common::GpuPhase::Phase::DrainTick);
 	const auto plan = PlanReadback(buffer_tick, m_address_write_tick, m_scheduler.CurrentTick());
+	Common::GpuPhase::NoteQueueReadback(plan.flush_first,
+	                                    m_scheduler.CurrentTick() - plan.wait_tick);
 	if (plan.flush_first) {
 		m_scheduler.Flush();
 	}

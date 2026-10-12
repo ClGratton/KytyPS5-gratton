@@ -56,6 +56,9 @@ std::atomic<uint64_t> g_submits {0};
 std::atomic<uint64_t> g_frames {0};
 std::atomic<uint64_t> g_barriers_emitted {0};
 std::atomic<uint64_t> g_barriers_elided {0};
+std::atomic<uint64_t> g_qr_calls {0};
+std::atomic<uint64_t> g_qr_flushed {0};
+std::atomic<uint64_t> g_qr_lag {0};
 std::atomic<uint64_t> g_clean_reads {0};
 std::atomic<uint64_t> g_direct_reads {0};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
@@ -253,6 +256,12 @@ void NoteCleanRead(bool clean) noexcept {
 	(clean ? g_clean_reads : g_direct_reads).fetch_add(1, std::memory_order_relaxed);
 }
 
+void NoteQueueReadback(bool flushed, uint64_t lag_ticks) noexcept {
+	g_qr_calls.fetch_add(1, std::memory_order_relaxed);
+	g_qr_flushed.fetch_add(flushed ? 1 : 0, std::memory_order_relaxed);
+	g_qr_lag.fetch_add(lag_ticks, std::memory_order_relaxed);
+}
+
 void NoteFrame() noexcept {
 	g_frames.fetch_add(1, std::memory_order_relaxed);
 }
@@ -367,6 +376,13 @@ void Report(detail::ThreadState& s, bool final_report) {
 		line += fmt::format("clean guest reads (total): clean={} direct={}\n",
 		                    g_clean_reads.load(std::memory_order_relaxed),
 		                    g_direct_reads.load(std::memory_order_relaxed));
+	}
+	if (g_qr_calls.load(std::memory_order_relaxed) != 0) {
+		const auto calls = g_qr_calls.load(std::memory_order_relaxed);
+		line += fmt::format("queue readbacks (total): {} flushed_first={} mean_producer_lag={:.1f} ticks\n",
+		                    calls, g_qr_flushed.load(std::memory_order_relaxed),
+		                    static_cast<double>(g_qr_lag.load(std::memory_order_relaxed)) /
+		                        static_cast<double>(calls));
 	}
 	line += fmt::format("guest barriers: emitted={} ({:.1f}/frame) elided={} ({:.1f}/frame)\n",
 	                    barrier_emit_d,
