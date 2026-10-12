@@ -538,6 +538,45 @@ public:
 		return clamped_size;
 	}
 
+	struct Part {
+		uint64_t address        = 0;
+		uint64_t size           = 0;
+		bool     private_memory = false; // stacks, code, runtime memory: no backing view
+		int      protection     = 0;     // of the range it came from
+	};
+	// The committed parts of [virtual_addr, virtual_addr + size), in order; adjacent parts of a
+	// kind (and, for private memory, of one protection) are merged.
+	void CommittedParts(uint64_t virtual_addr, uint64_t size, std::vector<Part>* out) {
+		out->clear();
+		if (size == 0 || size > UINT64_MAX - virtual_addr) {
+			return;
+		}
+		const auto        end = virtual_addr + size;
+		Common::LockGuard lock(m_mutex);
+		auto              range = std::upper_bound(
+            m_ranges.begin(), m_ranges.end(), virtual_addr,
+            [](uint64_t value, const Range& r) { return value < r.start; });
+		if (range != m_ranges.begin()) {
+			--range;
+		}
+		for (; range != m_ranges.end() && range->start < end; ++range) {
+			const auto range_end = End(range->start, range->size);
+			if (range_end <= virtual_addr || !IsCommittedRangeType(range->type)) {
+				continue;
+			}
+			const auto begin          = std::max(range->start, virtual_addr);
+			const auto finish         = std::min(range_end, end);
+			const bool private_memory = IsPrivateCommittedRangeType(range->type);
+			if (!out->empty() && out->back().address + out->back().size == begin &&
+			    out->back().private_memory == private_memory &&
+			    (!private_memory || out->back().protection == range->protection)) {
+				out->back().size += finish - begin;
+			} else {
+				out->push_back({begin, finish - begin, private_memory, range->protection});
+			}
+		}
+	}
+
 	uint64_t CountPageTableEntries(bool gpu) {
 		Common::LockGuard lock(m_mutex);
 
@@ -1003,11 +1042,81 @@ uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 	return clamped_size;
 }
 
+bool IsFullyMapped(uint64_t vaddr, uint64_t size) {
+	return g_virtual_ranges == nullptr || g_virtual_ranges->ClampRangeSize(vaddr, size) == size;
+}
+
+void MappedParts(uint64_t vaddr, uint64_t size, std::vector<std::pair<uint64_t, uint64_t>>* parts) {
+	parts->clear();
+	if (g_virtual_ranges == nullptr) {
+		parts->emplace_back(vaddr, size);
+		return;
+	}
+	std::vector<VirtualRanges::Part> committed;
+	g_virtual_ranges->CommittedParts(vaddr, size, &committed);
+	for (const auto& part: committed) {
+		if (!parts->empty() && parts->back().first + parts->back().second == part.address) {
+			parts->back().second += part.size;
+		} else {
+			parts->emplace_back(part.address, part.size);
+		}
+	}
+}
+
+// Private memory has no backing view: it is written at its own address, each page made writable
+// for the copy (and executable: it may be code another thread runs) and given its protection back.
+static bool WritePrivate(uint64_t vaddr, const uint8_t* data, uint64_t size, int protection) {
+	constexpr uint64_t PageSize = 0x1000;
+	VirtualMemory::Mode mode    = VirtualMemory::Mode::NoAccess;
+	GpuAccessMode       gpu     = GpuAccessMode::NoAccess;
+	if (!DecodeMemoryProtection(protection, &mode, &gpu)) {
+		return false;
+	}
+	for (uint64_t at = vaddr, end = vaddr + size; at < end;) {
+		const auto next = std::min((at & ~(PageSize - 1)) + PageSize, end);
+		if (!g_guest_address_space->Protect(at, next - at, VirtualMemory::Mode::ExecuteReadWrite)) {
+			return false;
+		}
+		std::memcpy(reinterpret_cast<void*>(at), data + (at - vaddr), next - at);
+		if (mode != VirtualMemory::Mode::ExecuteReadWrite) {
+			(void)g_guest_address_space->Protect(at, next - at, mode);
+		}
+		at = next;
+	}
+	return true;
+}
+
 void WriteBacking(uint64_t vaddr, const void* data, uint64_t size) noexcept {
-	if (!TryWriteBacking(vaddr, data, size)) {
-		EXIT("Memory: required direct-backing write failed, addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 "\n",
-		     vaddr, size);
+	if (TryWriteBacking(vaddr, data, size)) {
+		return;
+	}
+	// GPU results (readbacks, downloads) the backing view does not take whole. Private memory (a
+	// thread's stack or TLS: a game can have the GPU write a fence or a result into a stack
+	// variable) is written at its own address and backed parts through the backing. What the guest
+	// unmapped meanwhile has nowhere to go: that part of the data is dropped, with a log line.
+	std::vector<VirtualRanges::Part> parts;
+	if (g_virtual_ranges != nullptr) {
+		g_virtual_ranges->CommittedParts(vaddr, size, &parts);
+	}
+	uint64_t written = 0;
+	for (const auto& part: parts) {
+		const auto* source = static_cast<const uint8_t*>(data) + (part.address - vaddr);
+		if (part.private_memory ? WritePrivate(part.address, source, part.size, part.protection)
+		                        : TryWriteBacking(part.address, source, part.size)) {
+			written += part.size;
+		}
+	}
+	if (written == size) {
+		return;
+	}
+	static std::atomic<uint32_t> dropped_writes {0};
+	const auto                   count = dropped_writes.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (count <= 64) {
+		std::printf("Memory: GPU data for guest memory dropped, addr=0x%016" PRIx64
+		            " size=0x%" PRIx64 " (0x%" PRIx64 " bytes written; %zu committed parts, %" PRIu32
+		            " drops so far) caller=%p\n",
+		            vaddr, size, written, parts.size(), count, __builtin_return_address(0));
+		std::fflush(stdout);
 	}
 }
 

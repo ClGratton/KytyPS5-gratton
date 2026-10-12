@@ -1235,6 +1235,49 @@ void TestFragmentedBackingUnmapRollback() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestWriteBackingToPartlyUnmappedAndPrivateMemory() {
+	const char*        test = "WriteBackingToPartlyUnmappedAndPrivateMemory";
+	constexpr uint64_t page = SceKernelPageSize;
+	std::vector<uint8_t> pattern(page * 3);
+	for (size_t i = 0; i < pattern.size(); i++) {
+		pattern[i] = static_cast<uint8_t>(i * 13u + 5u);
+	}
+
+	// GPU results for memory the guest unmapped meanwhile: the mapped parts are written, the rest
+	// is dropped; it must not end the emulator.
+	const auto base = MapNamedFlexible(test, page * 3, SceKernelProtCpuRw, "writeback_partial");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + page, page), "KernelMunmap(middle)");
+	Check(test, !Libs::LibKernel::Memory::IsFullyMapped(base, page * 3) &&
+	                Libs::LibKernel::Memory::IsFullyMapped(base, page),
+	      "IsFullyMapped does not see the hole");
+	std::vector<std::pair<uint64_t, uint64_t>> parts;
+	Libs::LibKernel::Memory::MappedParts(base, page * 3, &parts);
+	Check(test, parts.size() == 2 && parts[0] == std::pair<uint64_t, uint64_t> {base, page} &&
+	                parts[1] == std::pair<uint64_t, uint64_t> {base + page * 2, page},
+	      "MappedParts does not return the two mapped pages");
+	Libs::LibKernel::Memory::WriteBacking(base, pattern.data(), pattern.size());
+	Check(test, std::memcmp(reinterpret_cast<void*>(base), pattern.data(), page) == 0 &&
+	                std::memcmp(reinterpret_cast<void*>(base + page * 2),
+	                            pattern.data() + page * 2, page) == 0,
+	      "the mapped parts did not receive the GPU data");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base, page), "KernelMunmap(left)");
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + page * 2, page),
+	        "KernelMunmap(right)");
+
+	// Private memory (stacks, TLS, runtime memory) has no backing view; a game can have the GPU
+	// write a fence or a result into it. It is written at its own address, and keeps its protection.
+	const auto runtime = Libs::LibKernel::Memory::AllocateRuntimeMemory(
+	    0, page * 2, Common::VirtualMemory::Mode::Read, "writeback_runtime");
+	Check(test, runtime != 0, "runtime allocation failed");
+	Libs::LibKernel::Memory::WriteBacking(runtime + 16, pattern.data(), 64);
+	Check(test, Libs::LibKernel::Memory::ProtectGuestMemory(runtime, page,
+	                                                        Common::VirtualMemory::Mode::ReadWrite) &&
+	                std::memcmp(reinterpret_cast<void*>(runtime + 16), pattern.data(), 64) == 0,
+	      "GPU data for private memory was not written");
+	Check(test, Libs::LibKernel::Memory::FreeGuestMemory(runtime, page * 2), "runtime free failed");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestRuntimeMemoryOwnerLifecycle() {
 	const char* test = "RuntimeMemoryOwnerLifecycle";
 	Check(test,
@@ -4986,6 +5029,7 @@ int main(int argc, char** argv) {
 	RunTest(TestMainEntryUsesGuestStackAndDisablesHostChecks);
 	RunTest(TestFragmentedBackingUnmapRollback);
 	RunTest(TestRuntimeMemoryOwnerLifecycle);
+	RunTest(TestWriteBackingToPartlyUnmappedAndPrivateMemory);
 	RunTest(TestFlexibleMapQueryAndWholeMunmap);
 	RunTest(TestPartialFlexibleMunmapAndFindNext);
 	RunTest(TestReserveMapFixedAndNoOverwrite);
