@@ -110,6 +110,9 @@ struct ConfigOptions {
 	// --debug-hang-watchdog <seconds>: write a thread/pool/lookahead state report when no frame
 	// was presented for that long (common/hangWatchdog.h). 0 = off.
 	uint32_t               hang_watchdog_seconds       = 0;
+	// --debug-hle-trace: keep a per-thread ring of the last HLE calls and print it in the fatal
+	// fault report (common/hleTrace.h). Default off.
+	bool                   hle_trace                   = false;
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
 	// bit 2 = programs only (do not request pipelines).
