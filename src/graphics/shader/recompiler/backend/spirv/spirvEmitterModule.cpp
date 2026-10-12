@@ -571,6 +571,13 @@ void DefineInputs(EmitterState& state) {
 			                            builtin);
 		}
 	}
+	if (state.program.stage == ShaderType::Pixel && state.program.info.subgroup_ballot) {
+		const auto variable = DefineInterfaceVariable(state, TypeBool(state), spv::StorageClassInput,
+		                                              "gl_HelperInvocation");
+		state.helper_invocation_variable = variable;
+		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn,
+		                            spv::BuiltInHelperInvocation);
+	}
 	if (state.program.info.subgroup_local_invocation_id) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");

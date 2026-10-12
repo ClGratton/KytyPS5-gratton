@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "common/loopGuard.h"
+
 namespace Config {
 
 void Initialize();
@@ -165,6 +167,20 @@ struct ConfigOptions {
 	// --debug-hang-watchdog <seconds>: write a thread/pool/lookahead state report when no frame
 	// was presented for that long (common/hangWatchdog.h). 0 = off.
 	uint32_t               hang_watchdog_seconds       = 0;
+	// --debug-gpu-ops <off|ring|checkpoints>: 0 off, 1 host-side ring of the last draws and
+	// dispatches (printed when the GPU stops answering), 2 plus VK_NV_device_diagnostic_checkpoints.
+	uint32_t               gpu_ops_mode                = 0;
+	// --shader-loop-limit <N>: every shader invocation gets N loop-header executions (all loops
+	// together); when they are used up the loops are left and the shader is reported loudly. A
+	// guard against a GPU hang from a loop that never ends because of an emulation bug (see
+	// common/loopGuard.h). On by default; 0 = off.
+	uint32_t               shader_loop_limit           = Common::LoopGuard::DefaultLimit;
+	// --debug-dump-shader <hex[,hex...]>: write the SPIR-V and the guest binary of just these shader
+	// hashes (as printed by --debug-gpu-ops) to --shader-log-folder, without --graphics-debug-dump.
+	std::vector<uint64_t>  debug_dump_shaders;
+	// --debug-hle-trace: keep a per-thread ring of the last HLE calls and print it in the fatal
+	// fault report (common/hleTrace.h). Default off.
+	bool                   hle_trace                   = false;
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
 	// bit 2 = programs only (do not request pipelines).
@@ -303,6 +319,9 @@ bool              GetPipelinesUnoptimizedFirst();
 bool              GetPrecompileOnLoad();
 bool              GetPipelineVariantsReplay();
 uint32_t          GetPipelineLookaheadKinds();
+uint32_t          GetGpuOpsMode();
+uint32_t          GetShaderLoopLimit();
+bool              DebugDumpShaderMatches(uint64_t shader_hash);
 bool              GetLookaheadVerify();
 bool              TextureGcEnabled();
 bool              TextureGcLog();

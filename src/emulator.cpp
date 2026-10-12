@@ -221,6 +221,7 @@ void Run(const RunOptions& options) {
 
 	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
 	Libs::InitAll(rt->Symbols());
+	rt->Symbols()->WrapFunctionsForTrace();
 
 	LoadElf(options.elf);
 

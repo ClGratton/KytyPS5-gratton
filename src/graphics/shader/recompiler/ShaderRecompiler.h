@@ -29,6 +29,8 @@ struct CompileOptions {
 	ShaderStageInputInfo        input_info;
 	// Storage-buffer accesses the emitter leaves to robustBufferAccess2 (--spirv-robust-bounds).
 	RobustBufferPolicy          robust_buffers;
+	// --shader-loop-limit: see EmitterState::loop_limit. 0 = off.
+	uint32_t                    loop_limit      = 0;
 };
 
 struct TranslateResult {

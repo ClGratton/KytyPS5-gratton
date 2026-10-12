@@ -8115,6 +8115,80 @@ void TestNewShaderRecompilerCfgLoopBreakContinue() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+// --shader-loop-limit: the loop's exit edges also leave once the invocation's budget of loop-header
+// executions is spent, so a loop over corrupt data (a linked list with a cycle) cannot hang the GPU.
+// Off by default: with limit 0 the SPIR-V must not change at all.
+void TestShaderLoopLimitGuard() {
+  const uint32_t shader[] = {
+      EncodeSMovB32(0, 128),       // s0 = 0
+      EncodeSopc(0x0a, 0, 129),    // s_cmp_lt_u32 s0, 1
+      EncodeSopp(0x04, 2),         // break when scc == 0
+      EncodeSop2(0x00, 0, 0, 129), // s_add_u32 s0, s0, 1
+      EncodeSopp(0x02, 0xfffcu),   // continue/backedge
+      0xbf810000u,
+  };
+
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.dump_ir = true;
+  const auto plain = RecompileForTest(shader, options);
+  options.loop_limit = 0;
+  const auto off = RecompileForTest(shader, options);
+  Check(plain.spirv == off.spirv, "loop limit 0 changed the SPIR-V");
+  Check(DisassembleSpirvBinary(plain.spirv).find("loop_budget") == std::string::npos,
+        "an unguarded shader has a loop budget");
+
+  options.loop_limit = 77;
+  const auto guarded = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(guarded.spirv);
+  const auto text = DisassembleSpirvBinary(guarded.spirv);
+  Check(text.find("loop_budget") != std::string::npos, "a guarded loop has no loop budget variable");
+  Check(text.find("OpConstant %uint 77") != std::string::npos, "the budget does not start at the limit");
+  // A guarded shader reports what it used through the host tail of the GDS buffer, so it binds GDS
+  // even if it never touched it, and records its use at the return.
+  Check(guarded.program.bindings.descriptor_counts[static_cast<size_t>(
+            ShaderRecompiler::IR::DescriptorBindingKind::Gds)] == 1u,
+        "a guarded shader does not bind the GDS buffer for its reports");
+  Check(plain.program.bindings.descriptor_counts[static_cast<size_t>(
+            ShaderRecompiler::IR::DescriptorBindingKind::Gds)] == 0u,
+        "an unguarded shader binds GDS");
+  Check(text.find("OpAtomicUMax") != std::string::npos, "a guarded shader does not report its use");
+  Check(SpirvInstructionOpcodeCount(guarded.spirv, 246) == SpirvInstructionOpcodeCount(plain.spirv, 246),
+        "the guard changed the number of loops");
+  // The header spends one unit (load, compare, subtract, select, store) and the exit edge reads the
+  // budget again: more loads and logical operations than the plain loop.
+  Check(SpirvInstructionOpcodeCount(guarded.spirv, 61) > SpirvInstructionOpcodeCount(plain.spirv, 61),
+        "the guarded loop does not read its budget");
+  Check(SpirvInstructionOpcodeCount(guarded.spirv, 166) + SpirvInstructionOpcodeCount(guarded.spirv, 167) >
+            SpirvInstructionOpcodeCount(plain.spirv, 166) + SpirvInstructionOpcodeCount(plain.spirv, 167),
+        "the exit condition does not include the spent budget");
+
+  // Nested loops share one budget and still validate (structured control flow is untouched).
+  const uint32_t nested[] = {
+      EncodeSopc(0x0a, 0, 129),    // outer loop: s_cmp_lt_u32 s0, 1
+      EncodeSopp(0x04, 6),         // outer exit -> end
+      EncodeSopc(0x0a, 1, 129),    // inner loop: s_cmp_lt_u32 s1, 1
+      EncodeSopp(0x04, 2),         // inner exit -> outer continue
+      EncodeSMovB32(2, 129),       // inner work
+      EncodeSopp(0x02, 0xfffcu),   // inner backedge
+      EncodeSop2(0x00, 0, 0, 129), // outer continue: s_add_u32 s0, s0, 1
+      EncodeSopp(0x02, 0xfff8u),   // outer backedge
+      0xbf810000u,
+  };
+  const auto nested_plain = [&] {
+    auto o = MakeCompileOptions(ShaderType::Compute);
+    return RecompileForTest(nested, o);
+  }();
+  options.loop_limit = 5;
+  const auto nested_guarded = RecompileForTest(nested, options);
+  CheckSpirvBinaryValidates(nested_guarded.spirv);
+  Check(SpirvInstructionOpcodeCount(nested_guarded.spirv, 246) >= 2 &&
+            SpirvInstructionOpcodeCount(nested_guarded.spirv, 246) ==
+                SpirvInstructionOpcodeCount(nested_plain.spirv, 246),
+        "nested loops lost a loop under the guard");
+  const auto nested_text = DisassembleSpirvBinary(nested_guarded.spirv);
+  Check(nested_text.find("loop_budget") != std::string::npos, "nested guarded loops have no budget");
+}
+
 void TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured() {
   const uint32_t shader[] = {
       EncodeSMovB32(0, 128), // preheader: s0 = 0
@@ -13484,6 +13558,62 @@ void TestNewShaderRecompilerPerInvocationMasksWithoutMirrors() {
         "ballot");
 }
 
+// Fragment helper invocations (quad padding) are active in a host subgroup ballot, but the host
+// drops their stores and atomics. A guest wave-aggregated append (ballot popcount, first lane does
+// the atomic, rank = bits below) that counted them gave the atomic to a helper lane whenever it was
+// the lowest lane, so the counter did not advance and every lane of the subgroup got the same stale
+// base: duplicate list nodes, cycles in a per-pixel linked list, a compute loop that never ends
+// (NVRM Xid 109 at a level load). Pixel-shader ballots now exclude helpers. Ported from
+// Jean-Philippe's KytyPS5#761 (as carried by BryanKAdams/BryKytyPS5 5b0479adb).
+void TestPixelBallotExcludesHelperInvocations() {
+  const uint32_t shader[] = {
+      EncodeVopc(0xc1, 5 + 256, 8),    // v_cmp_lt_u32 vcc, v5, v8
+      EncodeSop2(0x0f, 2, 126, 106),   // s_and_b64 s[2:3], exec, vcc
+      EncodeSop1(0x0a, 4, 2),          // s_wqm_b64 s[4:5], s[2:3]
+      EncodeVop1(0x01, 0, 4),          // v_mov_b32 v0, s4
+      EncodeExp0(0x00, 0x1), EncodeExp1(0, 0, 0, 0),
+      EncodeSopp(0x01),
+  };
+  auto options = MakeCompileOptions(ShaderType::Pixel);
+  const auto pixel = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(pixel.spirv);
+  const auto pixel_source = DisassembleSpirvBinary(pixel.spirv);
+  Check(pixel_source.find("OpGroupNonUniformBallot") != std::string::npos,
+        "the pixel fixture has no subgroup ballot");
+  Check(pixel_source.find("BuiltIn HelperInvocation") != std::string::npos,
+        "a pixel shader with a ballot does not read gl_HelperInvocation");
+  Check(pixel_source.find("OpLoad %bool %gl_HelperInvocation") != std::string::npos,
+        "the ballot does not load gl_HelperInvocation");
+  Check(pixel_source.find("OpLogicalNot %bool") != std::string::npos,
+        "the ballot predicate does not exclude helper invocations");
+
+  // Only pixel shaders have helper invocations.
+  const uint32_t vertex_shader[] = {
+      EncodeVopc(0xc1, 5 + 256, 8),  // v_cmp_lt_u32 vcc, v5, v8
+      EncodeSop2(0x0f, 2, 126, 106), // s_and_b64 s[2:3], exec, vcc
+      EncodeSop1(0x0a, 4, 2),        // s_wqm_b64 s[4:5], s[2:3]
+      EncodeVop1(0x01, 0, 4),        // v_mov_b32 v0, s4
+      EncodeExp0(0x0c, 0xf), EncodeExp1(0, 1, 2, 3), // POS0
+      EncodeSopp(0x01),
+  };
+  auto vertex_options = MakeCompileOptions(ShaderType::Vertex);
+  const auto vertex = RecompileForTest(vertex_shader, vertex_options);
+  CheckSpirvBinaryValidates(vertex.spirv);
+  Check(DisassembleSpirvBinary(vertex.spirv).find("HelperInvocation") == std::string::npos,
+        "a vertex shader reads gl_HelperInvocation");
+
+  // A pixel shader without ballots does not pay for the input.
+  const uint32_t plain_shader[] = {
+      EncodeVop1(0x01, 0, 242), // v_mov_b32 v0, 1.0
+      EncodeExp0(0x00, 0x1), EncodeExp1(0, 0, 0, 0),
+      EncodeSopp(0x01),
+  };
+  const auto plain = RecompileForTest(plain_shader, options);
+  CheckSpirvBinaryValidates(plain.spirv);
+  Check(DisassembleSpirvBinary(plain.spirv).find("HelperInvocation") == std::string::npos,
+        "a pixel shader without ballots reads gl_HelperInvocation");
+}
+
 void TestNewShaderRecompilerPerInvocationU64Complement() {
   const uint32_t shader[] = {
       EncodeVop1(0x01, 0, 0),        // v_mov_b32 v0, s0
@@ -16083,6 +16213,7 @@ int main() {
   TestNewShaderRecompilerCfgTerminalExitMergePS();
   TestNewShaderRecompilerCfgPostEndTargetMergePS();
   TestNewShaderRecompilerCfgLoopBreakContinue();
+  TestShaderLoopLimitGuard();
   TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured();
   TestNewShaderRecompilerCfgLoopHeaderBufferLoadStructured();
   TestNewShaderRecompilerCfgLoopHeaderDsAppendConsumeStructured();
@@ -16169,6 +16300,7 @@ int main() {
   TestNewShaderRecompilerVertexExportUsesInvocationExecMask();
   TestNewShaderRecompilerPerInvocationMasksWithoutMirrors();
   TestNewShaderRecompilerPerInvocationU64Complement();
+  TestPixelBallotExcludesHelperInvocations();
   TestNewShaderRecompilerExpPixelOutputs();
   TestRenderTargetReverseExportMapping();
   TestBlendMappingClassification();

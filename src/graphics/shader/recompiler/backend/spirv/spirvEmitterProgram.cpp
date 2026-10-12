@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 
+#include "common/loopGuard.h"
 #include <algorithm>
 #include <cstdio>
 #include <bit>
@@ -84,13 +85,73 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 	}
 }
 
+// Loop guard report (see common/loopGuard.h): an invocation that used a large share of its budget
+// records how much into this shader's slot of the GDS host tail (atomic max), so the host can log
+// the high-water mark and, loudly, a trip. Emitted at every return; a return has no successors, so
+// the extra blocks need no phi patching.
+void EmitLoopGuardReport(EmitterState& state) {
+	if (state.loop_budget_variable == 0 || state.gds_variable == 0) {
+		return;
+	}
+	auto&      builder = state.builder;
+	const auto budget  = builder.AllocateId();
+	builder.AddFunction(spv::OpLoad, TypeU32(state), budget, state.loop_budget_variable);
+	const auto used = builder.AllocateId();
+	builder.AddFunction(spv::OpISub, TypeU32(state), used, ConstantU32(state, state.loop_limit),
+	                    budget);
+	const auto heavy = builder.AllocateId();
+	builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), heavy, used,
+	                    ConstantU32(state, Common::LoopGuard::ReportThreshold(state.loop_limit)));
+	const auto report = builder.AllocateId();
+	const auto merge  = builder.AllocateId();
+	builder.AddFunction(spv::OpSelectionMerge, merge, spv::SelectionControlMaskNone);
+	builder.AddFunction(spv::OpBranchConditional, heavy, report, merge);
+	EmitLabel(state, report);
+	const auto slot_pointer = builder.AllocateId();
+	builder.AddFunction(spv::OpAccessChain,
+	                    TypePointer(state, spv::StorageClassStorageBuffer, TypeU32(state)),
+	                    slot_pointer, state.gds_variable, ConstantU32(state, 0),
+	                    ConstantU32(state, Common::LoopGuard::FirstDword +
+	                                           Common::LoopGuard::SlotFor(state.program.shader_hash)));
+	const auto old = builder.AllocateId();
+	builder.AddFunction(spv::OpAtomicUMax, TypeU32(state), old, slot_pointer,
+	                    ConstantU32(state, spv::ScopeDevice),
+	                    ConstantU32(state, spv::MemorySemanticsMaskNone), used);
+	builder.AddFunction(spv::OpBranch, merge);
+	EmitLabel(state, merge);
+}
+
 void EmitReturn(ValueEmitContext& ctx) {
 	EmitKillIfPixelValidMaskInactive(ctx.state);
+	EmitLoopGuardReport(ctx.state);
 	ctx.state.builder.AddFunction(spv::OpReturn);
+}
+
+// Loop-limit guard (see EmitterState::loop_limit): spends one unit of the invocation's budget at
+// the loop header and records the "budget spent" flag for the loop's merge block.
+void EmitLoopBudgetCheck(EmitterState& state, const IR::Block* block) {
+	const auto& term = block->terminator;
+	if (state.loop_budget_variable == 0 || !term.loop_header || term.merge_block == nullptr ||
+	    term.continue_block == nullptr) {
+		return;
+	}
+	auto&      builder = state.builder;
+	const auto budget  = builder.AllocateId();
+	builder.AddFunction(spv::OpLoad, TypeU32(state), budget, state.loop_budget_variable);
+	const auto spent = builder.AllocateId();
+	builder.AddFunction(spv::OpIEqual, TypeBool(state), spent, budget, ConstantU32(state, 0));
+	const auto decremented = builder.AllocateId();
+	builder.AddFunction(spv::OpISub, TypeU32(state), decremented, budget, ConstantU32(state, 1));
+	const auto next = builder.AllocateId();
+	builder.AddFunction(spv::OpSelect, TypeU32(state), next, spent, ConstantU32(state, 0),
+	                    decremented);
+	builder.AddFunction(spv::OpStore, state.loop_budget_variable, next);
+	state.loop_merges.insert(term.merge_block);
 }
 
 void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block) {
 	const auto& term       = block->terminator;
+	EmitLoopBudgetCheck(ctx.state, block);
 	const auto  emit_merge = [&]() {
 		if (term.loop_header) {
 			const auto* merge = term.merge_block;
@@ -124,7 +185,36 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block) {
 				EmitReturn(ctx);
 				return;
 			}
-			const auto condition = ctx.Def(block->condition);
+			auto condition = ctx.Def(block->condition);
+			if (!ctx.state.loop_merges.empty()) {
+				// An exit edge of a guarded loop is taken as soon as the budget is spent (read at
+				// the branch, so no SSA value has to dominate it).
+				auto&      builder = ctx.state.builder;
+				const auto spent_flag = [&]() {
+					const auto budget = builder.AllocateId();
+					builder.AddFunction(spv::OpLoad, TypeU32(ctx.state), budget,
+					                    ctx.state.loop_budget_variable);
+					const auto spent = builder.AllocateId();
+					builder.AddFunction(spv::OpIEqual, TypeBool(ctx.state), spent, budget,
+					                    ConstantU32(ctx.state, 0));
+					return spent;
+				};
+				if (ctx.state.loop_merges.count(true_block) != 0) {
+					const auto spent  = spent_flag();
+					const auto forced = builder.AllocateId();
+					builder.AddFunction(spv::OpLogicalOr, TypeBool(ctx.state), forced, condition,
+					                    spent);
+					condition = forced;
+				} else if (ctx.state.loop_merges.count(false_block) != 0) {
+					const auto spent      = spent_flag();
+					const auto keep_going = builder.AllocateId();
+					builder.AddFunction(spv::OpLogicalNot, TypeBool(ctx.state), keep_going, spent);
+					const auto forced = builder.AllocateId();
+					builder.AddFunction(spv::OpLogicalAnd, TypeBool(ctx.state), forced, condition,
+					                    keep_going);
+					condition = forced;
+				}
+			}
 			emit_merge();
 			ctx.state.builder.AddFunction(spv::OpBranchConditional, condition,
 			                              true_block->Definition(), false_block->Definition());
@@ -460,10 +550,27 @@ uint32_t ValueEmitContext::HalfArg(const IR::Inst& inst, size_t index, uint32_t 
 uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	const auto ballot_type = TypeU32Vector(state, 4);
 	const auto scope       = ConstantU32(state, spv::ScopeSubgroup);
-	const auto low         = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, low, scope,
-	                          other_half == nullptr || half == 0 ? Def(predicate)
-	                                                             : other_half->Def(predicate));
+	// Fragment helper invocations are not guest lanes that execute memory operations: the host
+	// drops their stores and atomics. A guest ballot (an append counter's lane count and first
+	// lane, a rank among the lanes below) that counted them would hand the atomic to a helper
+	// lane and every lane the same stale base index. Leave them out.
+	const auto live = [&](uint32_t value) {
+		if (state.helper_invocation_variable == 0) {
+			return value;
+		}
+		const auto helper = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeBool(state), helper,
+		                          state.helper_invocation_variable);
+		const auto not_helper = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), not_helper, helper);
+		const auto masked = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), masked, value, not_helper);
+		return masked;
+	};
+	const auto low = state.builder.AllocateId();
+	state.builder.AddFunction(
+	    spv::OpGroupNonUniformBallot, ballot_type, low, scope,
+	    live(other_half == nullptr || half == 0 ? Def(predicate) : other_half->Def(predicate)));
 	if (other_half == nullptr) {
 		return low;
 	}
@@ -472,7 +579,7 @@ uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	const auto high_word = state.builder.AllocateId();
 	const auto ballot    = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, high, scope,
-	                          half == 1 ? Def(predicate) : other_half->Def(predicate));
+	                          live(half == 1 ? Def(predicate) : other_half->Def(predicate)));
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low_word, low, 0);
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high_word, high, 0);
 	state.builder.AddFunction(spv::OpCompositeConstruct, ballot_type, ballot, low_word, high_word,
@@ -603,6 +710,11 @@ void EmitProgram(EmitterState& state) {
 		state.pixel_valid_mask_variable = state.builder.AllocateId();
 		state.builder.AddName(state.pixel_valid_mask_variable, "pixel_valid_mask_active");
 	}
+	state.loop_merges.clear();
+	if (state.loop_limit != 0 && state.gds_variable != 0 && ProgramHasGuardableLoop(program)) {
+		state.loop_budget_variable = state.builder.AllocateId();
+		state.builder.AddName(state.loop_budget_variable, "loop_budget");
+	}
 	for (const auto* block: program.blocks) {
 		// Re-emission may use a different host subgroup width and ID allocation order.
 		for (const auto& inst: *block) {
@@ -717,6 +829,11 @@ void EmitProgram(EmitterState& state) {
 		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
 		                          state.pixel_valid_mask_variable, spv::StorageClassFunction);
 	}
+	if (state.loop_budget_variable != 0) {
+		state.builder.AddFunction(spv::OpVariable,
+		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+		                          state.loop_budget_variable, spv::StorageClassFunction);
+	}
 	for (uint32_t half = 0; half < state.lane_count; half++) {
 		auto& lane = half == 0 ? ctx : high;
 		if (state.program.dispatcher_fallback) {
@@ -745,6 +862,10 @@ void EmitProgram(EmitterState& state) {
 	if (state.pixel_valid_mask_variable != 0) {
 		state.builder.AddFunction(spv::OpStore, state.pixel_valid_mask_variable,
 		                          ConstantU32(state, 1));
+	}
+	if (state.loop_budget_variable != 0) {
+		state.builder.AddFunction(spv::OpStore, state.loop_budget_variable,
+		                          ConstantU32(state, state.loop_limit));
 	}
 	if (state.lds_storage_class == spv::StorageClassStorageBuffer && state.lds_variable != 0) {
 		const auto group_x = EmitInputComponentU32(state, IR::StageInputKind::WorkgroupId, 0);

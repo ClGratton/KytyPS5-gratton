@@ -520,6 +520,16 @@ add_executable(readback_plan_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(readback_plan_tests PRIVATE ${inc_headers})
 
+add_executable(loop_guard_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/LoopGuardTests.cpp"
+)
+target_include_directories(loop_guard_tests PRIVATE ${inc_headers})
+
+add_executable(gpu_op_ring_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GpuOpRingTests.cpp"
+)
+target_include_directories(gpu_op_ring_tests PRIVATE ${inc_headers})
+
 add_executable(gc_clock_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GcClockTests.cpp"
 )
@@ -558,6 +568,12 @@ add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
 target_include_directories(lds_span_tests PRIVATE ${inc_headers})
+add_executable(hle_trace_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HleTraceTests.cpp"
+)
+target_link_libraries(hle_trace_tests common)
+target_include_directories(hle_trace_tests PRIVATE ${inc_headers})
+
 add_executable(async_pipeline_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AsyncPipelineTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.cpp"
@@ -818,6 +834,8 @@ if(BUILD_TESTING)
 	add_test(NAME indirect_draw_policy COMMAND $<TARGET_FILE:indirect_draw_policy_tests>)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
+	add_test(NAME gpu_op_ring COMMAND $<TARGET_FILE:gpu_op_ring_tests>)
+	add_test(NAME loop_guard COMMAND $<TARGET_FILE:loop_guard_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
 	add_test(NAME config_defaults COMMAND $<TARGET_FILE:config_defaults_tests>)
 	add_test(NAME skipped_draw_log COMMAND $<TARGET_FILE:skipped_draw_log_tests>)
@@ -827,6 +845,13 @@ if(BUILD_TESTING)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_fallback_disabled PROPERTIES
 		ENVIRONMENT "KYTY_SYSFILE_NO_READ_FALLBACK=1")
+	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
+	add_test(NAME sys_file_read_chaos COMMAND $<TARGET_FILE:sys_file_read_tests>)
+	set_tests_properties(sys_file_read_chaos PROPERTIES
+		ENVIRONMENT "KYTY_SYSFILE_CHAOS_EFAULT=1000")
+	add_test(NAME sys_file_read_chaos_no_fallback COMMAND $<TARGET_FILE:sys_file_read_tests>)
+	set_tests_properties(sys_file_read_chaos_no_fallback PROPERTIES
+		ENVIRONMENT "KYTY_SYSFILE_CHAOS_EFAULT=1000;KYTY_SYSFILE_NO_READ_FALLBACK=1")
 	add_test(NAME async_pipeline COMMAND $<TARGET_FILE:async_pipeline_tests>)
 	add_test(NAME pipeline_variants COMMAND $<TARGET_FILE:pipeline_variant_tests>)
 	add_test(NAME speculation_isolation COMMAND $<TARGET_FILE:speculation_isolation_tests>)
@@ -851,6 +876,13 @@ if(BUILD_TESTING)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME guest_gpu_timestamps
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-timestamps-only)
+	add_test(NAME shader_recompiler_helper_quad
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --ds-append-helper-quad-only)
+	# --swizzle-helper-quad-only (the GPU draw) is not registered: on NVIDIA v_mbcnt of the
+	# helper-free exec ballot numbers the covered lanes by rank, the test assumes physical lane
+	# numbers (AMD), so its expectation fails there for a reason unrelated to the helper exclusion.
+	add_test(NAME shader_recompiler_helper_host
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --fragment-helper-host-only)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
@@ -985,12 +1017,15 @@ if(BUILD_TESTING)
 		indirect_draw_policy_tests
 		readback_plan_tests
 		gc_clock_tests
+		gpu_op_ring_tests
+		loop_guard_tests
 		buffer_gc_gate_tests
 		config_defaults_tests
 		skipped_draw_log_tests
 		pipeline_cache_file_tests
 		bda_sync_gate_tests
 		sys_file_read_tests
+		hle_trace_tests
 		async_pipeline_tests
 		pipeline_variant_tests
 		speculation_isolation_tests

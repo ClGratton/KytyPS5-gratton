@@ -73,6 +73,8 @@ struct GraphicContext {
 	// checks storage-buffer accesses at (robustStorageBufferAccessSizeAlignment, 0 = unknown).
 	bool                               robust_buffer_access2_enabled          = false;
 	uint32_t                           robust_storage_buffer_alignment        = 0;
+	// --debug-gpu-ops checkpoints: VK_NV_device_diagnostic_checkpoints is enabled on the device.
+	bool                               op_checkpoints_enabled                = false;
 	bool                                      mesh_shader_enabled                   = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;

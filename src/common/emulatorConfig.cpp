@@ -4,6 +4,7 @@
 #include "common/benchInstrument.h"
 #include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
+#include "common/hleTrace.h"
 
 #include <algorithm>
 #include <memory>
@@ -36,6 +37,7 @@ void Load(const ConfigOptions& cfg) {
 	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s != 0 ? cfg.gpu_phase_stats_s
 	                                                           : cfg.submit_stats_s,
 	                            cfg.gpu_phase_stats_s != 0);
+	Common::HleTrace::Enable(cfg.hle_trace);
 	Bench::Configure({
 	    .frames_csv        = cfg.bench_frames_csv,
 	    .exit_after_frames = cfg.bench_exit_after_frames,
@@ -131,6 +133,19 @@ bool ReadbackQueueEnabled() {
 
 bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
+}
+
+bool DebugDumpShaderMatches(uint64_t shader_hash) {
+	const auto& list = g_config->debug_dump_shaders;
+	return std::find(list.begin(), list.end(), shader_hash) != list.end();
+}
+
+uint32_t GetShaderLoopLimit() {
+	return g_config->shader_loop_limit;
+}
+
+uint32_t GetGpuOpsMode() {
+	return g_config->gpu_ops_mode;
 }
 
 uint32_t GetPipelineLookaheadKinds() {

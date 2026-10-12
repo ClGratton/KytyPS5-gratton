@@ -56,6 +56,8 @@ public:
 	KYTY_CLASS_NO_COPY(BufferCache);
 
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
+	// Logs what the shader loop guards reported through the host tail of the GDS buffer.
+	void                   PollLoopGuard();
 	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false,
 	                                  Common::GpuPhase::DrainCause cause =
 	                                      Common::GpuPhase::DrainCause::BufferReadback);

@@ -255,8 +255,25 @@ static void PrintUsage() {
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
+	::printf("  --debug-gpu-ops <off|ring|checkpoints>\n"
+	         "                                       Debug: keep a host-side ring of the last draws and\n"
+	         "                                       dispatches and print the ones of unfinished\n"
+	         "                                       submissions when the GPU stops answering (hang\n"
+	         "                                       report, a wait of 5+ s, device loss). checkpoints\n"
+	         "                                       also drops VK_NV_device_diagnostic_checkpoints\n"
+	         "                                       markers. Default: off.\n");
+	::printf("  --shader-loop-limit <N>              Guard: each shader invocation may execute loop headers\n"
+	         "                                       N times in total, then its loops are left and the\n"
+	         "                                       shader is reported (a loop over corrupt data cannot\n"
+	         "                                       hang the GPU). 0 = off. Default: 1048576.\n");
+	::printf("  --debug-dump-shader <hex[,hex...]>   Debug: write the SPIR-V and guest binary of these shader\n"
+	         "                                       hashes (see --debug-gpu-ops) to --shader-log-folder.\n");
 	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
 	         "                                       render passes since the last flip. Default: off.\n");
+	::printf("  --debug-hle-trace <true|false>       Debug: record the last HLE calls of every guest thread\n"
+	         "                                       (name, first arguments, caller, result for file and\n"
+	         "                                       memory calls) and print them in the fatal fault report.\n"
+	         "                                       Linux x86-64 only. Default: false.\n");
 }
 
 static bool NextArg(int argc, char* argv[], int& index, std::string& out) {
@@ -921,6 +938,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				         value.c_str());
 				return false;
 			}
+		} else if (arg == "--debug-hle-trace") {
+			if (!ParseBool(value, options.config.hle_trace)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
 		} else if (arg == "--debug-hang-watchdog") {
 			uint64_t seconds = 0;
 			if (!ParseUint64(value, seconds) || seconds > 3600) {
@@ -928,6 +950,39 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.hang_watchdog_seconds = static_cast<uint32_t>(seconds);
+		} else if (arg == "--debug-gpu-ops") {
+			if (Common::EqualNoCase(value, "off")) {
+				options.config.gpu_ops_mode = 0;
+			} else if (Common::EqualNoCase(value, "ring")) {
+				options.config.gpu_ops_mode = 1;
+			} else if (Common::EqualNoCase(value, "checkpoints")) {
+				options.config.gpu_ops_mode = 2;
+			} else {
+				::printf("invalid --debug-gpu-ops (expected off, ring or checkpoints): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--shader-loop-limit") {
+			uint64_t limit = 0;
+			if (!ParseUint64(value, limit) || limit > 0x7fffffffu) {
+				::printf("invalid --shader-loop-limit (expected 0-2147483647): %s\n", value.c_str());
+				return false;
+			}
+			options.config.shader_loop_limit = static_cast<uint32_t>(limit);
+		} else if (arg == "--debug-dump-shader") {
+			size_t start = 0;
+			while (start <= value.size()) {
+				auto end = value.find(',', start);
+				if (end == std::string::npos) end = value.size();
+				const auto token = value.substr(start, end - start);
+				char*      parsed = nullptr;
+				const auto hash   = std::strtoull(token.c_str(), &parsed, 16);
+				if (token.empty() || parsed == nullptr || *parsed != '\0') {
+					::printf("invalid --debug-dump-shader hash (expected hex): %s\n", token.c_str());
+					return false;
+				}
+				options.config.debug_dump_shaders.push_back(hash);
+				start = end + 1;
+			}
 		} else if (arg == "--pipeline-workers") {
 			uint64_t workers = 0;
 			if (!ParseUint64(value, workers) || workers == 0 || workers > 64) {

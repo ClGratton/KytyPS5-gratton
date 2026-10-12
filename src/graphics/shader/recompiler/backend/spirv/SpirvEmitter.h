@@ -13,7 +13,7 @@ namespace Libs::Graphics::ShaderRecompiler::Spirv {
 // Resets and writes backend IDs and descriptor indices; do not emit the same program concurrently.
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
                                   uint32_t push_data_start_dword = 0,
-                                  RobustBufferPolicy robust_buffers = {});
+                                  RobustBufferPolicy robust_buffers = {}, uint32_t loop_limit = 0);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

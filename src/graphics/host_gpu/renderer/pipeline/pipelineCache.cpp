@@ -7,6 +7,7 @@
 #include "common/hangWatchdog.h"
 #include "common/speculation.h"
 #include "common/emulatorConfig.h"
+#include "common/loopGuard.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -301,7 +302,7 @@ bool ReadShaderGuestMemorySpeculative(void*, uint64_t address, std::span<uint32_
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!Config::GraphicsDebugDumpEnabled() && !Config::DebugDumpShaderMatches(shader_hash)) {
 		return;
 	}
 	static std::atomic_int id = 0;
@@ -319,7 +320,7 @@ void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
 
 void DumpShaderOriginal(const char* stage_name, uint64_t shader_hash,
                         std::span<const uint32_t> code) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!Config::GraphicsDebugDumpEnabled() && !Config::DebugDumpShaderMatches(shader_hash)) {
 		return;
 	}
 	EXIT_IF(code.empty());
@@ -725,7 +726,9 @@ struct PipelineCache::ProgramCache {
 			Stopwatch  sw;
 			ShaderRecompiler::CompileOptions options;
 			options.stage          = stage;
+			options.loop_limit     = Config::GetShaderLoopLimit();
 			options.shader_hash    = shader_hash;
+			Common::LoopGuard::GetMonitor().Register(shader_hash, stage_name);
 			options.user_data      = user_data;
 			options.back_code      = back_code;
 			options.dump_ir        = dump_ir;
@@ -1346,7 +1349,9 @@ struct PipelineCache::ProgramCache {
 		}
 		ShaderRecompiler::CompileOptions options;
 		options.stage       = stage;
+		options.loop_limit  = Config::GetShaderLoopLimit();
 		options.shader_hash = params.hash;
+		Common::LoopGuard::GetMonitor().Register(params.hash, stage_name);
 		options.user_data   = user_data;
 		options.back_code      = params.back_code;
 		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
