@@ -2,6 +2,7 @@
 #include "common/gpuPhaseStats.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/gdsCopyPlan.h"
 #include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
 #include "graphics/host_gpu/renderer/cache/readbackPlan.h"
 
@@ -763,6 +764,25 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
 	RecordKnownFill(vaddr, size, value);
+}
+
+void BufferCache::CopyGdsBuffer(uint64_t dst_offset, uint64_t src_offset, uint64_t size) {
+	if (size == 0) {
+		return;
+	}
+	if (((dst_offset | src_offset | size) & 3u) != 0 || dst_offset > m_gds_buffer.Size() ||
+	    size > m_gds_buffer.Size() - dst_offset || src_offset > m_gds_buffer.Size() ||
+	    size > m_gds_buffer.Size() - src_offset) {
+		EXIT("BufferCache: invalid GDS copy range, src=0x%016" PRIx64 " dst=0x%016" PRIx64
+		     " size=0x%016" PRIx64 "\n",
+		     src_offset, dst_offset, size);
+	}
+	// On-chip store-to-store DMA. It runs in GPU order like the other GDS copies, and a range that
+	// overlaps itself is copied in memmove order as non-overlapping regions.
+	auto& command = m_scheduler.Current();
+	for (const auto& chunk: PlanGdsCopy(dst_offset, src_offset, size)) {
+		m_gds_buffer.CopyFrom(command, m_gds_buffer, chunk.source, chunk.destination, chunk.size);
+	}
 }
 
 void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,

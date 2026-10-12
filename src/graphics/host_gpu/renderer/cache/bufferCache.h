@@ -80,6 +80,8 @@ public:
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
 	                bool src_gds);
+	// DMA between two GDS ranges (offsets into the GDS buffer); they may overlap.
+	void CopyGdsBuffer(uint64_t dst_offset, uint64_t src_offset, uint64_t size);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
 	[[nodiscard]] bool IsRegionRegistered(uint64_t vaddr, uint64_t size);
 	// Bumped whenever a buffer is registered or unregistered (K15).

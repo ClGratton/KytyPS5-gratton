@@ -440,6 +440,11 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+add_executable(gds_copy_plan_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GdsCopyPlanTests.cpp"
+)
+target_include_directories(gds_copy_plan_tests PRIVATE ${inc_headers})
+
 add_executable(mesh_dispatch_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/MeshDispatchTests.cpp"
 )
@@ -725,6 +730,7 @@ if(BUILD_TESTING)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME mesh_dispatch COMMAND $<TARGET_FILE:mesh_dispatch_tests>)
+	add_test(NAME gds_copy_plan COMMAND $<TARGET_FILE:gds_copy_plan_tests>)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME vram_policy COMMAND $<TARGET_FILE:vram_policy_tests>)
 	add_test(NAME lds_span COMMAND $<TARGET_FILE:lds_span_tests>)
@@ -856,6 +862,7 @@ if(BUILD_TESTING)
 		avplayer_file_tests
 		bit_array_tests
 		mesh_dispatch_tests
+		gds_copy_plan_tests
 		lru_cache_tests
 		vram_policy_tests
 		lds_span_tests
