@@ -4,6 +4,7 @@
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
+#include "common/gpuPhaseStats.h"
 #include "common/enomemTrace.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -956,6 +957,7 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 		}
 		auto& buffers = GetGpuResources().GetBufferCache();
 		if (buffers.HasGpuDirtyBytes(vaddr, size)) {
+			Common::GpuPhase::NoteGpuThreadFault(); // stack of the emulator's own dependent read
 			buffers.ReadMemory(vaddr, size);
 		}
 	}
