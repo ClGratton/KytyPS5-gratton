@@ -26,8 +26,8 @@ Rings hold 1024 entries per thread. A guest thread that makes no HLE call does n
 On an unhandled host exception the report prints, in this order:
 
 1. the faulting thread, `pc` and the return addresses on the frame-pointer chain as `module+offset`
-   (resolve in the decrypted eboot with `objdump -D`; for Astro Bot the SELF text segment starts
-   0x3b1f0 into the file);
+   (resolve in the decrypted main module with `objdump -D -b binary -mi386:x86-64`; the file offset
+   of a SELF text segment is in its segment table);
 2. the registers, 96 bytes of code around the pc and the top of the stack (as before);
 3. the faulting thread's last 96 traced calls;
 4. the last 400 calls of all other threads on one timeline, with thread names.
@@ -71,5 +71,4 @@ accepted and ignored.
 * `hle_trace` (tests/HleTraceTests.cpp): argument and stack-argument passing through a thunk with
   ten integer and two floating-point arguments, double results, result and note capture, per-thread
   rings, merged timeline, hot-call skip list.
-* Astro Bot skip3 route, crash binary `crash2-trace`: see `bench/RESULTS.md`, section
-  "crash #2 root cause", for the trace of a crash and the A/B.
+* A crash trace and the A/B runs that used it: `bench/RESULTS.md`, section "crash #2 root cause".
