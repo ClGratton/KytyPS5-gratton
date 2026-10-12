@@ -139,6 +139,18 @@ void TestReadbackLinearImagesStaysOff() {
 
 } // namespace
 
+// Host-RAM features (ram.md) change how guest memory is read or where a ring lives: performance
+// features, off until measured. --mem-residency only counts.
+void TestHostMemoryFeaturesStayOff() {
+	const Config::ConfigOptions options;
+	Check(!options.mem_residency && !options.mem_hole_reads && !options.upload_ring_rebar,
+	      "the host-memory features default to off");
+	Apply(options);
+	Check(!Config::MemResidencyEnabled() && !Config::MemHoleReadsEnabled() &&
+	          !Config::UploadRingRebarEnabled(),
+	      "an unconfigured emulator keeps the host-memory features off");
+}
+
 int main() {
 	Config::Initialize();
 
@@ -148,6 +160,7 @@ int main() {
 	TestPipelineCacheKeyDefault();
 	TestVramStatsAreIndependentOfPaging();
 	TestVramPagingDefault();
+	TestHostMemoryFeaturesStayOff();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");
