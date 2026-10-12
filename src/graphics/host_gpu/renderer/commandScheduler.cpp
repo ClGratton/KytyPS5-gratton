@@ -2,6 +2,7 @@
 
 #include "common/gpuPhaseStats.h"
 #include "common/profiler.h"
+#include "graphics/host_gpu/renderer/gpuOps.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -99,7 +100,9 @@ bool CommandScheduler::InDeferredOperation() noexcept {
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
     : m_master(graphics), m_context(context), m_graphics(graphics),
       m_command_pool(graphics, m_master), m_command(*this),
-      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {}
+      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {
+	GpuOps::Initialize(graphics, m_master, Config::GetGpuOpsMode());
+}
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();

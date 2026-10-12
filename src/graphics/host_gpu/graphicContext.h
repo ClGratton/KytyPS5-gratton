@@ -65,6 +65,8 @@ struct GraphicContext {
 	// (--pipelines-unoptimized-first).
 	bool                               pipeline_cache_control_enabled         = false;
 	bool                               supports_block_texel_view              = false;
+	// --debug-gpu-ops checkpoints: VK_NV_device_diagnostic_checkpoints is enabled on the device.
+	bool                               op_checkpoints_enabled                = false;
 	bool                                      mesh_shader_enabled                   = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;

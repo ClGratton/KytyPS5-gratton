@@ -109,6 +109,10 @@ bool GetLookaheadVerify() {
 	return g_config->lookahead_verify && g_config->pipeline_lookahead;
 }
 
+uint32_t GetGpuOpsMode() {
+	return g_config->gpu_ops_mode;
+}
+
 uint32_t GetPipelineLookaheadKinds() {
 	return g_config->pipeline_lookahead_kinds;
 }

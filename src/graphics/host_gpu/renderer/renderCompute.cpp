@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -446,6 +447,17 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	{
 		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		if (GpuOps::Enabled()) {
+			GpuOps::Op op;
+			op.kind      = GpuOps::Kind::Dispatch;
+			op.submit_id = submit_id;
+			op.shader0   = program.shader_hash;
+			op.n[0]      = thread_group_x;
+			op.n[1]      = thread_group_y;
+			op.n[2]      = thread_group_z;
+			op.n[3]      = mode;
+			GpuOps::Record(vk_buffer, op, m_context.GetCommandScheduler().CurrentTick());
+		}
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 
@@ -515,6 +527,17 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	if (GpuOps::Enabled()) {
+		GpuOps::Op op;
+		op.kind      = GpuOps::Kind::DispatchIndirect;
+		op.submit_id = submit_id;
+		op.shader0   = program.shader_hash;
+		op.addr      = args_addr;
+		// What guest memory holds now; the GPU reads the buffer copy, which may be newer.
+		std::memcpy(op.n, reinterpret_cast<const void*>(args_addr), sizeof(vk::DispatchIndirectCommand));
+		op.n[3] = mode;
+		GpuOps::Record(vk_buffer, op, m_context.GetCommandScheduler().CurrentTick());
+	}
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();

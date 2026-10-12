@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/host_gpu/renderer/gpuOps.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -1234,6 +1235,30 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
+	}
+	if (GpuOps::Enabled()) {
+		GpuOps::Op op;
+		op.kind      = mesh_active ? GpuOps::Kind::MeshDraw : GpuOps::Kind::Draw;
+		op.submit_id = submit_id;
+		op.shader0   = state.vertex_info[0].stage.program->shader_hash;
+		op.shader1   = state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;
+		op.addr      = index_source.address;
+		op.n[0]      = static_cast<uint32_t>(ucfg.GetPrimType());
+		op.n[1]      = draw.IsIndexed();
+		op.n[2]      = primitive_restart_enable;
+		op.n[3]      = draw.index_count;
+		op.n[4]      = draw.instance_count;
+		op.n[5]      = draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex;
+		op.n[6]      = emit.first_instance;
+		if (mesh_active) {
+			const auto& mesh = state.vertex_info[0].mesh;
+			op.n[7]          = mesh_groups;
+			op.n[8]          = mesh.primitives_per_group;
+			op.n[9]          = mesh.vertices_per_group;
+			op.n[10]         = mesh.max_primitives;
+			op.n[11]         = mesh.max_vertices;
+		}
+		GpuOps::Record(vk_buffer, op, m_context.GetCommandScheduler().CurrentTick());
 	}
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);

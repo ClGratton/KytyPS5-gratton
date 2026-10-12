@@ -145,6 +145,9 @@ struct ConfigOptions {
 	// --debug-hang-watchdog <seconds>: write a thread/pool/lookahead state report when no frame
 	// was presented for that long (common/hangWatchdog.h). 0 = off.
 	uint32_t               hang_watchdog_seconds       = 0;
+	// --debug-gpu-ops <off|ring|checkpoints>: 0 off, 1 host-side ring of the last draws and
+	// dispatches (printed when the GPU stops answering), 2 plus VK_NV_device_diagnostic_checkpoints.
+	uint32_t               gpu_ops_mode                = 0;
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
 	// bit 2 = programs only (do not request pipelines).
@@ -251,6 +254,7 @@ bool              GetPipelineLookahead();
 // The flag, effective only with --async-pipelines on (the optimized rebuilds run on the pool).
 bool              GetPipelinesUnoptimizedFirst();
 uint32_t          GetPipelineLookaheadKinds();
+uint32_t          GetGpuOpsMode();
 bool              GetLookaheadVerify();
 bool              TextureGcEnabled();
 bool              TextureGcLog();

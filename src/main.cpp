@@ -220,6 +220,13 @@ static void PrintUsage() {
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
+	::printf("  --debug-gpu-ops <off|ring|checkpoints>\n"
+	         "                                       Debug: keep a host-side ring of the last draws and\n"
+	         "                                       dispatches and print the ones of unfinished\n"
+	         "                                       submissions when the GPU stops answering (hang\n"
+	         "                                       report, a wait of 5+ s, device loss). checkpoints\n"
+	         "                                       also drops VK_NV_device_diagnostic_checkpoints\n"
+	         "                                       markers. Default: off.\n");
 	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
 	         "                                       render passes since the last flip. Default: off.\n");
 }
@@ -858,6 +865,17 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.hang_watchdog_seconds = static_cast<uint32_t>(seconds);
+		} else if (arg == "--debug-gpu-ops") {
+			if (Common::EqualNoCase(value, "off")) {
+				options.config.gpu_ops_mode = 0;
+			} else if (Common::EqualNoCase(value, "ring")) {
+				options.config.gpu_ops_mode = 1;
+			} else if (Common::EqualNoCase(value, "checkpoints")) {
+				options.config.gpu_ops_mode = 2;
+			} else {
+				::printf("invalid --debug-gpu-ops (expected off, ring or checkpoints): %s\n", value.c_str());
+				return false;
+			}
 		} else if (arg == "--pipeline-workers") {
 			uint64_t workers = 0;
 			if (!ParseUint64(value, workers) || workers == 0 || workers > 64) {
