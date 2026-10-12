@@ -58,6 +58,8 @@ struct GraphicContext {
 	bool                               host_query_reset_enabled              = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
+	// firstInstance may be non-zero in indirect draw commands (--gpu-indirect-draws, plain draws).
+	bool                               draw_indirect_first_instance_enabled  = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	// bool fp64_denorm_preserve = false; // Temporarily disabled.
 	bool                               attachment_feedback_loop_enabled      = false;

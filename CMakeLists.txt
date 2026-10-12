@@ -304,6 +304,21 @@ add_custom_command(
 list(APPEND kyty_emulator_src "${fault_buffer_shader_header}")
 list(APPEND kyty_emulator_src ${gpu_tiler_shader_headers})
 
+set(mesh_indirect_shader_source "${gpu_tiler_shader_dir}/mesh_indirect_args.comp")
+set(mesh_indirect_shader_spv "${gpu_tiler_generated_dir}/mesh_indirect_args.spv")
+set(mesh_indirect_shader_header "${gpu_tiler_generated_dir}/mesh_indirect_args_spv.h")
+add_custom_command(
+	OUTPUT "${mesh_indirect_shader_header}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
+	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os
+	        -o "${mesh_indirect_shader_spv}" "${mesh_indirect_shader_source}"
+	COMMAND ${CMAKE_COMMAND} -DINPUT=${mesh_indirect_shader_spv} -DOUTPUT=${mesh_indirect_shader_header}
+	        -DSYMBOL=MESH_INDIRECT_ARGS_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	DEPENDS "${mesh_indirect_shader_source}"
+	VERBATIM
+)
+list(APPEND kyty_emulator_src "${mesh_indirect_shader_header}")
+
 set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
 set(gpu_blit_shader_sources
 	"${gpu_tiler_shader_dir}/gpu_blit_fs_triangle.vert"
@@ -490,6 +505,15 @@ add_executable(draw_key_memo_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/DrawKeyMemoTests.cpp"
 )
 target_include_directories(draw_key_memo_tests PRIVATE ${inc_headers})
+add_executable(indirect_draw_args_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/IndirectDrawArgsTests.cpp"
+)
+target_include_directories(indirect_draw_args_tests PRIVATE ${inc_headers})
+
+add_executable(indirect_draw_policy_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/IndirectDrawPolicyTests.cpp"
+)
+target_include_directories(indirect_draw_policy_tests PRIVATE ${inc_headers})
 
 add_executable(readback_plan_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ReadbackPlanTests.cpp"
@@ -790,6 +814,8 @@ if(BUILD_TESTING)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
 	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
 	add_test(NAME draw_key_memo COMMAND $<TARGET_FILE:draw_key_memo_tests>)
+	add_test(NAME indirect_draw_args COMMAND $<TARGET_FILE:indirect_draw_args_tests>)
+	add_test(NAME indirect_draw_policy COMMAND $<TARGET_FILE:indirect_draw_policy_tests>)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
@@ -955,6 +981,8 @@ if(BUILD_TESTING)
 		barrier_elision_tests
 		known_fills_tests
 		draw_key_memo_tests
+		indirect_draw_args_tests
+		indirect_draw_policy_tests
 		readback_plan_tests
 		gc_clock_tests
 		buffer_gc_gate_tests

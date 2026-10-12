@@ -349,6 +349,17 @@ bool BufferCache::ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_ti
 	return true;
 }
 
+StreamBuffer& BufferCache::GetDrawRecordBuffer() {
+	if (!m_draw_record_buffer) {
+		m_draw_record_buffer = std::make_unique<StreamBuffer>(
+		    m_graphics, m_scheduler, MemoryUsage::Stream, 4 * MiB,
+		    vk::BufferUsageFlagBits::eShaderDeviceAddress);
+		SetVulkanObjectNameF(m_graphics.device, m_draw_record_buffer->Handle(),
+		                     "Draw Record Ring");
+	}
+	return *m_draw_record_buffer;
+}
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),

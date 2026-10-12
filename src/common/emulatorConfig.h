@@ -239,6 +239,11 @@ struct ConfigOptions {
 	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
 	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
 	bool                   clean_guest_reads           = false;
+	// --gpu-indirect-draws (K21): indirect draws whose argument block a GPU pass wrote are built on
+	// the GPU instead of being read on the CPU after a full drain: a one-thread argument pass, then
+	// vkCmdDrawIndexedIndirect (point/line/triangle lists) or vkCmdDrawMeshTasksIndirectEXT
+	// (mesh-emulated draws). Default off.
+	bool                   gpu_indirect_draws          = false;
 	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
 	// rendering family and wait only for the work that wrote the data. Default off.
 	bool                   readback_queue              = false;
@@ -312,6 +317,7 @@ bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();
 bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
+bool              GpuIndirectDrawsEnabled();
 bool              ReadbackQueueEnabled();
 
 LogDirection          GetPrintfDirection();

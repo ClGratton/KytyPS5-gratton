@@ -4,6 +4,7 @@
 #include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
+#include "common/indirectDrawPolicy.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -15,6 +16,7 @@
 #include "graphics/guest_gpu/pipelineLookahead.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/gpuTimestamps.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -221,6 +223,7 @@ void CommandProcessor::Reset() {
 	m_index_buffer_size                = 0;
 	m_index_base_addr                  = 0;
 	m_num_instances                    = 1;
+	m_num_instances_address            = 0;
 	m_predicate_skip                   = false;
 	m_user_data_marker                 = HW::UserSgprType::Unknown;
 	m_draw_indirect_args_base_addr     = 0;
@@ -1001,12 +1004,23 @@ void CommandProcessor::SetDispatchIndirectArgsBaseAddress(
 	m_dispatch_indirect_args_base_addr = dispatch_indirect_args_base_addr;
 }
 
+uint32_t CommandProcessor::NumInstances() {
+	if (m_num_instances_address != 0) {
+		// Reading faults and waits if the GPU still owns the arguments.
+		std::memcpy(&m_num_instances, reinterpret_cast<const void*>(m_num_instances_address),
+		            sizeof(m_num_instances));
+		m_num_instances_address = 0;
+	}
+	return m_num_instances;
+}
+
 void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 	if (num_instances == 0) {
 		num_instances = 1;
 	}
 
-	m_num_instances = num_instances;
+	m_num_instances         = num_instances;
+	m_num_instances_address = 0;
 }
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
@@ -1066,7 +1080,7 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
-		args.instance_count = m_num_instances;
+		args.instance_count = NumInstances();
 	}
 	if (IsShadow()) {
 		m_shadow_sink->OnDraw(*this, {.indexed             = true,
@@ -1166,15 +1180,72 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		}
 	}
 
+	// --gpu-indirect-draws: GPU-written arguments are not read here (that would wait for the pass
+	// that wrote them); a mesh-emulated indexed draw builds its mesh dispatch from them on the GPU.
+	Common::IndirectDraw::Route route = Common::IndirectDraw::Route::CpuNotGpuData;
+	if (Config::GpuIndirectDrawsEnabled()) {
+		const auto first = m_draw_indirect_args_base_addr + data_offset;
+		const auto range = static_cast<uint64_t>(draw_count - 1u) * stride_in_bytes + args_size;
+		const auto prim  = m_ucfg.GetPrimType();
+		const bool list_primitive = prim == Prospero::PrimitiveType::kTriList ||
+		                            prim == Prospero::PrimitiveType::kLineList ||
+		                            prim == Prospero::PrimitiveType::kPointList;
+		route = Common::IndirectDraw::Decide(
+		    {.indexed               = indexed,
+		     .arguments_gpu_data    = m_renderer.GetBufferCache().IsRegionGpuModified(first, range),
+		     .mesh_emulated         = (m_ctx.GetShaderStages() & 0x20u) != 0, // As in PrepareProgram.
+		     .list_primitive        = list_primitive,
+		     .first_instance_ok     = m_renderer.GetGraphics().draw_indirect_first_instance_enabled,
+		     .index_element_bytes   = static_cast<uint32_t>(index_size),
+		     .index_buffer_size     = m_index_buffer_size,
+		     .count_in_memory       = count_addr != nullptr});
+		if (route != Common::IndirectDraw::Route::Gpu) {
+			Common::GpuPhase::NoteIndirectDraw(route, draw_count);
+		}
+	}
+	const auto patched = [](uint32_t reg) {
+		return Common::IndirectDraw::PatchedSgpr(reg, Pm4::SH_NOP, Pm4::SPI_SHADER_USER_DATA_GS_0,
+		                                         32u);
+	};
+	const int32_t patched_sgpr[3] {patched(registers.vertex_offset),
+	                               patched(registers.instance_offset),
+	                               patched(registers.index_offset)};
+
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto args_addr = m_draw_indirect_args_base_addr + data_offset +
 		                       static_cast<uint64_t>(i) * stride_in_bytes;
+
+		if (route == Common::IndirectDraw::Route::Gpu) {
+			DrawIndexArgs gpu_draw {.index_count    = 1,
+			                        .index_addr     = reinterpret_cast<const void*>(m_index_base_addr),
+			                        .instance_count = 1,
+			                        .index_type_and_size = m_index_type_and_size,
+			                        .offset_source  = DrawOffsetSource::IndirectArgs,
+			                        .indirect_args  = args_addr,
+			                        .index_limit    = m_index_buffer_size};
+			std::copy(std::begin(patched_sgpr), std::end(patched_sgpr), gpu_draw.patched_sgpr);
+			if (Bench::TraceEnabled()) {
+				Bench::TraceDraw("gfx");
+			}
+			if (m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), gpu_draw)) {
+				Common::GpuPhase::NoteIndirectDraw(route, 1);
+				// The instance count stays in guest memory; a later draw that relies on it reads it.
+				m_num_instances_address =
+				    args_addr + offsetof(DrawIndexedIndirectArgs, instance_count);
+				continue;
+			}
+			// The vertex program reads the SGPRs this draw patches: this and the packet's other
+			// draws take the CPU path.
+			route = Common::IndirectDraw::Route::CpuOffsetRegisters;
+			Common::GpuPhase::NoteIndirectDraw(route, draw_count - i);
+		}
 
 		if (!indexed) {
 			auto* args = reinterpret_cast<const DrawIndirectArgs*>(args_addr);
 			PatchIndirectDrawOffsets(*this, registers, args->start_vertex_location,
 			                         args->start_instance_location, 0);
 			m_num_instances = args->instance_count;
+			m_num_instances_address = 0;
 			DrawIndexAuto({.vertex_count   = args->vertex_count_per_instance,
 			               .instance_count = args->instance_count,
 			               .first_vertex   = args->start_vertex_location,
@@ -1204,6 +1275,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		}
 
 		m_num_instances = args->instance_count;
+		m_num_instances_address = 0;
 		DrawIndex({.index_count    = index_count,
 		           .index_addr     = index_addr,
 		           .instance_count = args->instance_count,
@@ -1275,7 +1347,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	if (args.instance_count == 0) {
-		args.instance_count = m_num_instances;
+		args.instance_count = NumInstances();
 	}
 	if (IsShadow()) {
 		m_shadow_sink->OnDraw(*this, {.indexed        = false,

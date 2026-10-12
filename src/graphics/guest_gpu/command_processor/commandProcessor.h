@@ -123,6 +123,10 @@ public:
 		return m_dispatch_indirect_args_base_addr;
 	}
 	void SetNumInstances(uint32_t num_instances);
+	// The NUM_INSTANCES state. An indirect draw built on the GPU (--gpu-indirect-draws) leaves its
+	// instance count in guest memory; it is read here, on demand (a draw that relies on it is
+	// rare).
+	[[nodiscard]] uint32_t NumInstances();
 	void DrawIndex(DrawIndexArgs args);
 	void DrawIndexOffset(uint32_t index_offset, uint32_t index_count);
 	void DrawIndexAuto(DrawAutoArgs args);
@@ -215,6 +219,7 @@ private:
 	uint64_t         m_dispatch_indirect_args_base_addr = 0;
 	// Persistent draw state: indirect draws update it for subsequent draws.
 	uint32_t m_num_instances = 1;
+	uint64_t m_num_instances_address = 0;
 
 	uint32_t m_de_count    = 0;
 	uint32_t m_ce_count    = 0;

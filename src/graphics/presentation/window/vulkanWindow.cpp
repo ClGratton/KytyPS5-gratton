@@ -627,6 +627,10 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.fillModeNonSolid                      = VK_TRUE;
 	device_features.vertexPipelineStoresAndAtomics       = VK_TRUE;
 	graphics.sample_rate_shading_enabled                 = true;
+	device_features.drawIndirectFirstInstance =
+	    supported_features2.features.drawIndirectFirstInstance;
+	graphics.draw_indirect_first_instance_enabled =
+	    supported_features2.features.drawIndirectFirstInstance == VK_TRUE;
 	device_features.shaderInt64 = VK_TRUE;
 	device_features.shaderFloat64 =
 	    supported_features2.features.shaderFloat64 &&

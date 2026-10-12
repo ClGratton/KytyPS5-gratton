@@ -156,6 +156,13 @@ struct EmitterState {
 	std::vector<uint32_t>      interface_variables;
 };
 
+// --gpu-indirect-draws: a mesh shader loads its draw parameters from a record whose device address
+// is in push constant dwords 0 and 1 (needs the 64-bit and physical-address capabilities).
+[[nodiscard]] inline bool MeshDrawRecordByAddress(const EmitterState& state) {
+	return state.program.stage == ShaderType::Mesh && state.input_info.vertex != nullptr &&
+	       state.input_info.vertex->mesh.draw_record_address;
+}
+
 uint32_t TypeVoid(EmitterState& state);
 uint32_t TypeBool(EmitterState& state);
 uint32_t TypeBoolVector(EmitterState& state, uint32_t components);

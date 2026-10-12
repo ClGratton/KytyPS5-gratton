@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -29,6 +30,7 @@ struct ShaderComputeInputInfo;
 struct RenderDepthInfo;
 struct RenderColorInfo;
 struct DrawCallInfo;
+class MeshIndirectArgs;
 struct DrawEmitInfo;
 struct DrawIndexBufferSource;
 struct DrawRenderState;
@@ -64,6 +66,14 @@ struct DrawIndexArgs {
 	uint32_t         first_instance             = 0;
 	DrawOffsetSource offset_source              = DrawOffsetSource::DrawState;
 	uint32_t         render_target_slice_offset = 0;
+	// --gpu-indirect-draws: guest address of GPU-written DrawIndexedIndirectArgs for a
+	// mesh-emulated draw. The counts above are placeholders, index_addr is the index buffer base
+	// and index_limit its size in elements; the draw is built on the GPU (MeshIndirectArgs).
+	uint64_t         indirect_args              = 0;
+	uint32_t         index_limit                = 0;
+	// The user SGPRs (relative to the merged stage's user data) the draw packet patches on the CPU
+	// path; see Common::IndirectDraw::PatchedSgpr. Only read for GPU-args draws.
+	int32_t          patched_sgpr[3]            = {-1, -1, -1};
 };
 
 struct DrawAutoArgs {
@@ -158,7 +168,8 @@ private:
 
 class RenderExecutor {
 public:
-	explicit RenderExecutor(RenderContext& context): m_context(context) {}
+	explicit RenderExecutor(RenderContext& context);
+	~RenderExecutor();
 	KYTY_CLASS_NO_COPY(RenderExecutor);
 
 	// --pipeline-lookahead (lookahead thread): request the pipeline a draw is going to need.
@@ -180,7 +191,10 @@ public:
 	                    std::span<PreparedBindings* const> bindings);
 
 private:
-	void DrawIndex(uint64_t submit_id, CommandBuffer& buffer, const DrawIndexArgs& args);
+	// Returns false only for a GPU-args draw (args.indirect_args) that was refused before anything
+	// was recorded: the program reads the user SGPRs the command processor would patch, which the
+	// GPU path cannot supply. The caller then reads the arguments and draws on the CPU path.
+	bool DrawIndex(uint64_t submit_id, CommandBuffer& buffer, const DrawIndexArgs& args);
 	void DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args);
 
 	struct GraphicsBindings {
@@ -228,6 +242,7 @@ private:
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
+	std::unique_ptr<MeshIndirectArgs>     m_mesh_indirect; // --gpu-indirect-draws, on first use
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

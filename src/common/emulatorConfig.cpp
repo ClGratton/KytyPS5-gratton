@@ -121,6 +121,10 @@ bool CleanGuestReadsEnabled() {
 	return g_config->clean_guest_reads;
 }
 
+bool GpuIndirectDrawsEnabled() {
+	return g_config->gpu_indirect_draws;
+}
+
 bool ReadbackQueueEnabled() {
 	return g_config->readback_queue;
 }

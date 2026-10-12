@@ -724,6 +724,9 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 		                       mesh.primitives_per_group, mesh.vertices_per_group,
 		                       mesh.max_vertices, mesh.max_primitives, mesh.provoking_vertex,
 		                       static_cast<uint32_t>(mesh.fast_launch)});
+		if (mesh.draw_record_address) {
+			key.push_back(0x4d445241u); // 'MDRA': keeps the key of every other variant unchanged.
+		}
 	}
 	key.push_back(info.tess.input_control_points);
 	if (info.tess.input_control_points != 0) {
@@ -841,6 +844,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	const auto fast_launch = (context.GetShaderStages() >> 19u) & 3u;
 	EXIT_NOT_IMPLEMENTED(fast_launch > 1u);
 	mesh.fast_launch = fast_launch != 0;
+	mesh.draw_record_address = Config::GpuIndirectDrawsEnabled();
 	if (data.type == Prospero::ShaderBinaryType::kGsFront) {
 		EXIT_IF(regs.gs_regs.data_addr == 0);
 		const auto [back, back_hash] = ShaderGetMappedData(regs.gs_regs.data_addr, "ShaderGetInputInfoGS():");
