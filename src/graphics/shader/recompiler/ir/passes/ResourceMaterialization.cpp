@@ -1093,7 +1093,13 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	SrtWalker walker(program, observed,
 	                 capture_reads || program.requires_specialization_memory ? &clean : nullptr);
 	probe_setup.Stop();
-	MaterializeProbe::Timer probe_flat(MaterializeProbe::Flat);
+	const auto flat_slot = program.srt_code ? MaterializeProbe::FlatJit
+	                       : !program.control_flow.empty() ? MaterializeProbe::FlatCtl
+	                                                       : MaterializeProbe::FlatPlain;
+	MaterializeProbe::Add(static_cast<MaterializeProbe::Slot>(MaterializeProbe::ReadsJit +
+	                                                          (flat_slot - MaterializeProbe::FlatJit)),
+	                      program.srt_reads.size());
+	MaterializeProbe::Timer probe_flat(flat_slot);
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
 		return false;
 	}

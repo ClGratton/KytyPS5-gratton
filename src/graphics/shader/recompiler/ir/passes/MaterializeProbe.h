@@ -13,14 +13,28 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR::MaterializeProbe {
 
-enum Slot : uint32_t { Total, Setup, Flat, Fill, Buffers, Images, Samplers, Specialize, Count };
-
-inline constexpr std::array<const char*, Count> kNames = {"total",   "setup",  "flat",     "fill",
-                                                          "buffers", "images", "samplers", "specialize"};
+enum Slot : uint32_t {
+	Total, Setup, FlatJit, FlatCtl, FlatPlain, Fill, Buffers, Images, Samplers, Specialize,
+	// Not timers: the sum of srt_reads over the calls of each flat class (ticks column).
+	ReadsJit, ReadsCtl, ReadsPlain,
+	Count
+};
 
 inline std::atomic<bool>                             g_enabled {false};
 inline std::array<std::atomic<uint64_t>, Count>     g_ticks {};
 inline std::array<std::atomic<uint64_t>, Count>     g_calls {};
+
+inline constexpr std::array<const char*, Count> kNames = {
+    "total",   "setup",   "flat_jit_eligible", "flat_ctlflow", "flat_plain", "fill", "buffers",
+    "images",  "samplers", "specialize",       "reads_jit",    "reads_ctl",  "reads_plain"};
+
+inline void Add(Slot slot, uint64_t n) noexcept {
+	if (g_enabled.load(std::memory_order_relaxed)) {
+		g_ticks[slot].fetch_add(n, std::memory_order_relaxed);
+		g_calls[slot].fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
 
 class Timer {
 public:
