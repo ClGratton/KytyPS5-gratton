@@ -35,7 +35,7 @@ namespace Libs::Graphics::Variants {
 
 // Bump when the meaning of a stored field changes. A file with another schema is ignored (and
 // replaced by the next append): variants are only an accelerator, never needed for correctness.
-inline constexpr uint32_t kSchema = 2;
+inline constexpr uint32_t kSchema = 3;
 // Upper bound on the buffers or images of one stored specialization (a corrupt record cannot ask for
 // a huge allocation).
 inline constexpr uint32_t kMaxResources = 256;
@@ -129,9 +129,16 @@ struct ProgramVariant {
 	// its binary, 0 when the stage has none. The replay needs that binary registered as well.
 	uint64_t              back_hash        = 0;
 	uint32_t              back_size_dwords = 0;
+	// With a back half `code_hash` is the program key's combined hash of both binaries; this is the
+	// hash of the front binary itself, which is what the guest registers. 0 without a back half.
+	uint64_t              front_hash       = 0;
+
+	// The hash of the binary the guest registers for this stage's (front) code.
+	[[nodiscard]] uint64_t RegistrationHash() const { return front_hash != 0 ? front_hash : code_hash; }
 
 	bool operator==(const ProgramVariant& other) const {
 		return stage == other.stage && code_hash == other.code_hash && back_hash == other.back_hash &&
+		       front_hash == other.front_hash &&
 		       back_size_dwords == other.back_size_dwords &&
 		       code_size_dwords == other.code_size_dwords && user_data_count == other.user_data_count &&
 		       push_data_cursor == other.push_data_cursor && static_state == other.static_state &&

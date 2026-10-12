@@ -1040,6 +1040,9 @@ struct PipelineCache::ProgramCache {
 		if (!params.back_code.empty()) {
 			program.back_hash        = XXH3_64bits(params.back_code.data(), params.back_code.size_bytes());
 			program.back_size_dwords = static_cast<uint32_t>(params.back_code.size());
+			// The program key's hash of a front/back pair combines both; the guest registers
+			// the front binary under its own hash.
+			program.front_hash       = XXH3_64bits(params.code.data(), params.code.size_bytes());
 		}
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			program.input        = EncodeVertexInfo(input_info);
@@ -1805,7 +1808,7 @@ bool PipelineCache::UseVariantStore(const std::filesystem::path& path) {
 		m_gfx_by_hash.clear();
 		for (auto& stored: m_variants->Graphics()) {
 			const size_t index = m_gfx_pending.size();
-			m_gfx_by_hash[stored.vs.code_hash].push_back(index);
+			m_gfx_by_hash[stored.vs.RegistrationHash()].push_back(index);
 			if (stored.vs.back_hash != 0) m_gfx_by_hash[stored.vs.back_hash].push_back(index);
 			if (stored.has_ps) m_gfx_by_hash[stored.ps.code_hash].push_back(index);
 			m_gfx_pending.push_back({.variant = std::move(stored)});
@@ -2671,7 +2674,8 @@ void PipelineCache::CaptureGraphicsRegistration(const ShaderRegistration& reg, A
 		for (const size_t index: listed->second) {
 			auto& pending = m_gfx_pending[index];
 			if (pending.submitted) continue;
-			if (pending.variant.vs.code_hash == reg.hash && pending.variant.vs.code_size_dwords == code_dwords) {
+			if (pending.variant.vs.RegistrationHash() == reg.hash &&
+			    pending.variant.vs.code_size_dwords == code_dwords) {
 				pending.vs_code = code;
 			}
 			if (pending.variant.has_ps && pending.variant.ps.code_hash == reg.hash &&

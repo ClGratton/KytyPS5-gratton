@@ -224,6 +224,7 @@ GraphicsVariant MakeGraphics(uint64_t vs_hash, uint64_t ps_hash, uint8_t key_byt
 	g.vs.input_layout     = 0x1234;
 	g.vs.back_hash        = 0xfeedfaceull;
 	g.vs.back_size_dwords = 321;
+	g.vs.front_hash       = 0xc0ffeeull;
 	g.ps.stage            = 5;
 	g.ps.code_hash        = ps_hash;
 	g.ps.code_size_dwords = 1000;
@@ -246,6 +247,9 @@ void TestGraphicsRecords(const std::filesystem::path& dir) {
 	      "graphics record round trip");
 	Check(decoded.vs.back_hash == 0xfeedfaceull && decoded.vs.back_size_dwords == 321,
 	      "back half of a vertex program survives");
+	Check(decoded.vs.front_hash == 0xc0ffeeull && decoded.vs.RegistrationHash() == 0xc0ffeeull &&
+	          decoded.ps.RegistrationHash() == 200,
+	      "registration hash is the front binary's own, or the program hash");
 	auto other_back = g;
 	other_back.vs.back_hash = 5;
 	Check(!(other_back == g), "the back half is part of the program's identity");
