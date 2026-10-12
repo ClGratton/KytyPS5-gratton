@@ -149,10 +149,11 @@ static void PrintUsage() {
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
-	::printf("  --pipeline-cache-key <value>         revision (default) or schema. schema keys the driver\n"
-	         "                                       pipeline cache on a schema version + GPU/driver ids\n"
-	         "                                       instead of the git revision, and enables it in\n"
-	         "                                       non-Release/dirty builds.\n");
+	::printf("  --pipeline-cache-key <value>         schema (default) or revision. schema keys the driver\n"
+	         "                                       pipeline cache on a schema version + GPU/driver ids,\n"
+	         "                                       so a new emulator build keeps it (and it works in\n"
+	         "                                       non-Release/dirty builds). revision keys it on the git\n"
+	         "                                       revision: every commit drops it, dirty builds have none.\n");
 	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
 	         "                                       pipeline creation misses. Default: off.\n");
 	::printf("  --bench-gpu-trace <true|false>       With --shader-timing-log: also log the guest submit /\n"

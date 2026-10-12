@@ -27,12 +27,15 @@ enum class LogDirection { Silent, Console, File };
 
 enum class PresentMode { Fifo, Mailbox, Immediate };
 
-// What the on-disk driver VkPipelineCache signature is keyed on (see pipelineCache.cpp).
+// What the on-disk driver VkPipelineCache signature is keyed on (see pipelineCacheFile.h).
 //   Revision: stock behaviour. The git revision is part of the signature, so every commit drops
 //             the cache, and non-Release / unknown-revision / dirty builds disable it entirely.
-//   Schema:   a schema-version constant plus vendor/device/driverVersion/pipelineCacheUUID. The
-//             cache survives emulator revisions and is also enabled in dev (non-Release, dirty)
-//             builds. Opt-in via --pipeline-cache-key schema.
+//             --pipeline-cache-key revision.
+//   Schema:   (default) a schema-version constant plus vendor/device/driverVersion/
+//             pipelineCacheUUID. The cache survives emulator revisions and is also enabled in dev
+//             (non-Release, dirty) builds. The driver addresses every entry by the whole pipeline
+//             creation input, so a build that changes the SPIR-V or the state only misses; a
+//             different GPU, driver, layout (schema version) or a damaged file drops the cache.
 enum class PipelineCacheKey { Revision, Schema };
 
 // Where shader translation and Vulkan pipeline creation run (--async-pipelines, shaders.md C1a).
@@ -145,7 +148,7 @@ struct ConfigOptions {
 	uint64_t               bench_exit_after_frames     = 0;
 	std::filesystem::path  shader_timing_log;
 	bool                   bench_gpu_trace             = false;
-	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Revision;
+	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Schema;
 	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
 	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.
 	uint32_t               pipeline_workers            = 0;

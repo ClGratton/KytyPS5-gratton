@@ -71,6 +71,24 @@ void TestBufferGcOwnShare() {
 	}
 }
 
+// Correctness of the first-play experience: the driver pipeline cache survives emulator builds.
+// The invalidation rules (device, driver, schema version, damage, size cap) are pinned in
+// PipelineCacheFileTests.
+void TestPipelineCacheKeyDefault() {
+	const Config::ConfigOptions options;
+	Check(options.pipeline_cache_key == Config::PipelineCacheKey::Schema,
+	      "pipeline_cache_key defaults to schema");
+	Apply(options);
+	Check(Config::GetPipelineCacheKey() == Config::PipelineCacheKey::Schema,
+	      "an unconfigured emulator keys the pipeline cache on the schema");
+
+	Config::ConfigOptions stock;
+	stock.pipeline_cache_key = Config::PipelineCacheKey::Revision;
+	Apply(stock);
+	Check(Config::GetPipelineCacheKey() == Config::PipelineCacheKey::Revision,
+	      "--pipeline-cache-key revision still opts out");
+}
+
 } // namespace
 
 int main() {
@@ -78,6 +96,7 @@ int main() {
 
 	TestGpuTimestampsDefault();
 	TestBufferGcOwnShare();
+	TestPipelineCacheKeyDefault();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");
