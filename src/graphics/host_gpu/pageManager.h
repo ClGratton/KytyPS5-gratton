@@ -20,6 +20,10 @@ public:
 
 	[[nodiscard]] uint64_t GetPageSize() const;
 
+	// Restores the watchers' protection after the host protection of watched pages was changed
+	// behind the tracker's back (a guest mprotect). Unwatched pages keep theirs.
+	void ReapplyProtection(uint64_t vaddr, uint64_t size);
+
 	template <bool track>
 	void UpdatePageWatchers(uint64_t vaddr, uint64_t size);
 	template <bool track, bool is_read = false>

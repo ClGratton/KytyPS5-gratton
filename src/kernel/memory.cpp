@@ -4262,6 +4262,11 @@ static int ProtectMemory(const void* addr, size_t len, int prot) {
 		     " prot=0x%08x\n",
 		     aligned_addr, aligned_len, prot);
 	}
+	// The host protection just changed behind the GPU tracker's back: a writable page it watches
+	// would stop reporting CPU writes (the GPU would keep stale data).
+	if (g_gpu_resources != nullptr && IsGpuAddressRange(aligned_addr, aligned_len)) {
+		g_gpu_resources->ReapplyProtection(aligned_addr, aligned_len);
+	}
 	for (const auto& old_range: old_ranges) {
 		if (old_range.type == VirtualRangeType::Direct) {
 			g_physical_memory->ProtectMapping(old_range.start, old_range.size, prot, mode,

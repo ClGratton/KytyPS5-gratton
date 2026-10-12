@@ -53,6 +53,10 @@ public:
 	[[nodiscard]] bool InvalidateMemory(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
+	// After a guest protection change: pages the tracker watches get the tracker's protection back.
+	void               ReapplyProtection(uint64_t vaddr, uint64_t size) {
+		m_page_manager.ReapplyProtection(vaddr, size);
+	}
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
 	// `address_writes`: the shader may store through raw addresses (see BufferCache::NoteAddressWrites).
 	void               PrepareBda(bool address_writes = true);
