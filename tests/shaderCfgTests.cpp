@@ -3,12 +3,14 @@
 #include "common/stringUtils.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/csRegisters.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
@@ -9993,6 +9995,107 @@ void TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic() {
 // --skip-ir-validation: release translations may skip the IR consistency checks. The output must not
 // change, a broken program must still be caught when validation is on, and debug builds (and
 // KYTY_IR_VALIDATE) always validate.
+// Persisted variants (--pipeline-variants-replay): a compute program's translator inputs and its
+// resource specialization survive the record conversion, and the rebuilt inputs give the same
+// ProgramKey static state, so a replayed variant lands on the entry the real dispatch looks up.
+void TestVariantKeyRoundTrip() {
+  ShaderComputeInputInfo info{};
+  info.workgroup_register = 6;
+  info.wave_size = 32;
+  info.float_mode = 0xc0;
+  info.host_subgroup_size = 32;
+  info.thread_ids_num = 3;
+  info.lds_size_dwords = 256;
+  info.scratch_size_dwords = 64;
+  info.threads_num[0] = 8;
+  info.threads_num[1] = 4;
+  info.threads_num[2] = 2;
+  info.group_id[0] = true;
+  info.group_id[2] = true;
+  info.tg_size_en = true;
+  info.dispatch_thread_dimensions = true;
+  info.async_compute = true;
+  // Runtime state is not part of a variant.
+  info.workgroup_counts[0] = 99;
+  info.lds_storage = true;
+  const auto statics = ToVariantStatic(info, 9);
+  ShaderComputeInputInfo rebuilt{};
+  ApplyVariantStatic(statics, rebuilt);
+  Check(MakeStageStaticKey(info) == MakeStageStaticKey(rebuilt),
+        "variant static state changes the compute program key");
+  Check(rebuilt.workgroup_counts[0] == 0 && !rebuilt.lds_storage && statics.user_data_count == 9,
+        "variant carries runtime state or loses the user data count");
+  for (const auto flip: {1u, 2u, 4u, 8u, 16u, 32u}) {
+    auto other = statics;
+    other.flags ^= flip;
+    ShaderComputeInputInfo changed{};
+    ApplyVariantStatic(other, changed);
+    Check(MakeStageStaticKey(changed) != MakeStageStaticKey(rebuilt),
+          "a flag of the variant does not reach the program key");
+  }
+
+  using Spec = ShaderRecompiler::IR::ResourceSpecialization;
+  Spec spec;
+  spec.buffers.push_back({.packed_stride = 16, .descriptor_format = Prospero::BufferFormat::k32Float,
+                          .descriptor_swizzle = 0x4567, .zero_stride_oob = true,
+                          .indirect_root = 0, .indirect_mapping_offset = 5,
+                          .indirect_search_iterations = 3});
+  spec.buffers.push_back({});
+  spec.images.push_back({.numeric_class = Prospero::TextureNumericClass::Uint,
+                         .dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2DArray,
+                         .mip_count = 5, .conversion_format = Prospero::BufferFormat::k32UInt,
+                         .shader_swizzle = 0x123, .indirect_root = 0, .indirect_mapping_offset = 7,
+                         .indirect_search_iterations = 2, .cube = true, .fmask = true});
+  spec.images.push_back({});
+  const auto record = ToVariantSpec(spec);
+  Check(FromVariantSpec(record) == spec, "specialization changed in the record round trip");
+  Variants::ComputeVariant variant;
+  variant.code_hash = 0x1234;
+  variant.code_size_dwords = 77;
+  variant.state = statics;
+  variant.spec = record;
+  Variants::ComputeVariant decoded;
+  Check(Variants::Decode(Variants::Encode(variant), decoded) && decoded == variant &&
+            FromVariantSpec(decoded.spec) == spec,
+        "variant did not survive encoding");
+}
+
+// The shader-load hook rebuilds a compute shader's stage registers from the register list in its
+// AGC header, with the same decoder the PM4 stream uses.
+void TestComputeShaderHeaderRegisters() {
+  HW::CsStageRegisters regs{};
+  const uint32_t rsrc2 = (6u << Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) |
+                         (1u << Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_SHIFT) |
+                         (1u << Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_SHIFT) |
+                         (2u << Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_SHIFT) |
+                         (4u << Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT);
+  const std::pair<uint32_t, uint32_t> list[] = {
+      {Pm4::COMPUTE_PGM_LO, 0x00123456u},
+      {Pm4::COMPUTE_PGM_HI, 0x00000012u},
+      {Pm4::COMPUTE_PGM_RSRC1, 0xc0u << Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT},
+      {Pm4::COMPUTE_PGM_RSRC2, rsrc2},
+      {Pm4::COMPUTE_NUM_THREAD_X, 8},
+      {Pm4::COMPUTE_NUM_THREAD_Y, 4},
+      {Pm4::COMPUTE_NUM_THREAD_Z, 2},
+      {Pm4::COMPUTE_RESOURCE_LIMITS, 0x1234}};
+  for (const auto &[offset, value]: list) {
+    const auto result = HW::ApplyComputeShaderRegister(regs, offset, value);
+    Check(result == (offset == Pm4::COMPUTE_RESOURCE_LIMITS ? HW::CsRegisterResult::Ignored
+                                                            : HW::CsRegisterResult::Applied),
+          "known compute register result");
+  }
+  Check(regs.data_addr == ((uint64_t{0x00123456u} << 8u) | (uint64_t{0x12u} << 40u)),
+        "COMPUTE_PGM address");
+  Check(regs.user_sgpr == 6 && regs.tgid_x_en && !regs.tgid_y_en && regs.tgid_z_en &&
+            regs.tidig_comp_cnt == 2 && regs.lds_size == 4 && regs.float_mode == 0xc0,
+        "COMPUTE_PGM_RSRC fields");
+  Check(regs.num_thread_x == 8 && regs.num_thread_y == 4 && regs.num_thread_z == 2,
+        "COMPUTE_NUM_THREAD");
+  Check(HW::ApplyComputeShaderRegister(regs, Pm4::COMPUTE_USER_DATA_0, 5) ==
+            HW::CsRegisterResult::Unsupported,
+        "user data is not a stage register");
+}
+
 void TestShaderIrValidationGate() {
   using namespace ShaderRecompiler;
 
@@ -15779,6 +15882,8 @@ int main() {
   TestNewShaderRecompilerDispatcherSpillsU32x3();
   TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic();
   TestShaderIrValidationGate();
+  TestVariantKeyRoundTrip();
+  TestComputeShaderHeaderRegisters();
   TestNewShaderRecompilerPlanningOnlyLoads();
   TestNewShaderRecompilerNativeU64Translation();
   TestVertexMadU64UsesPortableProduct();
