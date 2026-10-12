@@ -1018,6 +1018,11 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return TryReadBacking(vaddr, data, size);
 }
 
+bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
+	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
+	       GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size);
+}
+
 bool TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (!Config::CleanGuestReadsEnabled() || g_gpu_resources == nullptr ||
 	    !Graphics::GuestGpu::IsGpuThread() || !IsGpuAddressRange(vaddr, size)) {

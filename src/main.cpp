@@ -224,6 +224,11 @@ static void PrintUsage() {
 	         "                                       Default: false.\n");
 	::printf("  --debug-draw-key-verify <true|false> With --draw-key-cache, also run the full lookup on every\n"
 	         "                                       memo hit and stop if the two disagree. Default: false.\n");
+	::printf("  --srt-plan-shadow <true|false>       Measurement only (needs --pipeline-lookahead): keep the SRT\n"
+	         "                                       the lookahead materializes for every draw as a plan and\n"
+	         "                                       compare it with the GPU thread's own result (lead time,\n"
+	         "                                       validity, byte equality, check cost). Prints a summary\n"
+	         "                                       every 10 s and at exit; nothing is adopted. Default: false.\n");
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
 	         "                                       the guest backing without faulting when none of the bytes\n"
 	         "                                       is GPU-written (no drain). Default: false.\n");
@@ -843,6 +848,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--srt-table-walk") {
 			if (!ParseBool(value, options.config.srt_table_walk)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--srt-plan-shadow") {
+			if (!ParseBool(value, options.config.srt_plan_shadow)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

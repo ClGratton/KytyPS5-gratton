@@ -252,6 +252,10 @@ struct ConfigOptions {
 	// guest-memory callback instead of walking the value graph. Default off.
 	bool                   srt_table_walk              = false;
 	bool                   draw_key_verify             = false;
+	// --srt-plan-shadow (measurement only): the lookahead thread keeps the materialized SRT of
+	// every draw it looks at as a plan, and kyGpu compares each plan with its own result
+	// (readiness, lead, validity, byte equality). Nothing is adopted. Needs --pipeline-lookahead.
+	bool                   srt_plan_shadow             = false;
 	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
 	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
 	bool                   clean_guest_reads           = false;
@@ -334,6 +338,7 @@ bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
 bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();
+bool              SrtPlanShadowEnabled();
 bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();

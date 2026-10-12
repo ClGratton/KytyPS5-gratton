@@ -321,6 +321,12 @@ QList<Option> BuildTable() {
 	             "With the draw key cache, also runs the full lookup on every memo hit and stops if "
 	             "the two disagree.",
 	             EMU_BOOL(draw_key_verify)});
+	defs.append({"srt_plan_shadow", "--srt-plan-shadow", Tab::Debug, "Diagnostics", Kind::Bool,
+	             "Measure SRT plans (needs look-ahead)",
+	             "The look-ahead thread keeps the shader resource tables it materializes as plans and "
+	             "the GPU thread compares each with its own result; prints lead time, validity and "
+	             "cost. Nothing is adopted.",
+	             EMU_BOOL(srt_plan_shadow)});
 	defs.append({"vram_audit", "--vram-audit", Tab::Debug, "Diagnostics", Kind::Int,
 	             "VRAM audit after:",
 	             "Once, this many seconds after start, log the resident image mix and the "
