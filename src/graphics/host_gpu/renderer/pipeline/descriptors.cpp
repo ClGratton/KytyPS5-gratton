@@ -1,5 +1,8 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
+#include <atomic>
+#include <cinttypes>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -523,6 +526,41 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		                                                    : TextureCache::BindingType::Texture);
 		const auto id   = texture_cache.FindImage(desc);
 		return {id, nullptr, std::move(desc)};
+	}
+
+	// Binding resolves every texture a shader references, and while a level loads some slots still
+	// hold stale descriptors that the draw never samples (the GPU does not read them). A sampled
+	// view of eight dwords that cannot describe an image at all (a base mip above the last, a
+	// format with no texel layout) is bound as the null image, loudly; a storage view is written
+	// back and still has to be exact. A well-formed descriptor of an unsupported feature is not
+	// this case and keeps its fatal report.
+	if (!storage) {
+		const char* invalid = nullptr;
+		if (!IsMultisampledTexture(TextureType(descriptor)) &&
+		    descriptor.BaseLevel() > descriptor.LastLevel()) {
+			invalid = "base mip above last mip";
+		} else if (TileTextureElementLayout element {};
+		           !TileGetTextureElementLayout(descriptor.Format(), element)) {
+			invalid = "format without a texel layout";
+		}
+		if (invalid != nullptr) {
+			static std::atomic<uint32_t> reported {0};
+			const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (count <= 32) {
+				std::printf("Texture: sampled descriptor is not an image (%s), bound as null: "
+				            "addr=0x%016" PRIx64 " format=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,"
+				            "%08x,%08x (%" PRIu32 " so far)\n",
+				            invalid, descriptor.Base40(),
+				            static_cast<uint32_t>(descriptor.Format()), descriptor.fields[0],
+				            descriptor.fields[1], descriptor.fields[2], descriptor.fields[3],
+				            descriptor.fields[4], descriptor.fields[5], descriptor.fields[6],
+				            descriptor.fields[7], count);
+				std::fflush(stdout);
+			}
+			auto       desc = NullTextureDesc(resource, TextureCache::BindingType::Texture);
+			const auto id   = texture_cache.FindImage(desc);
+			return {id, nullptr, std::move(desc)};
+		}
 	}
 
 	const auto address         = descriptor.Base40();
