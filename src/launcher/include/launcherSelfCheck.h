@@ -10,9 +10,10 @@
 //       emulator's, that every flag the launcher can pass is in the emulator's --help, that the
 //       default and the "Recommended for play" command lines are accepted by the emulator's
 //       parser, and that the preset reproduces the flags of a bench play config.
-//   launcher --print-command [--preset] --game <dir>
+//   launcher --print-command [--shell] [--preset] --game <dir>
 //       Prints the environment and command line the launcher would start the emulator with, from
 //       the saved global settings (or, with --preset, the recommended set on top of the defaults).
+//       --shell prints it as export/exec lines for eval (the kyty-gratton run wrapper).
 //
 // Both return the process exit code.
 int RunSelfCheck(const QStringList& args);

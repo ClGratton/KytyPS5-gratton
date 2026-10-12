@@ -378,7 +378,7 @@ int RunGrabSettings(const QStringList& args) {
 int RunPrintCommand(const QStringList& args) {
 	const auto game_at = args.indexOf(QStringLiteral("--game"));
 	if (game_at < 0 || game_at + 1 >= args.size()) {
-		QTextStream(stderr) << "usage: launcher --print-command [--preset] --game <dir>\n";
+		QTextStream(stderr) << "usage: launcher --print-command [--shell] [--preset] --game <dir>\n";
 		return 2;
 	}
 	Configuration info;
@@ -397,12 +397,29 @@ int RunPrintCommand(const QStringList& args) {
 	info.basedir = QDir(args.at(game_at + 1)).absolutePath();
 	const auto command = CreateEmulatorArgs(info);
 	QTextStream out(stdout);
+	const auto quote = [](QString value) {
+		value.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+		return QStringLiteral("'") + value + QStringLiteral("'");
+	};
+	if (args.contains(QStringLiteral("--shell"))) {
+		// For `eval "$(launcher --print-command --shell ...)"`: the exact command the Run button starts.
+		for (const auto& assignment: CreateEmulatorEnvironment(info)) {
+			const auto split = assignment.indexOf(QLatin1Char('='));
+			out << "export " << assignment.left(split) << "=" << quote(assignment.mid(split + 1)) << "\n";
+		}
+		out << "exec " << quote(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("kyty_emulator")));
+		for (const auto& arg: command) {
+			out << " " << quote(arg);
+		}
+		out << "\n";
+		return 0;
+	}
 	for (const auto& assignment: CreateEmulatorEnvironment(info)) {
 		out << assignment << "\n";
 	}
 	out << "kyty_emulator";
 	for (const auto& arg: command) {
-		out << " " << (arg.contains(QLatin1Char(' ')) ? QStringLiteral("'") + arg + QStringLiteral("'") : arg);
+		out << " " << (arg.contains(QLatin1Char(' ')) ? quote(arg) : arg);
 	}
 	out << "\n";
 	return 0;
