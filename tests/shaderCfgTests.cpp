@@ -42,6 +42,7 @@
 #include <deque>
 #include <initializer_list>
 #include <iterator>
+#include <memory>
 #include <span>
 #include <sstream>
 #include <string>
@@ -9932,6 +9933,63 @@ void TestNewShaderRecompilerDispatcherSpillsU32x3() {
         "dispatcher did not use one canonical U32x3 spill slot");
 }
 
+// Dispatcher spill ids used to be allocated by iterating a pointer-keyed map (second wave half), so
+// the module bytes depended on where the IR instructions happened to be allocated. Translate the same
+// shader repeatedly with different heap layouts: the SPIR-V must be byte-identical every time.
+void TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic() {
+  using namespace ShaderRecompiler;
+
+  const uint32_t shader[] = {
+      EncodeSopp(0x05, 2),       // entry -> B, fallthrough A
+      EncodeSopp(0x02, 0),       // A -> C
+      EncodeSopp(0x05, 0xfffeu), // C -> A, fallthrough B
+      EncodeSopp(0x02, 0xfffeu), // B -> C
+      EncodeSopp(0x01),
+  };
+  ShaderComputeInputInfo compute{};
+  compute.threads_num[0] = 64;
+  compute.threads_num[1] = compute.threads_num[2] = 1;
+  compute.host_subgroup_size = 32; // two host lanes per guest wave: spills for both halves
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.wave_size = 64;
+  options.input_info.compute = &compute;
+
+  constexpr uint32_t spill_count = 24;
+  std::vector<uint32_t> reference;
+  std::vector<std::unique_ptr<char[]>> heap_noise;
+  for (uint32_t run = 0; run < 12; run++) {
+    // Perturb the allocator so IR nodes land at different addresses (and bucket orders) each run.
+    for (uint32_t i = 0; i < 7 + run * 13; i++) {
+      heap_noise.push_back(std::make_unique<char[]>(16 + ((i * 37 + run * 11) % 200)));
+    }
+    if (run % 3 == 2) {
+      heap_noise.clear();
+    }
+
+    auto result = RecompileForTest(shader, options);
+    Check(result.program.dispatcher_fallback && result.program.blocks.size() >= 3u,
+          "deterministic spill fixture did not select dispatcher mode");
+    auto program = std::move(result.program);
+    IR::IREmitter definition(program.blocks[1]);
+    IR::IREmitter use(program.blocks[2]);
+    for (uint32_t i = 0; i < spill_count; i++) {
+      const auto vector = definition.Emit(IR::ValueOpcode::CompositeConstructU32x3,
+                                          {IR::Value(i), IR::Value(i + 1u), IR::Value(i + 2u)});
+      use.Emit(IR::ValueOpcode::CompositeExtractU32x3, {vector, IR::Value(i % 3u)});
+    }
+    program.shader_info_complete = false;
+    IR::CollectShaderInfo(program, options.input_info);
+    auto spirv = Spirv::EmitProgram(program, options.input_info);
+    CheckSpirvBinaryValidates(spirv);
+    if (run == 0) {
+      reference = std::move(spirv);
+      Check(!reference.empty(), "deterministic spill fixture produced no SPIR-V");
+    } else {
+      Check(spirv == reference, "dispatcher SPIR-V differs between runs of the same translation");
+    }
+  }
+}
+
 void TestNewShaderRecompilerPlanningOnlyLoads() {
   using namespace ShaderRecompiler;
   const uint32_t shader[] = {EncodeSopp(0x01)};
@@ -15671,6 +15729,7 @@ int main() {
   TestNewShaderRecompilerCfgFailedStructurizationPreservesGraph();
   TestNewShaderRecompilerCfgIrreducibleDispatcher();
   TestNewShaderRecompilerDispatcherSpillsU32x3();
+  TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic();
   TestNewShaderRecompilerPlanningOnlyLoads();
   TestNewShaderRecompilerNativeU64Translation();
   TestVertexMadU64UsesPortableProduct();
