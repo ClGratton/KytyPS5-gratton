@@ -55,6 +55,9 @@ constexpr char EMULATOR_EXE[] = "kyty_emulator";
 constexpr char CMD_EXE[] = "cmd.exe";
 #elif defined(__linux__)
 constexpr char KYTY_BASH_FILE[] = "kyty_run.sh";
+// Each run's output goes to <install dir>/logs/<date-time>.log; the newest runs are kept.
+constexpr char KYTY_RUN_LOG_DIR[]  = "logs";
+constexpr int  KYTY_RUN_LOGS_KEPT = 20;
 #endif
 #if defined(_WIN32)
 constexpr DWORD CMD_X_CHARS = 175;
@@ -223,7 +226,8 @@ static QString BashQuote(QString value) {
 }
 
 static bool CreateBashScript(const QString& interpreter, const QStringList& args,
-                             const QStringList& environment, const QString& file_name) {
+                             const QStringList& environment, const QString& file_name,
+                             const QString& log_dir) {
 	QFile file(file_name);
 	if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
 		QTextStream s(&file);
@@ -236,11 +240,24 @@ static bool CreateBashScript(const QString& interpreter, const QStringList& args
 				  << "\n";
 			}
 		}
-		s << BashQuote(interpreter);
+		// The run's output is shown in the terminal and saved to logs/<date-time>.log. Names sort by
+		// time: before this run starts, all but the newest KYTY_RUN_LOGS_KEPT - 1 earlier logs go, so
+		// with this run's log exactly KYTY_RUN_LOGS_KEPT remain.
+		s << "mkdir -p " << BashQuote(log_dir) << "\n";
+		s << "shopt -s nullglob\n";
+		s << "logs=(" << BashQuote(log_dir) << "/*.log)\n";
+		s << "for ((i = 0; i < ${#logs[@]} - " << (KYTY_RUN_LOGS_KEPT - 1)
+		  << "; i++)); do rm -f -- \"${logs[i]}\"; done\n";
+		s << "log=" << BashQuote(log_dir) << "/$(date +%Y-%m-%d-%H%M%S).log\n";
+		s << "echo \"Log: $log\"\n";
+		// stdbuf makes the emulator's stdout line-buffered, so a crash leaves the lines before it.
+		s << "wrap=()\n";
+		s << "command -v stdbuf >/dev/null && wrap=(stdbuf -oL -eL)\n";
+		s << "\"${wrap[@]}\" " << BashQuote(interpreter);
 		for (const auto& arg: args) {
 			s << " " << BashQuote(arg);
 		}
-		s << "\n";
+		s << " 2>&1 | tee \"$log\"\n";
 		s << "echo Press any key...\n";
 		s << "read -n1\n";
 
@@ -346,7 +363,8 @@ void MainDialog::RunInterpreter(QProcess* process, const Configuration& info) {
 
 #ifdef __linux__
 	auto bash_file_name = dir.filePath(KYTY_BASH_FILE);
-	if (!CreateBashScript(interpreter, args, environment, bash_file_name)) {
+	if (!CreateBashScript(interpreter, args, environment, bash_file_name,
+	                      dir.filePath(KYTY_RUN_LOG_DIR))) {
 		QMessageBox::critical(this, tr("Error"), tr("Can't create file:\n") + bash_file_name);
 		QApplication::quit();
 		return;
