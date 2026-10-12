@@ -655,10 +655,10 @@ void BufferCache::RunGarbageCollector() {
 	                                                      Config::GcBufferOwnSharePercent());
 	m_gc_stats.runs++;
 	m_gc_stats.aggressive += aggressive ? 1 : 0;
-	if (m_gc_stats.runs % 4096 == 0) {
+	if (m_gc_stats.runs % 1024 == 0) {
 		// Cumulative; the difference between two lines is a window. One line per 4096 runs that
 		// were past the trigger, so it only appears under memory pressure.
-		Log::Write(fmt::format(
+		Log::WriteToConsoleAndLog(fmt::format(
 		    "BufferGC: runs={} aggressive={} freed_clean={} downloaded_dirty={} drains={} "
 		    "own={}MiB device={}MiB critical={}MiB share={}%\n",
 		    m_gc_stats.runs, m_gc_stats.aggressive, m_gc_stats.freed, m_gc_stats.downloads,

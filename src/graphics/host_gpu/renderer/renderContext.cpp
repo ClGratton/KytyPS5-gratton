@@ -147,9 +147,10 @@ void RenderContext::PrepareBda() {
 		m_bda_full++;
 	}
 	if (((m_bda_full + m_bda_skipped) & 0x3FFF) == 0) {
-		Log::Write(fmt::format("GPU: BDA sync calls={} full={} skipped={} (--bda-sync-skip {})\n",
-		                       m_bda_full + m_bda_skipped, m_bda_full, m_bda_skipped,
-		                       Config::BdaSyncSkip() ? "on" : "off"));
+		Log::WriteToConsoleAndLog(
+		    fmt::format("GPU: BDA sync calls={} full={} skipped={} (--bda-sync-skip {})\n",
+		                m_bda_full + m_bda_skipped, m_bda_full, m_bda_skipped,
+		                Config::BdaSyncSkip() ? "on" : "off"));
 	}
 	m_fault_process_pending = true;
 }
