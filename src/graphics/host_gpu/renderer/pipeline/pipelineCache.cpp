@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
 #include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -204,6 +205,34 @@ std::size_t HashSpecialization(const ShaderRecompiler::IR::ResourceSpecializatio
 		mix(hash, (image.cube ? 1u : 0u) | (image.fmask ? 2u : 0u));
 	}
 	return hash;
+}
+
+// A stored specialization can be stale (the translator changed since it was recorded). Applying an
+// incompatible one is fatal in ApplyResourceSpecialization, so check what it asserts.
+bool SpecializationFits(const ShaderRecompiler::IR::ResourcePlan&           plan,
+                        const ShaderRecompiler::IR::ResourceSpecialization& spec) {
+	using ShaderRecompiler::IR::BufferResource;
+	using ShaderRecompiler::IR::ImageResource;
+	if (spec.buffers.size() < plan.info.buffers.size() || spec.images.size() < plan.info.images.size()) {
+		return false;
+	}
+	for (size_t i = 0; i < spec.buffers.size(); i++) {
+		const auto root = spec.buffers[i].indirect_root;
+		if (root != BufferResource::NoIndirectBuffer && root >= spec.buffers.size()) return false;
+		if (i >= plan.info.buffers.size() &&
+		    (root == BufferResource::NoIndirectBuffer || root >= plan.info.buffers.size())) {
+			return false;
+		}
+	}
+	for (size_t i = 0; i < spec.images.size(); i++) {
+		const auto root = spec.images[i].indirect_root;
+		if (root != ImageResource::NoIndirectImage && root >= spec.images.size()) return false;
+		if (i >= plan.info.images.size() &&
+		    (root == ImageResource::NoIndirectImage || root >= plan.info.images.size())) {
+			return false;
+		}
+	}
+	return true;
 }
 
 // One-line text of a variant for the compute_variant timing row: static state words, then the
@@ -860,6 +889,97 @@ struct PipelineCache::ProgramCache {
 		return load_active.size();
 	}
 
+	// ---- graphics replay (--pipeline-variants-replay) ---------------------------------------
+	// Builds (or finds) the permutation of a stored vertex / mesh / pixel stage program. Worker
+	// thread. Returns nullptr when the stage cannot be rebuilt (an S_SWAP_PC program, a stored
+	// specialization that no longer fits the translation); the translated source is kept.
+	Permutation* BuildStoredStage(const Variants::ProgramVariant& stored, std::span<const uint32_t> code,
+	                              ShaderVertexInputInfo* vertex, ShaderPixelInputInfo* pixel,
+	                              LoadCounters& counters, uint32_t& built_count) {
+		const auto stage = static_cast<ShaderType>(stored.stage);
+		const char* label = nullptr;
+		const char* name  = nullptr;
+		switch (stage) {
+			case ShaderType::Vertex: label = "ShaderRecompiler VS"; name = "vs"; break;
+			case ShaderType::Mesh: label = "ShaderRecompiler MS"; name = "ms"; break;
+			case ShaderType::Pixel: label = "ShaderRecompiler PS"; name = "ps"; break;
+			default: return nullptr;
+		}
+		ProgramKey key;
+		key.stage           = stage;
+		key.hash            = stored.code_hash;
+		key.user_data_count = stored.user_data_count;
+		key.code_size       = stored.code_size_dwords;
+		key.static_state    = stored.static_state;
+		const std::vector<uint32_t> user_data(stored.user_data_count, 0u);
+		ShaderRecompiler::CompileOptions options;
+		options.stage       = stage;
+		options.shader_hash = stored.code_hash;
+		options.user_data   = user_data;
+		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+		options.early_dump  = options.dump_ir;
+		options.dump_label  = label;
+		if (vertex != nullptr) {
+			options.input_info.vertex = vertex;
+			options.user_data_base    = 8;
+			options.wave_size         = vertex->wave_size;
+			if (stage == ShaderType::Mesh) {
+				options.user_data_base = 0;
+				options.wave_size      = vertex->mesh.wave_size;
+			}
+		} else {
+			options.input_info.pixel = pixel;
+			options.wave_size        = pixel->wave_size;
+		}
+		auto source = ShaderRecompiler::PrepareShaderSource(code, options);
+		if (source.call) {
+			counters.skipped_call.fetch_add(1, std::memory_order_relaxed);
+			return nullptr;
+		}
+		auto translated = ShaderRecompiler::TranslateProgram(source.decoded, options);
+		auto plan       = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+		auto spec       = FromVariantSpec(stored.spec);
+		const bool fits = SpecializationFits(plan, spec);
+		auto* entry     = InsertEntry(key, std::move(plan), nullptr);
+		if (!fits) {
+			counters.skipped_stale.fetch_add(1, std::memory_order_relaxed);
+			return nullptr;
+		}
+		if (auto* existing = entry->FindPublished(stored.push_data_cursor, spec)) {
+			return existing;
+		}
+		auto compiled = CompilePermutation(name, options, std::move(translated), spec,
+		                                   stored.push_data_cursor, {});
+		compiled.from_load     = true;
+		compiled.load_ready_ns = Bench::NowNs();
+		bool dup               = false;
+		auto* const published  = entry->Publish(compiled, stored.push_data_cursor, false, dup);
+		if (dup) {
+			device.destroyShaderModule(compiled.handle.module, nullptr);
+			counters.duplicates.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			stage_permutation_counts[static_cast<size_t>(stage)].fetch_add(1, std::memory_order_relaxed);
+			counters.built.fetch_add(1, std::memory_order_relaxed);
+			built_count++;
+		}
+		return published;
+	}
+
+	// One stored graphics pipeline: builds its stage programs, then queues the pipeline.
+	struct GfxLoadJob final: AsyncJob {
+		GfxLoadJob(PipelineCache& owner_cache, uint64_t key_hash)
+		    : AsyncJob(Kind::Program, key_hash), owner(owner_cache) {}
+		~GfxLoadJob() override;
+		void Execute() override;
+		void Cancel() override {}
+
+		PipelineCache&                               owner;
+		Variants::GraphicsVariant                    variant;
+		std::shared_ptr<const std::vector<uint32_t>> vs_code;
+		std::shared_ptr<const std::vector<uint32_t>> ps_code;
+		uint32_t                                     priority = 0;
+	};
+
 	struct AsyncContext {
 		AsyncPipelineCompiler* pool       = nullptr;
 		bool                   allow_skip = false; // graphics only; compute always waits
@@ -886,6 +1006,46 @@ struct PipelineCache::ProgramCache {
 	LoadCounters*             load     = nullptr;
 	bool                      track_use = false;
 	int64_t                   clock_start_ns = 0; // first_use_ms of recorded variants counts from here
+
+	// Graphics stage programs as draws used them, by program id (for NoteGraphicsVariant). Only
+	// programs a replay can rebuild are kept: vertex / mesh and pixel stages without a back half.
+	std::mutex                                       gfx_programs_mutex;
+	std::unordered_map<uint64_t, Variants::ProgramVariant> gfx_programs;
+
+	template <typename InputInfo>
+	void NoteGraphicsProgramUse(Permutation& permutation, const ShaderParams& params,
+	                            const InputInfo& input_info, ShaderType stage, uint32_t cursor_in,
+	                            const std::vector<uint32_t>& static_state) {
+		if (variants == nullptr || permutation.used.Exchange() || !params.back_code.empty() ||
+		    (stage != ShaderType::Vertex && stage != ShaderType::Mesh && stage != ShaderType::Pixel)) {
+			return;
+		}
+		Variants::ProgramVariant program;
+		program.stage            = static_cast<uint8_t>(stage);
+		program.code_hash        = params.hash;
+		program.code_size_dwords = static_cast<uint32_t>(params.code.size());
+		program.user_data_count  = params.user_data_count;
+		program.push_data_cursor = cursor_in;
+		program.static_state     = static_state;
+		program.spec             = ToVariantSpec(permutation.specialization);
+		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+			program.input        = EncodeVertexInfo(input_info);
+			program.input_layout = VertexInfoLayout();
+		} else {
+			program.input        = EncodePixelInfo(input_info);
+			program.input_layout = PixelInfoLayout();
+		}
+		std::lock_guard lock(gfx_programs_mutex);
+		gfx_programs[permutation.handle.id] = std::move(program);
+	}
+
+	[[nodiscard]] bool FindGraphicsProgram(uint64_t id, Variants::ProgramVariant& out) {
+		std::lock_guard lock(gfx_programs_mutex);
+		const auto      iter = gfx_programs.find(id);
+		if (iter == gfx_programs.end()) return false;
+		out = iter->second;
+		return true;
+	}
 
 	// First use of a compute permutation by a dispatch (GPU thread): records the variant for the
 	// next session and accounts a hit of the load-time build. The hot path is one relaxed
@@ -985,11 +1145,13 @@ struct PipelineCache::ProgramCache {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 		}
 		// The draw/dispatch (not a prefetch) is about to use `p`: variant recording and load hits.
+		const uint32_t cursor_in = push_data_cursor;
 		const auto note_use = [&](Permutation& p) {
+			if (prefetch || (entry != nullptr && entry->call_source != nullptr)) return;
 			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
-				if (!prefetch && (entry == nullptr || entry->call_source == nullptr)) {
-					NoteComputeUse(p, params, input_info);
-				}
+				NoteComputeUse(p, params, input_info);
+			} else {
+				NoteGraphicsProgramUse(p, params, input_info, stage, cursor_in, lookup_key.static_state);
 			}
 		};
 		bool source_changed = false;
@@ -1468,13 +1630,13 @@ std::string PipelineCache::LoadCounters::Summary() const {
 	    "registered_cs={};registered_other={};stored_variants={};jobs_stored={};jobs_guess={};"
 	    "skipped_unguessable={};skipped_call={};skipped_stale={};skipped_known={};skipped_registers={};built={};"
 	    "duplicates={};pipelines={};program_hit={};program_other={};pipeline_hit_ready={};"
-	    "pipeline_hit_inflight={};recorded={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f};"
+	    "pipeline_hit_inflight={};recorded={};recorded_graphics={};gfx_stored={};gfx_jobs={};gfx_pipelines={};gfx_skipped={};gfx_hit_ready={};gfx_hit_inflight={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f};"
 	    "lead_max_ms={:.1f}",
 	    registered_cs.load(), registered_other.load(), stored_variants.load(), jobs_stored.load(),
 	    jobs_guess.load(), skipped_unguessable.load(), skipped_call.load(), skipped_stale.load(), skipped_known.load(),
 	    skipped_registers.load(), built.load(), duplicates.load(), pipelines.load(),
 	    program_hit.load(), program_other.load(), pipeline_hit_ready.load(),
-	    pipeline_hit_inflight.load(), recorded.load(), n,
+	    pipeline_hit_inflight.load(), recorded.load(), recorded_graphics.load(), gfx_stored.load(), gfx_jobs.load(), gfx_pipelines.load(), gfx_skipped.load(), gfx_hit_ready.load(), gfx_hit_inflight.load(), n,
 	    n != 0 ? static_cast<double>(lead_sum_ns.load()) / static_cast<double>(n) / 1e6 : 0.0,
 	    n != 0 ? static_cast<double>(lead_min_ns.load()) / 1e6 : 0.0,
 	    static_cast<double>(lead_max_ns.load()) / 1e6);
@@ -1519,6 +1681,18 @@ bool PipelineCache::UseVariantStore(const std::filesystem::path& path) {
 	m_variants                = std::move(store);
 	m_program_cache->variants = m_variants.get();
 	m_program_cache->track_use = true;
+	{
+		std::lock_guard lock(m_gfx_mutex);
+		m_gfx_pending.clear();
+		m_gfx_by_hash.clear();
+		for (auto& stored: m_variants->Graphics()) {
+			const size_t index = m_gfx_pending.size();
+			m_gfx_by_hash[stored.vs.code_hash].push_back(index);
+			if (stored.has_ps) m_gfx_by_hash[stored.ps.code_hash].push_back(index);
+			m_gfx_pending.push_back({.variant = std::move(stored)});
+		}
+		m_load.gfx_stored.store(m_gfx_pending.size(), std::memory_order_relaxed);
+	}
 	return true;
 }
 
@@ -1967,6 +2141,7 @@ struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 		}
 		auto cached = std::make_unique<Pipeline>();
 		cached->prefetched = IsPrefetched();
+		cached->loaded     = from_load;
 		LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
 		Stopwatch create_sw;
 		CreatePipelineInternal(cache.m_graphics, *cached, key.rendering, key.vertex_input,
@@ -1983,6 +2158,9 @@ struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 		LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 		EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 		EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
+		if (from_load) {
+			cached->load_ready_ns = Bench::NowNs();
+		}
 		cache.NoteFirstBuild(*cached);
 		// An unoptimized pipeline gets its optimized build queued once it is published. The
 		// follow-up copies everything it needs now: after the publish only the GPU thread may touch
@@ -2028,6 +2206,7 @@ struct PipelineCache::GraphicsPipelineJob final: AsyncJob {
 	vk::PipelineCache                  driver_cache = nullptr;
 	uint64_t                           vs_id        = 0;
 	uint64_t                           ps_id        = 0;
+	bool                               from_load    = false; // queued by a shader-load job
 };
 
 struct PipelineCache::ComputeOptimizeJob final: AsyncJob {
@@ -2126,37 +2305,6 @@ void PipelineCache::ProgramCache::LoadJob::Unregister() {
 	owner.m_program_cache->RemoveLoad(this);
 }
 
-namespace {
-
-// A stored specialization can be stale (the translator changed since it was recorded). Applying an
-// incompatible one is fatal in ApplyResourceSpecialization, so check what it asserts.
-bool SpecializationFits(const ShaderRecompiler::IR::ResourcePlan&           plan,
-                        const ShaderRecompiler::IR::ResourceSpecialization& spec) {
-	using ShaderRecompiler::IR::BufferResource;
-	using ShaderRecompiler::IR::ImageResource;
-	if (spec.buffers.size() < plan.info.buffers.size() || spec.images.size() < plan.info.images.size()) {
-		return false;
-	}
-	for (size_t i = 0; i < spec.buffers.size(); i++) {
-		const auto root = spec.buffers[i].indirect_root;
-		if (root != BufferResource::NoIndirectBuffer && root >= spec.buffers.size()) return false;
-		if (i >= plan.info.buffers.size() &&
-		    (root == BufferResource::NoIndirectBuffer || root >= plan.info.buffers.size())) {
-			return false;
-		}
-	}
-	for (size_t i = 0; i < spec.images.size(); i++) {
-		const auto root = spec.images[i].indirect_root;
-		if (root != ImageResource::NoIndirectImage && root >= spec.images.size()) return false;
-		if (i >= plan.info.images.size() &&
-		    (root == ImageResource::NoIndirectImage || root >= plan.info.images.size())) {
-			return false;
-		}
-	}
-	return true;
-}
-
-} // namespace
 
 void PipelineCache::ProgramCache::LoadJob::Execute() {
 	ProgramCache& cache    = *owner.m_program_cache;
@@ -2278,9 +2426,12 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 	    (!Config::GetPrecompileOnLoad() && m_variants == nullptr)) {
 		return;
 	}
-	if (static_cast<Prospero::ShaderBinaryType>(reg.type) != Prospero::ShaderBinaryType::kCs) {
+	const bool compute = static_cast<Prospero::ShaderBinaryType>(reg.type) == Prospero::ShaderBinaryType::kCs;
+	if (!compute) {
 		m_load.registered_other.fetch_add(1, std::memory_order_relaxed);
-		return;
+		if (m_gfx_by_hash.empty()) {
+			return;
+		}
 	}
 	std::shared_lock gate(m_prefetch_gate);
 	if (m_prefetch_stopped) {
@@ -2288,6 +2439,10 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 	}
 	auto* pool = AsyncPool();
 	if (pool == nullptr) {
+		return;
+	}
+	if (!compute) {
+		CaptureGraphicsRegistration(reg, *pool);
 		return;
 	}
 	m_load.registered_cs.fetch_add(1, std::memory_order_relaxed);
@@ -2370,9 +2525,121 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 	submit(info, params.user_data_count, std::nullopt, Variants::ComputeVariant::kUnknownFirstUse);
 }
 
+// The guest registered a non-compute shader. When a stored graphics pipeline needs its binary the
+// code is copied; the pipeline's job starts once all of its binaries have been seen.
+void PipelineCache::CaptureGraphicsRegistration(const ShaderRegistration& reg, AsyncPipelineCompiler& pool) {
+	const auto listed = m_gfx_by_hash.find(reg.hash);
+	if (listed == m_gfx_by_hash.end() || reg.code_size_bytes < 4u) {
+		return;
+	}
+	const uint32_t code_dwords = reg.code_size_bytes / 4u;
+	auto code = std::make_shared<std::vector<uint32_t>>(code_dwords);
+	std::memcpy(code->data(), reinterpret_cast<const void*>(reg.address), code_dwords * 4u);
+	std::vector<std::shared_ptr<ProgramCache::GfxLoadJob>> ready;
+	{
+		std::lock_guard lock(m_gfx_mutex);
+		for (const size_t index: listed->second) {
+			auto& pending = m_gfx_pending[index];
+			if (pending.submitted) continue;
+			if (pending.variant.vs.code_hash == reg.hash && pending.variant.vs.code_size_dwords == code_dwords) {
+				pending.vs_code = code;
+			}
+			if (pending.variant.has_ps && pending.variant.ps.code_hash == reg.hash &&
+			    pending.variant.ps.code_size_dwords == code_dwords) {
+				pending.ps_code = code;
+			}
+			if (pending.vs_code == nullptr || (pending.variant.has_ps && pending.ps_code == nullptr)) continue;
+			pending.submitted = true;
+			auto job = std::make_shared<ProgramCache::GfxLoadJob>(*this, index);
+			job->variant  = pending.variant;
+			job->vs_code  = pending.vs_code;
+			job->ps_code  = pending.ps_code;
+			job->priority = pending.variant.first_use_ms;
+			ready.push_back(std::move(job));
+		}
+	}
+	for (auto& job: ready) {
+		m_gfx_load_active.fetch_add(1, std::memory_order_relaxed);
+		m_load.gfx_jobs.fetch_add(1, std::memory_order_relaxed);
+		const auto priority = job->priority;
+		if (!pool.SubmitLowPriority(job, true, priority)) {
+			// Cancelled by a shutdown; the destructor releases the active count.
+		}
+	}
+}
+
+PipelineCache::ProgramCache::GfxLoadJob::~GfxLoadJob() {
+	owner.m_gfx_load_active.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void PipelineCache::ProgramCache::GfxLoadJob::Execute() {
+	ProgramCache& cache    = *owner.m_program_cache;
+	LoadCounters& counters = owner.m_load;
+	const auto    skip     = [&] { counters.gfx_skipped.fetch_add(1, std::memory_order_relaxed); };
+	ShaderVertexInputInfo vertex;
+	ShaderPixelInputInfo  pixel;
+	if (!DecodeVertexInfo(variant.vs.input, variant.vs.input_layout, vertex) ||
+	    (variant.has_ps && !DecodePixelInfo(variant.ps.input, variant.ps.input_layout, pixel))) {
+		skip();
+		return;
+	}
+	uint32_t   built = 0;
+	Permutation* ps  = nullptr;
+	if (variant.has_ps) {
+		ps = cache.BuildStoredStage(variant.ps, *ps_code, nullptr, &pixel, counters, built);
+		if (ps == nullptr) {
+			skip();
+			return;
+		}
+	}
+	Permutation* vs = cache.BuildStoredStage(variant.vs, *vs_code, &vertex, nullptr, counters, built);
+	if (vs == nullptr) {
+		skip();
+		return;
+	}
+	GraphicsPipelineKey key {};
+	if (!DecodePipelineKey(variant.key, key.rendering, key.vertex_input, key.static_params)) {
+		skip();
+		return;
+	}
+	key.vertex_shader_ids[0] = vs->handle.id;
+	key.ps_shader_id         = variant.has_ps ? ps->handle.id : 0;
+	if (owner.FindGraphicsPipeline(key) != nullptr || owner.m_graphics_jobs.Find(key) != nullptr) {
+		skip();
+		return;
+	}
+	auto* pool = owner.AsyncPool();
+	if (pool == nullptr) {
+		return;
+	}
+	vertex.stage = {.program = &vs->program, .resources = &PrefetchResources()};
+	if (variant.has_ps) pixel.stage = {.program = &ps->program, .resources = &PrefetchResources()};
+	auto fresh = std::make_shared<GraphicsPipelineJob>(owner, key, GraphicsPipelineKeyHash {}(key));
+	fresh->vertex_info.assign(1, vertex);
+	if (variant.has_ps) fresh->ps_input_info = pixel;
+	fresh->programs.vertex[0] = vs->handle;
+	if (variant.has_ps) fresh->programs.pixel = ps->handle;
+	fresh->driver_cache = owner.m_driver_cache;
+	fresh->vs_id        = vs->handle.id;
+	fresh->ps_id        = variant.has_ps ? ps->handle.id : 0;
+	fresh->from_load    = true;
+	bool inserted       = false;
+	owner.m_graphics_jobs.Insert(key, fresh, inserted);
+	if (!inserted) {
+		skip();
+		return;
+	}
+	if (!pool->SubmitLowPriority(fresh, true, priority)) {
+		owner.m_graphics_jobs.Erase(key);
+		return;
+	}
+	counters.gfx_pipelines.fetch_add(1, std::memory_order_relaxed);
+}
+
 bool PipelineCache::WaitLoadIdle(int timeout_ms) {
 	const auto deadline = Bench::NowNs() + static_cast<int64_t>(timeout_ms) * 1000000;
-	while (m_program_cache->LoadActive() != 0 || m_compute_jobs.Size() != 0) {
+	while (m_program_cache->LoadActive() != 0 || m_compute_jobs.Size() != 0 ||
+	       m_graphics_jobs.Size() != 0 || m_gfx_load_active.load() != 0) {
 		if (Bench::NowNs() > deadline) {
 			return false;
 		}
@@ -2560,12 +2827,13 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 void PipelineCache::NoteDrawUse(Pipeline& pipeline, bool graphics, bool joined_in_flight) {
 	if (pipeline.loaded && !pipeline.load_claimed) {
 		pipeline.load_claimed = true;
-		(joined_in_flight ? m_load.pipeline_hit_inflight : m_load.pipeline_hit_ready)
+		(graphics ? (joined_in_flight ? m_load.gfx_hit_inflight : m_load.gfx_hit_ready)
+		          : (joined_in_flight ? m_load.pipeline_hit_inflight : m_load.pipeline_hit_ready))
 		    .fetch_add(1, std::memory_order_relaxed);
 		if (Bench::TimingEnabled()) {
 			const auto now = Bench::NowNs();
 			Bench::LogTiming("load_pipeline_hit", 0, now, 0, true,
-			                 fmt::format("waited={};ready_ns={};idle_ns={}", joined_in_flight ? 1 : 0,
+			                 fmt::format("gfx={};waited={};ready_ns={};idle_ns={}", graphics ? 1 : 0, joined_in_flight ? 1 : 0,
 			                             pipeline.load_ready_ns,
 			                             joined_in_flight ? 0 : now - pipeline.load_ready_ns));
 		}
@@ -2853,6 +3121,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 
 	if (auto* found = FindGraphicsPipeline(key)) {
 		NoteDrawUse(*found, true, false);
+		NoteGraphicsVariant(*found, key, programs, ps_active);
 		PromoteOptimized(*found);
 		return found;
 	}
@@ -2864,11 +3133,13 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 		const bool                may_skip = m_async_mode == Config::AsyncPipelineMode::Skip;
 		std::shared_ptr<AsyncJob> job      = m_graphics_jobs.Find(key, may_skip);
 		bool joined_prefetch = job != nullptr && job->IsPrefetched();
+		bool joined_load     = job != nullptr && static_cast<GraphicsPipelineJob&>(*job).from_load;
 		if (job == nullptr) {
 			// Not in flight. It may have been published since the lookup above: a worker
 			// publishes before it unregisters.
 			if (auto* published = FindGraphicsPipeline(key)) {
 				NoteDrawUse(*published, true, false);
+				NoteGraphicsVariant(*published, key, programs, ps_active);
 				PromoteOptimized(*published);
 				return published;
 			}
@@ -2894,6 +3165,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 				}
 			} else {
 				joined_prefetch = job->IsPrefetched();
+				joined_load     = static_cast<GraphicsPipelineJob&>(*job).from_load;
 				if (may_skip) {
 					job->CountSkippedDraw();
 				}
@@ -2906,7 +3178,8 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 			}
 			if (pool->WaitFor(*job)) {
 				if (auto* published = FindGraphicsPipeline(key)) {
-					NoteDrawUse(*published, true, joined_prefetch);
+					NoteDrawUse(*published, true, joined_prefetch || joined_load);
+					NoteGraphicsVariant(*published, key, programs, ps_active);
 					PromoteOptimized(*published);
 					return published;
 				}
@@ -2948,8 +3221,48 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	bool inserted = false;
 	auto* const published = PublishGraphicsPipeline(key, cached, inserted);
 	EXIT_IF(!inserted);
+	NoteGraphicsVariant(*published, key, programs, ps_active);
 
 	return published;
+}
+
+void PipelineCache::NoteGraphicsVariant(Pipeline& pipeline, const GraphicsPipelineKey& key,
+                                        const GraphicsPrograms& programs, bool ps_active) {
+	if (m_variants == nullptr || pipeline.gfx_recorded) {
+		return;
+	}
+	pipeline.gfx_recorded = true;
+	if (programs.VertexStageCount() != 1) {
+		return; // tessellation is not replayed
+	}
+	Variants::GraphicsVariant variant;
+	if (!m_program_cache->FindGraphicsProgram(programs.vertex[0].id, variant.vs)) {
+		return;
+	}
+	if (ps_active) {
+		if (!m_program_cache->FindGraphicsProgram(programs.pixel.id, variant.ps)) {
+			return;
+		}
+		variant.has_ps = true;
+	}
+	variant.key          = EncodePipelineKey(key.rendering, key.vertex_input, key.static_params);
+	variant.first_use_ms = static_cast<uint32_t>(std::min<int64_t>(
+	    (Bench::NowNs() - m_program_cache->clock_start_ns) / 1000000, 0xfffffffeLL));
+	const bool added = m_variants->Add(variant);
+	if (added) {
+		m_load.recorded_graphics.fetch_add(1, std::memory_order_relaxed);
+		m_load.recorded.fetch_add(1, std::memory_order_relaxed);
+	}
+	if (Bench::TimingEnabled()) {
+		Bench::LogTiming("graphics_variant", GraphicsPipelineKeyHash {}(key), Bench::NowNs(), 0, true,
+		                 fmt::format("new={};vs_hash={:016x};ps_hash={:016x};vs_stage={};cursor_vs={};"
+		                             "cursor_ps={};vs_spec_buffers={};ps_spec_buffers={};input_bytes={}",
+		                             added ? 1 : 0, variant.vs.code_hash, variant.ps.code_hash,
+		                             variant.vs.stage, variant.vs.push_data_cursor,
+		                             variant.ps.push_data_cursor, variant.vs.spec.buffers.size(),
+		                             variant.ps.spec.buffers.size(),
+		                             variant.vs.input.size() + variant.ps.input.size()));
+	}
 }
 
 void PipelineCache::PrefetchGraphicsPipeline(std::span<const RenderColorInfo> colors,

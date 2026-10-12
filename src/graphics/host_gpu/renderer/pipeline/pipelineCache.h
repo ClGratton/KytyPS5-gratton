@@ -149,6 +149,7 @@ public:
 		bool    loaded        = false;
 		bool    load_claimed  = false;
 		int64_t load_ready_ns = 0;
+		bool    gfx_recorded  = false; // GPU thread: this graphics pipeline's variant was recorded
 		// --pipelines-unoptimized-first: `pipeline` was created with DISABLE_OPTIMIZATION and
 		// `optimized` is the background build that replaces it (PromoteOptimized(), GPU thread
 		// only). Both are set before the Pipeline is published and cleared by the promotion.
@@ -302,6 +303,13 @@ public:
 		std::atomic<uint64_t> pipeline_hit_ready {0};  // pipeline was finished at the first dispatch
 		std::atomic<uint64_t> pipeline_hit_inflight {0}; // dispatch had to wait for it
 		std::atomic<uint64_t> recorded {0};            // new variants written to the store
+		std::atomic<uint64_t> recorded_graphics {0};   // ... of which graphics pipelines
+		std::atomic<uint64_t> gfx_stored {0};          // stored graphics pipelines waiting for their shaders
+		std::atomic<uint64_t> gfx_jobs {0};            // graphics load jobs started
+		std::atomic<uint64_t> gfx_pipelines {0};       // graphics pipeline jobs queued by them
+		std::atomic<uint64_t> gfx_skipped {0};         // undecodable, stale, known or not rebuildable
+		std::atomic<uint64_t> gfx_hit_ready {0};       // first draw found the pipeline finished
+		std::atomic<uint64_t> gfx_hit_inflight {0};    // first draw waited for it
 		std::atomic<uint64_t> lead_n {0};              // register-to-first-use lead of the hits
 		std::atomic<int64_t>  lead_sum_ns {0};
 		std::atomic<int64_t>  lead_min_ns {std::numeric_limits<int64_t>::max()};
@@ -422,6 +430,22 @@ private:
 	LoadCounters      m_load;
 	std::unique_ptr<Variants::VariantStore> m_variants; // --pipeline-variants-replay
 	void InitializeVariants();
+	// Stored graphics pipelines wait here until the guest has registered the shaders they need
+	// (NoteShaderRegistered copies the code of those), then one background job builds each.
+	struct GfxPending {
+		Variants::GraphicsVariant                    variant;
+		std::shared_ptr<const std::vector<uint32_t>> vs_code;
+		std::shared_ptr<const std::vector<uint32_t>> ps_code;
+		bool                                         submitted = false;
+	};
+	std::mutex                                       m_gfx_mutex;
+	std::vector<GfxPending>                          m_gfx_pending;
+	std::unordered_map<uint64_t, std::vector<size_t>> m_gfx_by_hash; // built once, then read-only
+	std::atomic<uint32_t>                            m_gfx_load_active {0};
+	void CaptureGraphicsRegistration(const ShaderRegistration& registration, AsyncPipelineCompiler& pool);
+	// GPU thread: the first draw that uses this graphics pipeline records its variant.
+	void NoteGraphicsVariant(Pipeline& pipeline, const GraphicsPipelineKey& key,
+	                         const GraphicsPrograms& programs, bool ps_active);
 	// Worker side of a load job: queues the pipeline build for a program it just published.
 	void SubmitLoadedComputePipeline(const ShaderProgram& program, ShaderComputeInputInfo info,
 	                                 const ShaderRecompiler::IR::CompiledShaderInfo* compiled,
