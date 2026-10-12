@@ -773,6 +773,12 @@ if(BUILD_TESTING)
 		avplayer_file_tests
 		bit_array_tests
 		lru_cache_tests
+		vram_policy_tests
+		lds_span_tests
+		texture_gc_policy_tests
+		phase_timers_tests
+		submit_coalescer_tests
+		gc_clock_tests
 		sys_file_read_tests
 		async_pipeline_tests
 		gpu_clock_tests
