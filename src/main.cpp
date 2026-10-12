@@ -141,6 +141,10 @@ static void PrintUsage() {
 	         "                                      instead of through the writable mapping, so the read\n"
 	         "                                      does not allocate zero pages (reads of 16 KiB or more).\n"
 	         "                                      Default: off.\n");
+	::printf("  --upload-ring-rebar <on|off>         Put the 512 MiB upload staging ring in device-local\n"
+	         "                                      host-visible memory (ReBAR) instead of system RAM.\n"
+	         "                                      Falls back to system RAM, logged, when the device has\n"
+	         "                                      no such heap. Default: off.\n");
 	::printf("  --vram-audit <seconds>               Debug: once, this many seconds after start, log the\n"
 	         "                                      resident image mix and content-duplicate textures.\n");
 	::printf("  --vram-ballast-mb <MiB>              Debug: hold this much device-local memory to\n"
@@ -723,6 +727,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--mem-hole-reads") {
 			if (!ParseBool(value, options.config.mem_hole_reads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--upload-ring-rebar") {
+			if (!ParseBool(value, options.config.upload_ring_rebar)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

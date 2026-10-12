@@ -142,6 +142,9 @@ struct ConfigOptions {
 	// Read never-written guest memory with pread instead of through the writable mapping, so the read
 	// does not make the zero pages resident (a read of a hole in a shared mapping allocates them).
 	bool                   mem_hole_reads              = false;
+	// Put the 512 MiB upload staging ring in device-local host-visible memory (ReBAR) instead of system
+	// RAM, when the device offers it. The ring is only written sequentially by the CPU.
+	bool                   upload_ring_rebar           = false;
 	uint32_t               vram_ballast_mb             = 0;
 	uint32_t               vram_audit_s                = 0;
 	// GC thresholds in MiB; 0 keeps the budget-derived stock value.
@@ -370,6 +373,7 @@ bool MemStatsEnabled();
 bool MemReleasePunchEnabled();
 bool MemResidencyEnabled();
 bool MemHoleReadsEnabled();
+bool UploadRingRebarEnabled();
 uint32_t VramBallastMb();
 uint32_t VramAuditSeconds();
 uint32_t GcTextureTriggerMb();

@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -120,6 +121,8 @@ public:
 	void               RunGarbageCollector();
 	// --mem-residency. GPU thread: the guest ranges of the registered buffers.
 	void CollectResidencyRanges(MemResidency::Snapshot& snapshot);
+	// One [upload-ring] line every 10 s under --mem-stats or --upload-ring-rebar.
+	void LogRingStatsPeriodic();
 
 private:
 	friend struct BufferCacheTestAccess;
@@ -212,6 +215,7 @@ private:
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
 	uint64_t m_gc_runs            = 0;
+	std::chrono::steady_clock::time_point m_ring_log_next {};
 };
 
 } // namespace Libs::Graphics

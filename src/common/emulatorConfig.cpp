@@ -352,6 +352,10 @@ bool MemResidencyEnabled() {
 	return g_config != nullptr && g_config->mem_residency;
 }
 
+bool UploadRingRebarEnabled() {
+	return g_config != nullptr && g_config->upload_ring_rebar;
+}
+
 bool MemHoleReadsEnabled() {
 	return g_config != nullptr && g_config->mem_hole_reads;
 }

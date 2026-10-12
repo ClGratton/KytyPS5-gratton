@@ -385,11 +385,21 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_bda_pagetable_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                              BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
-      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB),
+      // --upload-ring-rebar: the Stream usage asks for device-local host-visible memory (sequential
+      // CPU writes, write-combined); the ring is only ever written by the CPU.
+      m_staging_buffer(graphics, scheduler,
+                       Config::UploadRingRebarEnabled() ? MemoryUsage::Stream : MemoryUsage::Upload,
+                       512 * MiB),
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
+	if (Config::UploadRingRebarEnabled()) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "Upload ring (--upload-ring-rebar): {} MiB in {} memory{}\n", m_staging_buffer.Size() >> 20,
+		    m_staging_buffer.IsDeviceLocal() ? "device-local host-visible (ReBAR)" : "system",
+		    m_staging_buffer.IsDeviceLocal() ? "" : " (the device offers no host-visible device-local heap that large)"));
+	}
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
@@ -939,10 +949,27 @@ void BufferCache::CollectResidencyRanges(MemResidency::Snapshot& snapshot) {
 	}
 }
 
+void BufferCache::LogRingStatsPeriodic() {
+	if (!Config::MemStatsEnabled() && !Config::UploadRingRebarEnabled()) {
+		return;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now < m_ring_log_next) {
+		return;
+	}
+	m_ring_log_next = now + std::chrono::seconds(10);
+	const auto stats = m_staging_buffer.GetRingStats();
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[upload-ring] {} {} MiB: reserved {} MiB in {} wraps, {} blocking waits ({:.1f} ms total)\n",
+	    m_staging_buffer.IsDeviceLocal() ? "device-local" : "system", m_staging_buffer.Size() >> 20,
+	    stats.bytes >> 20, stats.wraps, stats.waits, static_cast<double>(stats.wait_ns) / 1e6));
+}
+
 void BufferCache::RunGarbageCollector() {
 	if ((m_gc_runs & 0xffu) == 0) {
 		PollLoopGuard();
 	}
+	LogRingStatsPeriodic();
 	const bool     frame_clock = Config::GcClockFrames();
 	const uint64_t run         = m_gc_runs++;
 	uint64_t       tick        = 0;
