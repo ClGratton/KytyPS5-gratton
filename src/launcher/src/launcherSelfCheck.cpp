@@ -3,6 +3,7 @@
 #include "common/emulatorConfig.h"
 #include "configuration.h"
 #include "emulatorArgs.h"
+#include "configurationEditDialog.h"
 #include "emulatorOptions.h"
 
 #include <QCoreApplication>
@@ -12,7 +13,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPixmap>
 #include <QProcess>
+#include <QPushButton>
+#include <QRegularExpression>
+#include <QTabWidget>
 #include <QSettings>
 #include <QTextStream>
 
@@ -281,6 +286,7 @@ int RunSelfCheck(const QStringList& args) {
 		        QStringLiteral("emulator accepts the Recommended-for-play command line"),
 		        output.left(300));
 		// Each option at a non-default value must also parse.
+		int rejected = 0;
 		for (const auto& option: EmulatorOptions::All()) {
 			if (option.flag.isEmpty()) {
 				continue;
@@ -301,11 +307,13 @@ int RunSelfCheck(const QStringList& args) {
 			const bool controller = option.tab == EmulatorOptions::Tab::Controller;
 			const auto option_args = EmulatorOptions::Args(values, controller);
 			if (RunEmulator(emulator, option_args, &output) != 0) {
+				rejected++;
 				r.Check(false, QStringLiteral("emulator accepts %1 at a non-default value").arg(option.flag),
 				        output.left(300));
 			}
 		}
-		r.Check(true, QStringLiteral("every flag parses at a non-default value (failures listed above)"));
+		r.Check(rejected == 0, QStringLiteral("every flag parses at a non-default value"),
+		        QStringLiteral("%1 rejected").arg(rejected));
 	}
 
 	const auto config_at = args.indexOf(QStringLiteral("--play-config"));
@@ -328,6 +336,43 @@ int RunSelfCheck(const QStringList& args) {
 
 	QTextStream(stdout) << (r.failures == 0 ? "\nself-check OK\n" : "\nself-check FAILED\n");
 	return r.failures == 0 ? 0 : 1;
+}
+
+int RunGrabSettings(const QStringList& args) {
+	const auto dir_at = args.indexOf(QStringLiteral("--grab-settings"));
+	if (dir_at < 0 || dir_at + 1 >= args.size()) {
+		QTextStream(stderr) << "usage: launcher --grab-settings <dir> [--global] [--preset]\n";
+		return 2;
+	}
+	const QDir out_dir(args.at(dir_at + 1));
+	QDir().mkpath(out_dir.absolutePath());
+	Configuration info;
+	info.name = QStringLiteral("Grab");
+	ConfigurationEditDialog dialog(info);
+	if (args.contains(QStringLiteral("--global"))) {
+		dialog.SetGlobalSettings({});
+	}
+	if (args.contains(QStringLiteral("--preset"))) {
+		for (auto* button: dialog.findChildren<QPushButton*>()) {
+			if (button->text() == QObject::tr("Recommended for play")) {
+				button->click();
+			}
+		}
+	}
+	dialog.resize(1000, 700);
+	dialog.show();
+	auto* tabs = dialog.findChild<QTabWidget*>(QStringLiteral("settings_tabs"));
+	if (tabs == nullptr) {
+		return 1;
+	}
+	for (int i = 0; i < tabs->count(); i++) {
+		tabs->setCurrentIndex(i);
+		QCoreApplication::processEvents();
+		const auto file = out_dir.filePath(QStringLiteral("%1-%2.png").arg(i).arg(tabs->tabText(i).replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]+")), QStringLiteral("_"))));
+		dialog.grab().save(file);
+		QTextStream(stdout) << file << "\n";
+	}
+	return 0;
 }
 
 int RunPrintCommand(const QStringList& args) {

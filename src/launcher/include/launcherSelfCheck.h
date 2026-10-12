@@ -17,5 +17,7 @@
 // Both return the process exit code.
 int RunSelfCheck(const QStringList& args);
 int RunPrintCommand(const QStringList& args);
+// launcher --grab-settings <dir> [--global] [--preset]: saves one PNG per tab of the settings dialog.
+int RunGrabSettings(const QStringList& args);
 
 #endif /* LAUNCHER_INCLUDE_LAUNCHER_SELF_CHECK_H_ */
