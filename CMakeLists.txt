@@ -502,6 +502,11 @@ add_executable(pipeline_cache_file_tests EXCLUDE_FROM_ALL
 target_link_libraries(pipeline_cache_file_tests xxhash fmt::fmt)
 target_include_directories(pipeline_cache_file_tests PRIVATE ${inc_headers})
 
+add_executable(skipped_draw_log_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SkippedDrawLogTests.cpp"
+)
+target_include_directories(skipped_draw_log_tests PRIVATE ${inc_headers})
+
 add_executable(config_defaults_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ConfigDefaultsTests.cpp"
 )
@@ -764,6 +769,7 @@ if(BUILD_TESTING)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
 	add_test(NAME config_defaults COMMAND $<TARGET_FILE:config_defaults_tests>)
+	add_test(NAME skipped_draw_log COMMAND $<TARGET_FILE:skipped_draw_log_tests>)
 	add_test(NAME pipeline_cache_file COMMAND $<TARGET_FILE:pipeline_cache_file_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
@@ -898,6 +904,7 @@ if(BUILD_TESTING)
 		gc_clock_tests
 		buffer_gc_gate_tests
 		config_defaults_tests
+		skipped_draw_log_tests
 		pipeline_cache_file_tests
 		bda_sync_gate_tests
 		sys_file_read_tests

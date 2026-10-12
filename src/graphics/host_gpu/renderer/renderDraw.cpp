@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/skippedDrawLog.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -44,6 +45,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -799,7 +801,18 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& t
 			topology = vk::PrimitiveTopology::eTriangleStrip;
 			break;
 		case Prospero::PrimitiveType::kPatch:
-			if (!Config::TessellationEnabled()) return false;
+			if (!Config::TessellationEnabled()) {
+				// Not silent: the geometry of this draw is missing from the frame.
+				static std::atomic<uint64_t> skipped {0};
+				const auto                   count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (SkippedDrawLog::ShouldLog(count)) {
+					Log::WriteToConsoleAndLog(
+					    "WARNING: skipped a tessellation patch draw (" + std::to_string(count) +
+					    " so far): tessellation is off, so geometry drawn with patches is missing."
+					    " Pass --tessellation true to draw it (the lowering is not complete).\n");
+				}
+				return false;
+			}
 			[[fallthrough]];
 		case Prospero::PrimitiveType::kRectList:
 		case Prospero::PrimitiveType::kRectListLegacy:
