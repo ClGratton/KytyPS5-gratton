@@ -11,6 +11,7 @@
 #include "common/subsystems.h"
 #include "common/systemInfo.h"
 #include "common/threads.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/recompiler/ir/Value.h"
@@ -213,6 +214,9 @@ void Run(const RunOptions& options) {
 	// Guest threads are still running, so skip KytyClose() and only flush emergency state.
 	ok = at_quick_exit(Common::Subsystems::EmergencyShutdownActive);
 	EXIT_NOT_IMPLEMENTED(ok != 0);
+
+	// Registered after the logging shutdown hooks, so it runs before them on both exit paths.
+	Libs::Graphics::RegisterTargetFallbackSummary();
 
 	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/app0");
 	Libs::LibKernel::FileSystem::Mount(options.app0_dir, "/hostapp");

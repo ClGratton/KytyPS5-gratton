@@ -68,6 +68,10 @@ template <typename T>
 void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
                             const ShaderTextureResource& descriptor, uint64_t size);
 
+// Prints the number of fallback bindings (target-flagged image without an attachment) at exit.
+// Idempotent; called once from the emulator's run path, after the logging shutdown hooks.
+void RegisterTargetFallbackSummary();
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DESCRIPTORS_H_

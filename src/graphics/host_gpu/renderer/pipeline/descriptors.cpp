@@ -37,8 +37,10 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -55,7 +57,31 @@ namespace {
 
 using BindingKind = ShaderRecompiler::IR::DescriptorBindingKind;
 
+// Times a target-flagged image without an attachment was bound as a sampled image (CommitBindings).
+// The first kTargetFallbackLogLimit occurrences are logged, each with the running count; the summary
+// at exit gives the total, so a session log shows whether the fallback fired and how often.
+constexpr uint32_t    kTargetFallbackLogLimit = 16;
+std::atomic<uint32_t> g_target_fallback_count {0};
+std::once_flag        g_target_fallback_summary_once;
+
+void PrintTargetFallbackSummary() {
+	static std::atomic<bool> printed {false};
+	if (!printed.exchange(true)) {
+		VRAM_LOG("Texture: target-without-attachment fallback bound %u image(s) as sampled this "
+		         "session\n",
+		         g_target_fallback_count.load(std::memory_order_relaxed));
+	}
+}
+
 } // namespace
+
+void RegisterTargetFallbackSummary() {
+	// Registered for both exit paths: the emulator normally leaves through std::quick_exit.
+	std::call_once(g_target_fallback_summary_once, [] {
+		std::atexit(PrintTargetFallbackSummary);
+		std::at_quick_exit(PrintTargetFallbackSummary);
+	});
+}
 
 vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 	const auto image_class = ShaderRecompiler::IR::ImageBindingResourceClass(kind);
@@ -1084,20 +1110,18 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			    !image.info.data.Empty() && image.binding.is_target &&
 			    image.binding.attachment_layout == vk::ImageLayout::eUndefined;
 			if (target_without_attachment) {
-				static std::atomic<uint32_t> reported {0};
-				const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
-				if (count <= 16) {
-					std::printf("Texture: image flagged as render target is not an attachment of this "
-					            "draw, bound as a sampled image: id=%u gen=%u format=%d depth=%d "
-					            "storage=%d is_bound=%d shader_write=%d force_general=%d "
-					            "needs_rebind=%d data=0x%016" PRIx64 " (%" PRIu32 " so far)\n",
-					            binding.image_id.index, binding.image_id.generation,
-					            static_cast<int>(image.backing.format), image.info.IsDepth() ? 1 : 0,
-					            storage ? 1 : 0, image.binding.is_bound ? 1 : 0,
-					            image.binding.shader_write ? 1 : 0, image.binding.force_general ? 1 : 0,
-					            image.binding.needs_rebind ? 1 : 0,
-					            static_cast<uint64_t>(image.info.data.address), count);
-					std::fflush(stdout);
+				const auto count = g_target_fallback_count.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (count <= kTargetFallbackLogLimit) {
+					VRAM_LOG("Texture: image flagged as render target is not an attachment of this "
+					         "draw, bound as a sampled image: id=%u gen=%u format=%d depth=%d "
+					         "storage=%d is_bound=%d shader_write=%d force_general=%d "
+					         "needs_rebind=%d data=0x%llx (%u so far)\n",
+					         binding.image_id.index, binding.image_id.generation,
+					         static_cast<int>(image.backing.format), image.info.IsDepth() ? 1 : 0,
+					         storage ? 1 : 0, image.binding.is_bound ? 1 : 0,
+					         image.binding.shader_write ? 1 : 0, image.binding.force_general ? 1 : 0,
+					         image.binding.needs_rebind ? 1 : 0,
+					         static_cast<unsigned long long>(image.info.data.address), count);
 				}
 			}
 			if (image.info.data.Empty()) {
