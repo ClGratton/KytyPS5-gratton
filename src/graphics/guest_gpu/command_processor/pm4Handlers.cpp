@@ -4,6 +4,7 @@
 #include "common/stringUtils.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
+#include "graphics/guest_gpu/csRegisters.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -983,8 +984,6 @@ KYTY_HW_CTX_PARSER(HwCtxSetViewportZ) {
 	return reg_num;
 }
 
-static void HwShIgnoreComputeRegister([[maybe_unused]] uint32_t cmd_offset,
-                                      [[maybe_unused]] uint32_t value) {}
 static void HwShIgnoreShaderRegister([[maybe_unused]] uint32_t cmd_offset,
                                      [[maybe_unused]] uint32_t value) {}
 
@@ -1004,71 +1003,10 @@ KYTY_HW_SH_PARSER(HwShSetRegisters) {
 static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_t value) {
 	auto cs_regs = cp.GetShCtx().GetCs().cs_regs;
 
-	switch (cmd_offset) {
-		case Pm4::COMPUTE_PGM_LO:
-			cs_regs.data_addr &= 0xFFFFFF00000000FFull;
-			cs_regs.data_addr |= static_cast<uint64_t>(value) << 8u;
-			break;
-		case Pm4::COMPUTE_PGM_HI:
-			cs_regs.data_addr &= 0xFFFF00FFFFFFFFFFull;
-			cs_regs.data_addr |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
-			break;
-		case Pm4::COMPUTE_PGM_RSRC1:
-			cs_regs.vgprs =
-			    (value >> Pm4::COMPUTE_PGM_RSRC1_VGPRS_SHIFT) & Pm4::COMPUTE_PGM_RSRC1_VGPRS_MASK;
-			cs_regs.priority = (value >> Pm4::COMPUTE_PGM_RSRC1_PRIORITY_SHIFT) &
-			                   Pm4::COMPUTE_PGM_RSRC1_PRIORITY_MASK;
-			cs_regs.float_mode    = (value >> Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_SHIFT) &
-			                        Pm4::COMPUTE_PGM_RSRC1_FLOAT_MODE_MASK;
-			cs_regs.dx10_clamp    = ((value >> Pm4::COMPUTE_PGM_RSRC1_DX10_CLAMP_SHIFT) &
-			                         Pm4::COMPUTE_PGM_RSRC1_DX10_CLAMP_MASK) != 0u;
-			cs_regs.debug_mode    = ((value >> Pm4::COMPUTE_PGM_RSRC1_DEBUG_MODE_SHIFT) &
-			                         Pm4::COMPUTE_PGM_RSRC1_DEBUG_MODE_MASK) != 0u;
-			cs_regs.ieee_mode     = ((value >> Pm4::COMPUTE_PGM_RSRC1_IEEE_MODE_SHIFT) &
-			                         Pm4::COMPUTE_PGM_RSRC1_IEEE_MODE_MASK) != 0u;
-			cs_regs.fp16_overflow = ((value >> Pm4::COMPUTE_PGM_RSRC1_FP16_OVFL_SHIFT) &
-			                         Pm4::COMPUTE_PGM_RSRC1_FP16_OVFL_MASK) != 0u;
-			cs_regs.threadgroup_configuration = ((value >> Pm4::COMPUTE_PGM_RSRC1_WGP_MODE_SHIFT) &
-			                                     Pm4::COMPUTE_PGM_RSRC1_WGP_MODE_MASK) != 0u;
-			cs_regs.require_forward_progress =
-			    ((value >> Pm4::COMPUTE_PGM_RSRC1_FWD_PROGRESS_SHIFT) &
-			     Pm4::COMPUTE_PGM_RSRC1_FWD_PROGRESS_MASK) != 0u;
-			break;
-		case Pm4::COMPUTE_PGM_RSRC2:
-			cs_regs.scratch_en     = ((value >> Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_SHIFT) &
-			                          Pm4::COMPUTE_PGM_RSRC2_SCRATCH_EN_MASK) != 0u;
-			cs_regs.user_sgpr      = (value >> Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_SHIFT) &
-			                         Pm4::COMPUTE_PGM_RSRC2_USER_SGPR_MASK;
-			cs_regs.tgid_x_en      = ((value >> Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_SHIFT) &
-			                          Pm4::COMPUTE_PGM_RSRC2_TGID_X_EN_MASK) != 0u;
-			cs_regs.tgid_y_en      = ((value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_SHIFT) &
-			                          Pm4::COMPUTE_PGM_RSRC2_TGID_Y_EN_MASK) != 0u;
-			cs_regs.tgid_z_en      = ((value >> Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_SHIFT) &
-			                          Pm4::COMPUTE_PGM_RSRC2_TGID_Z_EN_MASK) != 0u;
-			cs_regs.tg_size_en     = ((value >> Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_SHIFT) &
-			                          Pm4::COMPUTE_PGM_RSRC2_TG_SIZE_EN_MASK) != 0u;
-			cs_regs.tidig_comp_cnt = (value >> Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_SHIFT) &
-			                         Pm4::COMPUTE_PGM_RSRC2_TIDIG_COMP_CNT_MASK;
-			cs_regs.lds_size       = (value >> Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_SHIFT) &
-			                         Pm4::COMPUTE_PGM_RSRC2_LDS_SIZE_MASK;
-			break;
-		case Pm4::COMPUTE_PGM_RSRC3:
-			cs_regs.shared_vgprs =
-			    (value >> Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_SHIFT) &
-			    Pm4::COMPUTE_PGM_RSRC3_SHARED_VGPRS_MASK;
-			break;
-		case Pm4::COMPUTE_NUM_THREAD_X: cs_regs.num_thread_x = value; break;
-		case Pm4::COMPUTE_NUM_THREAD_Y: cs_regs.num_thread_y = value; break;
-		case Pm4::COMPUTE_NUM_THREAD_Z: cs_regs.num_thread_z = value; break;
-		case Pm4::COMPUTE_START_X:
-		case Pm4::COMPUTE_START_Y:
-		case Pm4::COMPUTE_START_Z:
-		case Pm4::COMPUTE_RESOURCE_LIMITS:
-		case Pm4::COMPUTE_TMPRING_SIZE:
-		case Pm4::COMPUTE_PACE_ID: HwShIgnoreComputeRegister(cmd_offset, value); break;
-		default:
-			EXIT("unsupported compute SH register 0x%08" PRIx32 " = 0x%08" PRIx32 "\n", cmd_offset,
-			     value);
+	if (HW::ApplyComputeShaderRegister(cs_regs, cmd_offset, value) ==
+	    HW::CsRegisterResult::Unsupported) {
+		EXIT("unsupported compute SH register 0x%08" PRIx32 " = 0x%08" PRIx32 "\n", cmd_offset,
+		     value);
 	}
 
 	cp.GetShCtx().SetCsShader(cs_regs);
