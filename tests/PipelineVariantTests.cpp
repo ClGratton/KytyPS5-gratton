@@ -306,6 +306,25 @@ void TestGraphicsRecords(const std::filesystem::path& dir) {
 	Check(torn.Load(path).torn_tail && torn.Size() == 4, "torn graphics record ignored");
 }
 
+void TestLimit(const std::filesystem::path& dir) {
+	const auto path = dir / "limit.variants";
+	std::filesystem::remove(path);
+	VariantStore store;
+	store.Load(path);
+	Check(store.OpenAppend(path), "create");
+	store.SetLimit(3);
+	Check(store.Add(MakeVariant(1, 1, 0, 0)) && store.Add(MakeGraphics(2, 3, 1)) &&
+	          store.Add(MakeVariant(4, 1, 0, 0)),
+	      "three fit");
+	Check(!store.Add(MakeVariant(5, 1, 0, 0)) && !store.Add(MakeGraphics(6, 7, 1)),
+	      "a full store refuses new variants");
+	Check(store.Size() == 3 && store.Dropped() == 2, "refused variants are counted");
+	Check(!store.Add(MakeVariant(1, 1, 0, 0)), "an existing variant is still a duplicate");
+	store.Close();
+	VariantStore again;
+	Check(again.Load(path).records == 3, "only the stored three are on disk");
+}
+
 } // namespace
 
 int main() {
@@ -318,6 +337,7 @@ int main() {
 	TestCorruptRecordEndsFile(dir);
 	TestSchemaAndGarbage(dir);
 	TestGraphicsRecords(dir);
+	TestLimit(dir);
 	std::filesystem::remove_all(dir);
 	std::printf("PipelineVariantTests: ok\n");
 	return 0;

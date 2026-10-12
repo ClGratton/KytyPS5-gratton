@@ -418,6 +418,10 @@ bool VariantStore::AppendLocked(const std::vector<uint8_t>& payload) {
 
 bool VariantStore::Add(const ComputeVariant& variant) {
 	std::lock_guard lock(m_mutex);
+	if (m_size >= m_limit) {
+		m_dropped++;
+		return false;
+	}
 	if (!AddLocked(variant)) {
 		return false;
 	}
@@ -427,11 +431,25 @@ bool VariantStore::Add(const ComputeVariant& variant) {
 
 bool VariantStore::Add(const GraphicsVariant& variant) {
 	std::lock_guard lock(m_mutex);
+	if (m_size >= m_limit) {
+		m_dropped++;
+		return false;
+	}
 	if (!AddLocked(variant)) {
 		return false;
 	}
 	AppendLocked(Encode(variant));
 	return true;
+}
+
+void VariantStore::SetLimit(size_t limit) {
+	std::lock_guard lock(m_mutex);
+	m_limit = limit;
+}
+
+size_t VariantStore::Dropped() const {
+	std::lock_guard lock(m_mutex);
+	return m_dropped;
 }
 
 bool VariantStore::Contains(const GraphicsVariant& variant) const {

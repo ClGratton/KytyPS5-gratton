@@ -198,6 +198,11 @@ public:
 	// Every stored variant of one shader binary.
 	[[nodiscard]] std::vector<ComputeVariant> Find(uint64_t code_hash, uint32_t code_size_dwords) const;
 	[[nodiscard]] size_t Size() const;
+	// A store never grows past this many variants (a changing game or translator would otherwise
+	// keep adding stale records for ever); further Add() calls return false and are counted.
+	static constexpr size_t kDefaultLimit = 50000;
+	void                    SetLimit(size_t limit);
+	[[nodiscard]] size_t    Dropped() const;
 
 	// Graphics pipelines (same file, same rules).
 	bool Add(const GraphicsVariant& variant);
@@ -213,6 +218,8 @@ private:
 	mutable std::mutex                                           m_mutex;
 	std::unordered_map<uint64_t, std::vector<ComputeVariant>>    m_by_binary;
 	size_t                                                       m_size = 0;
+	size_t                                                       m_limit   = kDefaultLimit;
+	size_t                                                       m_dropped = 0;
 	std::vector<GraphicsVariant>                                 m_graphics;
 	std::filesystem::path                                        m_path;
 	std::FILE*                                                   m_file = nullptr;
