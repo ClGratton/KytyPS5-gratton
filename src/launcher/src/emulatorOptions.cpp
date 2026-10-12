@@ -139,7 +139,7 @@ QList<Option> BuildTable() {
 	defs.append({"elide_barriers", "--elide-barriers", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Elide redundant barriers",
 	             "Leaves out a guest cache-flush barrier when nothing was recorded since the "
-	             "previous one in the same command buffer (about half of them in Astro Bot).",
+	             "previous one in the same command buffer (about half of them in the measurements).",
 	             EMU_BOOL(elide_barriers)});
 	defs.append({"known_fills", "--known-fills", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
 	             "Remember GPU fills",
