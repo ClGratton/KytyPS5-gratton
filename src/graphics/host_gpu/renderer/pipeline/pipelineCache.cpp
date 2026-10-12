@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -200,6 +201,30 @@ std::size_t HashSpecialization(const ShaderRecompiler::IR::ResourceSpecializatio
 	return hash;
 }
 
+// One-line text of a variant for the compute_variant timing row: static state words, then the
+// buffers (stride:format:swizzle:oob:indirect) and images (class:dimension:mips:conversion:swizzle:
+// flags). ',' is reserved by the timing log, so '|' and ':' separate fields.
+std::string DescribeVariant(const Variants::ComputeVariant& v) {
+	std::string text = fmt::format(
+	    "user={};wg_reg={};wave={};float={};host_sg={};tid={};lds={};scratch={};threads={}x{}x{};flags={:x}",
+	    v.state.user_data_count, v.state.workgroup_register, v.state.wave_size, v.state.float_mode,
+	    v.state.host_subgroup_size, v.state.thread_ids_num, v.state.lds_size_dwords,
+	    v.state.scratch_size_dwords, v.state.threads_num[0], v.state.threads_num[1],
+	    v.state.threads_num[2], v.state.flags);
+	text += ";buffers=";
+	for (const auto& b: v.spec.buffers) {
+		text += fmt::format("{}:{}:{:x}:{}:{}|", b.packed_stride, b.descriptor_format,
+		                    b.descriptor_swizzle, b.zero_stride_oob,
+		                    b.indirect_root == 0xffffffffu ? 0 : 1);
+	}
+	text += ";images=";
+	for (const auto& i: v.spec.images) {
+		text += fmt::format("{}:{}:{}:{}:{:x}:{}|", i.numeric_class, i.dimension, i.mip_count,
+		                    i.conversion_format, i.shader_swizzle, i.flags);
+	}
+	return text;
+}
+
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
@@ -365,6 +390,22 @@ struct PipelineCache::ProgramCache {
 		uint64_t                                     spirv_hash = 0;
 		bool                                         prefetched = false;
 		bool                                         verified   = false;
+		// Built by a shader-load job (set before publication, never changed after).
+		bool                                         from_load  = false;
+		int64_t                                      load_register_ns = 0;
+		int64_t                                      load_ready_ns = 0;
+		// Set by the GPU thread at the first dispatch that uses the permutation (variant
+		// recording and hit accounting); copyable so the deque can take it by move.
+		struct UseFlag {
+			std::atomic<bool> value {false};
+			UseFlag() = default;
+			UseFlag(const UseFlag& other): value(other.value.load(std::memory_order_relaxed)) {}
+			UseFlag& operator=(const UseFlag& other) {
+				value.store(other.value.load(std::memory_order_relaxed), std::memory_order_relaxed);
+				return *this;
+			}
+			bool Exchange() { return value.exchange(true, std::memory_order_relaxed); }
+		} used;
 	};
 
 	using LinkedPtr = std::shared_ptr<const ShaderRecompiler::ShaderSource::Linked>;
@@ -754,6 +795,47 @@ struct PipelineCache::ProgramCache {
 		            count(ShaderType::TessellationControl), count(ShaderType::TessellationEvaluation));
 	}
 
+	// Set by the PipelineCache before the first dispatch (null / false when the feature is off).
+	Variants::VariantStore*   variants = nullptr;
+	LoadCounters*             load     = nullptr;
+	bool                      track_use = false;
+
+	// First use of a compute permutation by a dispatch (GPU thread): records the variant for the
+	// next session and accounts a hit of the load-time build. The hot path is one relaxed
+	// exchange, and nothing at all when no feature that needs it is on.
+	void NoteComputeUse(Permutation& permutation, const ShaderParams& params,
+	                    const ShaderComputeInputInfo& input_info) {
+		const bool timing = Bench::TimingEnabled();
+		if (!track_use && !timing) return;
+		if (permutation.used.Exchange()) return;
+		if (permutation.from_load && load != nullptr) {
+			const auto now = Bench::NowNs();
+			load->program_hit.fetch_add(1, std::memory_order_relaxed);
+			if (permutation.load_register_ns != 0) load->NoteLead(now - permutation.load_register_ns);
+			if (timing) {
+				Bench::LogTiming("load_hit", params.hash, now, 0, true,
+				                 fmt::format("register_ns={};ready_ns={};lead_ns={};lead_after_ready_ns={}",
+				                             permutation.load_register_ns, permutation.load_ready_ns,
+				                             now - permutation.load_register_ns,
+				                             now - permutation.load_ready_ns));
+			}
+		}
+		if (variants == nullptr && !timing) return;
+		Variants::ComputeVariant variant;
+		variant.code_hash        = params.hash;
+		variant.code_size_dwords = static_cast<uint32_t>(params.code.size());
+		variant.state            = ToVariantStatic(input_info, params.user_data_count);
+		variant.spec             = ToVariantSpec(permutation.specialization);
+		const bool added = variants != nullptr && variants->Add(variant);
+		if (added && load != nullptr) load->recorded.fetch_add(1, std::memory_order_relaxed);
+		if (timing) {
+			Bench::LogTiming("compute_variant", params.hash, Bench::NowNs(), 0, true,
+			                 fmt::format("code_dwords={};new={};from_load={};{}", params.code.size(),
+			                             added ? 1 : 0, permutation.from_load ? 1 : 0,
+			                             DescribeVariant(variant)));
+		}
+	}
+
 	template <typename InputInfo>
 	ShaderProgram Get(const ShaderParams& params, InputInfo& input_info,
 	                  uint32_t& push_data_cursor, AsyncContext* async = nullptr) {
@@ -813,6 +895,14 @@ struct PipelineCache::ProgramCache {
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 		}
+		// The draw/dispatch (not a prefetch) is about to use `p`: variant recording and load hits.
+		const auto note_use = [&](Permutation& p) {
+			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+				if (!prefetch && (entry == nullptr || entry->call_source == nullptr)) {
+					NoteComputeUse(p, params, input_info);
+				}
+			}
+		};
 		bool source_changed = false;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		Permutation* verify_target = nullptr;
@@ -859,6 +949,7 @@ struct PipelineCache::ProgramCache {
 			if (permutation != nullptr) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
+				note_use(*permutation);
 				report_steps(false);
 				return permutation->handle;
 			}
@@ -878,6 +969,7 @@ struct PipelineCache::ProgramCache {
 			input_info.stage = {.program = &permutation.program,
 			                    .resources = prefetch ? &PrefetchResources() : &entry->resources};
 			permutation.program.bindings.AdvancePushData(push_data_cursor);
+			note_use(permutation);
 			report_steps(miss_report);
 			return permutation.handle;
 		};
@@ -1181,6 +1273,7 @@ struct PipelineCache::ProgramCache {
 		const auto& permutation = *published;
 		input_info.stage = {.program = &permutation.program, .resources = &entry->resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
+		note_use(*published);
 		log_translate(duplicate, permutation.handle.id);
 		report_steps(true);
 
@@ -1244,6 +1337,61 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		}
 	}
 	DecideUnoptimizedFirst();
+	InitializeVariants();
+}
+
+std::string PipelineCache::LoadCounters::Summary() const {
+	const auto n = lead_n.load();
+	return fmt::format(
+	    "registered_cs={};registered_other={};stored_variants={};jobs_stored={};jobs_guess={};"
+	    "skipped_unguessable={};skipped_call={};skipped_known={};skipped_registers={};built={};"
+	    "duplicates={};pipelines={};program_hit={};program_other={};pipeline_hit_ready={};"
+	    "pipeline_hit_inflight={};recorded={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f};"
+	    "lead_max_ms={:.1f}",
+	    registered_cs.load(), registered_other.load(), stored_variants.load(), jobs_stored.load(),
+	    jobs_guess.load(), skipped_unguessable.load(), skipped_call.load(), skipped_known.load(),
+	    skipped_registers.load(), built.load(), duplicates.load(), pipelines.load(),
+	    program_hit.load(), program_other.load(), pipeline_hit_ready.load(),
+	    pipeline_hit_inflight.load(), recorded.load(), n,
+	    n != 0 ? static_cast<double>(lead_sum_ns.load()) / static_cast<double>(n) / 1e6 : 0.0,
+	    n != 0 ? static_cast<double>(lead_min_ns.load()) / 1e6 : 0.0,
+	    static_cast<double>(lead_max_ns.load()) / 1e6);
+}
+
+// --pipeline-variants-replay: opens <TITLE>.variants next to the driver cache. The store records
+// every compute variant a dispatch uses (ProgramCache::NoteComputeUse) and, from the next session
+// on, answers NoteShaderRegistered(). It holds keys only: no code, no SPIR-V.
+void PipelineCache::InitializeVariants() {
+	m_program_cache->load = &m_load;
+	if (!Config::GetPipelineVariantsReplay() && !Config::GetPrecompileOnLoad()) {
+		return;
+	}
+	m_program_cache->track_use = true;
+	if (!Config::GetPipelineVariantsReplay()) {
+		return;
+	}
+	const auto title_id = PipelineCacheTitleId();
+	if (title_id.empty()) {
+		PipelineCacheLog("Pipeline variants: disabled (no title id)");
+		return;
+	}
+	const auto path = std::filesystem::path("_PipelineCache") / (title_id + ".variants");
+	auto       store = std::make_unique<Variants::VariantStore>();
+	const auto loaded = store->Load(path);
+	if (!store->OpenAppend(path)) {
+		PipelineCacheLog("Pipeline variants: disabled (cannot write {})", Common::PathToString(path));
+		return;
+	}
+	PipelineCacheLog("Pipeline variants: {} ({} stored, {} records, torn_tail={}, schema_ok={})",
+	                 Common::PathToString(path), store->Size(), loaded.records, loaded.torn_tail,
+	                 loaded.schema_ok);
+	if (Bench::TimingEnabled()) {
+		Bench::LogTiming("variants_init", 0, Bench::NowNs(), 0, false,
+		                 fmt::format("stored={};records={};torn_tail={};file_found={}", store->Size(),
+		                             loaded.records, loaded.torn_tail ? 1 : 0, loaded.file_found ? 1 : 0));
+	}
+	m_variants                 = std::move(store);
+	m_program_cache->variants = m_variants.get();
 }
 
 // --pipelines-unoptimized-first is active only where it is safe and effective:
@@ -1345,6 +1493,14 @@ void PipelineCache::ShutdownAsync() {
 		PipelineCacheLog("Unoptimized-first pipelines: {}", summary);
 		if (Bench::TimingEnabled()) {
 			Bench::LogTiming("summary_unoptimized_first", 0, Bench::NowNs(), 0, false, summary);
+		}
+	}
+	if (Config::GetPrecompileOnLoad() || Config::GetPipelineVariantsReplay()) {
+		const auto summary = m_load.Summary();
+		PipelineCacheLog("Pipeline load: {}; variants_stored={}", summary,
+		                 m_variants != nullptr ? m_variants->Size() : 0);
+		if (Bench::TimingEnabled()) {
+			Bench::LogTiming("summary_load", 0, Bench::NowNs(), 0, false, summary);
 		}
 	}
 	if (Config::GetPipelineLookahead()) {

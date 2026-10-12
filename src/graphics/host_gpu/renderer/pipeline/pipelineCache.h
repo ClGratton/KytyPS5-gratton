@@ -5,14 +5,17 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
+#include "graphics/host_gpu/renderer/pipeline/variantStore.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <string>
 #include <memory>
 #include <shared_mutex>
@@ -272,6 +275,46 @@ public:
 	void PrefetchCompute(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
 	                     uint32_t mode, bool async_compute, const uint32_t (&groups)[3]);
 
+	// ---- --precompile-on-load / --pipeline-variants-replay (docs/shader-load-notes.md) -------
+	// Counters of the load-time build and the variant store. Everything the guest thread does at
+	// registration is counted here; hits are counted by the GPU thread at the first dispatch.
+	struct LoadCounters {
+		std::atomic<uint64_t> registered_cs {0};       // compute binaries the guest registered
+		std::atomic<uint64_t> registered_other {0};    // other stages (ignored)
+		std::atomic<uint64_t> stored_variants {0};     // variants found in the store for them
+		std::atomic<uint64_t> jobs_stored {0};         // load jobs for a stored variant
+		std::atomic<uint64_t> jobs_guess {0};          // load jobs for the guessed variant
+		std::atomic<uint64_t> skipped_unguessable {0}; // typed buffers, bindless, guest-memory specialization
+		std::atomic<uint64_t> skipped_call {0};        // S_SWAP_PC programs stay on the GPU thread
+		std::atomic<uint64_t> skipped_known {0};       // an equal permutation was already there
+		std::atomic<uint64_t> skipped_registers {0};   // the header had no usable compute registers
+		std::atomic<uint64_t> built {0};               // permutations published by load jobs
+		std::atomic<uint64_t> duplicates {0};          // equal permutation published first by someone else
+		std::atomic<uint64_t> pipelines {0};           // pipeline jobs queued by load jobs
+		std::atomic<uint64_t> program_hit {0};         // first dispatch found a load-built permutation
+		std::atomic<uint64_t> program_other {0};       // dispatch of a loaded binary with another variant
+		std::atomic<uint64_t> pipeline_hit_ready {0};  // pipeline was finished at the first dispatch
+		std::atomic<uint64_t> pipeline_hit_inflight {0}; // dispatch had to wait for it
+		std::atomic<uint64_t> recorded {0};            // new variants written to the store
+		std::atomic<uint64_t> lead_n {0};              // register-to-first-use lead of the hits
+		std::atomic<int64_t>  lead_sum_ns {0};
+		std::atomic<int64_t>  lead_min_ns {std::numeric_limits<int64_t>::max()};
+		std::atomic<int64_t>  lead_max_ns {0};
+		void NoteLead(int64_t ns) {
+			lead_n.fetch_add(1, std::memory_order_relaxed);
+			lead_sum_ns.fetch_add(ns, std::memory_order_relaxed);
+			auto lo = lead_min_ns.load(std::memory_order_relaxed);
+			while (ns < lo && !lead_min_ns.compare_exchange_weak(lo, ns, std::memory_order_relaxed)) {
+			}
+			auto hi = lead_max_ns.load(std::memory_order_relaxed);
+			while (ns > hi && !lead_max_ns.compare_exchange_weak(hi, ns, std::memory_order_relaxed)) {
+			}
+		}
+		[[nodiscard]] std::string Summary() const;
+	};
+	[[nodiscard]] LoadCounters& Load() { return m_load; }
+	[[nodiscard]] const Variants::VariantStore* VariantsStore() const { return m_variants.get(); }
+
 private:
 	struct ProgramCache;
 	struct GraphicsPipelineJob;
@@ -346,6 +389,9 @@ private:
 	std::vector<vk::Pipeline>  m_retired_pipelines; // no handler took them: destroyed with the cache
 
 	LookaheadCounters m_lookahead;
+	LoadCounters      m_load;
+	std::unique_ptr<Variants::VariantStore> m_variants; // --pipeline-variants-replay
+	void InitializeVariants();
 	std::function<std::string()> m_lookahead_thread_summary;
 	// Taken shared by every prefetch call, exclusive by ShutdownAsync(): no prefetch is running
 	// (or starts) while the pool and the registries are torn down.
