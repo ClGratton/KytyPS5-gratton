@@ -443,7 +443,11 @@ int RunGrabMain(const QStringList& args) {
 	}
 	window.grab().save(args.at(png_at + 1));
 	out << "saved " << args.at(png_at + 1) << "\n";
-	return 0;
+	out.flush();
+	// The window's destructor waits for background loaders (compatibility list, trophies); a
+	// diagnostic run does not need them to finish.
+	std::fflush(stdout);
+	std::_Exit(0);
 }
 
 int RunPrintCommand(const QStringList& args) {
