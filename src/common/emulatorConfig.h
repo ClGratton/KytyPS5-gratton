@@ -171,9 +171,6 @@ struct ConfigOptions {
 	// --gpu-phase-stats <seconds>: report where the GPU thread spends its time every N seconds
 	// (common/gpuPhaseStats.h). 0 = off.
 	uint32_t               gpu_phase_stats_s           = 0;
-	// --debug-gpu-pc-sample <hz>: sample the GPU thread's instruction pointer on its CPU-time clock
-	// and write _gpu_pc_samples.txt with every phase report (common/pcSampler.h). 0 = off.
-	uint32_t               gpu_pc_sample_hz            = 0;
 	// --submit-stats <seconds>: only the frame/submit/coalescing counters, no timers. 0 = off.
 	uint32_t               submit_stats_s              = 0;
 	// --submit-coalesce (K13): hold back the submit of RELEASE_MEM end-of-pipe events (up to
