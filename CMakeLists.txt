@@ -770,6 +770,11 @@ if(BUILD_TESTING)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_helper_quad
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --ds-append-helper-quad-only)
+	# --swizzle-helper-quad-only (the GPU draw) is not registered: on NVIDIA v_mbcnt of the
+	# helper-free exec ballot numbers the covered lanes by rank, the test assumes physical lane
+	# numbers (AMD), so its expectation fails there for a reason unrelated to the helper exclusion.
+	add_test(NAME shader_recompiler_helper_host
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --fragment-helper-host-only)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
