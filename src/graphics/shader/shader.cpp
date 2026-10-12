@@ -953,6 +953,7 @@ ShaderParams PrepareProgram(
 
 ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
                             ShaderComputeInputInfo& info) {
+	Common::GpuPhase::Scope gpu_phase_prepare(Common::GpuPhase::Phase::PipePrepare);
 	const auto [data, hash] = ShaderGetMappedData(regs.cs_regs.data_addr, "ShaderGetInputInfoCS():");
 	if (Common::Speculation::HasFailure()) {
 		return {};
