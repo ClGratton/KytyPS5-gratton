@@ -50,6 +50,29 @@ load job: it builds its own, exactly as without the flag.
   builds **every stored variant** of a binary when the game registers it, exactly as used. Combined with `--precompile-on-load`, a
   binary with stored variants gets only those; a binary without gets the guess.
 
+### Background priority: idle-only, in first-use order
+The first measurement of the replay (bench/RESULTS.md) showed the cost of treating this as ordinary low-priority work. The 84 stored
+variants were queued in the registration burst at boot (795 registrations in the first second) and four of them ran at a time beside the
+draws' own compiles. The driver's compile throughput is shared (eight concurrent compiles double each one's time): the compile the first
+frame waited for took 7.2 s instead of 3.7 s and the first frame 10 s instead of 7 s, with no gain later. Load jobs are therefore
+**idle-only**: `SubmitLowPriority(job, idle_only=true, priority)` starts them only while no normal job is running or queued (still within the
+low-priority slot limit), and the pool wakes a worker when it goes quiet. They run in ascending `priority`; replay uses the time the
+variant was first needed in the previous session (`first_use_ms`, an optional trailing field of the record), so the earliest-needed
+variants are built first.
+
+### Graphics pipelines (`--pipeline-variants-replay` only)
+The measurement window of a first play is dominated by graphics pipelines (0 of the 22 frames over 50 ms in the post-skip window wait for a compute
+pipeline; 10 wait for graphics ones, 5.4 of 6.2 s). A graphics replay needs more than a hash:
+* **Record**: the first draw that uses a vertex/mesh or pixel permutation puts its stage program into a side table
+  (`gfx_programs`, program id to `ProgramVariant`: program key with its static-state words, push-data cursor, specialization, and the stage
+  input info as raw bytes). The first use of a graphics pipeline stores the vertex and pixel programs plus the pipeline key
+  (`EncodePipelineKey`, written field by field). Tessellation, S_SWAP_PC and fused back-half stages are not recorded.
+* **Replay**: `NoteShaderRegistered` also sees graphics binaries. When a stored graphics pipeline needs the binary its code is copied
+  (`CaptureGraphicsRegistration`); once every binary of a pipeline has been seen, one idle-only job (`GfxLoadJob`) rebuilds the stage programs
+  (`BuildStoredStage`: translate, resource plan, compile with the stored specialization and cursor), decodes the key, fills in the new
+  program ids, and queues the `GraphicsPipelineJob`. `graphicsVariantKeys.h` holds the encodings; the input infos are raw bytes behind a
+  layout fingerprint (`VertexInfoLayout()`, `PixelInfoLayout()`) and a sanity check, so a file written by another layout is ignored.
+
 Dedupe: an active load job with the same program key and the same stored variant (or both guesses) is not queued twice; a job whose
 specialization is already published stops (`skipped_known`); a stored variant that no longer fits the translated plan is dropped
 (`skipped_stale`, `SpecializationFits`).
