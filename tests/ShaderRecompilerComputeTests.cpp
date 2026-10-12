@@ -394,9 +394,9 @@ struct TextureCacheTestAccess {
 };
 
 struct RenderExecutorTestAccess {
-  static void DrawIndex(RenderExecutor &executor, CommandBuffer &command,
+  static bool DrawIndex(RenderExecutor &executor, CommandBuffer &command,
                         const DrawIndexArgs &args) {
-    executor.DrawIndex(0, command, args);
+    return executor.DrawIndex(0, command, args);
   }
 
   static void DrawAuto(RenderExecutor &executor, CommandBuffer &command,
@@ -16144,6 +16144,12 @@ public:
                   sizeof(rect_vertices));
       constexpr std::array<uint32_t, 3> indices{0, 1, 2};
       std::memcpy(reinterpret_cast<void *>(index_address), indices.data(), sizeof(indices));
+      // A DrawIndexedIndirectArgs block for the GPU-args draw below (index count 3, instance
+      // count 1, first index 0, base vertex 7, first instance 5). Guest memory is written before
+      // it is mapped for the GPU.
+      constexpr std::array<uint32_t, 5> args_block{3u, 1u, 0u, 7u, 5u};
+      std::memcpy(reinterpret_cast<void *>(index_address + 0x100), args_block.data(),
+                  sizeof(args_block));
     }
     resources.MapMemory(depth_address, allocation_size);
     if (depth_feedback) {
@@ -17127,6 +17133,41 @@ public:
           Require("NativeIndirectDrawOffsets", indexed ? "indexed" : "auto",
                   pixels[component] == (component % 4 == 3 ? 0x3f800000u : 0x3e800000u),
                   "native vertex or instance offset was applied twice");
+        }
+      }
+
+      // --gpu-indirect-draws: the same indexed draw built from a GPU-args block. The program reads
+      // user s8/s9, so a packet that patches them is refused before anything is recorded; a packet
+      // that patches no register that is read draws the same pixels as the CPU path above.
+      {
+        constexpr uint64_t args_address = index_address + 0x100;
+        const auto gpu_draw = [&](int32_t vertex_sgpr, int32_t instance_sgpr) {
+          DrawIndexArgs args{.index_count = 1,
+                             .index_addr = reinterpret_cast<const void *>(index_address),
+                             .instance_count = 1, .index_type_and_size = 1,
+                             .offset_source = DrawOffsetSource::IndirectArgs,
+                             .indirect_args = args_address, .index_limit = 3};
+          args.patched_sgpr[0] = vertex_sgpr;
+          args.patched_sgpr[1] = instance_sgpr;
+          TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
+              {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
+          const bool drawn = RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(), args);
+          return std::make_pair(drawn, ReadCachedTexel(name, context, sparse_color.image_id,
+                                                       {}, {extent, extent, 1}));
+        };
+        const auto [refused_drawn, refused_pixels] = gpu_draw(0, 1);
+        Require("GpuIndirectDrawOffsets", "refusal", !refused_drawn,
+                "a program that reads the patched user SGPRs was not refused");
+        Require("GpuIndirectDrawOffsets", "nothing recorded",
+                std::ranges::all_of(refused_pixels, [](u32 v) { return v == 0; }),
+                "a refused GPU-args draw still drew");
+        const auto [gpu_drawn, gpu_pixels] = gpu_draw(-1, -1);
+        Require("GpuIndirectDrawOffsets", "accepted", gpu_drawn,
+                "a GPU-args draw with no patched register was refused");
+        for (size_t component = 0; component < gpu_pixels.size(); component++) {
+          Require("GpuIndirectDrawOffsets", "pixels",
+                  gpu_pixels[component] == (component % 4 == 3 ? 0x3f800000u : 0x3e800000u),
+                  "the draw built from GPU-written arguments differs from the CPU path");
         }
       }
 
