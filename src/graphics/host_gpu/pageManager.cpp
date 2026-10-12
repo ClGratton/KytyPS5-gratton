@@ -146,7 +146,22 @@ struct PageManager::Impl {
 	struct Region {
 		std::atomic_flag                    lock = ATOMIC_FLAG_INIT;
 		std::array<PageState, REGION_PAGES> pages;
+		// --mem-residency read probes: one bit per page, under `lock`.
+		std::array<uint64_t, REGION_PAGES / 64> probes {};
+
+		[[nodiscard]] bool HasProbe(size_t index) const noexcept {
+			return (probes[index / 64] >> (index % 64) & 1u) != 0;
+		}
+		void SetProbe(size_t index) noexcept { probes[index / 64] |= uint64_t {1} << (index % 64); }
+		void ClearProbe(size_t index) noexcept {
+			probes[index / 64] &= ~(uint64_t {1} << (index % 64));
+		}
+		// The protection the page has now: a probe hides the tracker's own protection.
+		[[nodiscard]] Common::VirtualMemory::Mode Perms(size_t index) const noexcept {
+			return HasProbe(index) ? Common::VirtualMemory::Mode::NoAccess : pages[index].Perms();
+		}
 	};
+	static_assert(REGION_PAGES % 64 == 0);
 
 	Impl() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -213,7 +228,7 @@ struct PageManager::Impl {
 	void UpdateRegionWatchers(Region& region, uint64_t base_addr, size_t first, size_t last,
 	                          const RegionBits* mask = nullptr) {
 		SpinGuard lock(region.lock);
-		auto      perms                 = region.pages[first].Perms();
+		auto      perms                 = region.Perms(first);
 		uint64_t  range_begin           = 0;
 		uint64_t  range_bytes           = 0;
 		uint64_t  potential_range_bytes = 0;
@@ -231,10 +246,14 @@ struct PageManager::Impl {
 			const auto address = base_addr + page_index * PAGE_SIZE;
 			const bool update  = !masked || mask->Get(page_index);
 
-			const auto old_perms = page.Perms();
+			const auto old_perms = region.Perms(page_index);
 			const auto new_count = update ? page.AddDelta<track ? 1 : -1, is_read>(address)
 			                              : page.AddDelta<0, is_read>(address);
-			const auto new_perms = page.Perms();
+			if (region.HasProbe(page_index) && (page.write_watchers == 0 || page.access_watchers != 0)) {
+				region.ClearProbe(page_index);
+				m_probe_dropped.fetch_add(1, std::memory_order_relaxed);
+			}
+			const auto new_perms = region.Perms(page_index);
 
 			if (new_perms != perms) [[unlikely]] {
 				release_pending();
@@ -272,9 +291,9 @@ struct PageManager::Impl {
 				const auto last = static_cast<size_t>((chunk_end - region_base) / PAGE_SIZE);
 				for (auto first = static_cast<size_t>((chunk_begin - region_base) / PAGE_SIZE);
 				     first < last;) {
-					const auto perms = region->pages[first].Perms();
+					const auto perms = region->Perms(first);
 					auto       next  = first + 1;
-					while (next < last && region->pages[next].Perms() == perms) {
+					while (next < last && region->Perms(next) == perms) {
 						next++;
 					}
 					if (perms != Common::VirtualMemory::Mode::ReadWrite) {
@@ -306,9 +325,72 @@ struct PageManager::Impl {
 		}
 	}
 
+	uint64_t ArmReadProbes(uint64_t vaddr, uint64_t size) {
+		ValidateRange(vaddr, size);
+		const auto begin = Common::AlignDown(vaddr, PAGE_SIZE);
+		const auto end   = Common::AlignUp(vaddr + size, PAGE_SIZE);
+		uint64_t   armed = 0;
+		for (auto chunk_begin = begin; chunk_begin < end;) {
+			const auto chunk_end   = std::min(end, Common::AlignUp(chunk_begin + 1, REGION_SIZE));
+			const auto region_base = Common::AlignDown(chunk_begin, REGION_SIZE);
+			if (auto* region = FindRegion(chunk_begin); region != nullptr) {
+				SpinGuard  lock(region->lock);
+				const auto last = static_cast<size_t>((chunk_end - region_base) / PAGE_SIZE);
+				size_t     run_begin = 0;
+				size_t     run_end   = 0;
+				const auto flush     = [&] {
+					if (run_end != run_begin) {
+						Protect(region_base + run_begin * PAGE_SIZE,
+						        (run_end - run_begin) * PAGE_SIZE,
+						        Common::VirtualMemory::Mode::NoAccess);
+					}
+					run_begin = run_end = 0;
+				};
+				for (auto index = static_cast<size_t>((chunk_begin - region_base) / PAGE_SIZE);
+				     index < last; index++) {
+					const auto& page = region->pages[index];
+					if (page.write_watchers == 0 || page.access_watchers != 0 ||
+					    region->HasProbe(index)) {
+						flush();
+						continue;
+					}
+					region->SetProbe(index);
+					armed++;
+					if (run_end == run_begin) {
+						run_begin = index;
+					}
+					run_end = index + 1;
+				}
+				flush();
+			}
+			chunk_begin = chunk_end;
+		}
+		m_probe_armed.fetch_add(armed, std::memory_order_relaxed);
+		return armed;
+	}
+
+	bool ConsumeReadProbe(uint64_t vaddr) {
+		auto* region = FindRegion(vaddr);
+		if (region == nullptr) {
+			return false;
+		}
+		const auto index = static_cast<size_t>((vaddr % REGION_SIZE) / PAGE_SIZE);
+		SpinGuard  lock(region->lock);
+		if (!region->HasProbe(index)) {
+			return false;
+		}
+		region->ClearProbe(index);
+		Protect(Common::AlignDown(vaddr, PAGE_SIZE), PAGE_SIZE, region->pages[index].Perms());
+		m_probe_consumed.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
 	std::unique_ptr<std::atomic<Region*>[]> regions;
 	std::vector<std::unique_ptr<Region>>    region_storage;
 	std::mutex                              region_mutex;
+	std::atomic<uint64_t>                   m_probe_armed {0};
+	std::atomic<uint64_t>                   m_probe_consumed {0};
+	std::atomic<uint64_t>                   m_probe_dropped {0};
 };
 
 static_assert(std::atomic<void*>::is_always_lock_free);
@@ -323,6 +405,20 @@ uint64_t PageManager::GetPageSize() const {
 
 void PageManager::ReapplyProtection(uint64_t vaddr, uint64_t size) {
 	m_impl->ReapplyProtection(vaddr, size);
+}
+
+uint64_t PageManager::ArmReadProbes(uint64_t vaddr, uint64_t size) {
+	return m_impl->ArmReadProbes(vaddr, size);
+}
+
+bool PageManager::ConsumeReadProbe(uint64_t vaddr) {
+	return m_impl->ConsumeReadProbe(vaddr);
+}
+
+PageManager::ProbeStats PageManager::GetProbeStats() const noexcept {
+	return {m_impl->m_probe_armed.load(std::memory_order_relaxed),
+	        m_impl->m_probe_consumed.load(std::memory_order_relaxed),
+	        m_impl->m_probe_dropped.load(std::memory_order_relaxed)};
 }
 
 template <bool track>
