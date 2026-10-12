@@ -22,6 +22,7 @@
 // functions are bound directly). On = about 40 ns per HLE call. Linux x86-64 hosts only; the flag
 // is accepted and ignored elsewhere.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 

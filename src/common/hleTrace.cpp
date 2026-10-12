@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
