@@ -102,6 +102,26 @@ struct MeshOutput {
 	return out;
 }
 
+// A plain (non mesh-emulated) indexed draw: the guest block is already a VkDrawIndexedIndirectCommand
+// except that the count is clamped to INDEX_BUFFER_SIZE, and that a native-fetch shader takes the
+// base vertex and first instance from its patched user SGPRs, so the command carries 0 for them
+// (what the CPU path passes to vkCmdDrawIndexed). The index buffer is bound at its base and the
+// first index travels in the command.
+struct PlainCommand {
+	uint32_t index_count;
+	uint32_t instance_count;
+	uint32_t first_index;
+	uint32_t vertex_offset;
+	uint32_t first_instance;
+	bool     operator==(const PlainCommand&) const = default;
+};
+
+[[nodiscard]] constexpr PlainCommand BuildPlain(const IndexedArgs& args, uint32_t index_limit,
+                                                bool record_offsets) {
+	return {ClampIndexCount(args.index_count, index_limit), args.instance_count, args.start_index,
+	        record_offsets ? args.base_vertex : 0u, record_offsets ? args.start_instance : 0u};
+}
+
 } // namespace Libs::Graphics::IndirectDrawArgs
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_INDIRECTDRAWARGS_H_

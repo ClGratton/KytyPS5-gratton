@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
+#include "graphics/host_gpu/renderer/meshIndirect.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -11013,6 +11014,139 @@ public:
             Libs::LibKernel::Memory::KernelReleaseDirectMemory(
                 direct_offset, allocation_size) == 0,
             "fixed-clear direct-memory allocation release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
+  // --gpu-indirect-draws: the one-thread argument pass writes the same draw record and mesh-tasks
+  // command as the CPU model (IndirectDrawArgs::BuildMesh) for guest argument blocks that exercise
+  // the clamp, the host limits, the record offsets and the 64-bit index address carry.
+  void CheckMeshIndirectArgs() {
+    constexpr const char *name = "MeshIndirectArgs";
+    constexpr uintptr_t base = 0x0000000206800000ull;
+    constexpr uint64_t allocation_size = 0x10000;
+    using namespace IndirectDrawArgs;
+    EnsureRuntimeContext();
+    int64_t direct_offset = -1;
+    Require(name, "allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_size, 0, &direct_offset) == 0,
+            "arguments allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset, allocation_size) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "arguments mapping failed");
+    struct Case {
+      IndexedArgs args;
+      uint32_t index_bytes;
+      uint64_t index_address;
+      uint32_t index_limit;
+      MeshShape shape;
+      bool record_offsets;
+      bool plain = false;
+    };
+    const MeshShape triangles{3, 3, 85, 65535, 65535, 4194304};
+    const MeshShape strip{3, 1, 64, 65535, 65535, 4194304};
+    const MeshShape small_limits{3, 3, 1, 10, 4, 24};
+    const Case cases[] = {
+        // Count clamped to INDEX_BUFFER_SIZE, base vertex -2, first instance 7.
+        {{1000u, 3u, 5u, 0xfffffffeu, 7u}, 2, 0x0000000912345670ull, 600u, triangles, true},
+        {{1000u, 3u, 5u, 0xfffffffeu, 7u}, 2, 0x0000000912345670ull, 4096u, triangles, true},
+        {{258u, 1u, 0u, 123u, 9u}, 4, 0x1000ull, 0u, triangles, false},
+        {{300u, 5u, 12u, 4u, 1u}, 4, 0x0000000200000ff0ull, 1000u, strip, true},
+        {{3u * 100u, 100u, 0u, 0u, 0u}, 2, 0x4000ull, 0u, small_limits, true},
+        {{2u, 4u, 0u, 0u, 0u}, 2, 0x4000ull, 0u, triangles, true},
+        {{99u, 0u, 0u, 0u, 0u}, 2, 0x4000ull, 0u, triangles, true},
+        // The offset itself overflows 32 bits and the sum carries into the high word.
+        {{3u, 1u, 0x60000000u, 0u, 0u}, 4, 0x00000000fffffff0ull, 0u, triangles, true},
+        // Plain indexed draws: a VkDrawIndexedIndirectCommand with the clamped count.
+        {{1000u, 3u, 5u, 0xfffffffeu, 7u}, 2, 0x1000ull, 192u, triangles, true, true},
+        {{100u, 1u, 9u, 0xfffffffeu, 7u}, 2, 0x1000ull, 192u, triangles, true, true},
+        {{1000u, 3u, 5u, 0xfffffffeu, 7u}, 4, 0x1000ull, 0u, triangles, false, true},
+    };
+    {
+      RenderContext context(m_runtime_context);
+      context.InitializeGpu(nullptr);
+      LibKernel::Memory::InstallGpuResources(&context);
+      auto &scheduler = context.GetCommandScheduler();
+      HW::Context registers{};
+      HW::UserConfig user_config{};
+      HW::Shader shaders{};
+      scheduler.Begin(registers, user_config, shaders);
+      context.MapMemory(base, allocation_size);
+      auto &cache = context.GetBufferCache();
+      auto &records = cache.GetDrawRecordBuffer();
+      MeshIndirectArgs pass(context.GetGraphics());
+      for (size_t index = 0; index < std::size(cases); ++index) {
+        const auto &c = cases[index];
+        std::memcpy(mapped, &c.args, sizeof(c.args));
+        const auto [source, source_offset] =
+            cache.ObtainBuffer(base, MeshIndirectArgs::ArgumentsSize, false);
+        Require(name, "arguments buffer", source != nullptr, "the arguments had no buffer");
+        const auto [output, output_offset] = records.Map(MeshIndirectArgs::OutputSize, 64);
+        Require(name, "record slot", output != nullptr, "the record ring had no slot");
+        records.Commit();
+        auto native = scheduler.Current().Handle();
+        pass.Record(native, *source, source_offset, records, output_offset,
+                    {.index_bytes = c.index_bytes, .index_address = c.index_address,
+                     .index_limit = c.index_limit, .shape = c.shape,
+                     .record_offsets = c.record_offsets, .plain = c.plain});
+        auto readback = CreateHostBuffer(name, OutputDwords * sizeof(u32),
+                                         vk::BufferUsageFlagBits::eTransferDst, {0});
+        vk::MemoryBarrier written{};
+        written.sType = vk::StructureType::eMemoryBarrier;
+        written.srcAccessMask = vk::AccessFlagBits::eShaderWrite |
+                                vk::AccessFlagBits::eMemoryWrite;
+        written.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+        native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eTransfer, {}, 1, &written, 0,
+                               nullptr, 0, nullptr);
+        const vk::BufferCopy copy{output_offset + MeshIndirectArgs::RecordOffset, 0,
+                                  OutputDwords * sizeof(u32)};
+        native.copyBuffer(records.Handle(), readback.buffer, 1, &copy);
+        vk::MemoryBarrier host{};
+        host.sType = vk::StructureType::eMemoryBarrier;
+        host.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+        host.dstAccessMask = vk::AccessFlagBits::eHostRead;
+        native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eHost, {}, 1, &host, 0, nullptr, 0,
+                               nullptr);
+        scheduler.Finish();
+        auto words = ReadBuffer(name, readback, OutputDwords);
+        DestroyBuffer(&readback);
+        // Word 11 is padding the pass never writes.
+        words.resize(CommandWord + 3);
+        std::vector<u32> want(CommandWord + 3, 0u);
+        if (c.plain) {
+          const auto plain = BuildPlain(c.args, c.index_limit, c.record_offsets);
+          want = {plain.index_count, plain.instance_count, plain.first_index,
+                  plain.vertex_offset, plain.first_instance};
+          words.resize(want.size());
+        } else {
+          const auto expected = BuildMesh(c.args, c.index_bytes, c.index_address, c.index_limit,
+                                          c.shape, c.record_offsets);
+          std::copy(std::begin(expected.record), std::end(expected.record), want.begin());
+          want[CommandWord + 0] = expected.command.groups;
+          want[CommandWord + 1] = expected.command.instances;
+          want[CommandWord + 2] = 1u;
+        }
+        const auto text = std::string("case ") + std::to_string(index);
+        Require(name, text.c_str(), words == want,
+                "the GPU pass and the CPU model disagree on the record or the command");
+      }
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+      context.ShutdownGpu();
+      LibKernel::Memory::InstallGpuResources(nullptr);
+    }
+    Require(name, "unmap", Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "arguments mapping release failed");
+    Require(name, "release",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct_offset,
+                                                               allocation_size) == 0,
+            "arguments allocation release failed");
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
@@ -43953,6 +44087,11 @@ int main(int argc, char **argv) {
     vulkan.CheckBgra16Readback();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--mesh-indirect-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckMeshIndirectArgs();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--draw-offset-only") == 0) {
     CheckEmbeddedFetchVertexOffset();
     return 0;
@@ -44224,6 +44363,7 @@ int main(int argc, char **argv) {
   vulkan.CheckStreamBufferRing();
   vulkan.CheckGpuTilerCpuParity();
   vulkan.CheckNativeIndirectDispatch();
+  vulkan.CheckMeshIndirectArgs();
   CheckComputeLdsLimit(vulkan);
   vulkan.CheckBdaPageTableUploads();
   vulkan.CheckUnifiedTextureCacheFlow();

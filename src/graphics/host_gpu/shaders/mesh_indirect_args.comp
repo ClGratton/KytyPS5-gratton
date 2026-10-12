@@ -1,0 +1,103 @@
+#version 450
+
+// --gpu-indirect-draws (K21). Converts a guest DrawIndexedIndirectArgs block, written by an
+// earlier GPU pass, into the draw record of a mesh-emulated draw and a
+// VkDrawMeshTasksIndirectCommandEXT, so the CPU never reads the arguments. The arithmetic is
+// mirrored by src/graphics/host_gpu/renderer/indirectDrawArgs.h (BuildMesh), which the unit and GPU
+// tests compare it with.
+//
+// With `plain` set it writes a VkDrawIndexedIndirectCommand instead, for a draw that is not
+// mesh-emulated (BuildPlain).
+//
+// Ported from BryanKAdams/BryKytyPS5@1a6817502 and @d8449bd8e (GPL-2.0), re-implemented.
+
+layout(local_size_x = 1) in;
+
+// Guest DrawIndexedIndirectArgs: index count, instance count, first index, base vertex,
+// first instance.
+layout(std430, binding = 0) readonly buffer Arguments {
+	uint arguments[];
+};
+
+// Record (6 dwords, padded to 8) followed by the mesh-tasks command (3 dwords).
+layout(std430, binding = 1) writeonly buffer Output {
+	uint outputs[];
+};
+
+layout(push_constant) uniform Params {
+	uint arguments_word;
+	uint output_word;
+	uint index_bytes;
+	uint index_low;
+	uint index_high;
+	uint index_limit;
+	uint primitive_size;
+	uint primitive_step;
+	uint primitives_per_group;
+	uint max_groups;
+	uint max_instances;
+	uint max_total;
+	uint record_offsets;
+	uint plain;
+} params;
+
+void main() {
+	uint count = arguments[params.arguments_word + 0u];
+	uint instances = arguments[params.arguments_word + 1u];
+	const uint first_index = arguments[params.arguments_word + 2u];
+	const uint base_vertex = arguments[params.arguments_word + 3u];
+	const uint first_instance = arguments[params.arguments_word + 4u];
+
+	// The CPU path clamps the count to INDEX_BUFFER_SIZE the same way.
+	if (params.index_limit != 0u) {
+		count = min(count, params.index_limit);
+	}
+
+	if (params.plain != 0u) {
+		// A draw that is not mesh-emulated: a VkDrawIndexedIndirectCommand with the clamped count.
+		const uint command = params.output_word;
+		outputs[command + 0u] = count;
+		outputs[command + 1u] = instances;
+		outputs[command + 2u] = first_index;
+		outputs[command + 3u] = params.record_offsets != 0u ? base_vertex : 0u;
+		outputs[command + 4u] = params.record_offsets != 0u ? first_instance : 0u;
+		return;
+	}
+
+	// Index address = base + first_index * element size, as a 64-bit sum in two words.
+	uint offset_high;
+	uint offset_low;
+	umulExtended(first_index, params.index_bytes, offset_high, offset_low);
+	const uint low = params.index_low + offset_low;
+	const uint high = params.index_high + offset_high + (low < offset_low ? 1u : 0u);
+
+	uint groups = 0u;
+	if (count >= params.primitive_size && instances != 0u) {
+		const uint primitives = (count - params.primitive_size) / params.primitive_step + 1u;
+		groups = (primitives - 1u) / params.primitives_per_group + 1u;
+	}
+	// Host limits. Guest draws this large would need sliced dispatches; clamp rather than
+	// exceed the limits (the CPU path stops with an error instead).
+	groups = min(groups, params.max_groups);
+	instances = min(instances, params.max_instances);
+	if (groups != 0u && instances > params.max_total / groups) {
+		instances = params.max_total / groups;
+	}
+	if (groups == 0u || instances == 0u) {
+		groups = 0u;
+		instances = 0u;
+	}
+
+	const uint record = params.output_word;
+	outputs[record + 0u] = count;
+	outputs[record + 1u] = params.record_offsets != 0u ? base_vertex : 0u;
+	outputs[record + 2u] = params.record_offsets != 0u ? first_instance : 0u;
+	outputs[record + 3u] = params.index_bytes;
+	outputs[record + 4u] = low;
+	outputs[record + 5u] = high;
+	outputs[record + 6u] = 0u;
+	outputs[record + 7u] = 0u;
+	outputs[record + 8u] = groups;
+	outputs[record + 9u] = instances;
+	outputs[record + 10u] = 1u;
+}

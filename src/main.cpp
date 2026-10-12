@@ -182,6 +182,9 @@ static void PrintUsage() {
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
 	         "                                       the guest backing without faulting when none of the bytes\n"
 	         "                                       is GPU-written (no drain). Default: false.\n");
+	::printf("  --gpu-indirect-draws <true|false>    Build indirect draws whose argument block a GPU pass wrote\n"
+	         "                                       on the GPU instead of reading it on the CPU after a\n"
+	         "                                       full drain (mesh-emulated draws). Default: false.\n");
 	::printf("  --readback-queue <true|false>        Synchronous GPU->guest buffer readbacks copy on a second\n"
 	         "                                       queue of the rendering family and wait only for the\n"
 	         "                                       work that wrote the data. Default: false.\n");
@@ -729,6 +732,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--known-fills") {
 			if (!ParseBool(value, options.config.known_fills)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--gpu-indirect-draws") {
+			if (!ParseBool(value, options.config.gpu_indirect_draws)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

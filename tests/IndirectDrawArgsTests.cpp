@@ -83,6 +83,17 @@ void TestAddressCarriesIntoHighWord() {
 	Check(out.record[5] == 2, "carry: high word value");
 }
 
+void TestPlainCommandFollowsCpuPath() {
+	const IndexedArgs args {1000, 3, 5, 0xfffffffeu, 7};
+	Check((BuildPlain(args, 192, true) == PlainCommand {192, 3, 5, 0xfffffffeu, 7}),
+	      "plain: count clamped, everything else from the arguments");
+	Check((BuildPlain(args, 0, true) == PlainCommand {1000, 3, 5, 0xfffffffeu, 7}),
+	      "plain: unknown INDEX_BUFFER_SIZE does not clamp");
+	Check((BuildPlain(args, 4096, false) == PlainCommand {1000, 3, 5, 0, 0}),
+	      "plain, native fetch: the patched user SGPRs carry the offsets, the command carries 0");
+	Check((BuildPlain({0, 0, 0, 0, 0}, 192, true) == PlainCommand {0, 0, 0, 0, 0}), "empty draw");
+}
+
 } // namespace
 
 int main() {
@@ -93,6 +104,7 @@ int main() {
 	TestMeshRecordFollowsCpuPath();
 	TestNativeFetchKeepsOffsetsOutOfTheRecord();
 	TestAddressCarriesIntoHighWord();
+	TestPlainCommandFollowsCpuPath();
 	std::printf("IndirectDrawArgsTests: ok\n");
 	return 0;
 }
