@@ -9990,6 +9990,54 @@ void TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic() {
   }
 }
 
+// --skip-ir-validation: release translations may skip the IR consistency checks. The output must not
+// change, a broken program must still be caught when validation is on, and debug builds (and
+// KYTY_IR_VALIDATE) always validate.
+void TestShaderIrValidationGate() {
+  using namespace ShaderRecompiler;
+
+  const uint32_t shader[] = {
+      EncodeSopp(0x05, 2),       // entry -> B, fallthrough A
+      EncodeSopp(0x02, 0),       // A -> C
+      EncodeSopp(0x05, 0xfffeu), // C -> A, fallthrough B
+      EncodeSopp(0x02, 0xfffeu), // B -> C
+      EncodeSopp(0x01),
+  };
+  auto options = MakeCompileOptions(ShaderType::Compute);
+
+  Check(IR::ValidationEnabled(), "IR validation must be on by default");
+  auto validated = RecompileForTest(shader, options);
+
+  const bool forced = std::getenv("KYTY_IR_VALIDATE") != nullptr;
+  IR::SetValidationEnabled(false);
+  const bool can_skip = KYTY_BUILD == KYTY_BUILD_RELEASE && !forced;
+  Check(IR::ValidationEnabled() == !can_skip,
+        "IR validation gate ignores the build type or KYTY_IR_VALIDATE");
+  auto skipped = RecompileForTest(shader, options);
+  Check(skipped.spirv == validated.spirv && skipped.program.dispatcher_fallback,
+        "skipping IR validation changed the translated shader");
+
+  if (can_skip) {
+    // A program with an inconsistent block table passes the skipped check ...
+    auto& program = skipped.program;
+    program.blocks.push_back(program.blocks.front());
+    IR::ValidateProgramIfEnabled(program, true);
+    program.blocks.pop_back();
+  }
+  IR::SetValidationEnabled(true);
+  Check(IR::ValidationEnabled(), "IR validation did not turn back on");
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+  // ... and is caught when validation is on.
+  ExpectFatal(
+      [&] {
+        auto& program = validated.program;
+        program.blocks.push_back(program.blocks.front());
+        IR::ValidateProgramIfEnabled(program, true);
+      },
+      "enabled IR validation accepted an inconsistent block table");
+#endif
+}
+
 void TestNewShaderRecompilerPlanningOnlyLoads() {
   using namespace ShaderRecompiler;
   const uint32_t shader[] = {EncodeSopp(0x01)};
@@ -15730,6 +15778,7 @@ int main() {
   TestNewShaderRecompilerCfgIrreducibleDispatcher();
   TestNewShaderRecompilerDispatcherSpillsU32x3();
   TestNewShaderRecompilerDispatcherSpillIdsAreDeterministic();
+  TestShaderIrValidationGate();
   TestNewShaderRecompilerPlanningOnlyLoads();
   TestNewShaderRecompilerNativeU64Translation();
   TestVertexMadU64UsesPortableProduct();

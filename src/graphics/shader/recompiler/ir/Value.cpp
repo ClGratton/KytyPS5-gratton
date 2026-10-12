@@ -256,9 +256,13 @@ void Inst::Invalidate() {
 }
 
 void Inst::AddUse(Inst* used, size_t operand) {
-	const auto found = std::ranges::find_if(
-	    used->uses, [&](const Use& use) { return use.user == this && use.operand == operand; });
-	EXIT_IF(found != used->uses.end());
+	// The duplicate check scans every existing use of the value: linear per edge, so a debug aid
+	// that release translations skip together with the IR validation.
+	if (ValidationEnabled()) {
+		const auto found = std::ranges::find_if(
+		    used->uses, [&](const Use& use) { return use.user == this && use.operand == operand; });
+		EXIT_IF(found != used->uses.end());
+	}
 	used->uses.push_back({this, operand});
 }
 

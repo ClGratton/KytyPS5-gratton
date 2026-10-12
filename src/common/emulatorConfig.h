@@ -113,6 +113,10 @@ struct ConfigOptions {
 	// --pipeline-lookahead-kinds <all|compute|graphics|none>: debug aid to bisect a misprediction.
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches.
 	uint32_t               pipeline_lookahead_kinds    = 3;
+	// --skip-ir-validation: skip the shader IR consistency checks in release translations (about a
+	// fifth of translate time; the output is byte-identical). Debug builds always validate and
+	// KYTY_IR_VALIDATE forces it on. Default off (= validate, stock behaviour).
+	bool                   skip_ir_validation          = false;
 	// --debug-lookahead-verify: the GPU thread recompiles every program a prefetch built before
 	// its first use and compares the SPIR-V; mismatches are logged (finds prefetch inputs that
 	// differ from the real draw's). Slow, debug only.

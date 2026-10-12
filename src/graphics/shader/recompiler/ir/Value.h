@@ -184,4 +184,10 @@ private:
 
 static_assert(sizeof(Inst) <= 120, "Inst operand and backend storage unintentionally increased");
 
+// Full IR validation is a consistency check that only ever stops the emulator, and it costs about a
+// fifth of a release translation. It always runs in debug builds and whenever KYTY_IR_VALIDATE is set;
+// in release builds --skip-ir-validation turns it off (SetValidationEnabled(false)).
+bool ValidationEnabled();
+void SetValidationEnabled(bool enabled);
+
 } // namespace Libs::Graphics::ShaderRecompiler::IR

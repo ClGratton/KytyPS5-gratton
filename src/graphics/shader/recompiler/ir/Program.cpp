@@ -1,7 +1,10 @@
 #include "common/assert.h"
+#include "common/config.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 
+#include <atomic>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <xbyak/xbyak.h>
 #include <map>
@@ -13,6 +16,8 @@
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 namespace {
+
+std::atomic<bool> g_validation_enabled{true};
 
 [[noreturn]] void Fail(std::string_view message) {
 	EXIT("shader IR validation failed: %s", std::string(message).c_str());
@@ -231,6 +236,25 @@ bool HasShaderMemoryWrites(const Program& program) {
 		}
 	}
 	return false;
+}
+
+bool ValidationEnabled() {
+#if KYTY_BUILD != KYTY_BUILD_RELEASE
+	return true;
+#else
+	static const bool forced = std::getenv("KYTY_IR_VALIDATE") != nullptr;
+	return forced || g_validation_enabled.load(std::memory_order_relaxed);
+#endif
+}
+
+void SetValidationEnabled(bool enabled) {
+	g_validation_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+void ValidateProgramIfEnabled(const Program& program, bool require_ssa) {
+	if (ValidationEnabled()) {
+		ValidateProgram(program, require_ssa);
+	}
 }
 
 void ValidateProgram(const Program& program, bool require_ssa) {
