@@ -145,6 +145,12 @@ static void PrintUsage() {
 	         "                                      host-visible memory (ReBAR) instead of system RAM.\n"
 	         "                                      Falls back to system RAM, logged, when the device has\n"
 	         "                                      no such heap. Default: off.\n");
+	::printf("  --skip-zero-uploads <on|off>         Do not read and upload a color image whose guest memory\n"
+	         "                                      was never written (it reads as zeros): clear the GPU\n"
+	         "                                      image instead. Saves the guest read, the staging copy and\n"
+	         "                                      the detile pass. Default: off.\n");
+	::printf("  --verify-zero-uploads <on|off>       Debug: with --skip-zero-uploads, also pread each skipped\n"
+	         "                                      range and log an error if it holds a non-zero byte.\n");
 	::printf("  --vram-audit <seconds>               Debug: once, this many seconds after start, log the\n"
 	         "                                      resident image mix and content-duplicate textures.\n");
 	::printf("  --vram-ballast-mb <MiB>              Debug: hold this much device-local memory to\n"
@@ -732,6 +738,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--upload-ring-rebar") {
 			if (!ParseBool(value, options.config.upload_ring_rebar)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--skip-zero-uploads") {
+			if (!ParseBool(value, options.config.skip_zero_uploads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--verify-zero-uploads") {
+			if (!ParseBool(value, options.config.verify_zero_uploads)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

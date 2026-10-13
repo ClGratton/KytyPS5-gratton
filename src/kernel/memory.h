@@ -122,6 +122,11 @@ bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t
 // readback, when none of them is GPU-written (--clean-guest-reads). False reads nothing.
 bool                   TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
+// True when the whole range is file-backed guest memory that was never written, so it reads as
+// zeros. Reads nothing and makes no page resident; false when in doubt.
+bool                   GuestRangeNeverWritten(uint64_t vaddr, uint64_t size);
+// Debug: reads the range with pread (no page becomes resident) and says whether it is all zeros.
+bool                   GuestRangeReadsAsZero(uint64_t vaddr, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
 // Whether guest mappings cover all of [vaddr, vaddr + size), and the parts they cover (as
 // (address, size), in order): what can be read or written of a range that reaches into memory the
@@ -287,6 +292,8 @@ struct TestBackingScan {
 	uint64_t                  resident_after  = 0;
 	BackingReadStats::Counts  delta;                    // 'other' counters changed by the read
 	uint64_t                  pread_failures  = 0;
+	bool                      never_written_ok = false; // RangeIsNeverWritten/RangeReadsAsZero verdicts before the read
+	bool                      hole_after_read  = false; // RangeIsNeverWritten of the 2nd MiB after the read
 };
 void     TestBackingReadScan(TestBackingScan* out, bool hole_reads);
 #endif

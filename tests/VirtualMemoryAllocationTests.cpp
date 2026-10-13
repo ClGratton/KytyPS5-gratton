@@ -1686,6 +1686,9 @@ void TestBackingReadResidencyStats() {
 	}
 	constexpr uint64_t mib = 1u << 20;
 	Check(test, scan.data_ok, "the scanning read changed the bytes read");
+	Check(test, scan.never_written_ok, "never-written verdicts were wrong, or the checks made pages resident");
+	// A read through the mapping gives the hole a zero page; it then has data for SEEK_DATA.
+	Check(test, !scan.hole_after_read, "a mapped read left the hole a hole");
 	Check(test, scan.resident_before == 2 * mib, "written MiBs are not exactly the resident ones");
 	Check(test, scan.delta.reads == 1 && scan.delta.bytes == 4 * mib, "read size was not counted");
 	Check(test, scan.delta.nonresident == 2 * mib, "non-resident bytes were not counted");
@@ -1697,6 +1700,8 @@ void TestBackingReadResidencyStats() {
 	Libs::LibKernel::Memory::TestBackingScan preads;
 	Libs::LibKernel::Memory::TestBackingReadScan(&preads, true);
 	Check(test, preads.ran && preads.data_ok, "pread of holes returned different bytes");
+	Check(test, preads.never_written_ok && preads.hole_after_read,
+	      "a pread of a hole made it data, or its verdict was wrong");
 	Check(test, preads.resident_before == 2 * mib, "second store did not start with 2 MiB resident");
 	Check(test, preads.delta.pread_bytes == 2 * mib && preads.pread_failures == 0,
 	      "holes were not read with pread");

@@ -360,6 +360,14 @@ bool MemHoleReadsEnabled() {
 	return g_config != nullptr && g_config->mem_hole_reads;
 }
 
+bool SkipZeroUploadsEnabled() {
+	return g_config != nullptr && g_config->skip_zero_uploads;
+}
+
+bool VerifyZeroUploadsEnabled() {
+	return g_config != nullptr && g_config->verify_zero_uploads;
+}
+
 uint32_t VramAuditSeconds() {
 	return g_config->vram_audit_s;
 }

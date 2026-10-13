@@ -22,8 +22,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <limits>
@@ -996,6 +998,68 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 	destination.Upload(copies, linear.buffer, linear.offset, linear.size);
 }
 
+namespace {
+struct ZeroUploadStats {
+	std::atomic<uint64_t> images {0};
+	std::atomic<uint64_t> bytes {0};
+	std::atomic<uint64_t> mismatches {0};
+	std::atomic<int64_t>  last_log_ms {0};
+};
+ZeroUploadStats g_zero_uploads;
+} // namespace
+
+bool TextureCache::TryUploadNeverWritten(Image& image) {
+	if (!Config::SkipZeroUploadsEnabled()) {
+		return false;
+	}
+	const auto& info = image.info;
+	// Zero bytes decode to zero only for plain color formats: block-compressed formats and depth or
+	// stencil have other encodings of zero, multisampled images are not uploaded here at all.
+	if (image.depth_id || info.IsDepth() || info.HasStencil() || info.IsBlock() ||
+	    info.samples != 1 || image.backing.samples != 1 || info.data.Empty() ||
+	    UploadBinding(image) == BindingType::DepthTarget) {
+		return false;
+	}
+	const auto address = info.data.address;
+	const auto size    = info.data.size;
+	// GPU-written bytes (a buffer the shaders wrote) are not in the guest memory.
+	if (m_buffer_cache.IsRegionGpuModified(address, size) ||
+	    !LibKernel::Memory::GuestRangeNeverWritten(address, size)) {
+		return false;
+	}
+	if (Config::VerifyZeroUploadsEnabled() && !LibKernel::Memory::GuestRangeReadsAsZero(address, size)) {
+		g_zero_uploads.mismatches.fetch_add(1, std::memory_order_relaxed);
+		char text[256];
+		std::snprintf(text, sizeof(text),
+		              "ERROR: --skip-zero-uploads: guest range 0x%016" PRIx64 "+0x%" PRIx64
+		              " has no data in its backing file but a non-zero byte; uploading it instead\n",
+		              address, size);
+		Log::WriteToConsoleAndLog(text);
+		return false;
+	}
+	if (!image.ClearColorToZero()) {
+		return false;
+	}
+	g_zero_uploads.images.fetch_add(1, std::memory_order_relaxed);
+	g_zero_uploads.bytes.fetch_add(size, std::memory_order_relaxed);
+	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count();
+	auto last = g_zero_uploads.last_log_ms.load(std::memory_order_relaxed);
+	if (now_ms - last >= 10000 &&
+	    g_zero_uploads.last_log_ms.compare_exchange_strong(last, now_ms)) {
+		char text[256];
+		std::snprintf(text, sizeof(text),
+		              "[zero-uploads] images cleared instead of uploaded %" PRIu64
+		              ", guest bytes not read %.3f GiB, verify mismatches %" PRIu64 "\n",
+		              g_zero_uploads.images.load(),
+		              static_cast<double>(g_zero_uploads.bytes.load()) / (1u << 30),
+		              g_zero_uploads.mismatches.load());
+		Log::WriteToConsoleAndLog(text);
+	}
+	return true;
+}
+
 void TextureCache::InitializeImage(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (image.info.data.Empty()) {
@@ -1013,12 +1077,14 @@ void TextureCache::InitializeImage(ImageId id) {
 	}
 	const bool upload = image.IsBufferModified() || image.IsCpuDirty();
 	if (upload) {
-		const auto [source, source_offset] =
-		    m_buffer_cache.ObtainBufferForImage(image.info.data.address, image.info.data.size);
-		if (source == nullptr) {
-			EXIT("TextureCache: failed to obtain image upload source\n");
+		if (!TryUploadNeverWritten(image)) {
+			const auto [source, source_offset] =
+			    m_buffer_cache.ObtainBufferForImage(image.info.data.address, image.info.data.size);
+			if (source == nullptr) {
+				EXIT("TextureCache: failed to obtain image upload source\n");
+			}
+			UploadImage(image, *source, source_offset);
 		}
-		UploadImage(image, *source, source_offset);
 		image.ClearBufferModified();
 	}
 	if (image.IsCpuDirty()) {

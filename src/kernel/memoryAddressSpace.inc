@@ -464,6 +464,92 @@ public:
 		return true;
 	}
 
+	// True when every byte of [vaddr, vaddr + size) is mapped to the backing store and none of it was
+	// ever written (no data and no swapped page in the backing file): it reads as zeros, and
+	// checking it reads nothing and makes no page resident. False when in doubt (unmapped parts,
+	// a page that holds data, hosts without SEEK_DATA on the backing object).
+	bool RangeIsNeverWritten(uint64_t vaddr, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::shared_lock lock(m_mutex);
+		const auto       end   = vaddr + size;
+		auto             first = m_maps.upper_bound(vaddr);
+		if (first == m_maps.begin()) {
+			return false;
+		}
+		--first;
+		auto current = vaddr;
+		for (auto mapping = first; current < end; ++mapping) {
+			if (mapping == m_maps.end() || current < mapping->second.vaddr ||
+			    current >= mapping->second.vaddr + mapping->second.size) {
+				return false;
+			}
+			const auto& entry = mapping->second;
+			const auto  bytes = std::min(end, entry.vaddr + entry.size) - current;
+			const auto  lo    = entry.backing_offset + current - entry.vaddr;
+			if (!RangeOk(lo, bytes) || !FileRangeIsHole(lo, lo + bytes)) {
+				return false;
+			}
+			current += bytes;
+		}
+		return true;
+#else
+		(void)vaddr;
+		(void)size;
+		return false;
+#endif
+	}
+
+	// Debug check for RangeIsNeverWritten: reads the range with pread (no page becomes resident) and
+	// returns whether every byte is zero. False when it cannot read the range.
+	bool RangeReadsAsZero(uint64_t vaddr, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::shared_lock lock(m_mutex);
+		const auto       end   = vaddr + size;
+		auto             first = m_maps.upper_bound(vaddr);
+		if (first == m_maps.begin()) {
+			return false;
+		}
+		--first;
+		std::vector<uint8_t> scratch(1u << 20);
+		auto                 current = vaddr;
+		for (auto mapping = first; current < end; ++mapping) {
+			if (mapping == m_maps.end() || current < mapping->second.vaddr ||
+			    current >= mapping->second.vaddr + mapping->second.size) {
+				return false;
+			}
+			const auto& entry = mapping->second;
+			const auto  bytes = std::min(end, entry.vaddr + entry.size) - current;
+			const auto  lo    = entry.backing_offset + current - entry.vaddr;
+			if (!RangeOk(lo, bytes)) {
+				return false;
+			}
+			for (uint64_t done = 0; done < bytes;) {
+				const auto n = std::min<uint64_t>(scratch.size(), bytes - done);
+				if (!PreadFromBacking(scratch.data(), lo + done, n)) {
+					return false;
+				}
+				if (std::any_of(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(n),
+				                [](uint8_t b) { return b != 0; })) {
+					return false;
+				}
+				done += n;
+			}
+			current += bytes;
+		}
+		return true;
+#else
+		(void)vaddr;
+		(void)size;
+		return false;
+#endif
+	}
+
 	bool MapFixed(uint64_t vaddr, uint64_t size, uint64_t backing_offset,
 	              VirtualMemory::Mode mode, FailureReason* failure_reason = nullptr) {
 		if (!IsAvailable() || !RangeOk(backing_offset, size)) {
@@ -747,6 +833,15 @@ public:
 			pos = static_cast<uint64_t>(next_hole);
 		}
 		return hole;
+	}
+
+	// True when no byte of the backing file in [lo, hi) holds data (SEEK_DATA finds nothing before hi).
+	[[nodiscard]] bool FileRangeIsHole(uint64_t lo, uint64_t hi) const {
+		const off_t data = lseek(m_fd, static_cast<off_t>(lo), SEEK_DATA);
+		if (data < 0) {
+			return errno == ENXIO; // no data at or after lo
+		}
+		return static_cast<uint64_t>(data) >= hi;
 	}
 
 	static constexpr uint64_t SCAN_READ_MIN = 16 * 1024;
@@ -1364,6 +1459,32 @@ public:
 			}
 		}
 		return m_backing->TryReadSparseBacking(vaddr, data, size);
+	}
+
+	// See GuestBackingStore::RangeIsNeverWritten. Ranges that touch private (non-file) mappings
+	// are never reported as holes.
+	bool RangeIsNeverWritten(uint64_t vaddr, uint64_t size) {
+		if (!Owns(vaddr, size)) {
+			return false;
+		}
+		{
+			std::shared_lock lock(m_mutex);
+			auto            mapping = m_mapped.upper_bound(vaddr);
+			if (mapping != m_mapped.begin()) {
+				--mapping;
+			}
+			for (; mapping != m_mapped.end() && mapping->second.vaddr < vaddr + size; ++mapping) {
+				const auto& region = mapping->second;
+				if (region.type == MappingType::Private && region.vaddr + region.size > vaddr) {
+					return false;
+				}
+			}
+		}
+		return m_backing->RangeIsNeverWritten(vaddr, size);
+	}
+
+	bool RangeReadsAsZero(uint64_t vaddr, uint64_t size) {
+		return Owns(vaddr, size) && m_backing->RangeReadsAsZero(vaddr, size);
 	}
 
 	bool BackingContains(uint64_t vaddr, uint64_t size) { return m_backing->Contains(vaddr, size); }

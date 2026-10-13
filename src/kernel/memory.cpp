@@ -1263,6 +1263,14 @@ bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space->TryReadSparseBacking(vaddr, data, size);
 }
 
+bool GuestRangeReadsAsZero(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->RangeReadsAsZero(vaddr, size);
+}
+
+bool GuestRangeNeverWritten(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->RangeIsNeverWritten(vaddr, size);
+}
+
 static bool SelfTestSub64SharedPlaceholderAlias() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	constexpr uint64_t PageSize    = 0x4000;
@@ -4208,11 +4216,31 @@ void TestBackingReadScan(TestBackingScan* out, bool hole_reads) {
 	bool ok = backing.TryWriteBacking(address, pattern.data(), mib) &&
 	          backing.TryWriteBacking(address + 2 * mib, pattern.data(), mib);
 	out->resident_before = backing.ResidentGuestBytes(address, size);
+	// Never-written verdicts: MiB 1 and 3 are holes, MiB 0 and 2 hold data, nothing is resident
+	// because of the checks themselves.
+	out->never_written_ok =
+	    backing.RangeIsNeverWritten(address + mib, mib) &&
+	    backing.RangeIsNeverWritten(address + 3 * mib, mib) &&
+	    backing.RangeIsNeverWritten(address + mib + 100, 200) &&
+	    backing.RangeIsNeverWritten(address + mib + 4096, 3 * 4096) &&
+	    !backing.RangeIsNeverWritten(address, mib) &&
+	    !backing.RangeIsNeverWritten(address, 2 * mib) &&
+	    !backing.RangeIsNeverWritten(address + mib, 2 * mib) &&
+	    !backing.RangeIsNeverWritten(address + mib - 1, 2) &&
+	    !backing.RangeIsNeverWritten(address + 3 * mib - 4096, 4096) &&
+	    !backing.RangeIsNeverWritten(address + 3 * mib, 2 * mib) && // runs off the mapping
+	    !backing.RangeIsNeverWritten(address, 0) &&
+	    backing.RangeReadsAsZero(address + mib, mib) &&
+	    backing.RangeReadsAsZero(address + 3 * mib + 5, 777) &&
+	    !backing.RangeReadsAsZero(address, mib) &&
+	    !backing.RangeReadsAsZero(address + mib, 2 * mib) &&
+	    backing.ResidentGuestBytes(address, size) == out->resident_before;
 	const auto before    = KernelBackingReadStats();
 	std::vector<uint8_t> read(size, 0xEE);
 	ok = ok && backing.TryReadBacking(address, read.data(), size);
 	const auto after = KernelBackingReadStats();
 	out->resident_after = backing.ResidentGuestBytes(address, size);
+	out->hole_after_read = backing.RangeIsNeverWritten(address + mib, mib);
 	bool data_ok = ok;
 	for (size_t i = 0; i < size && data_ok; i++) {
 		const uint64_t mb = i / mib;

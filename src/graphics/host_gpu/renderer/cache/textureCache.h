@@ -154,6 +154,9 @@ private:
 	void                        InitializeImage(ImageId id);
 	[[nodiscard]] bool          CanDownload(const Image& image) const;
 	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
+	// --skip-zero-uploads: true when the image was set to zero because its whole guest range was
+	// never written, in place of reading, staging and detiling that range.
+	[[nodiscard]] bool          TryUploadNeverWritten(Image& image);
 	void DownloadImage(Image& image, Buffer& destination, uint64_t destination_offset,
 	                   uint64_t destination_size, uint32_t levels);
 	void DownloadDepth(Image& image, Buffer& destination, uint64_t destination_offset);
