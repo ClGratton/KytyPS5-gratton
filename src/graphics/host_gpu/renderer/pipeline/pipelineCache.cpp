@@ -410,6 +410,23 @@ void ShadowCompare(const SrtPlan::Key& key, bool nested, bool compute, uint32_t 
 	SrtPlan::Record(sample);
 }
 
+// --srt-plans, kyGpu thread: look the draw's plan up and check it (SrtPlan::Decide, the same
+// validity check as the shadow). Returns the plan when it can stand in for the draw's own
+// materialization, nullptr otherwise; counts the outcome, no clocks and no samples.
+std::unique_ptr<SrtPlan::Plan> TakeAdoptablePlan(const SrtPlan::Key& key, bool nested, uint32_t stage,
+                                                 uint64_t                                    shader_hash,
+                                                 const ShaderRecompiler::IR::SrtRuntime& runtime) {
+	Common::GpuPhase::Scope gpu_phase_adopt(Common::GpuPhase::Phase::SrtPlanAdopt);
+	std::unique_ptr<SrtPlan::Plan> plan;
+	const SrtPlan::Inputs          inputs {runtime.user_data, runtime.shader_base, runtime.workgroup_counts};
+	const auto decision = SrtPlan::Decide(SrtPlan::GetStore(), key, nested, stage, shader_hash, inputs,
+	                                      ShadowRead, ShadowDirty, plan);
+	SrtPlan::Adopting().Note(decision);
+	if (decision.Adopted()) return plan;
+	if (plan) SrtPlan::RecyclePlan(std::move(plan));
+	return nullptr;
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
 	if (!Config::GraphicsDebugDumpEnabled() && !Config::DebugDumpShaderMatches(shader_hash)) {
@@ -631,6 +648,35 @@ struct PipelineCache::ProgramCache {
 				*specialization_out = specialization;
 			}
 			return found;
+		}
+
+		// --srt-plans: the draw's materialization is `plan` (checked by the caller) instead of a walk
+		// of the guest memory: the entry takes over the plan's snapshot and specialization, then the
+		// same permutation search runs. The plan keeps the entry's old buffers for recycling.
+		Permutation* FindPermutationAdopting(SrtPlan::Plan& plan, uint32_t push_data_cursor,
+		                                     ShaderRecompiler::IR::ResourceSpecialization* specialization_out) {
+			std::unique_lock lock(mutex, std::defer_lock);
+			LockEntry(lock, "entry_lock_gpu");
+			SrtPlan::AdoptInto(resources, specialization, plan);
+			Permutation* found = FindExistingLocked<false>(push_data_cursor, specialization, {});
+			if (found == nullptr && specialization_out != nullptr) {
+				*specialization_out = specialization;
+			}
+			return found;
+		}
+
+		// --srt-plans with --srt-plan-shadow: materializes the draw the ordinary way into scratch
+		// storage and returns which parts differ from what was adopted (0 = byte-equal).
+		uint32_t DiffAdoptedAgainstOwn(const ShaderRecompiler::IR::SrtRuntime& runtime) {
+			std::unique_lock lock(mutex, std::defer_lock);
+			LockEntry(lock, "entry_lock_gpu");
+			thread_local ShaderRecompiler::IR::ResourceSnapshot       own;
+			thread_local ShaderRecompiler::IR::ResourceSpecialization own_specialization;
+			own                = {};
+			own_specialization = {};
+			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, own,
+			                                                    own_specialization));
+			return SrtPlan::Diff(resources, specialization, own, own_specialization);
 		}
 
 		// Lookahead thread: materializes into private storage (never into `resources` /
@@ -1277,6 +1323,10 @@ struct PipelineCache::ProgramCache {
 		SourceEntry* entry = FindEntry(lookup_key);
 		gpu_phase_key.End();
 		const bool prefetch = async != nullptr && async->prefetch;
+		// kyGpu, --srt-plans: adopt the lookahead's plan of this draw (with --srt-plan-shadow also
+		// verify it); --srt-plan-shadow alone only compares.
+		const bool plan_adopt  = plan_active && !prefetch && SrtPlan::AdoptEnabled();
+		const bool plan_shadow = plan_active && !prefetch && !plan_adopt && SrtPlan::ShadowEnabled();
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
@@ -1315,7 +1365,12 @@ struct PipelineCache::ProgramCache {
 		int64_t materialize_t0 = 0;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		Permutation* verify_target = nullptr;
-		if (entry == nullptr && plan_active && !prefetch) {
+		if (entry == nullptr && plan_adopt) {
+			auto& counts = SrtPlan::Adopting();
+			++counts.events;
+			++counts.new_source;
+		}
+		if (entry == nullptr && plan_shadow) {
 			// A shader kyGpu sees for the first time: the lookahead cannot have a plan for it.
 			SrtPlan::Sample sample;
 			sample.outcome = SrtPlan::Outcome::NewSource;
@@ -1370,7 +1425,12 @@ struct PipelineCache::ProgramCache {
 					return {};
 				}
 			} else if (entry->call_source) {
-				materialize_t0 = plan_active ? SrtPlan::NowNs() : 0;
+				materialize_t0 = plan_shadow ? SrtPlan::NowNs() : 0;
+				if (plan_adopt) {
+					auto& counts = SrtPlan::Adopting();
+					++counts.events; // call-source programs are left to kyGpu: the lookahead skips them
+					++counts.call_source;
+				}
 				Stopwatch refresh_sw;
 				source_changed = entry->RefreshCallSource(runtime);
 				refresh_time.Add(refresh_sw, refresh_sw.Lap());
@@ -1378,12 +1438,25 @@ struct PipelineCache::ProgramCache {
 					permutation = entry->FindPermutation<true>(runtime, push_data_cursor, &materialize_time,
 					                                           &specialization);
 			} else {
-				materialize_t0 = plan_active ? SrtPlan::NowNs() : 0;
-				permutation = entry->FindPermutation<false>(runtime, push_data_cursor, &materialize_time,
-				                                            &specialization);
+				std::unique_ptr<SrtPlan::Plan> adopted;
+				if (plan_adopt) {
+					adopted = TakeAdoptablePlan(plan_key, plan_nested, static_cast<uint32_t>(stage),
+					                            params.hash, runtime);
+				}
+				if (adopted) {
+					permutation = entry->FindPermutationAdopting(*adopted, push_data_cursor, &specialization);
+					SrtPlan::RecyclePlan(std::move(adopted));
+					if (SrtPlan::ShadowEnabled()) {
+						SrtPlan::Adopting().NoteVerified(entry->DiffAdoptedAgainstOwn(runtime));
+					}
+				} else {
+					materialize_t0 = plan_shadow ? SrtPlan::NowNs() : 0;
+					permutation = entry->FindPermutation<false>(runtime, push_data_cursor, &materialize_time,
+					                                            &specialization);
+				}
 			}
 			gpu_phase_materialize.End();
-			if (plan_active && !prefetch) {
+			if (plan_shadow) {
 				// kyGpu has its own result in entry->resources / entry->specialization (sole writer).
 				ShadowCompare(plan_key, plan_nested, std::is_same_v<InputInfo, ShaderComputeInputInfo>,
 				              static_cast<uint32_t>(stage), params.hash, runtime, entry->resources,
