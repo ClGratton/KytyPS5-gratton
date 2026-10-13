@@ -602,6 +602,11 @@ add_executable(skipped_draw_log_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(skipped_draw_log_tests PRIVATE ${inc_headers})
 
+add_executable(skip_dependencies_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SkipDependenciesTests.cpp"
+)
+target_include_directories(skip_dependencies_tests PRIVATE ${inc_headers})
+
 add_executable(config_defaults_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ConfigDefaultsTests.cpp"
 )
@@ -949,6 +954,7 @@ if(BUILD_TESTING)
 		                 "${KYTY_SOURCE_DIR}/launcher/include/hostMemoryProbe.h")
 	endif()
 	add_test(NAME skipped_draw_log COMMAND $<TARGET_FILE:skipped_draw_log_tests>)
+	add_test(NAME skip_dependencies COMMAND $<TARGET_FILE:skip_dependencies_tests>)
 	add_test(NAME pipeline_cache_file COMMAND $<TARGET_FILE:pipeline_cache_file_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
@@ -1153,6 +1159,7 @@ if(BUILD_TESTING)
 		config_defaults_tests
 		host_memory_policy_tests
 		skipped_draw_log_tests
+		skip_dependencies_tests
 		pipeline_cache_file_tests
 		bda_sync_gate_tests
 		sys_file_read_tests
