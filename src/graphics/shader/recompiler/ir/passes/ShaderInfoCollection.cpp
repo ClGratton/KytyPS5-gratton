@@ -1,18 +1,25 @@
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/ldsSpan.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
 #include <fmt/format.h>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
 
+// Shader being collected on this thread, named in the failure message.
+thread_local uint64_t g_collecting_hash = 0;
+
 [[noreturn]] void Fail(std::string_view message) {
-	EXIT("shader info collection failed: %s", std::string(message).c_str());
+	NoteDescriptorDiag(g_collecting_hash, "shader_info_failed", 0, nullptr, 0);
+	EXIT("shader info collection failed: %s (shader 0x%016" PRIx64 ")", std::string(message).c_str(),
+	     g_collecting_hash);
 	std::abort();
 }
 
@@ -566,6 +573,7 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 } // namespace
 
 void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
+	g_collecting_hash = program.shader_hash;
 	if (!program.resource_tracking_complete || program.shader_info_complete) {
 		return Fail(!program.resource_tracking_complete ? "shader resources were not tracked"
 		                                                : "shader info already collected");
