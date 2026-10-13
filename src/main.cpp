@@ -278,6 +278,13 @@ static void PrintUsage() {
 	         "                                       Stores, atomics and typed accesses keep their checks.\n"
 	         "                                       Needs robustBufferAccess2 and a storage access\n"
 	         "                                       alignment <= 4; otherwise ignored. Default: true.\n");
+	::printf("  --spirv-robust-stores <true|false>   With --spirv-robust-bounds: plain storage-buffer stores\n"
+	         "                                       also lose their bounds-check block. An out-of-bounds\n"
+	         "                                       index is replaced by one far past any range (compare +\n"
+	         "                                       select) and the device drops the write: the same bytes\n"
+	         "                                       as the explicit check. Atomics, typed accesses and\n"
+	         "                                       sub-dword stores into dword arrays keep their checks.\n"
+	         "                                       Default: false.\n");
 	::printf("  --skip-ir-validation <true|false>    Skip the shader IR consistency checks in release\n"
 	         "                                       translations (cuts translate time; output is\n"
 	         "                                       identical). KYTY_IR_VALIDATE=1 forces them on.\n"
@@ -965,6 +972,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			options.config.submit_stats_s = static_cast<uint32_t>(seconds);
 		} else if (arg == "--pipelines-unoptimized-first") {
 			if (!ParseBool(value, options.config.pipelines_unoptimized_first)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--spirv-robust-stores") {
+			if (!ParseBool(value, options.config.spirv_robust_stores)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

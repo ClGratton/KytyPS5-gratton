@@ -838,6 +838,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_spirv_robust_bounds_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --spirv-robust-bounds maybe)
 	set_tests_properties(emulator_spirv_robust_bounds_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_spirv_robust_stores_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --spirv-robust-stores true)
+	add_test(NAME emulator_spirv_robust_stores_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --spirv-robust-stores maybe)
+	set_tests_properties(emulator_spirv_robust_stores_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME emulator_unoptimized_first_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --pipelines-unoptimized-first true)
 	add_test(NAME emulator_unoptimized_first_invalid
@@ -1016,6 +1021,15 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	set_tests_properties(shader_recompiler_compute_robust_bounds_async_stall PROPERTIES
 		ENVIRONMENT "KYTY_TEST_ROBUST_BOUNDS=1;KYTY_TEST_ASYNC_PIPELINES=stall")
+	# --spirv-robust-stores: plain stores lose their bounds block as well (compare + select on the index).
+	add_test(NAME shader_recompiler_compute_robust_stores
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_robust_stores PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ROBUST_BOUNDS=1;KYTY_TEST_ROBUST_STORES=1")
+	add_test(NAME shader_recompiler_compute_robust_stores_async_stall
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	set_tests_properties(shader_recompiler_compute_robust_stores_async_stall PROPERTIES
+		ENVIRONMENT "KYTY_TEST_ROBUST_BOUNDS=1;KYTY_TEST_ROBUST_STORES=1;KYTY_TEST_ASYNC_PIPELINES=stall")
 	# --precompile-on-load / --pipeline-variants-replay: the whole suite with variant tracking on
 	# (every first dispatch of a program), and the registration -> build -> hit flow itself.
 	add_test(NAME shader_recompiler_compute_shader_load

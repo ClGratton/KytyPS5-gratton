@@ -110,6 +110,12 @@ QList<Option> BuildTable() {
 	             "out-of-bounds load reads zero either way; stores and atomics keep their checks. "
 	             "Ignored on a device without robustBufferAccess2.",
 	             EMU_BOOL(spirv_robust_bounds)});
+	defs.append({"spirv_robust_stores", "--spirv-robust-stores", Tab::Shaders, "Shader code",
+	             Kind::Bool, "Robust buffer stores (shorter SPIR-V)",
+	             "With Robust buffer bounds: storage-buffer stores lose their bounds check block too. "
+	             "An out-of-bounds store index is replaced by one far past any range and the GPU "
+	             "drops the write, exactly what the explicit check did. Off until measured.",
+	             EMU_BOOL(spirv_robust_stores)});
 	defs.append({"skip_ir_validation", "--skip-ir-validation", Tab::Shaders, "Shader code",
 	             Kind::Bool, "Skip shader IR validation",
 	             "Skips the internal consistency checks of every shader translation (about a fifth of "

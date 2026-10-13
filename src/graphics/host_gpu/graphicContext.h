@@ -137,7 +137,7 @@ struct GraphicContext {
 	[[nodiscard]] ShaderRecompiler::RobustBufferPolicy SpirvRobustBufferPolicy() const {
 		return ShaderRecompiler::MakeRobustBufferPolicy(
 		    Config::SpirvRobustBoundsRequested(), robust_buffer_access2_enabled,
-		    robust_storage_buffer_alignment);
+		    robust_storage_buffer_alignment, Config::SpirvRobustStoresRequested());
 	}
 
 	[[nodiscard]] vk::DeviceSize StorageMinAlignment() const {

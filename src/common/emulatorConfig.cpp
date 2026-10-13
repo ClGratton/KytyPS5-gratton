@@ -320,6 +320,10 @@ bool SpirvRobustBoundsRequested() {
 	return g_config->spirv_robust_bounds;
 }
 
+bool SpirvRobustStoresRequested() {
+	return g_config->spirv_robust_stores;
+}
+
 bool SyncRawImageBuffersEnabled() {
 	return g_config->sync_raw_image_buffers;
 }

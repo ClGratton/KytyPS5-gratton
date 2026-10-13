@@ -216,6 +216,11 @@ struct ConfigOptions {
 	// Default on since the measurement in docs/emitter-shape-notes.md; --spirv-robust-bounds false
 	// restores the explicit checks.
 	bool                   spirv_robust_bounds         = true;
+	// --spirv-robust-stores: with --spirv-robust-bounds, plain storage-buffer stores also lose their
+	// bounds block: an out-of-bounds index is replaced by one far past any range (compare + select)
+	// and robustBufferAccess2 drops the write. Exactly the explicit semantics. Default off until
+	// measured (docs/emitter-shape-notes.md).
+	bool                   spirv_robust_stores         = false;
 	// --pipelines-unoptimized-first: a pipeline no cache holds is created with
 	// VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT so its draw can proceed, and the optimized build
 	// replaces it from a background worker. Needs --async-pipelines stall|skip; NVIDIA only unless
@@ -381,6 +386,7 @@ bool RenderDocEnabled();
 bool ReadbackLinearImagesEnabled();
 bool SyncRawImageBuffersEnabled();
 bool SpirvRobustBoundsRequested();
+bool SpirvRobustStoresRequested();
 bool TessellationEnabled();
 bool TrophyEnabled();
 bool PlayGoHackEnabled();
