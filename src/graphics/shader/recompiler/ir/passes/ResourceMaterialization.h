@@ -92,6 +92,7 @@ enum class GenericRefusal : uint8_t {
 	ImageBinding,      // a group member that has no binding (for instance an MSAA storage image)
 	TooManyImages,
 	CallSource,        // an S_SWAP_PC program: its callee is linked at run time (set by the cache)
+	Unsupported,       // the translator does not implement the binary (set by the cache)
 	Count,
 };
 

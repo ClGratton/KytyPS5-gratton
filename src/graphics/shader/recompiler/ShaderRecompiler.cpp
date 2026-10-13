@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/speculation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
@@ -485,7 +486,17 @@ void PrepareCallTarget(ShaderSource& source, const CompileOptions& options) {
 	using namespace IR;
 	for (uint32_t i = 0; i < source.decoded.instructions.size(); ++i) {
 		if (source.decoded.instructions[i].opcode != Decoder::Opcode::S_SWAPPC_B64) continue;
-		EXIT_NOT_IMPLEMENTED(source.call.has_value() || options.stage != ShaderType::Compute);
+		if (source.call.has_value() || options.stage != ShaderType::Compute) {
+			// More than one call is not implemented. A dispatch needs the program and stops here;
+			// the load-time precompile only looks at binaries the game may never use, so it skips
+			// this one (its caller checks Speculation::TakeFailure()).
+			if (Common::Speculation::Active()) {
+				Common::Speculation::NoteFailure();
+				source.call.reset();
+				return;
+			}
+			EXIT_NOT_IMPLEMENTED(true);
+		}
 		source.call = ShaderSource::Call {.instruction = i};
 	}
 	EXIT_IF(options.input_info.compute == nullptr);

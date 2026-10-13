@@ -298,6 +298,7 @@ public:
 		std::atomic<uint64_t> jobs_guess {0};          // load jobs for the guessed variant
 		std::atomic<uint64_t> skipped_unguessable {0}; // typed buffers, bindless, guest-memory specialization
 		std::atomic<uint64_t> skipped_call {0};        // S_SWAP_PC programs stay on the GPU thread
+		std::atomic<uint64_t> skipped_unsupported {0}; // binaries the translator rejects (several calls)
 		std::atomic<uint64_t> skipped_stale {0};       // a stored variant that no longer fits the translation
 		std::atomic<uint64_t> skipped_known {0};       // an equal permutation was already there
 		std::atomic<uint64_t> skipped_registers {0};   // the header had no usable compute registers

@@ -1968,10 +1968,11 @@ std::string PipelineCache::LoadCounters::GenericSummary() const {
 	const auto n = lead_n.load();
 	return fmt::format(
 	    "registered_cs={};jobs={};built={};refused={};dispatches={};hits={};hit_pct={:.1f};"
-	    "programs_used={};compute_ondemand={};reads_queue={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f}{}{}",
+	    "programs_used={};compute_ondemand={};reads_queue={};unsupported={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f}{}{}",
 	    registered_cs.load(), generic_jobs.load(), generic_built.load(), generic_refused.load(),
 	    dispatches, hits, dispatches != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(dispatches) : 0.0,
-	    generic_programs_used.load(), compute_ondemand.load(), generic_reads_queue.load(), n,
+	    generic_programs_used.load(), compute_ondemand.load(), generic_reads_queue.load(),
+	    skipped_unsupported.load(), n,
 	    n != 0 ? static_cast<double>(lead_sum_ns.load()) / static_cast<double>(n) / 1e6 : 0.0,
 	    n != 0 ? static_cast<double>(lead_min_ns.load()) / 1e6 : 0.0, misses, refusals);
 }
@@ -2696,6 +2697,18 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 	options.input_info.compute = &info;
 
 	auto source = ShaderRecompiler::PrepareShaderSource(code, options);
+	if (Common::Speculation::TakeFailure()) {
+		// A check the dispatch path would stop at (more than one call): nothing to build.
+		counters.skipped_unsupported.fetch_add(1, std::memory_order_relaxed);
+		if (generic) {
+			cache.NoteGenericVariant(key.hash, ShaderRecompiler::IR::GenericRefusal::Unsupported, true);
+			counters.generic_refused.fetch_add(1, std::memory_order_relaxed);
+			counters.generic_refusal[static_cast<size_t>(ShaderRecompiler::IR::GenericRefusal::Unsupported)]
+			    .fetch_add(1, std::memory_order_relaxed);
+		}
+		Unregister();
+		return;
+	}
 	if (source.call) {
 		counters.skipped_call.fetch_add(1, std::memory_order_relaxed);
 		if (generic) {

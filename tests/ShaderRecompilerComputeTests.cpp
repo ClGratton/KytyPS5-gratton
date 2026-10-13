@@ -40112,6 +40112,35 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
   Require(name, "queue reader noted", load.registered_cs == 2 && load.generic_reads_queue == 1,
           "a binary reading the queue was not noted");
   std::free(queue_memory);
+
+  // A binary with two calls is not implemented by the translator (a dispatch stops at it). The
+  // precompile workers meet such binaries at registration, whether or not the game dispatches them:
+  // the job is dropped with a count, the worker lives on.
+  std::vector<u32> calls_code;
+  calls_code.push_back(EncodeSop1(0x21, 20, 20)); // s_swappc_b64 s[20:21], s[20:21]
+  calls_code.push_back(EncodeSop1(0x21, 20, 20));
+  AppendEnd(&calls_code);
+  auto *calls_memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
+  std::fill(calls_memory, calls_memory + 64, 0u);
+  std::copy(calls_code.begin(), calls_code.end(), calls_memory);
+  const auto calls_address = reinterpret_cast<uint64_t>(calls_memory);
+  const auto calls_bytes = static_cast<u32>(calls_code.size() * sizeof(u32));
+  auto calls_registration = registration;
+  calls_registration.address = calls_address;
+  calls_registration.code_size_bytes = calls_bytes;
+  calls_registration.hash = ShaderMapUserData(
+      calls_address, {.type = Prospero::ShaderBinaryType::kCs, .code_size_bytes = calls_bytes});
+  auto calls_header = header;
+  calls_header[0].value = static_cast<u32>(calls_address >> 8u);
+  calls_header[1].value = static_cast<u32>(calls_address >> 40u) & 0xffu;
+  calls_registration.sh_registers = calls_header;
+  cache.NoteShaderRegistered(calls_registration);
+  Require(name, "unsupported idle", cache.WaitLoadIdle(120000), "load jobs did not finish");
+  Require(name, "unsupported skipped",
+          load.registered_cs == 3 && load.skipped_unsupported == 1 && load.generic_refused == 1 &&
+              load.generic_refusal[static_cast<size_t>(ShaderRecompiler::IR::GenericRefusal::Unsupported)] == 1,
+          "a binary with two calls was not skipped with a count");
+  std::free(calls_memory);
   cache.WaitLoadIdle(120000);
   std::free(memory);
   std::printf("[gpu]     %-32s ok\n", name);
