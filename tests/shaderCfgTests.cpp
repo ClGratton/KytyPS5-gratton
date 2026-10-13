@@ -10260,6 +10260,22 @@ void TestRobustBufferPolicy() {
   Check(!policy(true, true, 8).Any(), "alignment above 4 must keep the explicit checks");
   Check(CompileOptions {}.robust_buffers == RobustBufferPolicy {},
         "compile options must default to explicit bounds checks");
+
+  // --spirv-robust-stores needs the flag and robustBufferAccess2, not an alignment guarantee: the
+  // clamped index of a surviving store is inside the whole elements of the range.
+  const auto stores = [](bool requested, bool robust2, uint32_t alignment) {
+    return MakeRobustBufferPolicy(requested, robust2, alignment, true);
+  };
+  Check(policy(true, true, 1) == MakeRobustBufferPolicy(true, true, 1, false) &&
+            !policy(true, true, 1).dword_stores && !policy(true, true, 1).subdword_stores,
+        "stores must stay explicit without --spirv-robust-stores");
+  Check(stores(true, true, 1) == RobustBufferPolicy {true, true, true, true},
+        "stores must be added to the loads at alignment 1");
+  Check(stores(true, true, 8) == RobustBufferPolicy {false, false, true, true},
+        "stores do not need an access alignment guarantee");
+  Check(!stores(false, true, 1).Any(), "robust stores active without --spirv-robust-bounds");
+  Check(!stores(true, false, 1).Any(), "robust stores active without robustBufferAccess2");
+  Check(!stores(true, true, 0).Any(), "robust stores active with an unknown alignment");
 }
 
 // --spirv-robust-bounds: plain storage-buffer loads and stores lose their `index < OpArrayLength`
@@ -10273,27 +10289,28 @@ void TestRobustBufferBoundsEmission() {
     const char *name;
     std::vector<uint32_t> shader;
     bool dword_elements; // which policy bit applies: 32-bit or sub-dword storage elements
-    uint32_t removed;    // bounds checks the policy removes: 1 for the load of a load+store pair,
+    uint32_t removed;    // bounds checks the load policy removes: 1 for the load of a load+store pair,
                          // 0 for stores and atomics (typed accesses are covered by the GPU suite)
+    uint32_t stores;     // bounds blocks the store policy removes (the OpArrayLength stays for the compare)
   };
   // Every load is followed by a store of its result so that it is not dead code.
   const std::vector<Case> cases = {
       {"buffer_load_dword+store", {EncodeMubuf0(0x0c), EncodeMubuf1(0, 0, 1), EncodeMubuf0(0x1c, 0, false),
-                                   EncodeMubuf1(0, 12, 0), EncodeSopp(0x01)}, true, 1},
+                                   EncodeMubuf1(0, 12, 0), EncodeSopp(0x01)}, true, 1, 1},
       {"buffer_store_dword", {EncodeMubuf0(0x1c, 0, false), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
-       true, 0},
+       true, 0, 1},
       {"buffer_load_ubyte+store_byte", {EncodeMubuf0(0x08), EncodeMubuf1(0, 0, 1),
                                         EncodeMubuf0(0x18, 0, false), EncodeMubuf1(0, 12, 0),
-                                        EncodeSopp(0x01)}, false, 1},
+                                        EncodeSopp(0x01)}, false, 1, 1},
       {"buffer_load_ushort+store_short", {EncodeMubuf0(0x0a), EncodeMubuf1(0, 0, 1),
                                           EncodeMubuf0(0x1a, 0, false), EncodeMubuf1(0, 12, 0),
-                                          EncodeSopp(0x01)}, false, 1},
+                                          EncodeSopp(0x01)}, false, 1, 1},
       {"buffer_store_byte", {EncodeMubuf0(0x18, 0, false), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
-       false, 0},
+       false, 0, 1},
       {"buffer_store_short", {EncodeMubuf0(0x1a, 0, false), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
-       false, 0},
+       false, 0, 1},
       {"buffer_atomic_add", {EncodeMubuf0(0x32, 0, true, true), EncodeMubuf1(0, 0, 1), EncodeSopp(0x01)},
-       true, 0},
+       true, 0, 0},
   };
 
   const auto compile = [](const Case &test, RobustBufferPolicy policy) {
@@ -10337,6 +10354,30 @@ void TestRobustBufferBoundsEmission() {
       // Stores and atomics are bit for bit what the explicit mode emits.
       Check(both == off && on == off, say("a store or atomic changed under --spirv-robust-bounds").c_str());
     }
+
+    // --spirv-robust-stores: the store's block becomes a compare and a select. The OpArrayLength
+    // stays (the compare needs it) and an atomic is untouched.
+    const RobustBufferPolicy loads_and_stores {true, true, true, true};
+    const auto stores_on = compile(test, loads_and_stores);
+    const auto store_branches = SpirvInstructionOpcodeCount(stores_on, OpBranchConditional);
+    const auto store_lengths = SpirvInstructionOpcodeCount(stores_on, OpArrayLength);
+    const auto store_say = std::string(" (array lengths ") + std::to_string(off_array_length) + " -> " +
+                           std::to_string(store_lengths) + ", branches " + std::to_string(off_branches) +
+                           " -> " + std::to_string(store_branches) + ")";
+    Check(store_branches == off_branches - test.removed - test.stores &&
+              store_lengths == off_array_length - test.removed,
+          say("the store policy removed the wrong blocks" + store_say).c_str());
+    if (test.stores != 0u) {
+      Check(SpirvInstructionOpcodeCount(stores_on, 169u /* OpSelect */) >
+                SpirvInstructionOpcodeCount(off, 169u),
+            say("the robust store has no select").c_str());
+    } else {
+      Check(stores_on == both, say("an atomic changed under --spirv-robust-stores").c_str());
+    }
+    // The store policy of the other element size does not touch this access.
+    Check(compile(test, test.dword_elements ? RobustBufferPolicy {false, false, false, true}
+                                            : RobustBufferPolicy {false, false, true, false}) == off,
+          say("a store policy for the other element size changed the SPIR-V").c_str());
   }
 }
 

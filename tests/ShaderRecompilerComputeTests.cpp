@@ -1026,6 +1026,12 @@ bool RobustBoundsRequested() {
   return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
+// KYTY_TEST_ROBUST_STORES=1 (with KYTY_TEST_ROBUST_BOUNDS=1): --spirv-robust-stores as well.
+bool RobustStoresRequested() {
+  const char *value = std::getenv("KYTY_TEST_ROBUST_STORES");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
 void EnsureConfigInitialized() {
   static bool config_initialized = false;
   if (!config_initialized) {
@@ -20011,11 +20017,12 @@ private:
       m_robust_storage_alignment =
           static_cast<u32>(robustness2_properties.robustStorageBufferAccessSizeAlignment);
       TestRobustBufferPolicy() = ShaderRecompiler::MakeRobustBufferPolicy(
-          true, true, m_robust_storage_alignment);
+          true, true, m_robust_storage_alignment, RobustStoresRequested());
       std::printf("[host]    RobustBounds              robustBufferAccess2 alignment=%u dword=%d "
-                  "subdword=%d\n",
+                  "subdword=%d stores=%d\n",
                   m_robust_storage_alignment, TestRobustBufferPolicy().dword_elements,
-                  TestRobustBufferPolicy().subdword_elements);
+                  TestRobustBufferPolicy().subdword_elements,
+                  TestRobustBufferPolicy().dword_stores);
     }
     device_info.enabledExtensionCount =
         static_cast<uint32_t>(device_extensions.size());
@@ -31134,6 +31141,86 @@ TestCase BufferDwordStraddlingRangeEnd() {
   return test;
 }
 
+// Stores into a 14-byte range (two whole dwords plus 6 bytes): the dword at byte 8 is written, the dwords at
+// bytes 12 (straddling the end), 16, 4096 and the largest 32-bit offsets are dropped whole. Holds with the
+// explicit checks, with --spirv-robust-bounds, and with --spirv-robust-stores (KYTY_TEST_ROBUST_STORES=1),
+// where the driver's rounding of an odd-sized range up to whole dwords must not show.
+TestCase BufferDwordStoresDroppedOutOfBounds() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovLiteral(&code, 5, 0xdeadbeefu);
+  const u32 dword_offsets[] = {8u, 12u, 16u, 4096u, 0x7ffffffcu, 0xfffffff8u, 0xfffffffcu};
+  for (const u32 offset : dword_offsets) {
+    AppendVMovLiteral(&code, 20, offset);
+    AppendBufferStoreOpcode(&code, 0x1c, 5, 20);
+  }
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "BufferDwordStoresDroppedOutOfBounds";
+  test.code = std::move(code);
+  test.initial = {0xc0ffee00u, 0xc0ffee01u, 0xc0ffee02u, 0xc0ffee03u,
+                  0xc0ffee04u, 0xc0ffee05u, 0xc0ffee06u, 0xc0ffee07u};
+  test.expected = {0xc0ffee00u, 0xc0ffee01u, 0xdeadbeefu, 0xc0ffee03u,
+                   0xc0ffee04u, 0xc0ffee05u, 0xc0ffee06u, 0xc0ffee07u};
+  test.storage_buffer_range_bytes = 14;
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  return test;
+}
+
+// Byte stores (8-bit storage elements) into the same 14-byte range: bytes 5 and 13 land, byte 14, 4096 and
+// the largest offsets are dropped.
+TestCase BufferByteStoresDroppedOutOfBounds() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovLiteral(&code, 5, 0xdeadbeefu);
+  const u32 byte_offsets[] = {5u, 13u, 14u, 15u, 4096u, 0xfffffffeu, 0xffffffffu};
+  for (const u32 offset : byte_offsets) {
+    AppendVMovLiteral(&code, 20, offset);
+    AppendBufferStoreOpcode(&code, 0x18, 5, 20);
+  }
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "BufferByteStoresDroppedOutOfBounds";
+  test.code = std::move(code);
+  test.initial = {0xc0ffee00u, 0xc0ffee01u, 0xc0ffee02u, 0xc0ffee03u,
+                  0xc0ffee04u, 0xc0ffee05u, 0xc0ffee06u, 0xc0ffee07u};
+  test.expected = {0xc0ffee00u, 0xc0ffef01u, 0xc0ffee02u, 0xc0ffef03u,
+                   0xc0ffee04u, 0xc0ffee05u, 0xc0ffee06u, 0xc0ffee07u};
+  test.storage_buffer_range_bytes = 14;
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_STORE_BYTE, O::S_ENDPGM};
+  return test;
+}
+
+// Short stores (16-bit storage elements): the shorts at bytes 2 and 12 land, the one at byte 14, 4096 and
+// the largest offsets are dropped.
+TestCase BufferShortStoresDroppedOutOfBounds() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovLiteral(&code, 5, 0xdeadbeefu);
+  const u32 short_offsets[] = {2u, 12u, 14u, 16u, 4096u, 0xfffffffcu, 0xfffffffeu};
+  for (const u32 offset : short_offsets) {
+    AppendVMovLiteral(&code, 20, offset);
+    AppendBufferStoreOpcode(&code, 0x1a, 5, 20);
+  }
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "BufferShortStoresDroppedOutOfBounds";
+  test.code = std::move(code);
+  test.initial = {0xc0ffee00u, 0xc0ffee01u, 0xc0ffee02u, 0xc0ffee03u,
+                  0xc0ffee04u, 0xc0ffee05u, 0xc0ffee06u, 0xc0ffee07u};
+  test.expected = {0xbeefee00u, 0xc0ffee01u, 0xc0ffee02u, 0xc0ffbeefu,
+                   0xc0ffee04u, 0xc0ffee05u, 0xc0ffee06u, 0xc0ffee07u};
+  test.storage_buffer_range_bytes = 14;
+  test.opcodes = {O::V_MOV_B32, O::BUFFER_STORE_SHORT, O::S_ENDPGM};
+  return test;
+}
+
 // Diagnostic probe (not in ctest): 32 lanes store to dword (or byte) `lane` of a buffer whose
 // descriptor range is `range` bytes; the backing buffer is 40 dwords of a canary. With the explicit
 // checks it passes for every range; with KYTY_TEST_ROBUST_BOUNDS=1 it shows where the device stops
@@ -39369,6 +39456,9 @@ std::vector<TestCase> MakeCases() {
   AddCase(BufferStoreDwordx4DropsOnlyOutOfBoundsTail);
   AddCase(BufferOutOfBoundsLoadsZeroStoresDropped);
   if (!RobustBoundsRequested()) AddCase(BufferDwordStraddlingRangeEnd);
+  AddCase(BufferDwordStoresDroppedOutOfBounds);
+  AddCase(BufferByteStoresDroppedOutOfBounds);
+  AddCase(BufferShortStoresDroppedOutOfBounds);
   AddCase(BufferLoadFormatXyzwRejectsPartialRecord);
   AddCase(BufferStoreFormatXyzwDropsPartialRecord);
   AddCase(BufferLoadFormatXRejectsPartialRecord);

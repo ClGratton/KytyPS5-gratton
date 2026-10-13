@@ -464,6 +464,12 @@ MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState&         st
 // that is not a storage buffer still check explicitly.
 bool BufferBoundsAreRobust(const EmitterState& state, IR::ResourceKind kind, uint32_t element_bits);
 bool MemoryBoundsAreRobust(const EmitterState& state, const MemoryResourceAccess& access);
+// --spirv-robust-stores: a plain storage-buffer store of this element size is emitted without a
+// bounds block (EmitRobustStoreIndex). Native 32-bit storage elements and native 8/16-bit arrays.
+bool StoreBoundsAreRobust(const EmitterState& state, const MemoryResourceAccess& access);
+// The element index to store to: `index` when it is below the array length, else an index far
+// past any storage buffer range, which robustBufferAccess2 drops.
+uint32_t EmitRobustStoreIndex(EmitterState& state, const MemoryResourceAccess& access, uint32_t index);
 
 uint32_t EmitMemoryElementInBounds(EmitterState& state, const MemoryResourceAccess& access,
                                    uint32_t index);

@@ -482,7 +482,14 @@ void StoreSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR:
 	const auto index = Binary(
 	    ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), address,
 	    ConstantU32(ctx.state, std::countr_zero(resource.element_bits / 8u)));
-	// Stores keep their explicit check, see LoadWordPrepared.
+	// --spirv-robust-stores: a native 8/16-bit element array is written through the clamped index.
+	// Sub-dword stores into 32-bit elements are a read-modify-write atomic (unspecified out of
+	// bounds) and keep their explicit check.
+	if (resource.element_bits < 32u && StoreBoundsAreRobust(ctx.state, resource)) {
+		StoreSubwordInBounds(ctx, mem, resource, address,
+		                     EmitRobustStoreIndex(ctx.state, resource, index), bits, data);
+		return;
+	}
 	EmitIfCondition(
 	    ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index), [&]() {
 		    StoreSubwordInBounds(ctx, mem, resource, address, index, bits, data);
@@ -550,9 +557,15 @@ void StoreLocalFlat(ValueEmitContext& ctx, const IR::Inst& inst) {
 void StoreWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
                        const MemoryResourceAccess& resource, uint32_t data) {
 	const auto index = DwordIndex(ctx, inst, mem);
-	// Stores keep their explicit check (RobustBufferPolicy): the driver rounds a dword access up to
-	// whole dwords of an odd-sized range and a store without the guard hangs the GPU in a real
-	// shader (docs/emitter-shape-notes.md), where an over-read is harmless.
+	// Plain stores keep a bounds test. Without --spirv-robust-stores it is a block (RobustBufferPolicy):
+	// the driver rounds a dword access up to whole dwords of an odd-sized range, so a store with no
+	// test at all writes the tail dword the explicit check dropped (docs/emitter-shape-notes.md).
+	// With it the test is a compare and a select on the index, and the device drops the write of the
+	// out-of-range one: surviving stores are exactly the explicit ones.
+	if (StoreBoundsAreRobust(ctx.state, resource)) {
+		StoreWordInBounds(ctx, resource, EmitRobustStoreIndex(ctx.state, resource, index), data);
+		return;
+	}
 	EmitIfCondition(ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index), [&]() {
 		StoreWordInBounds(ctx, resource, index, data);
 	});

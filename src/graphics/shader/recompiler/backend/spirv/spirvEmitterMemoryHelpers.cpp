@@ -180,6 +180,14 @@ bool MemoryBoundsAreRobust(const EmitterState& state, const MemoryResourceAccess
 	return BufferBoundsAreRobust(state, access.kind, access.element_bits);
 }
 
+bool StoreBoundsAreRobust(const EmitterState& state, const MemoryResourceAccess& access) {
+	if (access.kind != IR::ResourceKind::Buffer) {
+		return false;
+	}
+	return access.element_bits < 32u ? state.robust_buffers.subdword_stores
+	                                 : state.robust_buffers.dword_stores;
+}
+
 MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
                                                          const IR::MemoryInfo& mem,
                                                          BufferDefinition& buffer,
@@ -273,6 +281,16 @@ uint32_t EmitMemoryElementInBounds(EmitterState& state, const MemoryResourceAcce
 	const auto in_bounds = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpULessThan, TypeBool(state), in_bounds, index, length);
 	return in_bounds;
+}
+
+uint32_t EmitRobustStoreIndex(EmitterState& state, const MemoryResourceAccess& access,
+                              uint32_t index) {
+	// index * element_bytes must not wrap in the driver's 32-bit byte offset: the sentinel is the
+	// largest element index whose byte offset plus the element size is past the 4 GiB range limit.
+	const uint32_t element_bytes = access.element_bits / 8u;
+	const uint32_t sentinel      = 0xffffffffu / element_bytes;
+	return Select(state, TypeU32(state), EmitMemoryElementInBounds(state, access, index), index,
+	              ConstantU32(state, sentinel));
 }
 
 uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAccess& access,

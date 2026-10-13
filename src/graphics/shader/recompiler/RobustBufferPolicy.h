@@ -20,26 +20,42 @@ namespace Libs::Graphics::ShaderRecompiler {
 // Loads of 32-bit elements are checked exactly by the driver when
 // robustStorageBufferAccessSizeAlignment is at most 4. Loads of 8/16-bit elements need alignment 1,
 // otherwise the driver rounds the range up to the alignment.
+//
+// Stores (--spirv-robust-stores, docs/emitter-shape-notes.md): a plain storage-buffer store loses its
+// bounds block too, but not its bounds test. The index is replaced by an index that is out of any
+// range when `index >= OpArrayLength` (a compare and a select, no block) and robustBufferAccess2
+// discards that write. The in-range stores are exactly the explicit ones, so the driver's rounding
+// of an odd-sized range to whole dwords (which a plain unguarded store would run into, it writes the
+// tail dword the explicit check dropped) cannot change a byte: the index of a store that survives is
+// below the number of whole elements. Needs no alignment guarantee, only robustBufferAccess2.
 struct RobustBufferPolicy {
 	bool dword_elements    = false; // loads of 32-bit storage elements
 	bool subdword_elements = false; // loads of 8/16-bit storage elements
+	bool dword_stores      = false; // stores of 32-bit storage elements, clamped instead of branched
+	bool subdword_stores   = false; // stores of 8/16-bit storage elements (native element arrays)
 
-	[[nodiscard]] bool Any() const { return dword_elements || subdword_elements; }
+	[[nodiscard]] bool Any() const {
+		return dword_elements || subdword_elements || dword_stores || subdword_stores;
+	}
 	bool operator==(const RobustBufferPolicy&) const = default;
 };
 
 // `requested`: the user asked for it (--spirv-robust-bounds). `robust_buffer_access2`: the device
 // was created with robustBufferAccess2 enabled. `storage_alignment`:
 // VkPhysicalDeviceRobustness2PropertiesEXT::robustStorageBufferAccessSizeAlignment (0 = unknown).
+// `stores_requested`: --spirv-robust-stores, which also needs `requested`.
 [[nodiscard]] constexpr RobustBufferPolicy MakeRobustBufferPolicy(bool requested,
                                                                   bool robust_buffer_access2,
-                                                                  uint32_t storage_alignment) {
+                                                                  uint32_t storage_alignment,
+                                                                  bool stores_requested = false) {
 	RobustBufferPolicy policy;
 	if (!requested || !robust_buffer_access2 || storage_alignment == 0u) {
 		return policy;
 	}
 	policy.dword_elements    = storage_alignment <= 4u;
 	policy.subdword_elements = storage_alignment == 1u;
+	policy.dword_stores      = stores_requested;
+	policy.subdword_stores   = stores_requested;
 	return policy;
 }
 
