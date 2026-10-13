@@ -3,6 +3,7 @@
 #include "common/loopGuard.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/cache/gdsCopyPlan.h"
 #include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
 #include "graphics/host_gpu/renderer/cache/readbackPlan.h"
@@ -548,6 +549,15 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
+	}
+	if (SkipDeps::Poisoned()) {
+		// --debug-skip-log: the guest CPU reads (or overwrites) memory a skipped draw left stale.
+		if (is_write) {
+			SkipDeps::Global().NoteOverwrite({vaddr, size});
+		} else {
+			std::vector<SkipDeps::Hit> hits;
+			SkipDeps::NoteRead({vaddr, size}, SkipDeps::ReadKind::CpuRead, 0, "cpu_readback", hits);
+		}
 	}
 	// A fault taken by the GPU thread itself (it parses shader metadata straight from guest
 	// memory) is a different problem from a game thread reading results.

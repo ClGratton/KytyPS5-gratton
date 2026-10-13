@@ -322,7 +322,9 @@ static void PrintUsage() {
 	::printf("  --debug-skip-log <path>              Debug: append one row per graphics draw that was dropped\n"
 	         "                                       (--async-pipelines skip) or waited for its program or\n"
 	         "                                       pipeline: frame numbers, shader hashes, render targets,\n"
-	         "                                       and whether the store-safety rule kept the draw. Default: off.\n");
+	         "                                       and whether the store-safety rule kept the draw. Also logs\n"
+	         "                                       every later reader of the memory a dropped draw should have\n"
+	         "                                       written (until its pipeline is ready). Default: off.\n");
 	::printf("  --bench-render-csv <path>            Append one row per guest flip with the sizes of the\n"
 	         "                                       render passes since the last flip. Default: off.\n");
 	::printf("  --debug-hle-trace <true|false>       Debug: record the last HLE calls of every guest thread\n"

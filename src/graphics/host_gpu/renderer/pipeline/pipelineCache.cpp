@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/nullPageRead.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheFile.h"
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 
@@ -270,6 +271,7 @@ std::string DescribeVariant(const Variants::ComputeVariant& v) {
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	Common::GpuPhase::Scope gpu_phase_read(Common::GpuPhase::Phase::PipeSrtRead);
+	SkipDeps::NoteScalarRead(address, values.size_bytes());
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads. A table pointer
 	// the game left null reads zeros, as on the GPU.
@@ -282,6 +284,7 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 
 bool ReadShaderScalarMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	Common::GpuPhase::Scope gpu_phase_read(Common::GpuPhase::Phase::PipeSrtRead);
+	SkipDeps::NoteScalarRead(address, values.size_bytes());
 	// The walk evaluates loads the shader may never execute, e.g. through a null SRT pointer, so
 	// unmapped guest memory reads as zeros instead of faulting the host.
 	if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
@@ -302,6 +305,7 @@ const ShaderRecompiler::IR::ResourceSnapshot& PrefetchResources() {
 // guest address off the GPU thread because it needs the GPU thread's view of GPU-dirty ranges;
 // the lookahead accepts a possibly stale answer (a wrong prediction only wastes worker time).
 bool ReadShaderGuestMemorySpeculative(void*, uint64_t address, std::span<uint32_t> values) {
+	SkipDeps::NoteScalarRead(address, values.size_bytes());
 	if (ReadGuestNullPage(address, values)) {
 		return true;
 	}
@@ -622,6 +626,7 @@ struct PipelineCache::ProgramCache {
 		Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime, StepTime* materialize_time) {
 			std::unique_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_gpu");
+			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_gpu");
 			MaterializeLocked(runtime, materialize_time);
 			return specialization;
 		}
@@ -634,6 +639,7 @@ struct PipelineCache::ProgramCache {
 		                             ShaderRecompiler::IR::ResourceSpecialization* specialization_out) {
 			std::unique_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_gpu");
+			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_gpu");
 			MaterializeLocked(runtime, materialize_time);
 			Permutation* found = nullptr;
 			if constexpr (HasCalls) {
@@ -670,6 +676,7 @@ struct PipelineCache::ProgramCache {
 		uint32_t DiffAdoptedAgainstOwn(const ShaderRecompiler::IR::SrtRuntime& runtime) {
 			std::unique_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_gpu");
+			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_shadow");
 			thread_local ShaderRecompiler::IR::ResourceSnapshot       own;
 			thread_local ShaderRecompiler::IR::ResourceSpecialization own_specialization;
 			own                = {};
@@ -694,6 +701,7 @@ struct PipelineCache::ProgramCache {
 			LockEntry(lock, "entry_lock_lookahead");
 			Common::Speculation::HeldLock held(&mutex);
 			Common::Hang::Phase phase("lookahead_materialize");
+			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead");
 			ShaderRecompiler::IR::ResourceSnapshot discarded;
 			auto& snapshot = keep != nullptr ? *keep : discarded; // --srt-plan-shadow keeps it
 			materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
@@ -710,6 +718,7 @@ struct PipelineCache::ProgramCache {
 			LockEntry(lock, "entry_lock_lookahead");
 			Common::Speculation::HeldLock held(&mutex);
 			Common::Hang::Phase phase("lookahead_materialize");
+			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead_private");
 			ShaderRecompiler::IR::ResourceSnapshot snapshot;
 			return ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
 			                                                  specialization_out);
