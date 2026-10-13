@@ -12,6 +12,10 @@
 
 #include "common/loopGuard.h"
 
+namespace Common::RuntimeToggles {
+class Registry;
+}
+
 namespace Config {
 
 void Initialize();
@@ -136,6 +140,25 @@ struct ConfigOptions {
 	bool                   vram_stats                  = false;
 	bool                   mem_stats                   = false;
 	bool                   mem_release_punch           = false;
+	// Log-only host RAM residency diagnostics (mincore per GPU-registered range class, CPU faults on
+	// clean uploaded pages, reads of never-written guest memory). Costs a few read-probe faults.
+	bool                   mem_residency               = false;
+	// Hand free pages of the host allocator back to the kernel (malloc_trim) when a lot of freed memory
+	// sits in its arenas. See common/heapTrim.h.
+	bool                   heap_trim                   = true;
+	// Read never-written guest memory with pread instead of through the writable mapping, so the read
+	// does not make the zero pages resident (a read of a hole in a shared mapping allocates them).
+	bool                   mem_hole_reads              = true;
+	// Put the 512 MiB upload staging ring in device-local host-visible memory (ReBAR) instead of system
+	// RAM, when the device offers it. The ring is only written sequentially by the CPU.
+	bool                   upload_ring_rebar           = true;
+	// Do not read and upload a color image whose guest range was never written (it reads as zeros):
+	// clear the GPU image instead. Needs no flag to find the range, but a read of the same range
+	// through the mapping would make it resident, so it works best with mem_hole_reads.
+	bool                   skip_zero_uploads           = true;
+	// Debug: when a range is skipped as never written, also read it with pread and log loudly if it
+	// holds a non-zero byte.
+	bool                   verify_zero_uploads         = false;
 	uint32_t               vram_ballast_mb             = 0;
 	uint32_t               vram_audit_s                = 0;
 	// GC thresholds in MiB; 0 keeps the budget-derived stock value.
@@ -281,6 +304,9 @@ struct ConfigOptions {
 	uint32_t               poll_before_wait_us         = 0;
 	bool                   eager_readback_verify       = false;
 	std::filesystem::path  bench_render_csv;
+	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
+	// names at the next presented frame (common/runtimeToggles.h). Default off.
+	std::filesystem::path  toggle_control;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -290,6 +316,10 @@ struct ConfigOptions {
 };
 
 void Load(const ConfigOptions& cfg);
+
+// Registers the flags that may change at run time (common/runtimeToggles.h).
+void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry);
+
 
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();
@@ -384,6 +414,12 @@ bool VramStatsEnabled();
 // safe to call before the config exists (they report false).
 bool MemStatsEnabled();
 bool MemReleasePunchEnabled();
+bool MemResidencyEnabled();
+bool HeapTrimEnabled();
+bool MemHoleReadsEnabled();
+bool SkipZeroUploadsEnabled();
+bool VerifyZeroUploadsEnabled();
+bool UploadRingRebarEnabled();
 uint32_t VramBallastMb();
 uint32_t VramAuditSeconds();
 uint32_t GcTextureTriggerMb();

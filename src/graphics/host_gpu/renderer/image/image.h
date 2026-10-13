@@ -62,6 +62,10 @@ public:
 	             std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer);
 	void Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
 	            uint64_t size);
+	// Sets every level and layer of a color image to zero, in place of an Upload of an all-zero
+	// guest range (same final layout and access as Upload; the image is not marked GPU-written).
+	// False, and nothing recorded, when the backing format is not a pure color format.
+	[[nodiscard]] bool ClearColorToZero();
 	void Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
 	              uint64_t size);
 	void CopyImage(Image& source);

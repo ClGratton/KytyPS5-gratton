@@ -238,6 +238,35 @@ QList<Option> BuildTable() {
 	             "fallocate(PUNCH_HOLE). Whole host pages only. Off until a trace shows memory "
 	             "released but still resident.",
 	             EMU_BOOL(mem_release_punch)});
+	defs.append({"mem_hole_reads", "--mem-hole-reads", Tab::Memory, "Host RAM", Kind::Bool,
+	             "Read never-written guest memory without making it resident",
+	             "Reads guest memory that was never written with pread instead of through the "
+	             "writable mapping, so the read does not allocate zero pages in RAM (reads of "
+	             "16 KiB or more).",
+	             EMU_BOOL(mem_hole_reads)});
+	defs.append({"upload_ring_rebar", "--upload-ring-rebar", Tab::Memory, "Host RAM", Kind::Bool,
+	             "Keep the upload staging ring in video memory (ReBAR)",
+	             "Puts the 512 MiB upload staging ring in device-local host-visible memory instead "
+	             "of system RAM: 0.5 GiB less host RAM for 0.5 GiB of VRAM. Used only when the card "
+	             "has Resizable BAR and at least 8 GiB of VRAM; otherwise the ring stays in RAM.",
+	             EMU_BOOL(upload_ring_rebar)});
+	defs.append({"skip_zero_uploads", "--skip-zero-uploads", Tab::Memory, "Host RAM", Kind::Bool,
+	             "Clear, do not upload, images whose memory was never written",
+	             "A color image whose guest memory the game never wrote is cleared on the GPU "
+	             "instead of reading, staging and detiling the zeros. Saves RAM bandwidth and "
+	             "upload time.",
+	             EMU_BOOL(skip_zero_uploads)});
+	defs.append({"heap_trim", "--heap-trim", Tab::Memory, "Host RAM", Kind::Bool,
+	             "Return free emulator heap to the system",
+	             "Calls malloc_trim when at least 64 MiB and 20% of the emulator's heap is free "
+	             "but still resident (at most every 5 s).",
+	             EMU_BOOL(heap_trim)});
+	defs.append({"mem_residency", "--mem-residency", Tab::Memory, "Statistics", Kind::Bool,
+	             "Log guest memory residency",
+	             "Every 10 s logs how much guest memory is resident per GPU range class, which "
+	             "allocations hold memory without a GPU copy, and what the emulator itself wrote. "
+	             "Costs about 1% of frame time.",
+	             EMU_BOOL(mem_residency)});
 	defs.append({"mem_stats", "--mem-stats", Tab::Memory, "Statistics", Kind::Bool,
 	             "Log guest memory statistics",
 	             "Logs guest memory release, unmap and decommit counters and how much released "

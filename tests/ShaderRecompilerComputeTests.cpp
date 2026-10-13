@@ -2802,7 +2802,10 @@ public:
       auto &utility = cache.GetUtilityBuffer(utilities[i].first);
       handles[i] = utility.Handle();
       Require("StreamBufferRing", "utility ownership",
-              utility.Usage() == utilities[i].first &&
+              // The staging ring lives in device-local host-visible (Stream) memory on cards that
+              // can spare it (--upload-ring-rebar, on by default), in system memory otherwise.
+              (utility.Usage() == utilities[i].first ||
+               (i == 0 && utility.Usage() == MemoryUsage::Stream)) &&
                   utility.Size() == utilities[i].second &&
                   utility.Handle() != nullptr,
               "BufferCache utility buffer does not match the fixed layout");

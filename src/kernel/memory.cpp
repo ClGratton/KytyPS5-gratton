@@ -13,6 +13,8 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "common/heapTrim.h"
+#include "kernel/eventQueue.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 
@@ -28,6 +30,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <magic_enum.hpp>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <map>
 #include <memory>
 #include <mutex>
@@ -226,6 +231,63 @@ struct MemStats {
 static MemStats g_mem_stats;
 static bool     g_mem_stats_on = false;
 static bool     g_mem_punch_on = false;
+static bool     g_mem_residency_on = false;
+static bool     g_mem_hole_reads_on = false;
+
+// --mem-residency: reads of the guest backing through the writable alias (see BackingReadStats).
+struct BackingReadCounters {
+	struct Counts {
+		std::atomic<uint64_t> reads {0};
+		std::atomic<uint64_t> bytes {0};
+		std::atomic<uint64_t> nonresident {0};
+		std::atomic<uint64_t> hole {0};
+		std::atomic<uint64_t> pread_bytes {0};
+	};
+	Counts                image;
+	Counts                other;
+	std::atomic<uint64_t> pread_failures {0};
+};
+static BackingReadCounters g_backing_reads;
+static thread_local BackingReadTag g_backing_read_tag = BackingReadTag::Other;
+
+ScopedBackingReadTag::ScopedBackingReadTag(BackingReadTag tag) noexcept
+    : m_previous(g_backing_read_tag) {
+	g_backing_read_tag = tag;
+}
+
+ScopedBackingReadTag::~ScopedBackingReadTag() {
+	g_backing_read_tag = m_previous;
+}
+
+struct BackingWriteCounters {
+	struct Counts {
+		std::atomic<uint64_t> writes {0};
+		std::atomic<uint64_t> bytes {0};
+		std::atomic<uint64_t> newly_resident {0};
+	};
+	Counts by_tag[static_cast<size_t>(BackingWriteTag::Count)];
+};
+static BackingWriteCounters g_backing_writes;
+static thread_local BackingWriteTag g_backing_write_tag = BackingWriteTag::Other;
+
+ScopedBackingWriteTag::ScopedBackingWriteTag(BackingWriteTag tag) noexcept
+    : m_previous(g_backing_write_tag) {
+	g_backing_write_tag = tag;
+}
+
+ScopedBackingWriteTag::~ScopedBackingWriteTag() {
+	g_backing_write_tag = m_previous;
+}
+
+BackingWriteStats KernelBackingWriteStats() {
+	BackingWriteStats out;
+	for (size_t i = 0; i < static_cast<size_t>(BackingWriteTag::Count); i++) {
+		const auto& c      = g_backing_writes.by_tag[i];
+		out.by_tag[i] = {c.writes.load(std::memory_order_relaxed), c.bytes.load(std::memory_order_relaxed),
+		                 c.newly_resident.load(std::memory_order_relaxed)};
+	}
+	return out;
+}
 
 static void MemStatAdd(MemStats::Pair& pair, uint64_t bytes) {
 	if (g_mem_stats_on) {
@@ -254,6 +316,21 @@ MemStatsSnapshot KernelMemStatsSnapshot() {
 	s.realloc_after_punch_bytes = g_mem_stats.realloc_after_punch_bytes.load(std::memory_order_relaxed);
 	s.punch_failures            = g_mem_stats.punch_failures.load(std::memory_order_relaxed);
 	return s;
+}
+
+BackingReadStats KernelBackingReadStats() {
+	const auto counts = [](const BackingReadCounters::Counts& c) {
+		return BackingReadStats::Counts {c.reads.load(std::memory_order_relaxed),
+		                                 c.bytes.load(std::memory_order_relaxed),
+		                                 c.nonresident.load(std::memory_order_relaxed),
+		                                 c.hole.load(std::memory_order_relaxed),
+		                                 c.pread_bytes.load(std::memory_order_relaxed)};
+	};
+	BackingReadStats stats;
+	stats.image          = counts(g_backing_reads.image);
+	stats.other          = counts(g_backing_reads.other);
+	stats.pread_failures = g_backing_reads.pread_failures.load(std::memory_order_relaxed);
+	return stats;
 }
 
 enum class VirtualRangeType {
@@ -441,6 +518,11 @@ public:
 		Common::LockGuard lock(m_mutex);
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
+	}
+
+	std::vector<Range> Snapshot() {
+		Common::LockGuard lock(m_mutex);
+		return m_ranges;
 	}
 
 	bool Query(uint64_t addr, int flags, Range* out) {
@@ -995,8 +1077,23 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 }
 
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
-	return g_guest_address_space != nullptr &&
-	       g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	if (g_guest_address_space == nullptr) {
+		return false;
+	}
+	if (!Config::MemResidencyEnabled()) {
+		return g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	}
+	// --mem-residency: how much of this write landed on pages that were not resident.
+	const auto before = g_guest_address_space->GetBacking().ResidentGuestBytes(vaddr, size);
+	const bool ok     = g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	if (ok) {
+		const auto after = g_guest_address_space->GetBacking().ResidentGuestBytes(vaddr, size);
+		auto&      c     = g_backing_writes.by_tag[static_cast<size_t>(g_backing_write_tag)];
+		c.writes.fetch_add(1, std::memory_order_relaxed);
+		c.bytes.fetch_add(size, std::memory_order_relaxed);
+		c.newly_resident.fetch_add(after > before ? after - before : 0, std::memory_order_relaxed);
+	}
+	return ok;
 }
 
 bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
@@ -1209,8 +1306,58 @@ static bool IsInPrtAperture(uint64_t address, uint64_t size = 1) {
 	return false;
 }
 
+std::vector<GuestRangeInfo> KernelGuestRangesSnapshot() {
+	std::vector<GuestRangeInfo> out;
+	if (g_virtual_ranges == nullptr) {
+		return out;
+	}
+	for (const auto& r: g_virtual_ranges->Snapshot()) {
+		if (IsReservedRangeType(r.type)) {
+			continue;
+		}
+		GuestRangeInfo info;
+		info.start       = r.start;
+		info.size        = r.size;
+		info.protection  = r.protection;
+		info.memory_type = r.memory_type;
+		switch (r.type) {
+			case VirtualRangeType::Direct: info.kind = "direct"; break;
+			case VirtualRangeType::Flexible: info.kind = "flexible"; break;
+			case VirtualRangeType::Pooled: info.kind = "pooled"; break;
+			case VirtualRangeType::Stack: info.kind = "stack"; break;
+			case VirtualRangeType::Code: info.kind = "code"; break;
+			case VirtualRangeType::Runtime: info.kind = "runtime"; break;
+			default: info.kind = "other"; break;
+		}
+		std::memcpy(info.name, r.name, sizeof(info.name));
+		info.name[sizeof(info.name) - 1] = '\0';
+		out.push_back(info);
+	}
+	return out;
+}
+
+uint64_t KernelGuestResidentBytes(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr
+	           ? g_guest_address_space->GetBacking().ResidentGuestBytes(vaddr, size)
+	           : 0;
+}
+
+uint64_t KernelGuestResidentTotalBytes() {
+	return g_guest_address_space != nullptr
+	           ? g_guest_address_space->GetBacking().ResidentTotalBytes()
+	           : 0;
+}
+
 bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space->TryReadSparseBacking(vaddr, data, size);
+}
+
+bool GuestRangeReadsAsZero(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->RangeReadsAsZero(vaddr, size);
+}
+
+bool GuestRangeNeverWritten(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->RangeIsNeverWritten(vaddr, size);
 }
 
 static bool SelfTestSub64SharedPlaceholderAlias() {
@@ -1261,6 +1408,8 @@ static std::mutex              g_mem_stats_mutex;
 static std::condition_variable g_mem_stats_cv;
 static bool                    g_mem_stats_stop = false;
 static std::chrono::steady_clock::time_point g_mem_stats_start;
+
+static void PrintHostHeap(const char* tag, long long seconds);
 
 static void PrintMemStats(const char* tag) {
 	const auto MiB = [](uint64_t bytes) { return bytes >> 20u; };
@@ -1316,6 +1465,113 @@ static void PrintMemStats(const char* tag) {
 	    static_cast<unsigned long long>(MiB(get(g_mem_stats.punch_resident_bytes))),
 	    static_cast<unsigned long long>(get(g_mem_stats.punch_failures)));
 	Log::WriteToConsoleAndLog(text);
+	char equeue[160];
+	std::snprintf(equeue, sizeof(equeue), "[mem-stats %s t=%llds] equeue coalesced_triggers %llu\n", tag,
+	              static_cast<long long>(seconds),
+	              static_cast<unsigned long long>(Libs::LibKernel::EventQueue::KernelCoalescedTriggerCount()));
+	Log::WriteToConsoleAndLog(equeue);
+	PrintHostHeap(tag, static_cast<long long>(seconds));
+}
+
+// Host allocator state (glibc): arenas, the free memory inside them, and the process's anonymous RSS.
+struct HostHeapSample {
+	uint64_t arena = 0, in_use = 0, free_bytes = 0, mmapped = 0, rss_anon = 0;
+};
+
+static HostHeapSample SampleHostHeap() {
+	HostHeapSample sample;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	const auto info   = mallinfo2();
+	sample.arena      = info.arena;
+	sample.in_use     = info.uordblks;
+	sample.free_bytes = info.fordblks;
+	sample.mmapped    = info.hblkhd;
+	if (FILE* status = std::fopen("/proc/self/status", "r")) {
+		char line[256];
+		while (std::fgets(line, sizeof(line), status) != nullptr) {
+			unsigned long long kb = 0;
+			if (std::sscanf(line, "RssAnon: %llu kB", &kb) == 1) {
+				sample.rss_anon = kb * 1024ull;
+				break;
+			}
+		}
+		std::fclose(status);
+	}
+#endif
+	return sample;
+}
+
+static void PrintHostHeap(const char* tag, long long seconds) {
+	const auto h = SampleHostHeap();
+	char       text[256];
+	std::snprintf(text, sizeof(text),
+	              "[mem-stats %s t=%llds] host heap: arenas %llu MiB (in use %llu, free %llu), mmapped chunks %llu MiB,"
+	              " anon RSS %llu MiB\n",
+	              tag, seconds, static_cast<unsigned long long>(h.arena >> 20),
+	              static_cast<unsigned long long>(h.in_use >> 20), static_cast<unsigned long long>(h.free_bytes >> 20),
+	              static_cast<unsigned long long>(h.mmapped >> 20), static_cast<unsigned long long>(h.rss_anon >> 20));
+	Log::WriteToConsoleAndLog(text);
+}
+
+static std::thread             g_heap_trim_thread;
+static std::mutex              g_heap_trim_mutex;
+static std::condition_variable g_heap_trim_cv;
+static bool                    g_heap_trim_stop = false;
+
+static void StartHeapTrim() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	g_heap_trim_stop   = false;
+	g_heap_trim_thread = std::thread([] {
+		KYTY_PROFILER_THREAD("kyHeapTrim");
+		const Common::HeapTrim::Policy policy;
+		auto                           last = std::chrono::steady_clock::now();
+		uint64_t                       trims = 0, returned = 0;
+		std::unique_lock<std::mutex>   lock(g_heap_trim_mutex);
+		while (!g_heap_trim_cv.wait_for(lock, std::chrono::seconds(1), [] { return g_heap_trim_stop; })) {
+			lock.unlock();
+			if (!Config::HeapTrimEnabled()) { // --toggle-control turned it off: skip the pass
+				lock.lock();
+				continue;
+			}
+			const auto now = std::chrono::steady_clock::now();
+			const auto since = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count());
+			const auto before = SampleHostHeap();
+			if (Common::HeapTrim::ShouldTrim({before.arena, before.free_bytes}, policy, since)) {
+				malloc_trim(0);
+				last = std::chrono::steady_clock::now();
+				const auto after = SampleHostHeap();
+				trims++;
+				returned += before.rss_anon > after.rss_anon ? before.rss_anon - after.rss_anon : 0;
+				char text[256];
+				std::snprintf(text, sizeof(text),
+				              "[heap-trim] #%llu: arenas %llu MiB, free %llu MiB; anon RSS %llu -> %llu MiB"
+				              " (%.1f ms; %llu MiB returned in total)\n",
+				              static_cast<unsigned long long>(trims),
+				              static_cast<unsigned long long>(before.arena >> 20),
+				              static_cast<unsigned long long>(before.free_bytes >> 20),
+				              static_cast<unsigned long long>(before.rss_anon >> 20),
+				              static_cast<unsigned long long>(after.rss_anon >> 20),
+				              std::chrono::duration<double, std::milli>(last - now).count(),
+				              static_cast<unsigned long long>(returned >> 20));
+				Log::WriteToConsoleAndLog(text);
+			}
+			lock.lock();
+		}
+	});
+#endif
+}
+
+static void StopHeapTrim() {
+	if (!g_heap_trim_thread.joinable()) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_heap_trim_mutex);
+		g_heap_trim_stop = true;
+	}
+	g_heap_trim_cv.notify_all();
+	g_heap_trim_thread.join();
 }
 
 static void StartMemStats() {
@@ -1351,6 +1607,8 @@ void Initialize() {
 	VirtualMemory::Init();
 	g_mem_stats_on = Config::MemStatsEnabled();
 	g_mem_punch_on = Config::MemReleasePunchEnabled();
+	g_mem_residency_on = Config::MemResidencyEnabled();
+	g_mem_hole_reads_on = Config::MemHoleReadsEnabled();
 	g_guest_address_space = std::make_unique<GuestAddressSpace>(PhysicalMemory::TotalSize());
 	g_physical_memory     = std::make_unique<PhysicalMemory>();
 	g_flexible_memory     = std::make_unique<FlexibleMemory>();
@@ -1361,9 +1619,13 @@ void Initialize() {
 	if (g_mem_stats_on) {
 		StartMemStats();
 	}
+	if (Config::HeapTrimEnabled()) {
+		StartHeapTrim();
+	}
 }
 
 void Shutdown() {
+	StopHeapTrim();
 	StopMemStats();
 	g_pooled_memory.reset();
 	g_flexible_memory.reset();
@@ -4120,6 +4382,81 @@ bool TestWindowsBackingViewModes() {
 	return VirtualFree(placeholder, 0, MEM_RELEASE) != 0 && valid;
 }
 #endif
+
+void TestBackingReadScan(TestBackingScan* out, bool hole_reads) {
+	*out = {};
+	const bool saved_hole_reads = g_mem_hole_reads_on;
+	g_mem_hole_reads_on         = hole_reads;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	constexpr uint64_t size = 4u << 20;
+	constexpr uint64_t mib  = 1u << 20;
+	GuestBackingStore  backing(size);
+	if (!backing.IsAvailable()) {
+		g_mem_hole_reads_on = saved_hole_reads;
+		return;
+	}
+	void* reservation = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (reservation == MAP_FAILED) {
+		g_mem_hole_reads_on = saved_hole_reads;
+		return;
+	}
+	const auto address = reinterpret_cast<uint64_t>(reservation);
+	if (!backing.MapFixed(address, size, 0, VirtualMemory::Mode::ReadWrite)) {
+		munmap(reservation, size);
+		g_mem_hole_reads_on = saved_hole_reads;
+		return;
+	}
+	std::vector<uint8_t> pattern(mib);
+	for (size_t i = 0; i < pattern.size(); i++) {
+		pattern[i] = static_cast<uint8_t>(0xA5 ^ (i * 31));
+	}
+	bool ok = backing.TryWriteBacking(address, pattern.data(), mib) &&
+	          backing.TryWriteBacking(address + 2 * mib, pattern.data(), mib);
+	out->resident_before = backing.ResidentGuestBytes(address, size);
+	// Never-written verdicts: MiB 1 and 3 are holes, MiB 0 and 2 hold data, nothing is resident
+	// because of the checks themselves.
+	out->never_written_ok =
+	    backing.RangeIsNeverWritten(address + mib, mib) &&
+	    backing.RangeIsNeverWritten(address + 3 * mib, mib) &&
+	    backing.RangeIsNeverWritten(address + mib + 100, 200) &&
+	    backing.RangeIsNeverWritten(address + mib + 4096, 3 * 4096) &&
+	    !backing.RangeIsNeverWritten(address, mib) &&
+	    !backing.RangeIsNeverWritten(address, 2 * mib) &&
+	    !backing.RangeIsNeverWritten(address + mib, 2 * mib) &&
+	    !backing.RangeIsNeverWritten(address + mib - 1, 2) &&
+	    !backing.RangeIsNeverWritten(address + 3 * mib - 4096, 4096) &&
+	    !backing.RangeIsNeverWritten(address + 3 * mib, 2 * mib) && // runs off the mapping
+	    !backing.RangeIsNeverWritten(address, 0) &&
+	    backing.RangeReadsAsZero(address + mib, mib) &&
+	    backing.RangeReadsAsZero(address + 3 * mib + 5, 777) &&
+	    !backing.RangeReadsAsZero(address, mib) &&
+	    !backing.RangeReadsAsZero(address + mib, 2 * mib) &&
+	    backing.ResidentGuestBytes(address, size) == out->resident_before;
+	const auto before    = KernelBackingReadStats();
+	std::vector<uint8_t> read(size, 0xEE);
+	ok = ok && backing.TryReadBacking(address, read.data(), size);
+	const auto after = KernelBackingReadStats();
+	out->resident_after = backing.ResidentGuestBytes(address, size);
+	out->hole_after_read = backing.RangeIsNeverWritten(address + mib, mib);
+	bool data_ok = ok;
+	for (size_t i = 0; i < size && data_ok; i++) {
+		const uint64_t mb = i / mib;
+		const uint8_t want = (mb == 0 || mb == 2) ? pattern[i % mib] : uint8_t {0};
+		data_ok = read[i] == want;
+	}
+	out->data_ok = data_ok;
+	out->delta.reads       = after.other.reads - before.other.reads;
+	out->delta.bytes       = after.other.bytes - before.other.bytes;
+	out->delta.nonresident = after.other.nonresident - before.other.nonresident;
+	out->delta.hole        = after.other.hole - before.other.hole;
+	out->delta.pread_bytes = after.other.pread_bytes - before.other.pread_bytes;
+	out->pread_failures    = after.pread_failures - before.pread_failures;
+	EXIT_IF(!backing.Unmap(address, size));
+	munmap(reservation, size);
+	out->ran = true;
+#endif
+	g_mem_hole_reads_on = saved_hole_reads;
+}
 
 bool TestGuestFreeRangeBounds() {
 	return GuestFreeRangeContains(0x10000, 0x20000, 0x18000, 0x4000) &&

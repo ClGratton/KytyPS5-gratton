@@ -697,6 +697,72 @@ void CheckDeathCase(const char *name) {
 #endif
 }
 
+void TestReadProbes() {
+  PageManager manager;
+  constexpr auto page_size = TRACKER_PAGE_SIZE;
+  constexpr auto region_size = TRACKER_REGION_SIZE;
+  auto *allocation = Allocate(region_size * 2);
+  const auto allocation_base = reinterpret_cast<uint64_t>(allocation);
+  const auto address = (allocation_base + region_size - 1) & ~(region_size - 1);
+  auto *memory = reinterpret_cast<uint8_t *>(address);
+
+  // Only write-watched pages are armed: pages 1-3 are watched, 0 and 4 are not.
+  manager.UpdatePageWatchers<true>(address + page_size, page_size * 3);
+  Check(manager.ArmReadProbes(address, page_size * 5) == 3,
+        "probes were not armed on exactly the watched pages");
+  Check(Protection(memory) == PAGE_READWRITE &&
+            Protection(memory + page_size) == PAGE_NOACCESS &&
+            Protection(memory + page_size * 3) == PAGE_NOACCESS &&
+            Protection(memory + page_size * 4) == PAGE_READWRITE,
+        "armed probes did not hide the pages");
+  Check(manager.ArmReadProbes(address, page_size * 5) == 0,
+        "an armed page was armed again");
+
+  // The first access consumes the probe and the page is write watched again.
+  Check(manager.ConsumeReadProbe(address + page_size + 8), "probe was not consumed");
+  Check(Protection(memory + page_size) == PAGE_READONLY,
+        "consumed probe did not restore the write watch");
+  Check(!manager.ConsumeReadProbe(address + page_size), "a probe was consumed twice");
+  Check(!manager.ConsumeReadProbe(address), "an unwatched page held a probe");
+
+  // Losing the last write watcher drops the probe and unprotects the page.
+  manager.UpdatePageWatchers<false>(address + page_size * 2, page_size);
+  Check(IsWritable(memory + page_size * 2), "unwatched page stayed probed");
+  Check(!manager.ConsumeReadProbe(address + page_size * 2), "dropped probe was consumed");
+
+  // A read watcher (GPU-dirty page) replaces the probe: the page keeps no-access protection.
+  RegionBits read_mask;
+  read_mask.Set(3);
+  manager.UpdatePageWatchersForRegion<true, true>(address, read_mask);
+  Check(Protection(memory + page_size * 3) == PAGE_NOACCESS,
+        "read watcher lost the page's protection");
+  Check(!manager.ConsumeReadProbe(address + page_size * 3),
+        "a read-watched page still held a probe");
+  manager.UpdatePageWatchersForRegion<false, true>(address, read_mask);
+  Check(Protection(memory + page_size * 3) == PAGE_READONLY,
+        "read unwatch did not fall back to the write watch");
+
+  // A guest mprotect over a probed page is undone to the probe, not to the bare watch.
+  Check(manager.ArmReadProbes(address + page_size * 3, page_size) == 1, "rearm failed");
+  DWORD old_protection = 0;
+  Check(VirtualProtect(memory + page_size * 3, page_size, PAGE_READWRITE,
+                       &old_protection) != 0,
+        "guest protection change failed");
+  manager.ReapplyProtection(address + page_size * 3, page_size);
+  Check(Protection(memory + page_size * 3) == PAGE_NOACCESS,
+        "reapply dropped a probe");
+
+  const auto stats = manager.GetProbeStats();
+  Check(stats.armed == 4 && stats.consumed == 1 && stats.dropped == 2,
+        "probe statistics are wrong");
+
+  manager.UpdatePageWatchers<false>(address + page_size, page_size);
+  manager.UpdatePageWatchers<false>(address + page_size * 3, page_size);
+  Check(IsWritable(memory + page_size) && IsWritable(memory + page_size * 3),
+        "final unwatch left a page protected");
+  Check(VirtualFree(allocation, 0, MEM_RELEASE) != 0, "VirtualFree failed");
+}
+
 void TestFatalPaths() {
   for (const char *name :
        {"invalid-range", "unknown-untrack", "destructor-watch",
@@ -730,6 +796,7 @@ int main(int argc, char **argv) {
   TestRegionEndpointBatching();
   TestReadWriteWatcherInteractions();
   TestConcurrentSharedWatchers();
+  TestReadProbes();
   TestFatalPaths();
   std::puts("PageManagerTests: all cases passed");
   return 0;

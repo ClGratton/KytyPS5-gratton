@@ -7,6 +7,7 @@
 #include "controllerPreview.h"
 #include "emulatorArgs.h"
 #include "gameContent.h"
+#include "hostMemoryDialog.h"
 #include "updateChecker.h"
 
 #include <QApplication>
@@ -81,6 +82,10 @@ public:
 	void Update();
 	void FindInterpreter();
 	void Run();
+	// Looks at the host's memory setup; shows the result in the main window and, when a change is
+	// recommended and was not dismissed, opens the "Host memory" window once.
+	void CheckHostMemory(bool propose);
+	void OpenHostMemory(const HostMemoryReport* known);
 
 	[[nodiscard]] const QString& GetInterpreter() const { return m_interpreter; }
 
@@ -98,6 +103,10 @@ private:
 	QString         m_interpreter;
 
 	QProcess m_process;
+
+	QLabel*           m_host_memory_label = nullptr;
+	HostMemoryReport  m_host_memory_report;
+	QPointer<QDialog> m_host_memory_dialog;
 
 	QPointer<ConfigurationItem> m_running_item;
 };
@@ -124,6 +133,12 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui->check_updates_on_startup->setChecked(g_check_updates_on_startup);
 	m_ui->check_updates_link->setVisible(UpdateChecker::IsSupported());
 	m_ui->check_updates_on_startup->setVisible(UpdateChecker::IsSupported());
+
+	m_host_memory_label = new QLabel(main_dialog);
+	m_host_memory_label->setTextFormat(Qt::RichText);
+	m_host_memory_label->setVisible(false);
+	m_ui->verticalLayout_4->addWidget(m_host_memory_label);
+	connect(m_host_memory_label, &QLabel::linkActivated, this, [this](const QString&) { OpenHostMemory(nullptr); });
 
 	main_dialog->setWindowFlags(Qt::Dialog /*| Qt::MSWindowsFixedSizeDialogHint*/);
 
@@ -214,9 +229,45 @@ void MainDialogPrivate::FindInterpreter() {
 	m_ui->label_settings_file->setText(tr("Settings file: ") + m_ui->widget->GetSettingsFile());
 
 	Update();
+	CheckHostMemory(true);
 	if (m_ui->check_updates_on_startup->isChecked()) {
 		m_update_checker->Check(false);
 	}
+}
+
+void MainDialogPrivate::CheckHostMemory(bool propose) {
+	// macOS has no zswap and no pagefile setting to tune: no Host memory line there.
+#if defined(__APPLE__)
+	Q_UNUSED(propose);
+#else
+	HostMemoryTool::Detect(this, [this, propose](const HostMemoryReport& report) {
+		m_host_memory_report = report;
+		m_host_memory_label->setText(HostMemoryTool::StatusLine(report) + QStringLiteral(" - <a href=\"details\">") +
+		                             tr("details") + QStringLiteral("</a>"));
+		m_host_memory_label->setVisible(true);
+		if (propose && HostMemoryTool::ShouldProposeAtStartup(report)) {
+			OpenHostMemory(&report);
+		}
+	});
+#endif
+}
+
+void MainDialogPrivate::OpenHostMemory(const HostMemoryReport* known) {
+	if (m_host_memory_dialog != nullptr) {
+		m_host_memory_dialog->raise();
+		return;
+	}
+	auto* dialog = new HostMemoryDialog(m_main_dialog);
+	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	m_host_memory_dialog = dialog;
+	connect(dialog, &HostMemoryDialog::ReportChanged, this, [this](const HostMemoryReport& report) {
+		m_host_memory_report = report;
+		m_host_memory_label->setText(HostMemoryTool::StatusLine(report) + QStringLiteral(" - <a href=\"details\">") +
+		                             tr("details") + QStringLiteral("</a>"));
+	});
+	dialog->SetStartupProposal(known != nullptr);
+	dialog->SetReport(known != nullptr ? *known : m_host_memory_report);
+	dialog->open();
 }
 
 #ifdef __linux__

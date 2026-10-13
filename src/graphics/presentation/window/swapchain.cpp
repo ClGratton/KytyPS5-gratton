@@ -7,6 +7,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/runtimeToggles.h"
 #include "common/threads.h"
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
 #include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
@@ -1015,6 +1016,9 @@ void Presenter::Impl::Present() {
 		    window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed) + 1;
 		Common::Hang::NoteProgress();
 		Common::GpuPhase::NoteFrame();
+		if (Common::RuntimeToggles::Active()) {
+			Common::RuntimeToggles::OnFrame(presented); // --toggle-control: apply a requested flag change
+		}
 		if (Bench::FramesEnabled() && Bench::RecordPresent(presented)) {
 			// --bench-exit-after-frames: take the normal clean-exit path (same as closing the
 			// window): the main loop sees SDL_EVENT_QUIT, saves the pipeline cache, then

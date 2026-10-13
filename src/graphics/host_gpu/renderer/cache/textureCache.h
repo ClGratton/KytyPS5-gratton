@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/lruCache.h"
 #include "common/slotVector.h"
+#include "graphics/host_gpu/memResidency.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
@@ -79,6 +80,10 @@ public:
 	void RunGarbageCollector();
 	void ReclaimMemory();
 	void AuditVram();
+	// --mem-residency. GPU thread: the guest ranges of the images, by class.
+	void CollectResidencyRanges(MemResidency::Snapshot& snapshot);
+	// Which kind of image holds `address` (any thread; never waits for the cache lock it already holds).
+	[[nodiscard]] MemResidency::FaultClass ClassifyAddress(uint64_t address);
 
 private:
 	// --debug-texture-gc log: one line per free of a GPU-written image. Caller holds m_lock.
@@ -149,6 +154,9 @@ private:
 	void                        InitializeImage(ImageId id);
 	[[nodiscard]] bool          CanDownload(const Image& image) const;
 	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
+	// --skip-zero-uploads: true when the image was set to zero because its whole guest range was
+	// never written, in place of reading, staging and detiling that range.
+	[[nodiscard]] bool          TryUploadNeverWritten(Image& image);
 	void DownloadImage(Image& image, Buffer& destination, uint64_t destination_offset,
 	                   uint64_t destination_size, uint32_t levels);
 	void DownloadDepth(Image& image, Buffer& destination, uint64_t destination_offset);

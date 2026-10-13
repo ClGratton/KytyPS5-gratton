@@ -132,6 +132,28 @@ static void PrintUsage() {
 	::printf("  --mem-release-punch <on|off>         Return guest memory the game released (and no view\n"
 	         "                                      maps) to the host with fallocate(PUNCH_HOLE). Whole\n"
 	         "                                      host pages only. Default: off.\n");
+	::printf("  --mem-residency <on|off>             Log-only host RAM diagnostics every 10 s: resident guest\n"
+	         "                                      memory per GPU range class (textures, render targets,\n"
+	         "                                      buffers, other), CPU faults on clean uploaded pages\n"
+	         "                                      (one-shot read probes on textures), and bytes Kyty reads\n"
+	         "                                      from never-written guest memory. Default: off.\n");
+	::printf("  --heap-trim <on|off>                 Hand free pages of the host allocator back to the kernel\n"
+	         "                                      (malloc_trim, at most every 5 s) when at least 64 MiB and\n"
+	         "                                      20%% of its arenas are free. Default: on.\n");
+	::printf("  --mem-hole-reads <on|off>            Read guest memory that was never written with pread\n"
+	         "                                      instead of through the writable mapping, so the read\n"
+	         "                                      does not allocate zero pages (reads of 16 KiB or more).\n"
+	         "                                      Default: on.\n");
+	::printf("  --upload-ring-rebar <on|off>         Put the 512 MiB upload staging ring in device-local\n"
+	         "                                      host-visible memory (ReBAR) instead of system RAM, on\n"
+	         "                                      cards with a large BAR and at least 8 GiB of VRAM; other\n"
+	         "                                      cards keep it in system RAM (logged). Default: on.\n");
+	::printf("  --skip-zero-uploads <on|off>         Do not read and upload a color image whose guest memory\n"
+	         "                                      was never written (it reads as zeros): clear the GPU\n"
+	         "                                      image instead. Saves the guest read, the staging copy and\n"
+	         "                                      the detile pass. Default: on.\n");
+	::printf("  --verify-zero-uploads <on|off>       Debug: with --skip-zero-uploads, also pread each skipped\n"
+	         "                                      range and log an error if it holds a non-zero byte.\n");
 	::printf("  --vram-audit <seconds>               Debug: once, this many seconds after start, log the\n"
 	         "                                      resident image mix and content-duplicate textures.\n");
 	::printf("  --vram-ballast-mb <MiB>              Debug: hold this much device-local memory to\n"
@@ -152,6 +174,14 @@ static void PrintUsage() {
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
+	::printf("  --toggle-control <path>              Poll this file (name=value lines) and flip the runtime-\n"
+	         "                                       safe performance flags it names (submit-coalesce,\n"
+	         "                                       elide-barriers, bda-sync-skip, clean-guest-reads,\n"
+	         "                                       srt-plans, readback-queue, heap-trim) at the next\n"
+	         "                                       presented frame; applied changes are logged and appended\n"
+	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
+	         "                                       (srt-plans, readback-queue, heap-trim) can only be turned\n"
+	         "                                       on again if it was on at start. Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
 	::printf("  --pipeline-cache-key <value>         schema (default) or revision. schema keys the driver\n"
 	         "                                       pipeline cache on a schema version + GPU/driver ids,\n"
@@ -731,6 +761,36 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--mem-residency") {
+			if (!ParseBool(value, options.config.mem_residency)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--heap-trim") {
+			if (!ParseBool(value, options.config.heap_trim)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--mem-hole-reads") {
+			if (!ParseBool(value, options.config.mem_hole_reads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--upload-ring-rebar") {
+			if (!ParseBool(value, options.config.upload_ring_rebar)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--skip-zero-uploads") {
+			if (!ParseBool(value, options.config.skip_zero_uploads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--verify-zero-uploads") {
+			if (!ParseBool(value, options.config.verify_zero_uploads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
 		} else if (arg == "--vram-audit") {
 			if (!ParseUint32(value, options.config.vram_audit_s)) {
 				::printf("invalid value for %s: %s\n", arg.c_str(), value.c_str());
@@ -788,6 +848,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.bench_frames_csv = Common::PathFromUtf8(value);
+		} else if (arg == "--toggle-control") {
+			if (value.empty()) {
+				::printf("invalid --toggle-control path\n");
+				return false;
+			}
+			options.config.toggle_control = Common::PathFromUtf8(value);
 		} else if (arg == "--pipeline-cache-key") {
 			if (Common::EqualNoCase(value, "revision")) {
 				options.config.pipeline_cache_key = Config::PipelineCacheKey::Revision;

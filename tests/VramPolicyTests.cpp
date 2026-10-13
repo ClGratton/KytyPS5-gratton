@@ -160,7 +160,25 @@ void TestAllocationLadder() {
 
 } // namespace
 
+void TestUploadRingPlan() {
+	// A 12 GiB card with ReBAR: the ring goes to VRAM when asked, never when not.
+	Check(PlanUploadRing(true, 12 * GiB, 12 * GiB).device_local, "ReBAR on a 12 GiB card");
+	Check(!PlanUploadRing(false, 12 * GiB, 12 * GiB).device_local, "ReBAR not wanted");
+	// The legacy 256 MiB window cannot hold the ring, and no host-visible device-local heap at all.
+	Check(!PlanUploadRing(true, 12 * GiB, 256 * MiB).device_local, "256 MiB BAR window");
+	Check(!PlanUploadRing(true, 12 * GiB, 0).device_local, "no host-visible device-local heap");
+	// 8 GiB is the smallest card that gives away 1/16 of its VRAM; below that the ring stays in RAM.
+	Check(PlanUploadRing(true, 8 * GiB, 8 * GiB).device_local, "8 GiB card");
+	Check(!PlanUploadRing(true, 6 * GiB, 6 * GiB).device_local, "6 GiB card keeps the ring in RAM");
+	Check(!PlanUploadRing(true, 4 * GiB, 4 * GiB).device_local, "4 GiB card keeps the ring in RAM");
+	// A small BAR that is just one ring is refused, two rings is the minimum.
+	Check(!PlanUploadRing(true, 12 * GiB, UploadRingBytes).device_local, "BAR as large as the ring");
+	Check(PlanUploadRing(true, 12 * GiB, 2 * UploadRingBytes).device_local, "BAR of two rings");
+	Check(PlanUploadRing(true, 12 * GiB, 0).size == UploadRingBytes, "ring size is the nominal one");
+}
+
 int main() {
+	TestUploadRingPlan();
 	TestEstimateImageBytes();
 	TestDedicatedThreshold();
 	TestImagePriority();

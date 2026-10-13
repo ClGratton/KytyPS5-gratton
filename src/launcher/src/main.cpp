@@ -11,7 +11,8 @@ int main(int argc, char* argv[]) {
 		const QString arg = QString::fromLocal8Bit(argv[i]);
 		if (arg == QLatin1String("--self-check") || arg == QLatin1String("--print-command") ||
 		    arg == QLatin1String("--grab-settings") || arg == QLatin1String("--configure") ||
-		    arg == QLatin1String("--grab-main")) {
+		    arg == QLatin1String("--grab-main") || arg == QLatin1String("--host-memory") ||
+		    arg == QLatin1String("--grab-host-memory") || arg == QLatin1String("--print-host-helper")) {
 			qputenv("QT_QPA_PLATFORM", "offscreen");
 			QApplication app(argc, argv);
 			QStringList  rest = QCoreApplication::arguments();
@@ -24,6 +25,15 @@ int main(int argc, char* argv[]) {
 			}
 			if (arg == QLatin1String("--grab-main")) {
 				return RunGrabMain(rest);
+			}
+			if (arg == QLatin1String("--host-memory")) {
+				return RunHostMemory(rest);
+			}
+			if (arg == QLatin1String("--print-host-helper")) {
+				return RunPrintHostHelper(rest);
+			}
+			if (arg == QLatin1String("--grab-host-memory")) {
+				return RunGrabHostMemory(rest);
 			}
 			return arg == QLatin1String("--configure") ? RunConfigure(rest) : RunGrabSettings(rest);
 		}

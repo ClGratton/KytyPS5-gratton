@@ -27,5 +27,13 @@ int RunConfigure(const QStringList& args);
 int RunGrabMain(const QStringList& args);
 // launcher --grab-settings <dir> [--global] [--preset]: saves one PNG per tab of the settings dialog.
 int RunGrabSettings(const QStringList& args);
+// launcher --host-memory [--root <dir>]: prints what the "Host memory" window would show (Linux), optionally
+// for a made-up /proc and /sys tree under <dir>. Changes nothing.
+int RunHostMemory(const QStringList& args);
+// launcher --print-host-helper [--sha256 | --installer]: prints the helper script compiled into the launcher, its
+// SHA-256, or the one-time install step that pkexec runs as root.
+int RunPrintHostHelper(const QStringList& args);
+// launcher --grab-host-memory <png> [--root <dir>]: saves the "Host memory" window as a PNG.
+int RunGrabHostMemory(const QStringList& args);
 
 #endif /* LAUNCHER_INCLUDE_LAUNCHER_SELF_CHECK_H_ */

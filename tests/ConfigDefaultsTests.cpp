@@ -3,11 +3,17 @@
 // the opt-out flags still reach the config.
 
 #include "common/emulatorConfig.h"
+#include "common/runtimeToggles.h"
 #include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <thread>
 
 namespace {
 
@@ -139,6 +145,77 @@ void TestReadbackLinearImagesStaysOff() {
 
 } // namespace
 
+// Host-RAM features (ram.md), measured on the level route (notes/mem-footprint.md): reading never-written
+// guest memory with pread, the ReBAR upload ring (placed by VramPolicy::PlanUploadRing, with a system-RAM
+// fallback), clearing never-written images instead of uploading them and trimming the host heap are on.
+// --mem-residency only counts, so it stays off, as does the zero-upload verifier.
+void TestHostMemoryFeaturesDefaults() {
+	const Config::ConfigOptions options;
+	Check(options.mem_hole_reads && options.upload_ring_rebar && options.skip_zero_uploads &&
+	          options.heap_trim,
+	      "the measured host-memory features default to on");
+	Check(!options.mem_residency && !options.verify_zero_uploads,
+	      "the diagnostics default to off");
+	Apply(options);
+	Check(Config::MemHoleReadsEnabled() && Config::UploadRingRebarEnabled() &&
+	          Config::SkipZeroUploadsEnabled() && Config::HeapTrimEnabled(),
+	      "an unconfigured emulator has the host-memory features on");
+	Check(!Config::MemResidencyEnabled() && !Config::VerifyZeroUploadsEnabled(),
+	      "an unconfigured emulator keeps the diagnostics off");
+
+	Config::ConfigOptions off;
+	off.mem_hole_reads = off.upload_ring_rebar = off.skip_zero_uploads = off.heap_trim = false;
+	Apply(off);
+	Check(!Config::MemHoleReadsEnabled() && !Config::UploadRingRebarEnabled() &&
+	          !Config::SkipZeroUploadsEnabled() && !Config::HeapTrimEnabled(),
+	      "each host-memory feature can be switched off");
+}
+
+// --toggle-control: a control file flips the registered flags through the same accessors the
+// emulator reads, at the frame hook, and the applied changes land in <control>.applied.csv.
+void TestRuntimeToggleControlFile() {
+	namespace RT = Common::RuntimeToggles;
+	const auto dir = std::filesystem::temp_directory_path() / "kyty-toggle-test";
+	std::filesystem::create_directories(dir);
+	const auto control = dir / "toggles.ctl";
+	std::filesystem::remove(control);
+	std::filesystem::remove(dir / "toggles.ctl.applied.csv");
+
+	Config::ConfigOptions options;
+	options.srt_plans = options.pipeline_lookahead = options.submit_coalesce = true;
+	options.readback_queue = false;
+	options.toggle_control = control;
+	Apply(options);
+	Check(RT::Active(), "--toggle-control starts the toggles");
+	Check(Config::SrtPlansEnabled() && Config::SubmitCoalesceEnabled(), "start values");
+
+	{
+		std::ofstream out(dir / "toggles.tmp");
+		out << "# seq 1\nsrt-plans=false\nsubmit-coalesce=off\nreadback-queue=true\nsrt-table-walk=true\n";
+	}
+	std::filesystem::rename(dir / "toggles.tmp", control);
+	for (int i = 0; i < 100 && !RT::detail::g_pending.load(); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	Check(RT::detail::g_pending.load(), "the watcher saw the control file");
+	Check(Config::SrtPlansEnabled(), "nothing changes before the frame boundary");
+	RT::OnFrame(42);
+	Check(!Config::SrtPlansEnabled() && !Config::SubmitCoalesceEnabled(), "srt-plans and submit-coalesce are off");
+	Check(!Config::ReadbackQueueEnabled(), "readback-queue was off at start-up: it cannot be turned on");
+	std::ifstream csv(dir / "toggles.ctl.applied.csv");
+	std::stringstream text;
+	text << csv.rdbuf();
+	Check(text.str().find(",42,srt-plans,1,0,applied") != std::string::npos, "the change is logged with its frame");
+	Check(text.str().find("readback-queue,0,1,not_armed_at_startup") != std::string::npos, "the refusal is logged");
+	Check(text.str().find("srt-table-walk") != std::string::npos &&
+	          text.str().find("unknown_or_not_runtime_safe") != std::string::npos,
+	      "a flag that is not registered is refused");
+
+	Apply(Config::ConfigOptions {});
+	Check(!RT::Active(), "loading a config without --toggle-control stops it");
+	std::filesystem::remove_all(dir);
+}
+
 int main() {
 	Config::Initialize();
 
@@ -148,6 +225,8 @@ int main() {
 	TestPipelineCacheKeyDefault();
 	TestVramStatsAreIndependentOfPaging();
 	TestVramPagingDefault();
+	TestHostMemoryFeaturesDefaults();
+	TestRuntimeToggleControlFile();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");

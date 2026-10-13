@@ -1,0 +1,390 @@
+#!/bin/bash
+# Root helper of the launcher's "Host memory" window (docs/host-memory.md).
+#
+#   kyty-host-memory apply --zswap-percent N [--compressor NAME] [--disable-zram] [--swapfile-mib M]
+#   kyty-host-memory undo
+#
+# Both take --dry-run (print what would be done, change nothing). The launcher runs this through pkexec when
+# the user clicks Apply or Undo; nobody else needs to call it. The launcher has this text compiled in and, the
+# first time, installs it as root:root, mode 755, into /usr/local/libexec/kyty (or /usr/libexec/kyty) after
+# checking its SHA-256; pkexec only ever runs that root-owned copy, never a file in the user's directories.
+#
+# apply: turns zswap on now and at every boot, optionally creates a swapfile first, optionally switches zram
+#        swap off (now and at boot). The previous state is recorded so that undo can restore it.
+# undo : removes what apply installed and puts the recorded state back.
+#
+# What is written, and where (nothing else on the system is touched; no bootloader, no kernel command line):
+#   /etc/systemd/system/kyty-host-memory.service              oneshot unit, runs boot.sh at every boot
+#   /var/lib/kyty-host-memory/boot.sh                         the boot-time settings (zswap parameters, swapon, zram off)
+#   /var/lib/kyty-host-memory/state                           the previous state, for undo
+#   /etc/systemd/zram-generator.conf.d/99-kyty-host-memory.conf   zram-size = 0 (only with --disable-zram and zram-generator)
+#   /var/lib/kyty-host-memory/swap/swapfile                   only with --swapfile-mib
+#
+# For the tests: --root DIR writes the files above under DIR and skips every system command (no sysfs writes,
+# no systemctl, no swapon), reading /proc and /sys from DIR instead.
+set -u
+
+# Keep in step with src/launcher/include/hostMemoryPolicy.h (kDiskReserveMiB) and hostMemoryProbe.h (paths);
+# tests/host_memory_helper_test.sh checks that they agree.
+DISK_RESERVE_MIB=16384
+SWAPOFF_MARGIN_MIB=1024
+UNIT_NAME=kyty-host-memory.service
+STATE_DIR=/var/lib/kyty-host-memory
+SWAP_DIR=$STATE_DIR/swap
+SWAP_FILE=$SWAP_DIR/swapfile
+UNIT=/etc/systemd/system/$UNIT_NAME
+DROPIN_DIR=/etc/systemd/zram-generator.conf.d
+DROPIN=$DROPIN_DIR/99-kyty-host-memory.conf
+
+DRY=0
+ROOT=""
+
+die() { echo "error: $*" >&2; exit 1; }
+say() { echo "$*"; }
+
+# Run a system command, or only print it.
+sys() {
+	if [ "$DRY" = 1 ]; then echo "would run: $*"; return 0; fi
+	if [ -n "$ROOT" ]; then echo "skipped (--root): $*"; return 0; fi
+	"$@"
+}
+
+# Same for a command whose failure is not an error.
+sys_try() { sys "$@" || echo "note: '$*' failed (ignored)"; }
+
+# Write stdin to $ROOT$1 with mode $2.
+put_file() {
+	local path="$ROOT$1" mode="$2" text
+	text=$(cat)
+	if [ "$DRY" = 1 ]; then
+		echo "would write $path (mode $mode):"
+		printf '%s\n' "$text" | sed 's/^/    /'
+		return 0
+	fi
+	mkdir -p "$(dirname "$path")" || die "cannot create the directory of $path"
+	printf '%s\n' "$text" > "$path" || die "cannot write $path"
+	chmod "$mode" "$path"
+	echo "wrote $path"
+}
+
+remove_file() {
+	local path="$ROOT$1"
+	if [ ! -e "$path" ] && [ ! -L "$path" ]; then return 0; fi
+	if [ "$DRY" = 1 ]; then echo "would remove $path"; return 0; fi
+	rm -f -- "$path" && echo "removed $path"
+}
+
+param() { echo "$ROOT/sys/module/zswap/parameters/$1"; }
+
+is_int() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+emulator_running() {
+	[ -n "$ROOT" ] && return 1
+	local d exe
+	for d in /proc/[0-9]*; do
+		exe=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | head -n 1)
+		case "${exe##*/}" in kyty_emulator*) return 0 ;; esac
+	done
+	return 1
+}
+
+mem_available_mib() { awk '/^MemAvailable:/ {print int($2 / 1024)}' "$ROOT/proc/meminfo" 2>/dev/null; }
+
+# Active zram swap devices (names such as zram0).
+zram_swaps() { awk 'NR > 1 && $1 ~ /^\/dev\/zram/ {sub("/dev/", "", $1); print $1}' "$ROOT/proc/swaps" 2>/dev/null; }
+# zram devices that zram-generator is configured to create (sections [zramN] of its config files).
+zram_configured() {
+	cat "$ROOT"/usr/lib/systemd/zram-generator.conf "$ROOT"/etc/systemd/zram-generator.conf \
+		"$ROOT"/usr/lib/systemd/zram-generator.conf.d/*.conf "$ROOT"/usr/local/lib/systemd/zram-generator.conf.d/*.conf \
+		"$ROOT"/etc/systemd/zram-generator.conf.d/*.conf "$ROOT"/run/systemd/zram-generator.conf.d/*.conf 2>/dev/null |
+		sed -n 's/^\[\(zram[0-9][0-9]*\)\].*/\1/p'
+}
+disk_swap_count() { awk 'NR > 1 && $1 !~ /^\/dev\/zram/ {n++} END {print n + 0}' "$ROOT/proc/swaps" 2>/dev/null; }
+
+# Data held by a zram device before compression, in MiB (that is what swapoff must find room for).
+zram_orig_mib() { awk '{print int($1 / 1048576)}' "$ROOT/sys/block/$1/mm_stat" 2>/dev/null || echo 0; }
+
+fs_type_of() {
+	local dir="$1" t=""
+	if command -v findmnt >/dev/null 2>&1; then t=$(findmnt -n -o FSTYPE -T "$dir" 2>/dev/null | head -n 1); fi
+	[ -z "$t" ] && t=$(stat -f -c %T "$dir" 2>/dev/null)
+	echo "$t"
+}
+
+nearest_dir() { local d="$1"; while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done; echo "$d"; }
+
+# ---- state file: KEY=value lines, only keys and values this script writes ----
+state_get() { [ -f "$ROOT$STATE_DIR/state" ] && sed -n "s/^$1=//p" "$ROOT$STATE_DIR/state" | head -n 1; }
+
+# Writes the record from the variables of apply() (bash locals are visible here).
+save_state() {
+	{
+		echo "prev_zswap_enabled=$prev_enabled"
+		echo "prev_zswap_compressor=$prev_comp"
+		echo "prev_zswap_pool=$prev_pool"
+		echo "prev_zswap_shrinker=$prev_shrinker"
+		echo "swapfile=$swapfile_created"
+		echo "swapdir_subvolume=$subvol"
+		echo "zram_disabled=$zram_list"
+	} | put_file "$STATE_DIR/state" 600
+}
+
+# ---- apply ----
+
+apply() {
+	local percent="" compressor=zstd disable_zram=0 swapfile_mib=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--zswap-percent) percent="${2:-}"; shift 2 ;;
+			--compressor) compressor="${2:-}"; shift 2 ;;
+			--disable-zram) disable_zram=1; shift ;;
+			--swapfile-mib) swapfile_mib="${2:-}"; shift 2 ;;
+			*) die "unknown option for apply: $1" ;;
+		esac
+	done
+	is_int "$percent" && [ "$percent" -ge 1 ] && [ "$percent" -le 50 ] || die "--zswap-percent must be 1..50"
+	case "$compressor" in ''|*[!a-z0-9-]*) die "--compressor: letters, digits and dashes only" ;; esac
+	is_int "$swapfile_mib" || die "--swapfile-mib must be a number"
+	[ "$swapfile_mib" = 0 ] || { [ "$swapfile_mib" -ge 1024 ] && [ "$swapfile_mib" -le 262144 ]; } || die "--swapfile-mib must be 1024..262144"
+
+	if emulator_running; then
+		[ "$DRY" = 1 ] && say "note: an emulator is running; the real apply would refuse" || die "an emulator is running; close it and try again"
+	fi
+	[ -d "$ROOT/sys/module/zswap" ] || die "this kernel has no zswap"
+	[ -d "$ROOT/run/systemd/system" ] || [ "$DRY" = 1 ] || [ -n "$ROOT" ] || die "systemd is not running; the setting could not be kept across reboots"
+
+	# Previous state, recorded once: a second apply must not record our own settings as "previous".
+	local prev_enabled prev_comp prev_pool prev_shrinker prev_swapfile prev_subvol prev_zram
+	if [ -f "$ROOT$STATE_DIR/state" ]; then
+		prev_enabled=$(state_get prev_zswap_enabled); prev_comp=$(state_get prev_zswap_compressor)
+		prev_pool=$(state_get prev_zswap_pool); prev_shrinker=$(state_get prev_zswap_shrinker)
+		prev_swapfile=$(state_get swapfile); prev_subvol=$(state_get swapdir_subvolume); prev_zram=$(state_get zram_disabled)
+		say "an earlier apply is recorded; keeping its saved state"
+	else
+		prev_enabled=$(cat "$(param enabled)" 2>/dev/null); prev_comp=$(cat "$(param compressor)" 2>/dev/null)
+		prev_pool=$(cat "$(param max_pool_percent)" 2>/dev/null); prev_shrinker=$(cat "$(param shrinker_enabled)" 2>/dev/null)
+		prev_swapfile=""; prev_subvol=""; prev_zram=""
+	fi
+
+	# zram only goes off when a disk swap takes over: one that exists now, or the swapfile created below.
+	if [ "$disable_zram" = 1 ] && [ "$swapfile_mib" = 0 ] && [ -z "$ROOT" ] && [ "$DRY" != 1 ] && [ "$(disk_swap_count)" -eq 0 ]; then
+		die "--disable-zram without a disk swap would leave the system with no swap"
+	fi
+
+	# 1. The swapfile first, so that zram is never switched off without somewhere to swap to.
+	local swapfile_created="$prev_swapfile" subvol="$prev_subvol" zram_list="$prev_zram" z
+	if [ "$swapfile_mib" != 0 ]; then
+		sys mkdir -p "$ROOT$STATE_DIR"
+		local dir fstype avail
+		dir=$(nearest_dir "$ROOT$STATE_DIR")
+		fstype=$(fs_type_of "$dir")
+		if [ -z "$ROOT" ]; then
+			case "$fstype" in ext4|ext2/ext3|xfs|btrfs) ;; *) die "a swapfile cannot be created on '$fstype' (ext4, xfs and btrfs only)" ;; esac
+			avail=$(df -Pm "$dir" | awk 'NR == 2 {print $4}')
+			[ "${avail:-0}" -ge $((swapfile_mib + DISK_RESERVE_MIB)) ] || die "not enough free disk space for a ${swapfile_mib} MiB swapfile (need ${DISK_RESERVE_MIB} MiB left free)"
+		fi
+		if [ -e "$ROOT$SWAP_FILE" ]; then
+			say "$SWAP_FILE already exists; leaving it"
+		else
+			# Recorded before it exists, so a half-finished apply can still be undone.
+			[ -n "$swapfile_created" ] || swapfile_created=$SWAP_FILE
+			save_state
+			if [ "$fstype" = btrfs ]; then
+				[ -d "$ROOT$SWAP_DIR" ] || { sys btrfs subvolume create "$ROOT$SWAP_DIR" && subvol=1; }
+				# Created with copy-on-write off, as btrfs requires for a swapfile.
+				if ! sys btrfs filesystem mkswapfile --size "${swapfile_mib}m" "$ROOT$SWAP_FILE"; then
+					say "btrfs filesystem mkswapfile is not available; creating the file by hand"
+					sys truncate -s 0 "$ROOT$SWAP_FILE" && sys chattr +C "$ROOT$SWAP_FILE" &&
+						sys fallocate -l "${swapfile_mib}M" "$ROOT$SWAP_FILE" && sys chmod 600 "$ROOT$SWAP_FILE" &&
+						sys mkswap "$ROOT$SWAP_FILE" || die "could not create the swapfile"
+				fi
+			else
+				sys mkdir -p "$ROOT$SWAP_DIR"
+				{ sys fallocate -l "${swapfile_mib}M" "$ROOT$SWAP_FILE" || sys dd if=/dev/zero of="$ROOT$SWAP_FILE" bs=1M count="$swapfile_mib" status=none; } &&
+					sys chmod 600 "$ROOT$SWAP_FILE" && sys mkswap -q "$ROOT$SWAP_FILE" || die "could not create the swapfile"
+			fi
+		fi
+		if awk -v f="$SWAP_FILE" 'NR > 1 && $1 == f {found = 1} END {exit !found}' "$ROOT/proc/swaps" 2>/dev/null; then
+			say "$SWAP_FILE is already in use"
+		else
+			sys swapon "$ROOT$SWAP_FILE" || die "swapon failed for $SWAP_FILE"
+		fi
+		say "swapfile $SWAP_FILE of $swapfile_mib MiB is on"
+	fi
+
+	# 2. zswap, now. The compressor must be set before zswap is enabled; take the first one the kernel accepts.
+	local chosen="" c
+	if [ -n "$ROOT" ] || [ "$DRY" = 1 ]; then
+		chosen=$compressor
+	else
+		for c in "$compressor" lz4 lzo-rle lzo; do
+			if echo "$c" > "$(param compressor)" 2>/dev/null && [ "$(cat "$(param compressor)" 2>/dev/null)" = "$c" ]; then chosen=$c; break; fi
+		done
+		[ -n "$chosen" ] || die "the kernel accepts none of the compressors zstd, lz4, lzo-rle, lzo"
+	fi
+	[ "$chosen" = "$compressor" ] || say "compressor $compressor is not available; using $chosen"
+	sys sh -c "echo $percent > '$(param max_pool_percent)'" || die "cannot set the zswap pool size"
+	[ -e "$(param shrinker_enabled)" ] && sys_try sh -c "echo Y > '$(param shrinker_enabled)'"
+	sys sh -c "echo Y > '$(param enabled)'" || die "cannot enable zswap"
+	say "zswap on: $chosen, pool $percent% of RAM"
+
+	# 3. The boot-time settings: the drop-in for zram-generator (so zram is not even created) and the unit.
+	if [ "$disable_zram" = 1 ]; then
+		zram_list="$prev_zram $(zram_swaps | tr '\n' ' ') $(zram_configured | tr '\n' ' ')"
+		zram_list=$(printf '%s\n' $zram_list | sort -u | tr '\n' ' ')
+		zram_list=${zram_list% }
+		[ -n "$zram_list" ] || zram_list=zram0
+		if [ -e "$ROOT/usr/lib/systemd/system-generators/zram-generator" ] || [ -e "$ROOT/lib/systemd/system-generators/zram-generator" ] || [ -n "$ROOT" ]; then
+			{
+				echo "# Written by the Kyty launcher (kyty-host-memory). Removed by its Undo button."
+				for z in $zram_list; do echo "[$z]"; echo "zram-size = 0"; echo; done
+			} | put_file "$DROPIN" 644
+		else
+			say "zram-generator is not installed; zram is switched off at boot by the unit instead"
+		fi
+	fi
+
+	{
+		echo "#!/bin/sh"
+		echo "# Written by the Kyty launcher (kyty-host-memory). Run at every boot by $UNIT_NAME."
+		echo "P=/sys/module/zswap/parameters"
+		echo "echo $chosen > \$P/compressor 2>/dev/null"
+		echo "echo $percent > \$P/max_pool_percent 2>/dev/null"
+		echo "[ -e \$P/shrinker_enabled ] && echo Y > \$P/shrinker_enabled 2>/dev/null"
+		echo "echo Y > \$P/enabled"
+		[ -n "$swapfile_created" ] && echo "[ -f '$swapfile_created' ] && swapon '$swapfile_created' 2>/dev/null"
+		if [ "$disable_zram" = 1 ] || [ -n "$prev_zram" ]; then
+			echo "# zram swap only goes off when a disk swap is there to take over"
+			echo "if [ \"\$(awk 'NR > 1 && \$1 !~ /^\\/dev\\/zram/ {n++} END {print n + 0}' /proc/swaps)\" -gt 0 ]; then"
+			echo "  for z in \$(awk 'NR > 1 && \$1 ~ /^\\/dev\\/zram/ {print \$1}' /proc/swaps); do swapoff \"\$z\"; done"
+			echo "fi"
+		fi
+		echo "exit 0"
+	} | put_file "$STATE_DIR/boot.sh" 755
+
+	put_file "$UNIT" 644 <<UNITEOF
+[Unit]
+Description=Kyty host memory tuning (zswap in front of the disk swap)
+Documentation=https://github.com/ClGratton/KytyPS5-gratton/blob/gratton-play/docs/host-memory.md
+After=systemd-tmpfiles-setup.service swap.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh $STATE_DIR/boot.sh
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+
+	# 4. The record for undo, complete now.
+	save_state
+
+	sys systemctl daemon-reload || die "systemctl daemon-reload failed"
+	sys systemctl enable "$UNIT_NAME" || die "systemctl enable failed"
+
+	# 5. zram swap off, now. The drop-in is in place, so the generator does not bring it back.
+	if [ "$disable_zram" = 1 ]; then
+		local avail_now need
+		avail_now=$(mem_available_mib); avail_now=${avail_now:-0}
+		for z in $(zram_swaps); do
+			need=$(( $(zram_orig_mib "$z") + SWAPOFF_MARGIN_MIB ))
+			if [ "$(disk_swap_count)" -eq 0 ] && [ -z "$ROOT" ] && [ "$DRY" != 1 ]; then
+				say "no disk swap is active; keeping $z"
+				continue
+			fi
+			if [ -z "$ROOT" ] && [ "$DRY" != 1 ] && [ "$avail_now" -lt "$need" ]; then
+				say "not enough free memory (${avail_now} MiB, need ${need} MiB) to move $z back to RAM now; it goes off at the next boot"
+				continue
+			fi
+			sys swapoff "/dev/$z" || { say "swapoff /dev/$z failed; it goes off at the next boot"; continue; }
+			sys_try systemctl stop "systemd-zram-setup@$z.service"
+			sys_try systemctl mask --runtime "dev-$z.swap" "systemd-zram-setup@$z.service"
+			say "$z swap is off"
+		done
+	fi
+	say "done: zswap on now and at every boot"
+}
+
+# ---- undo ----
+
+undo() {
+	if emulator_running; then
+		[ "$DRY" = 1 ] && say "note: an emulator is running; the real undo would refuse" || die "an emulator is running; close it and try again"
+	fi
+	if [ ! -f "$ROOT$STATE_DIR/state" ] && [ ! -e "$ROOT$UNIT" ] && [ ! -e "$ROOT$DROPIN" ]; then
+		say "nothing to undo: the launcher's host memory tuning is not installed"
+		exit 0
+	fi
+	local prev_enabled prev_comp prev_pool prev_shrinker swapfile subvol zram_list z
+	prev_enabled=$(state_get prev_zswap_enabled); prev_comp=$(state_get prev_zswap_compressor)
+	prev_pool=$(state_get prev_zswap_pool); prev_shrinker=$(state_get prev_zswap_shrinker)
+	swapfile=$(state_get swapfile); subvol=$(state_get swapdir_subvolume); zram_list=$(state_get zram_disabled)
+
+	sys_try systemctl disable "$UNIT_NAME"
+	remove_file "$UNIT"
+	remove_file "$DROPIN"
+	remove_file "$STATE_DIR/boot.sh"
+	sys systemctl daemon-reload || true
+
+	# zswap back to what it was.
+	case "$prev_enabled" in
+		Y|y|1) ;;
+		*) [ -e "$(param enabled)" ] && sys_try sh -c "echo N > '$(param enabled)'" ;;
+	esac
+	[ -n "$prev_pool" ] && sys_try sh -c "echo $prev_pool > '$(param max_pool_percent)'"
+	[ -n "$prev_comp" ] && sys_try sh -c "echo $prev_comp > '$(param compressor)'"
+	if [ -n "$prev_shrinker" ] && [ -e "$(param shrinker_enabled)" ]; then
+		case "$prev_shrinker" in Y|y|1) sys_try sh -c "echo Y > '$(param shrinker_enabled)'" ;; *) sys_try sh -c "echo N > '$(param shrinker_enabled)'" ;; esac
+	fi
+	say "zswap back to: enabled=${prev_enabled:-?} compressor=${prev_comp:-?} pool=${prev_pool:-?}%"
+
+	# zram swap back on.
+	for z in $zram_list; do
+		sys_try systemctl unmask --runtime "dev-$z.swap" "systemd-zram-setup@$z.service"
+		sys_try systemctl start "systemd-zram-setup@$z.service"
+		sys_try systemctl start "dev-$z.swap"
+		say "$z swap is back on"
+	done
+
+	# The swapfile we created.
+	if [ -n "$swapfile" ]; then
+		local used avail
+		used=$(awk -v f="$swapfile" 'NR > 1 && $1 == f {print int($4 / 1024)}' "$ROOT/proc/swaps" 2>/dev/null)
+		avail=$(mem_available_mib)
+		if [ -n "$used" ] && [ -z "$ROOT" ] && [ "$DRY" != 1 ] && [ "${avail:-0}" -lt $((used + SWAPOFF_MARGIN_MIB)) ]; then
+			say "the swapfile holds ${used} MiB and only ${avail:-0} MiB of RAM is free; it is kept. Close programs and press Undo again."
+			exit 1
+		fi
+		[ -n "$used" ] && { sys swapoff "$ROOT$swapfile" || { say "swapoff failed; the swapfile is kept"; exit 1; }; }
+		remove_file "$swapfile"
+		if [ "$subvol" = 1 ]; then sys_try btrfs subvolume delete "$ROOT$SWAP_DIR"; else
+			[ "$DRY" = 1 ] && echo "would remove directory $ROOT$SWAP_DIR" || rmdir "$ROOT$SWAP_DIR" 2>/dev/null
+		fi
+	fi
+	remove_file "$STATE_DIR/state"
+	if [ "$DRY" != 1 ]; then rmdir "$ROOT$STATE_DIR" 2>/dev/null; rmdir "$ROOT$DROPIN_DIR" 2>/dev/null; fi
+	say "done: the launcher's host memory tuning is removed"
+}
+
+# ---- main ----
+
+[ $# -ge 1 ] || die "usage: kyty-host-memory apply|undo [options] [--dry-run]"
+CMD="$1"; shift
+ARGS=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--dry-run) DRY=1; shift ;;
+		--root) ROOT="${2:-}"; [ -n "$ROOT" ] || die "--root needs a directory"; shift 2 ;;
+		*) ARGS+=("$1"); shift ;;
+	esac
+done
+ROOT=${ROOT%/}
+
+if [ "$DRY" != 1 ] && [ -z "$ROOT" ] && [ "$(id -u)" != 0 ]; then die "must run as root (the launcher starts it through pkexec)"; fi
+
+case "$CMD" in
+	apply) apply "${ARGS[@]+"${ARGS[@]}"}" ;;
+	undo) undo ;;
+	*) die "unknown command: $CMD" ;;
+esac

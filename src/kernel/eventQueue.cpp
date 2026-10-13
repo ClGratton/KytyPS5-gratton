@@ -10,6 +10,7 @@
 #include "libs/libs.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <fmt/format.h>
 #include <limits>
@@ -257,6 +258,24 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
 	}
 
 	return KERNEL_ERROR_ENOENT;
+}
+
+static std::atomic<uint64_t> g_coalesced_triggers {0};
+
+void KernelCoalesceTrigger(KernelEqueueEvent* event, intptr_t data, uint32_t fflags_max) {
+	EXIT_IF(event == nullptr);
+	if (event->triggered) {
+		g_coalesced_triggers.fetch_add(1, std::memory_order_relaxed);
+	}
+	if (event->event.fflags < fflags_max) {
+		event->event.fflags++;
+	}
+	event->event.data = data;
+	event->triggered  = true;
+}
+
+uint64_t KernelCoalescedTriggerCount() {
+	return g_coalesced_triggers.load(std::memory_order_relaxed);
 }
 
 static void UserEventTriggerFunc(KernelEqueueEvent* event, void* trigger_data) {
