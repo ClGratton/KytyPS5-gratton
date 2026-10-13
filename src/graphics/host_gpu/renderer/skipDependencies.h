@@ -65,16 +65,19 @@ enum class ReadKind : uint8_t {
 inline constexpr size_t kReadKinds = static_cast<size_t>(ReadKind::Count);
 
 // How bad it is when a skipped draw's output is read: Visual = the pixels of one frame are wrong
-// (what skip already accepts), Data = buffer / DMA / CPU / geometry data derives from it, Table =
-// descriptors, pointers or draw arguments derive from it (the abort class: garbage V#/T#).
-enum class Sink : uint8_t { Visual = 0, Data = 1, Table = 2 };
-inline constexpr size_t kSinks = 3;
+// (what skip already accepts), Data = buffer / DMA / geometry data derives from it, Cpu = the guest
+// CPU reads it back (game logic can change), Table = descriptors, pointers or draw arguments derive
+// from it (the abort class: garbage V#/T#). Ordered: a reader of a higher class counts for the lower
+// ones too.
+enum class Sink : uint8_t { Visual = 0, Data = 1, Cpu = 2, Table = 3 };
+inline constexpr size_t kSinks = 4;
 
 [[nodiscard]] constexpr Sink SinkOf(ReadKind kind) {
 	switch (kind) {
 		case ReadKind::SampledImage: return Sink::Visual;
 		case ReadKind::ScalarWalk:
 		case ReadKind::IndirectArgs: return Sink::Table;
+		case ReadKind::CpuRead: return Sink::Cpu;
 		default: return Sink::Data;
 	}
 }
@@ -96,6 +99,7 @@ inline constexpr size_t kSinks = 3;
 	switch (sink) {
 		case Sink::Visual: return "visual";
 		case Sink::Data: return "data";
+		case Sink::Cpu: return "cpu";
 		case Sink::Table: return "table";
 	}
 	return "?";
