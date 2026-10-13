@@ -258,8 +258,10 @@ void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	}
 	Common::Hang::Phase phase("lookahead_draw", m_stats.draws.load(std::memory_order_relaxed));
 	RenderExecutor::PrefetchDrawStatus status {};
+	const auto                         call_start = Bench::NowNs();
 	(void)m_renderer.GetRenderExecutor().PrefetchDraw(cp.GetCtx(), cp.GetShCtx(), cp.GetUcfg(),
 	                                                  draw, status);
+	SkipDeps::NoteLookaheadCall("draw", call_start, Bench::NowNs() - call_start);
 }
 
 void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& dispatch) {
@@ -275,9 +277,11 @@ void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& d
 	Common::Hang::Phase phase("lookahead_dispatch", m_stats.dispatches.load(std::memory_order_relaxed));
 	const uint32_t groups[3] = {dispatch.indirect ? 0u : dispatch.x, dispatch.indirect ? 0u : dispatch.y,
 	                            dispatch.indirect ? 0u : dispatch.z};
+	const auto call_start = Bench::NowNs();
 	m_renderer.GetPipelineCache().PrefetchCompute(cp.GetShCtx().GetCs(),
 	                                              cp.GetCtx().GetShaderRegisters(), dispatch.mode,
 	                                              cp.IsAsyncComputeQueue(), groups);
+	SkipDeps::NoteLookaheadCall("dispatch", call_start, Bench::NowNs() - call_start);
 }
 
 } // namespace Libs::Graphics

@@ -31,6 +31,7 @@ thread_local std::array<RecentRead, kRecentReads> t_recent;
 thread_local size_t                               t_recent_count = 0;
 
 std::atomic<int64_t> g_last_dump_ns {0};
+std::atomic<int64_t> g_last_la_dump_ns {0};
 std::atomic<bool>    g_atexit_registered {false};
 
 const char* ThreadName() {
@@ -187,6 +188,33 @@ void NoteUntracked(uint64_t shader_hash, const char* op, const char* reason, boo
 	Row("untracked", shader_hash, 0, reason, op, reads_poison ? "reads_poison=1" : "reads_poison=0");
 }
 
+void NoteLookaheadCall(const char* what, int64_t start_ns, int64_t duration_ns) {
+	if (!Bench::SkipLogEnabled() || duration_ns < 20'000'000) return;
+	auto& p = Progress();
+	p.slow_calls.fetch_add(1, std::memory_order_relaxed);
+	p.slow_total_ns.fetch_add(duration_ns, std::memory_order_relaxed);
+	p.last_slow_ns.store(duration_ns, std::memory_order_relaxed);
+	p.last_slow_end_ns.store(start_ns + duration_ns, std::memory_order_relaxed);
+	const auto la_seq  = p.item_seq.load(std::memory_order_relaxed);
+	const auto started = p.gpu_started.load(std::memory_order_relaxed);
+	char       text[256];
+	std::snprintf(text, sizeof(text),
+	              "what=%s duration_ms=%lld la_seq=%" PRIu64 " gpu_started=%" PRIu64
+	              " gpu_minus_la=%lld item_age_ms=%lld",
+	              what, static_cast<long long>(duration_ns / 1000000), la_seq, started,
+	              static_cast<long long>(static_cast<int64_t>(started - la_seq)),
+	              static_cast<long long>((start_ns + duration_ns - p.item_start_ns.load()) / 1000000));
+	Row("slow_prefetch", 0, 0, "none", "-", text);
+}
+
+void NoteLookaheadPeriodic() {
+	const auto now  = Bench::NowNs();
+	auto       last = g_last_la_dump_ns.load(std::memory_order_relaxed);
+	if (now - last > 5'000'000'000ll && g_last_la_dump_ns.compare_exchange_strong(last, now)) {
+		DumpLookahead("periodic");
+	}
+}
+
 void NoteBadDescriptor(uint64_t shader_hash, const char* what, uint32_t slot, const uint32_t* words,
                        uint32_t word_count) {
 	if (!Bench::SkipLogEnabled()) return;
@@ -202,6 +230,10 @@ void NoteBadDescriptor(uint64_t shader_hash, const char* what, uint32_t slot, co
 	const auto  started  = progress.gpu_started.load(std::memory_order_relaxed);
 	std::string text = "la_seq=" + std::to_string(la_seq) + " gpu_started=" + std::to_string(started) +
 	                   " gpu_minus_la=" + std::to_string(static_cast<int64_t>(started - la_seq)) +
+	                   " item_age_ms=" + std::to_string((Bench::NowNs() - progress.item_start_ns.load()) / 1000000) +
+	                   " last_slow_ms=" + std::to_string(progress.last_slow_ns.load() / 1000000) +
+	                   " last_slow_ended_ms_ago=" +
+	                   std::to_string((Bench::NowNs() - progress.last_slow_end_ns.load()) / 1000000) +
 	                   " what=" + what + " slot=" + std::to_string(slot) +
 	                   " thread=" + ThreadName() + " op=" + t_reader_op +
 	                   " open_entries=" + std::to_string(Global().EntryCount()) + " words=";
@@ -222,24 +254,28 @@ void NoteBadDescriptor(uint64_t shader_hash, const char* what, uint32_t slot, co
 	Row("bad_descriptor", shader_hash, 0, "none", t_reader_op, text);
 }
 
+void DumpLookahead(const char* why) {
+	const auto& p = Progress();
+	char        la[480];
+	std::snprintf(la, sizeof(la),
+	              "items=%" PRIu64 " items_gpu_started_at_start=%" PRIu64 " draws=%" PRIu64
+	              " draws_gpu_started=%" PRIu64 " draws_gpu_passed=%" PRIu64 " gpu_started=%" PRIu64
+	              " la_seq=%" PRIu64 " gpu_minus_la=%lld slow_calls=%" PRIu64 " slow_total_ms=%lld",
+	              p.items.load(), p.items_gpu_started_at_start.load(), p.draws.load(),
+	              p.draws_gpu_started.load(), p.draws_gpu_passed.load(), p.gpu_started.load(),
+	              p.item_seq.load(),
+	              static_cast<long long>(static_cast<int64_t>(p.gpu_started.load() - p.item_seq.load())),
+	              p.slow_calls.load(), static_cast<long long>(p.slow_total_ns.load() / 1000000));
+	Row("lookahead", 0, 0, why, "-", la);
+}
+
 void DumpOpenRoots(const char* why) {
 	const auto now   = Bench::NowNs();
 	const auto roots = Global().OpenRoots();
 	for (const auto& root : roots) {
 		Row("open", root.vs, root.ps, why, "-", FormatRoot(root, now));
 	}
-	{
-		const auto& p = Progress();
-		char        la[320];
-		std::snprintf(la, sizeof(la),
-		              "items=%" PRIu64 " items_gpu_started_at_start=%" PRIu64 " draws=%" PRIu64
-		              " draws_gpu_started=%" PRIu64 " draws_gpu_passed=%" PRIu64 " gpu_started=%" PRIu64
-		              " la_seq=%" PRIu64,
-		              p.items.load(), p.items_gpu_started_at_start.load(), p.draws.load(),
-		              p.draws_gpu_started.load(), p.draws_gpu_passed.load(), p.gpu_started.load(),
-		              p.item_seq.load());
-		Row("lookahead", 0, 0, why, "-", la);
-	}
+	DumpLookahead(why);
 	const auto totals = Global().GetTotals();
 	char       text[256];
 	std::snprintf(text, sizeof(text),

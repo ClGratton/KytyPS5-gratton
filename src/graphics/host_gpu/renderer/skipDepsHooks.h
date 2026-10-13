@@ -75,12 +75,21 @@ struct LookaheadProgress {
 	std::atomic<uint64_t> draws_gpu_passed {0};  // ... and has started a later one
 	std::atomic<uint64_t> items {0};
 	std::atomic<uint64_t> items_gpu_started_at_start {0};
+	std::atomic<int64_t>  item_start_ns {0};
+	// Prefetch calls that kept the lookahead thread busy for 20 ms or more (compile waits, translation).
+	std::atomic<uint64_t> slow_calls {0};
+	std::atomic<int64_t>  slow_total_ns {0};
+	std::atomic<int64_t>  last_slow_ns {0};
+	std::atomic<int64_t>  last_slow_end_ns {0};
 };
 [[nodiscard]] LookaheadProgress& Progress();
+void NoteLookaheadPeriodic();
 inline void NoteLookaheadItem(uint64_t seq, bool started_at_start) {
 	if (!Bench::SkipLogEnabled()) return;
 	auto& p = Progress();
 	p.item_seq.store(seq, std::memory_order_relaxed);
+	p.item_start_ns.store(Bench::NowNs(), std::memory_order_relaxed);
+	NoteLookaheadPeriodic();
 	p.items.fetch_add(1, std::memory_order_relaxed);
 	if (started_at_start) p.items_gpu_started_at_start.fetch_add(1, std::memory_order_relaxed);
 }
@@ -97,8 +106,13 @@ inline void NoteLookaheadDraw(uint64_t item_seq) {
 	if (item_seq != 0 && item_seq < started) p.draws_gpu_passed.fetch_add(1, std::memory_order_relaxed);
 }
 
+// One prefetch call (draw or dispatch) took `duration_ns`; calls of 20 ms or more get a `slow_prefetch`
+// row with the lookahead's lag behind the GPU thread when it returned.
+void NoteLookaheadCall(const char* what, int64_t start_ns, int64_t duration_ns);
+
 // Writes the rows of still-waiting roots (periodically from NoteSkippedDraw, and at exit).
 void DumpOpenRoots(const char* why);
+void DumpLookahead(const char* why);
 
 [[nodiscard]] std::string FormatRange(const Range& range);
 
