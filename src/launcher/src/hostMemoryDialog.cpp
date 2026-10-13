@@ -81,6 +81,8 @@ HostMemoryDialog::HostMemoryDialog(QWidget* parent): QDialog(parent) {
 
 	m_explanation = WrappedLabel(this);
 	layout->addWidget(m_explanation);
+	m_summary = WrappedLabel(this);
+	layout->addWidget(m_summary);
 	m_drawbacks = WrappedLabel(this);
 	layout->addWidget(m_drawbacks);
 	m_note = WrappedLabel(this);
@@ -91,7 +93,7 @@ HostMemoryDialog::HostMemoryDialog(QWidget* parent): QDialog(parent) {
 	m_facts            = new QPlainTextEdit(facts_box);
 	m_facts->setReadOnly(true);
 	m_facts->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-	m_facts->setLineWrapMode(QPlainTextEdit::NoWrap);
+	m_facts->setLineWrapMode(QPlainTextEdit::WidgetWidth);
 	m_facts->setMinimumHeight(130);
 	facts_layout->addWidget(m_facts);
 	layout->addWidget(facts_box);
@@ -163,6 +165,8 @@ void HostMemoryDialog::SetReport(const HostMemoryReport& report) {
 	m_headline->setText(report.headline);
 	m_explanation->setText(report.explanation);
 	m_explanation->setVisible(!report.explanation.isEmpty());
+	m_summary->setText(report.summary);
+	m_summary->setVisible(!report.summary.isEmpty());
 	m_drawbacks->setText(report.drawbacks);
 	m_drawbacks->setVisible(!report.drawbacks.isEmpty());
 	m_note->setText(report.note);

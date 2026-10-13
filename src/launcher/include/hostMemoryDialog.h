@@ -37,6 +37,7 @@ private:
 	HostMemoryReport m_report;
 	QLabel*          m_headline    = nullptr;
 	QLabel*          m_explanation = nullptr;
+	QLabel*          m_summary     = nullptr;
 	QLabel*          m_drawbacks   = nullptr;
 	QLabel*          m_note        = nullptr;
 	QPlainTextEdit*  m_facts       = nullptr;

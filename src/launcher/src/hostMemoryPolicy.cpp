@@ -315,6 +315,24 @@ std::string DrawbacksLinux(const Advice& advice) {
 	return out.str();
 }
 
+std::string ActionSummaryLinux(const Advice& advice) {
+	if (advice.action == Action::None) {
+		return {};
+	}
+	std::ostringstream out;
+	out << "Apply will: ";
+	if (advice.action == Action::CreateSwapfile) {
+		out << "create a " << Gib(advice.swapfile_mib) << " swapfile on disk, ";
+	}
+	out << "turn on zswap (zstd, pool " << advice.pool_percent << "% of RAM)";
+	if (advice.disable_zram) {
+		out << " and switch zram swap off";
+	}
+	out << ", right now and at every boot (a systemd service). You are asked for your administrator password. "
+	       "Preview shows the exact steps without changing anything.";
+	return out.str();
+}
+
 std::vector<std::string> ApplyArguments(const Advice& advice) {
 	std::vector<std::string> args;
 	if (advice.action == Action::None) {
@@ -609,6 +627,22 @@ std::string DrawbacksWindows(const WindowsAdvice& advice) {
 		out << " Undo restores the previous settings.";
 	}
 	return out.str();
+}
+
+std::string ActionSummaryWindows(const WindowsAdvice& advice) {
+	if (!advice.system_managed_pagefile && !advice.enable_memory_compression) {
+		return {};
+	}
+	std::string out = "Apply will: ";
+	if (advice.system_managed_pagefile) {
+		out += "let Windows manage the pagefile size";
+	}
+	if (advice.enable_memory_compression) {
+		out += std::string(advice.system_managed_pagefile ? " and " : "") + "turn memory compression on";
+	}
+	out += ", after a Windows administrator (UAC) prompt, effective after a restart. Preview shows the exact steps "
+	       "without changing anything.";
+	return out;
 }
 
 } // namespace HostMemory

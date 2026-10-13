@@ -5,6 +5,7 @@
 #include "emulatorArgs.h"
 #include "configurationEditDialog.h"
 #include "emulatorOptions.h"
+#include "hostMemoryReport.h"
 #include "mainDialog.h"
 
 #include <QCoreApplication>
@@ -263,6 +264,19 @@ int RunSelfCheck(const QStringList& args) {
 	r.Check(HasFlag(preset_args, QStringLiteral("--async-pipelines"), QStringLiteral("stall")) &&
 	            HasFlag(preset_args, QStringLiteral("--pipeline-lookahead"), QStringLiteral("true")),
 	        QStringLiteral("preset command line passes stall + lookahead"));
+
+#if !defined(_WIN32)
+	// The "Host memory" window: its helper script is installed next to the launcher, and the report builds on this host.
+	{
+		const auto helper = HostMemoryTool::HelperPath();
+		r.Check(!helper.isEmpty() && QFileInfo(helper).isExecutable(),
+		        QStringLiteral("the host memory helper script is next to the launcher and executable"), helper);
+		HostMemoryReport report;
+		HostMemoryTool::Detect(nullptr, [&report](const HostMemoryReport& found) { report = found; });
+		r.Check(!report.headline.isEmpty() && !report.facts.isEmpty(),
+		        QStringLiteral("the host memory report is built from this host"));
+	}
+#endif
 
 	const auto emulator = FindEmulator(args);
 	if (emulator.isEmpty()) {

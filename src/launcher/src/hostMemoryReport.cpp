@@ -71,6 +71,7 @@ HostMemoryReport MakeLinuxReport(const LinuxFacts& facts, const QString& helper_
 	report.verdict     = advice.verdict;
 	report.headline    = Headline(advice.verdict, false);
 	report.explanation = Q(ExplainLinux(facts, advice));
+	report.summary     = Q(ActionSummaryLinux(advice));
 	report.drawbacks   = Q(DrawbacksLinux(advice));
 	report.facts       = Q(DescribeLinux(facts)).trimmed();
 	report.helper_path = helper_path;
@@ -106,6 +107,7 @@ HostMemoryReport MakeWindowsReport(const WindowsFacts& facts, const QString& hel
 	report.verdict     = advice.verdict;
 	report.headline    = Headline(advice.verdict, true);
 	report.explanation = Q(ExplainWindows(facts, advice));
+	report.summary     = Q(ActionSummaryWindows(advice));
 	report.drawbacks   = Q(DrawbacksWindows(advice));
 	report.facts       = Q(DescribeWindows(facts)).trimmed();
 	report.helper_path = helper_path;

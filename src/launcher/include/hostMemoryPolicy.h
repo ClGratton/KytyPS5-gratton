@@ -181,6 +181,8 @@ std::string DescribeLinux(const LinuxFacts& facts);
 std::string ExplainLinux(const LinuxFacts& facts, const Advice& advice);
 // The drawbacks of the proposed action (empty when there is no action).
 std::string DrawbacksLinux(const Advice& advice);
+// What Apply does, in plain words (empty when there is no action).
+std::string ActionSummaryLinux(const Advice& advice);
 // Arguments of `kyty-host-memory apply` for this advice (empty when there is no action).
 std::vector<std::string> ApplyArguments(const Advice& advice);
 
@@ -238,6 +240,7 @@ WindowsFacts ParseWindowsFacts(const std::string& text);
 std::string  DescribeWindows(const WindowsFacts& facts);
 std::string  ExplainWindows(const WindowsFacts& facts, const WindowsAdvice& advice);
 std::string  DrawbacksWindows(const WindowsAdvice& advice);
+std::string  ActionSummaryWindows(const WindowsAdvice& advice);
 
 } // namespace HostMemory
 

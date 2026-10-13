@@ -19,6 +19,7 @@ struct HostMemoryReport {
 
 	QString headline;     // one line
 	QString explanation;  // why
+	QString summary;      // what Apply does, in words (empty without an action)
 	QString drawbacks;    // costs of the proposed action (empty without one)
 	QString facts;        // what was detected, one fact per line
 	QString note;         // a restart is needed, the emulator must be closed, ... (empty when none)

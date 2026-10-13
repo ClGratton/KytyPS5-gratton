@@ -49,7 +49,8 @@ int RunHostMemory(const QStringList& args) {
 }
 
 int RunGrabHostMemory(const QStringList& args) {
-	if (args.isEmpty()) {
+	const auto png_at = args.indexOf(QStringLiteral("--grab-host-memory"));
+	if (png_at < 0 || png_at + 1 >= args.size()) {
 		QTextStream(stderr) << "usage: launcher --grab-host-memory <png> [--root <dir>]\n";
 		return 2;
 	}
@@ -61,5 +62,5 @@ int RunGrabHostMemory(const QStringList& args) {
 #endif
 	dialog.show();
 	QCoreApplication::processEvents();
-	return dialog.grab().save(args.first()) ? 0 : 1;
+	return dialog.grab().save(args.at(png_at + 1)) ? 0 : 1;
 }

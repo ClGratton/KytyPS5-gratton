@@ -208,6 +208,10 @@ void TestLinuxDecisionTable() {
 		const auto a     = DecideLinux(facts);
 		Check(DescribeLinux(facts).find("zram") != std::string::npos, "the description lists zram");
 		Check(!ExplainLinux(facts, a).empty() && !DrawbacksLinux(a).empty(), "advice has an explanation and drawbacks");
+		const auto summary = ActionSummaryLinux(a);
+		Check(summary.find("zswap") != std::string::npos && summary.find("zram") != std::string::npos && summary.find("21%") != std::string::npos,
+		      "the summary says what Apply does");
+		Check(ActionSummaryLinux(Advice {}).empty(), "no summary without an action");
 		Check(DrawbacksLinux(DecideLinux([] { auto f = Laptop16(); f.ram_mib = 32 * kGiB; return f; }())).empty(),
 		      "no drawbacks text without an action");
 	}
@@ -414,6 +418,9 @@ void TestWindows() {
 		const auto a              = DecideWindows(facts);
 		Check(a.system_managed_pagefile && a.enable_memory_compression && a.blocked && a.undo_available, "windows: both problems, blocked while running, undo available");
 		Check(!ExplainWindows(facts, a).empty() && !DrawbacksWindows(a).empty() && !DescribeWindows(facts).empty(), "windows: texts");
+		Check(ActionSummaryWindows(a).find("pagefile") != std::string::npos && ActionSummaryWindows(a).find("compression") != std::string::npos,
+		      "windows: the summary names both changes");
+		Check(ActionSummaryWindows(WindowsAdvice {}).empty(), "windows: no summary without an action");
 	}
 	{
 		auto facts = Pc16(PagefileMode::SystemManaged, 40 * kGiB, 6 * kGiB);
