@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 
+#include "common/speculation.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <sys/prctl.h>
@@ -92,6 +93,20 @@ LookaheadProgress& Progress() {
 	static LookaheadProgress progress;
 	return progress;
 }
+
+// A speculative abort ends the lookahead: write when and where to the skip log.
+void OnSpeculativeAbort(const char* file, int line, std::string_view text) {
+	if (!Bench::SkipLogEnabled()) return;
+	std::string row = "spec_abort,0000000000000000,0000000000000000,none,-,";
+	row += std::string(file) + ":" + std::to_string(line) + " ";
+	for (const char c: text) row += (c == ',' || c == '\n' || c == '\r') ? ' ' : c;
+	Bench::LogSkipRow(row);
+}
+
+const bool g_observer_registered = [] {
+	Common::Speculation::SetAbortObserver(&OnSpeculativeAbort);
+	return true;
+}();
 
 Tracker& Global() {
 	static Tracker tracker;

@@ -45,6 +45,10 @@ void               NoteFailure() noexcept;
 // so its owner can drop the job and start a replacement thread. Thread-local; null clears it.
 using AbortHandler = void (*)(void* user);
 void SetThreadAbortHandler(AbortHandler handler, void* user) noexcept;
+// Optional observer called (on the aborting thread, before it parks) for every speculative abort:
+// a diagnostics hook, e.g. the skip log. Null clears it.
+using AbortObserver = void (*)(const char* file, int line, std::string_view text);
+void SetAbortObserver(AbortObserver observer) noexcept;
 // Number of isolated aborts so far (all threads).
 [[nodiscard]] uint32_t IsolatedAborts() noexcept;
 

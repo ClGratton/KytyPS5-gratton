@@ -1,7 +1,5 @@
 #include "common/speculation.h"
 
-#include "common/benchInstrument.h"
-
 #include <chrono>
 #include <string>
 #include <cstdio>
@@ -20,7 +18,12 @@ std::atomic<bool>    g_aborted {false};
 thread_local AbortHandler t_abort_handler = nullptr;
 thread_local void*        t_abort_user    = nullptr;
 std::atomic<uint32_t>     g_isolated_aborts {0};
+std::atomic<AbortObserver> g_abort_observer {nullptr};
 } // namespace
+
+void SetAbortObserver(AbortObserver observer) noexcept {
+	g_abort_observer.store(observer, std::memory_order_release);
+}
 
 void SetThreadAbortHandler(AbortHandler handler, void* user) noexcept {
 	t_abort_handler = handler;
@@ -111,12 +114,8 @@ void Abort(const char* file, int line, std::string_view text) {
 		}
 	}
 	t_held_count = 0;
-	if (Bench::SkipLogEnabled()) {
-		// --debug-skip-log: when and where the lookahead died.
-		std::string row = "spec_abort,0000000000000000,0000000000000000,none,-,";
-		row += std::string(file) + ":" + std::to_string(line) + " ";
-		for (const char c: text) row += (c == ',' || c == '\n' || c == '\r') ? ' ' : c;
-		Bench::LogSkipRow(row);
+	if (const auto observer = g_abort_observer.load(std::memory_order_acquire)) {
+		observer(file, line, text);
 	}
 	if (t_abort_handler != nullptr) {
 		const auto count = g_isolated_aborts.fetch_add(1, std::memory_order_acq_rel) + 1;
