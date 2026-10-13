@@ -61,20 +61,21 @@ void TestDependentCounting() {
 	t.NoteRead({0x1000, 4}, ReadKind::SampledImage, 7, hits);
 	auto totals = t.GetTotals();
 	Check(totals.skip_events == 2 && totals.dependent[0] == 2 && totals.dependent[1] == 0 &&
-	          totals.dependent[2] == 0,
+	          totals.dependent[2] == 0 && totals.dependent[3] == 0,
 	      "a visual read marks both events visual-dependent only");
 	t.NoteSkip(kKey, 1, 2, std::span(&rt, 1), 2); // third event, no reader since
 	totals = t.GetTotals();
 	Check(totals.skip_events == 3 && totals.dependent[0] == 2, "a later event without a reader stays free");
 	t.NoteRead({0x1000, 4}, ReadKind::ScalarWalk, 9, hits);
 	totals = t.GetTotals();
-	Check(totals.dependent[0] == 3 && totals.dependent[1] == 3 && totals.dependent[2] == 3,
-	      "a table read marks every event at all three levels");
+	Check(totals.dependent[0] == 3 && totals.dependent[1] == 3 && totals.dependent[2] == 3 &&
+	          totals.dependent[3] == 3,
+	      "a table read marks every event at all four levels");
 	const auto done = t.NoteReady(kKey, 100);
-	Check(done.size() == 1 && done[0].skips == 3 && done[0].dependent[2] == 3, "resolve reports the stats");
+	Check(done.size() == 1 && done[0].skips == 3 && done[0].dependent[3] == 3, "resolve reports the stats");
 	Check(!t.Active(), "no poison left");
 	totals = t.GetTotals();
-	Check(totals.resolved == 1 && totals.dependent[2] == 3 && totals.skip_events == 3,
+	Check(totals.resolved == 1 && totals.dependent[3] == 3 && totals.skip_events == 3,
 	      "totals survive the resolve");
 }
 
@@ -103,7 +104,7 @@ void TestTaintChain() {
 	          walk[0].roots[0] == id,
 	      "attributed to the skipped draw at depth 1");
 	const auto totals = t.GetTotals();
-	Check(totals.dependent[2] == 1, "the root has a table-class dependent through the chain");
+	Check(totals.dependent[3] == 1 && totals.dependent[0] == 1, "the root has a table-class dependent through the chain");
 	// A second pass reading the table and writing another buffer: depth 2.
 	const Range second {0xa000, 0x40};
 	t.NoteTaint(walk, std::span(&second, 1));
@@ -166,8 +167,9 @@ void TestCapacity() {
 void TestSinks() {
 	Check(SinkOf(ReadKind::SampledImage) == Sink::Visual, "image reads are visual");
 	Check(SinkOf(ReadKind::BufferRead) == Sink::Data && SinkOf(ReadKind::Dma) == Sink::Data &&
-	          SinkOf(ReadKind::CpuRead) == Sink::Data && SinkOf(ReadKind::IndexOrVertex) == Sink::Data,
-	      "buffer, DMA, CPU and geometry reads are data");
+	          SinkOf(ReadKind::IndexOrVertex) == Sink::Data,
+	      "buffer, DMA and geometry reads are data");
+	Check(SinkOf(ReadKind::CpuRead) == Sink::Cpu, "a CPU readback steers game logic");
 	Check(SinkOf(ReadKind::ScalarWalk) == Sink::Table && SinkOf(ReadKind::IndirectArgs) == Sink::Table,
 	      "descriptor walks and draw arguments are tables");
 }

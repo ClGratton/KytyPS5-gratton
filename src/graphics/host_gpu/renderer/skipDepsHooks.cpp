@@ -56,9 +56,10 @@ std::string FormatReads(const std::array<uint32_t, kReadKinds>& reads) {
 std::string FormatRoot(const RootStats& root, int64_t now_ns) {
 	char text[512];
 	std::snprintf(text, sizeof(text),
-	              "id=%u skips=%u dep_visual=%u dep_data=%u dep_table=%u age_ms=%lld reads=%s "
+	              "id=%u skips=%u dep_visual=%u dep_data=%u dep_cpu=%u dep_table=%u age_ms=%lld reads=%s "
 	              "transitive=%s",
 	              root.id, root.skips, root.dependent[0], root.dependent[1], root.dependent[2],
+	              root.dependent[3],
 	              static_cast<long long>(((root.ready_ns != 0 ? root.ready_ns : now_ns) - root.first_ns) /
 	                                     1000000),
 	              FormatReads(root.reads).c_str(), FormatReads(root.transitive_reads).c_str());
@@ -243,9 +244,10 @@ void DumpOpenRoots(const char* why) {
 	char       text[256];
 	std::snprintf(text, sizeof(text),
 	              "skip_events=%" PRIu64 " roots=%" PRIu64 " resolved=%" PRIu64 " dropped=%" PRIu64
-	              " dep_visual=%" PRIu64 " dep_data=%" PRIu64 " dep_table=%" PRIu64 " live=%zu",
+	              " dep_visual=%" PRIu64 " dep_data=%" PRIu64 " dep_cpu=%" PRIu64 " dep_table=%" PRIu64
+	              " live=%zu",
 	              totals.skip_events, totals.entries, totals.resolved, totals.dropped_entries,
-	              totals.dependent[0], totals.dependent[1], totals.dependent[2],
+	              totals.dependent[0], totals.dependent[1], totals.dependent[2], totals.dependent[3],
 	              Global().EntryCount());
 	Row("summary", 0, 0, why, "-", text);
 }
