@@ -289,6 +289,16 @@ struct ConfigOptions {
 	// validity check, instead of materializing the draw's SRT itself; it falls back to its own path
 	// when the check fails or no plan is there. Needs --pipeline-lookahead. Default off.
 	bool                   srt_plans                   = false;
+	// --skip-guard: with --async-pipelines skip, learn from the readers of the memory skipped draws
+	// should have written (descriptor-table walks, indirect arguments, CP DMA, CPU readbacks,
+	// index/vertex data); once one reads such memory, later draws that write it wait for their
+	// pipeline instead of being skipped. Loud log lines and a summary (skipDependencies.h). Skip
+	// stays an opt-in bridge; this narrows what it may drop. Default off.
+	bool                   skip_guard                  = false;
+	// --skip-guard-64bit: with --skip-guard, a shader that loads through 64-bit addresses and also
+	// reads a skipped draw's output makes that output unsafe too (those loads are invisible to the
+	// tracker). Default on; needs --skip-guard.
+	bool                   skip_guard_bda              = true;
 	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
 	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
 	bool                   clean_guest_reads           = false;
@@ -384,6 +394,9 @@ bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();
 bool              SrtPlanShadowEnabled();
 bool              SrtPlansEnabled();
+bool              SkipGuardEnabled();
+bool              SkipGuardRequested();
+bool              SkipGuardBdaEnabled();
 bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
