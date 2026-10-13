@@ -885,6 +885,14 @@ if(BUILD_TESTING)
 	add_test(NAME buffer_gc_gate COMMAND $<TARGET_FILE:buffer_gc_gate_tests>)
 	add_test(NAME config_defaults COMMAND $<TARGET_FILE:config_defaults_tests>)
 	add_test(NAME host_memory_policy COMMAND $<TARGET_FILE:host_memory_policy_tests>)
+	if(UNIX)
+		# The root helper of the "Host memory" window, run against a fake root (no root, no system change).
+		add_test(NAME host_memory_helper
+		         COMMAND bash "${KYTY_TESTS_DIR}/host_memory_helper_test.sh"
+		                 "${KYTY_SOURCE_DIR}/launcher/host/kyty-host-memory"
+		                 "${KYTY_SOURCE_DIR}/launcher/include/hostMemoryPolicy.h"
+		                 "${KYTY_SOURCE_DIR}/launcher/include/hostMemoryProbe.h")
+	endif()
 	add_test(NAME skipped_draw_log COMMAND $<TARGET_FILE:skipped_draw_log_tests>)
 	add_test(NAME pipeline_cache_file COMMAND $<TARGET_FILE:pipeline_cache_file_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)

@@ -51,6 +51,20 @@ add_custom_target(stage_updater
 	VERBATIM)
 add_dependencies(launcher kyty_emulator stage_updater)
 
+# Root / administrator helpers of the "Host memory" window. They sit next to the launcher binary.
+foreach(kyty_host_script kyty-host-memory kyty-host-memory.ps1)
+	add_custom_command(TARGET launcher POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${CMAKE_CURRENT_SOURCE_DIR}/host/${kyty_host_script}"
+			"$<TARGET_FILE_DIR:launcher>/${kyty_host_script}"
+		VERBATIM)
+endforeach()
+if(WIN32)
+	install(FILES host/kyty-host-memory.ps1 DESTINATION .)
+elseif(NOT APPLE)
+	install(PROGRAMS host/kyty-host-memory DESTINATION .)
+endif()
+
 # Window-less check of the launcher's options against the emulator (defaults, flags, command lines).
 if(BUILD_TESTING AND LINUX)
 	add_test(NAME launcher_self_check
