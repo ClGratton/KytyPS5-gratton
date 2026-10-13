@@ -27,11 +27,13 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -291,45 +293,60 @@ enum class Lookup : uint8_t {
 	Evicted,  // a plan was made and fell out of the bounded queue unused
 };
 
-// Bounded FIFO of plans, written by the lookahead thread and read by kyGpu.
+// Hand-off of plans from the lookahead thread (single producer) to kyGpu (single consumer), batched
+// per submission. The producer collects plans in a private bucket and publishes it (one lock) every
+// kPublishPlans plans, at the end of a submission and when it moves on to the next one. kyGpu detaches
+// the published pieces of a submission on its first lookup of it (one lock) and then answers every
+// lookup from that bucket without locks: plans are in key order, so the common case is the next
+// entry. A lookup that finds no plan takes the lock again, to merge pieces published since and to say
+// why there is none (not yet looked at, late, evicted, looked at without a plan). Submissions may be
+// consumed in any order and be resumed.
+//
+// Thread contract: Put and NoteProgress from one thread (the lookahead); Take from one thread (kyGpu);
+// NoteLate, Recycle and GetCounters from anywhere.
 class Store {
 public:
 	Store(size_t max_plans, size_t max_bytes): m_max_plans(max_plans), m_max_bytes(max_bytes) {}
 
 	// Lookahead thread.
 	void Put(std::unique_ptr<Plan> plan) {
-		std::vector<std::unique_ptr<Plan>> dropped; // freed outside the lock
-		{
-			std::lock_guard lock(m_mutex);
-			dropped.swap(m_recycled);
-			const auto      key = plan->key;
-			m_bytes += plan->Bytes();
-			auto [it, inserted] = m_map.try_emplace(key);
-			if (!inserted) {
-				m_bytes -= it->second->Bytes();
-				dropped.push_back(std::move(it->second));
+		const auto key = plan->key;
+		if (m_open && m_open->seq != key.seq) Publish();
+		if (!m_open) {
+			m_open      = std::make_unique<Bucket>();
+			m_open->seq = key.seq;
+		}
+		auto& bucket = *m_open;
+		if (!bucket.entries.empty() && !KeyLess(bucket.entries.back().key, key)) {
+			if (bucket.entries.back().key == key) { // a second plan for the same call replaces the first
+				bucket.bytes -= bucket.entries.back().plan->Bytes();
+				bucket.dead.push_back(std::move(bucket.entries.back().plan));
+				bucket.entries.pop_back();
+				--bucket.live;
 			} else {
-				m_fifo.push_back(key);
-			}
-			it->second = std::move(plan);
-			++m_put;
-			while (!m_fifo.empty() && (m_map.size() > m_max_plans || m_bytes > m_max_bytes)) {
-				const auto oldest = m_fifo.front();
-				m_fifo.pop_front();
-				auto found = m_map.find(oldest);
-				if (found == m_map.end()) continue; // taken already
-				m_bytes -= found->second->Bytes();
-				m_evicted = std::max(m_evicted, PositionOf(oldest));
-				dropped.push_back(std::move(found->second));
-				m_map.erase(found);
-				++m_evictions;
+				bucket.sorted = false;
 			}
 		}
+		bucket.bytes += plan->Bytes();
+		++bucket.live;
+		bucket.entries.push_back({key, std::move(plan)});
+		m_put.fetch_add(1, std::memory_order_relaxed);
+		m_open_plans.store(bucket.live, std::memory_order_relaxed);
+		m_open_bytes.store(bucket.bytes, std::memory_order_relaxed);
+		if (bucket.entries.size() >= kPublishPlans) Publish();
 	}
-	// Lookahead thread: every event up to and including `position` has been looked at.
+	// Lookahead thread: every event up to and including `position` has been looked at. A plan lookup
+	// is only answered "made no plan" up to the position whose plans are published, so the open
+	// bucket is published here when the submission ends, and while kyGpu is on this submission or the
+	// one before it (it asks for plans that were made a moment ago); otherwise it stays private.
 	void NoteProgress(Position position) {
-		std::lock_guard lock(m_mutex);
-		m_progress = std::max(m_progress, position);
+		const uint64_t packed = Pack(position);
+		if (!m_open) {
+			RaiseVisible(packed);
+		} else if (position.ordinal == UINT32_MAX ? m_open->seq <= position.seq
+		                                          : m_consumer_seq.load(std::memory_order_relaxed) + 1 >= m_open->seq) {
+			Publish(packed);
+		}
 	}
 	// Lookahead thread: a whole submission was skipped because kyGpu had started it.
 	void NoteLate(uint64_t seq) {
@@ -343,7 +360,7 @@ public:
 		}
 	}
 	// kyGpu (--srt-plans): hands back plans it is done with, so the lookahead thread frees them
-	// (and the buffers a swapped-in snapshot left in them) instead of kyGpu. Freed by the next Put.
+	// (and the buffers a swapped-in snapshot left in them) instead of kyGpu. Freed by the next publish.
 	void Recycle(std::vector<std::unique_ptr<Plan>>&& dead) {
 		std::lock_guard lock(m_mutex);
 		for (auto& plan: dead) m_recycled.push_back(std::move(plan));
@@ -351,19 +368,38 @@ public:
 	}
 	// kyGpu: removes and returns the plan for `key`, or says why there is none.
 	Lookup Take(const Key& key, std::unique_ptr<Plan>& plan) {
-		std::lock_guard lock(m_mutex);
-		const auto      it = m_map.find(key);
-		if (it != m_map.end()) {
-			m_bytes -= it->second->Bytes();
-			plan = std::move(it->second);
-			m_map.erase(it);
-			return Lookup::Ready;
+		if (key.seq > m_noted_seq) {
+			m_noted_seq = key.seq;
+			m_consumer_seq.store(key.seq, std::memory_order_relaxed);
 		}
-		const auto position = PositionOf(key);
-		if (m_late.contains(key.seq)) return Lookup::Late;
-		if (position <= m_evicted) return Lookup::Evicted;
-		if (position <= m_progress) return Lookup::Missing;
-		return Lookup::NotReady;
+		Local* local = FindLocal(key.seq);
+		if (local != nullptr) {
+			if (Find(*local, key, plan)) return Lookup::Ready;
+		}
+		// Slow path: pieces published since, or no bucket at all.
+		std::lock_guard lock(m_mutex);
+		const auto      it = m_published.find(key.seq);
+		if (it != m_published.end()) {
+			m_published_plans -= it->second->live;
+			m_published_bytes -= it->second->bytes;
+			if (local == nullptr) {
+				m_local.push_back({std::move(it->second)});
+				m_published.erase(it);
+				EvictOldestLocal();
+				local = FindLocal(key.seq);
+			} else {
+				AppendBucket(*local->bucket, std::move(*it->second));
+				m_published.erase(it);
+			}
+			if (Find(*local, key, plan)) return Lookup::Ready;
+		}
+		if (local == nullptr) {
+			if (m_late.contains(key.seq)) return Lookup::Late;
+			if (key.seq <= m_evicted_seq) return Lookup::Evicted;
+		}
+		// The lookahead looked at this draw and made no plan, or it has not got there yet.
+		return m_visible.load(std::memory_order_acquire) >= Pack({key.seq, key.ordinal}) ? Lookup::Missing
+		                                                                                   : Lookup::NotReady;
 	}
 
 	struct Counters {
@@ -371,23 +407,176 @@ public:
 	};
 	[[nodiscard]] Counters GetCounters() {
 		std::lock_guard lock(m_mutex);
-		return {m_put, m_evictions, m_map.size(), m_bytes};
+		return {m_put.load(std::memory_order_relaxed), m_evictions,
+		        m_published_plans + m_open_plans.load(std::memory_order_relaxed),
+		        m_published_bytes + m_open_bytes.load(std::memory_order_relaxed)};
 	}
 
 private:
-	std::mutex                                   m_mutex;
-	size_t                                       m_max_plans;
-	size_t                                       m_max_bytes;
-	size_t                                       m_bytes = 0;
-	std::unordered_map<Key, std::unique_ptr<Plan>, KeyHash> m_map;
-	std::vector<std::unique_ptr<Plan>>           m_recycled;
-	std::deque<Key>                              m_fifo;
-	std::unordered_set<uint64_t>                 m_late;
-	std::deque<uint64_t>                         m_late_fifo;
-	Position                                     m_progress;
-	Position                                     m_evicted;
-	uint64_t                                     m_put       = 0;
-	uint64_t                                     m_evictions = 0;
+	static constexpr size_t kMaxLocal     = 16;
+	static constexpr size_t kPublishPlans = 64;
+
+	struct Entry {
+		Key                   key;
+		std::unique_ptr<Plan> plan;
+	};
+	struct Bucket {
+		uint64_t                           seq = 0;
+		std::vector<Entry>                 entries;
+		std::vector<std::unique_ptr<Plan>> dead; // replaced before the bucket was published
+		size_t                             live   = 0;
+		size_t                             bytes  = 0;
+		bool                               sorted = true;
+	};
+	struct Local {
+		std::unique_ptr<Bucket> bucket;
+		size_t                  cursor = 0;
+	};
+
+	static bool KeyLess(const Key& a, const Key& b) {
+		return a.seq != b.seq ? a.seq < b.seq : a.ordinal != b.ordinal ? a.ordinal < b.ordinal : a.call < b.call;
+	}
+	static uint64_t Pack(Position p) { return (p.seq << 24u) | std::min<uint32_t>(p.ordinal, 0xffffffu); }
+
+	static void PrefetchBody(const Plan& p) {
+		__builtin_prefetch(p.snapshot.user_data.data(), 0, 3);
+		__builtin_prefetch(p.workgroup_counts.data(), 0, 3);
+		__builtin_prefetch(p.reads.windows.data(), 0, 3);
+		__builtin_prefetch(p.reads.runs.data(), 0, 3);
+		__builtin_prefetch(p.reads.values.data(), 0, 3);
+	}
+
+	void RaiseVisible(uint64_t packed) {
+		uint64_t seen = m_visible.load(std::memory_order_relaxed);
+		while (seen < packed && !m_visible.compare_exchange_weak(seen, packed, std::memory_order_release,
+		                                                        std::memory_order_relaxed)) {
+		}
+	}
+
+	// Moves the pieces of `src` (later keys of the same submission) to the end of `dst`.
+	static void AppendBucket(Bucket& dst, Bucket&& src) {
+		if (!src.entries.empty() && !dst.entries.empty() && !KeyLess(dst.entries.back().key, src.entries.front().key)) {
+			dst.sorted = false;
+		}
+		dst.sorted = dst.sorted && src.sorted;
+		dst.live += src.live;
+		dst.bytes += src.bytes;
+		dst.entries.insert(dst.entries.end(), std::make_move_iterator(src.entries.begin()),
+		                   std::make_move_iterator(src.entries.end()));
+		for (auto& d: src.dead) dst.dead.push_back(std::move(d));
+	}
+
+	Local* FindLocal(uint64_t seq) {
+		if (m_hint < m_local.size() && m_local[m_hint].bucket->seq == seq) return &m_local[m_hint];
+		for (size_t i = 0; i < m_local.size(); ++i) {
+			if (m_local[i].bucket->seq == seq) {
+				m_hint = i;
+				return &m_local[i];
+			}
+		}
+		return nullptr;
+	}
+
+	// m_mutex held: the oldest detached bucket (never the newest one) goes back to be freed.
+	void EvictOldestLocal() {
+		if (m_local.size() <= kMaxLocal) return;
+		size_t oldest = 0;
+		for (size_t i = 1; i + 1 < m_local.size(); ++i) {
+			if (m_local[i].bucket->seq < m_local[oldest].bucket->seq) oldest = i;
+		}
+		for (auto& e: m_local[oldest].bucket->entries) if (e.plan) m_recycled.push_back(std::move(e.plan));
+		for (auto& d: m_local[oldest].bucket->dead) m_recycled.push_back(std::move(d));
+		m_local[oldest] = std::move(m_local.back());
+		m_local.pop_back();
+		m_hint = 0;
+	}
+
+	// kyGpu: looks `key` up in a detached bucket; true and `plan` set when its plan was there.
+	static bool Find(Local& local, const Key& key, std::unique_ptr<Plan>& plan) {
+		auto&  bucket  = *local.bucket;
+		auto&  entries = bucket.entries;
+		size_t i       = local.cursor;
+		if (!(i < entries.size() && entries[i].key == key)) {
+			if (bucket.sorted) {
+				i = static_cast<size_t>(std::lower_bound(entries.begin(), entries.end(), key,
+				        [](const Entry& e, const Key& k) { return KeyLess(e.key, k); }) - entries.begin());
+			} else {
+				i = entries.size();
+				for (size_t j = 0; j < entries.size(); ++j) {
+					if (entries[j].key == key && entries[j].plan) { i = j; break; }
+				}
+			}
+		}
+		if (i >= entries.size() || !(entries[i].key == key) || !entries[i].plan) return false;
+		plan         = std::move(entries[i].plan);
+		local.cursor = i + 1;
+		// The next plans are checked next: pull their cache lines in while this one is used.
+		if (i + 1 < entries.size() && entries[i + 1].plan) PrefetchBody(*entries[i + 1].plan);
+		if (i + 2 < entries.size() && entries[i + 2].plan) __builtin_prefetch(entries[i + 2].plan.get(), 0, 3);
+		return true;
+	}
+
+	// Producer: the open bucket becomes visible to kyGpu; the oldest published ones fall out when the
+	// queue is over its limits.
+	void Publish(uint64_t visible_upto = 0) {
+		auto bucket = std::move(m_open);
+		m_open_plans.store(0, std::memory_order_relaxed);
+		m_open_bytes.store(0, std::memory_order_relaxed);
+		std::vector<std::unique_ptr<Plan>> dropped; // freed outside the lock
+		for (auto& d: bucket->dead) dropped.push_back(std::move(d));
+		bucket->dead.clear();
+		std::lock_guard lock(m_mutex);
+		dropped.insert(dropped.end(), std::make_move_iterator(m_recycled.begin()),
+		               std::make_move_iterator(m_recycled.end()));
+		m_recycled.clear();
+		if (bucket->live != 0) {
+			m_published_plans += bucket->live;
+			m_published_bytes += bucket->bytes;
+			const auto seq = bucket->seq;
+			const auto it  = m_published.find(seq);
+			if (it == m_published.end()) {
+				m_published[seq] = std::move(bucket);
+			} else {
+				AppendBucket(*it->second, std::move(*bucket));
+			}
+		}
+		RaiseVisible(visible_upto);
+		while (m_published.size() > 1 && (m_published_plans > m_max_plans || m_published_bytes > m_max_bytes)) {
+			auto oldest = m_published.begin();
+			m_published_plans -= oldest->second->live;
+			m_published_bytes -= oldest->second->bytes;
+			m_evictions += oldest->second->live;
+			m_evicted_seq = std::max(m_evicted_seq, oldest->first);
+			for (auto& e: oldest->second->entries) if (e.plan) dropped.push_back(std::move(e.plan));
+			m_published.erase(oldest);
+		}
+
+
+	}
+
+	size_t                                        m_max_plans;
+	size_t                                        m_max_bytes;
+	// producer only
+	std::unique_ptr<Bucket>                       m_open;
+	// consumer only
+	std::vector<Local>                            m_local;
+	size_t                                        m_hint = 0;
+	uint64_t                                      m_noted_seq = 0;
+	// shared
+	std::atomic<uint64_t>                         m_consumer_seq {0}; // highest submission kyGpu asked about
+	std::atomic<uint64_t>                         m_visible {0}; // looked at, and its plans published
+	std::atomic<uint64_t>                         m_put {0};
+	std::atomic<size_t>                           m_open_plans {0};
+	std::atomic<size_t>                           m_open_bytes {0};
+	std::mutex                                    m_mutex; // guards the members below
+	std::map<uint64_t, std::unique_ptr<Bucket>>   m_published;
+	size_t                                        m_published_plans = 0;
+	size_t                                        m_published_bytes = 0;
+	std::vector<std::unique_ptr<Plan>>            m_recycled;
+	std::unordered_set<uint64_t>                  m_late;
+	std::deque<uint64_t>                          m_late_fifo;
+	uint64_t                                      m_evicted_seq = 0;
+	uint64_t                                      m_evictions   = 0;
 };
 
 // ---- statistics (kyGpu thread only) ---------------------------------------------------------
