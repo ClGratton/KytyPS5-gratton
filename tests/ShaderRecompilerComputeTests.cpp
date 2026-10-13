@@ -5617,6 +5617,31 @@ public:
               Backing(hot_offset) == fourth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
               "a guest read saw the stale copy while an eager write-back was in flight");
 
+      // 5. --eager-readback can be switched off at run time (--toggle-control): a copy already in
+      // flight is still retired (by the next submit, or by a read fault), and no new copy is scheduled.
+      constexpr uint32_t fifth_value = 0x13572468u;
+      constexpr uint32_t sixth_value = 0x2468ace0u;
+      GpuWrite(hot_offset, fifth_value);
+      cache.WriteBackHotPages();
+      Config::Load(Config::ConfigOptions{});
+      Settle();
+      cache.WriteBackHotPages();
+      Require(name, "copy in flight is retired after the flag went off",
+              Backing(hot_offset) == fifth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  !cache.IsRegionGpuModified(base + hot_offset, 4),
+              "an eager copy in flight when the flag was switched off was never retired");
+      GpuWrite(hot_offset, sixth_value);
+      cache.WriteBackHotPages();
+      Settle();
+      Require(name, "no new copy with the flag off",
+              Backing(hot_offset) == fifth_value && cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "an eager copy was scheduled with the flag off");
+      GameThreadFault(hot_offset);
+      Require(name, "fault reads back on demand with the flag off",
+              Backing(hot_offset) == sixth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "the GPU write was lost with the flag off");
+      Config::Load(eager);
+
       cache.ReadMemory(base + cold_offset, sizeof(uint32_t));
       Require(name, "cold page reads back on demand",
               Backing(cold_offset) == second_value,

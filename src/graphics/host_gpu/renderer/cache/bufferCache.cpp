@@ -574,13 +574,14 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
-		if (Config::EagerReadbackEnabled()) {
-			if (guest_read_fault) {
-				m_hot_pages.NoteFault(Common::AlignDown(vaddr, TRACKER_PAGE_SIZE));
-			}
-			// An eager write-back in flight has already taken its bytes out of the GPU-modified
-			// ranges, so finish it (and unprotect what it covered) before looking for anything
-			// left to read.
+		if (guest_read_fault && Config::EagerReadbackEnabled()) {
+			m_hot_pages.NoteFault(Common::AlignDown(vaddr, TRACKER_PAGE_SIZE));
+		}
+		// An eager write-back in flight has already taken its bytes out of the GPU-modified
+		// ranges, so finish it (and unprotect what it covered) before looking for anything left to
+		// read. This runs whether or not --eager-readback is on right now: the flag can be switched
+		// off at run time (--toggle-control) while copies are in flight.
+		{
 			const auto first_page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 			RetireHotPages(first_page, Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE) - first_page,
 			               true);
@@ -700,7 +701,7 @@ bool BufferCache::EagerDownload(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::WriteBackHotPages() {
-	if (m_hot_pages.Empty() || !Config::EagerReadbackEnabled()) {
+	if (m_hot_pages.Empty()) {
 		return;
 	}
 	auto& command = m_scheduler.Current();
@@ -708,6 +709,11 @@ void BufferCache::WriteBackHotPages() {
 		return;
 	}
 	RetireHotPages(0, UINT64_MAX, false);
+	// With the flag off (it can be switched off at run time) copies already in flight are still
+	// retired above, but no new ones are scheduled.
+	if (!Config::EagerReadbackEnabled()) {
+		return;
+	}
 	m_hot_pages.ForEachInRange(0, UINT64_MAX, [&](uint64_t page, HotPageSet::Entry& entry) {
 		if (entry.in_flight_tick != 0 || !m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
 			return;

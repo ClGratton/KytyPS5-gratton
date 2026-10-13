@@ -278,9 +278,8 @@ SubmitCoalescerConfig CoalescerConfigFromGlobals() {
 // Every submit of the recording command buffer: first the eager write-back of hot pages (--eager-readback),
 // whose copies must be recorded into the buffer that is about to be submitted.
 void CommandProcessor::FlushScheduler() {
-	if (Config::EagerReadbackEnabled()) {
-		m_renderer.GetBufferCache().WriteBackHotPages();
-	}
+	// Also with the flag off: copies still in flight from before it was switched off are retired.
+	m_renderer.GetBufferCache().WriteBackHotPages();
 	GetScheduler().Flush();
 }
 
