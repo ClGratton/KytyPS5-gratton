@@ -199,6 +199,9 @@ static void PrintUsage() {
 	::printf("  --debug-texture-gc <true|false|log>  Debug: false disables the texture garbage collector;\n"
 	         "                                       log logs every free of a GPU-written image with\n"
 	         "                                       the flags that decided it. Default: true.\n");
+	::printf("  --compute-gpu-times <seconds>        Every N seconds print the GPU time of each compute\n"
+	         "                                       dispatch per shader and write _compute_gpu_times.csv.\n"
+	         "                                       Adds queries: never an fps baseline. Default: 0 (off).\n");
 	::printf("  --gpu-phase-stats <seconds>          Every N seconds print where the GPU thread spends its\n"
 	         "                                       time (phase shares, submits per frame, drains by\n"
 	         "                                       cause, slowest PM4 packets) and write\n"
@@ -808,6 +811,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--compute-gpu-times") {
+			uint64_t seconds = 0;
+			if (!ParseUint64(value, seconds) || seconds > 3600) {
+				::printf("invalid compute gpu times interval (expected 0-3600 seconds): %s\n",
+				         value.c_str());
+				return false;
+			}
+			options.config.compute_gpu_times_s = static_cast<uint32_t>(seconds);
 		} else if (arg == "--gpu-phase-stats") {
 			uint64_t seconds = 0;
 			if (!ParseUint64(value, seconds) || seconds > 3600) {

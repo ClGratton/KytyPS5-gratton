@@ -99,6 +99,10 @@ bool GetGenericCompute() {
 	return g_config->generic_compute && g_config->async_pipelines != AsyncPipelineMode::Off;
 }
 
+uint32_t GetComputeGpuTimesSeconds() {
+	return g_config->compute_gpu_times_s;
+}
+
 bool GetPipelineVariantsReplay() {
 	return g_config->pipeline_variants_replay && g_config->async_pipelines != AsyncPipelineMode::Off;
 }

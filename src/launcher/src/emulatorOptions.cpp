@@ -263,6 +263,11 @@ QList<Option> BuildTable() {
 	             "per frame, drains by cause) and write _gpu_phase.csv. Adds timers: never use it "
 	             "for an fps comparison.",
 	             EMU_INT(gpu_phase_stats_s), {}, 0, 3600, "Off", " s"});
+	defs.append({"compute_gpu_times", "--compute-gpu-times", Tab::Debug, "Diagnostics", Kind::Int,
+	             "Compute dispatch GPU times interval:",
+	             "Every N seconds print the GPU time of each compute dispatch per shader and write "
+	             "_compute_gpu_times.csv. Adds timestamp queries: never use it for an fps comparison.",
+	             EMU_INT(compute_gpu_times_s), {}, 0, 3600, "Off", " s"});
 	defs.append({"submit_stats", "--submit-stats", Tab::Debug, "Diagnostics", Kind::Int,
 	             "Submit statistics interval:",
 	             "Every N seconds print frames, Vulkan submits per frame and the coalescing "

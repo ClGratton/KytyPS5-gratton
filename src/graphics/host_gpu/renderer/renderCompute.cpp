@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
+#include "graphics/host_gpu/renderer/computeGpuTimes.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -542,7 +543,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			GpuOps::Record(vk_buffer, op, m_context.GetCommandScheduler().CurrentTick());
 			GpuOps::LogShaderBuffers("cs", input_info.stage);
 		}
+		const auto gpu_time = ComputeGpuTimes::Begin(buffer);
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		ComputeGpuTimes::End(buffer, gpu_time, program.shader_hash, thread_group_x, thread_group_y,
+		                     thread_group_z, program.info.generic);
 	}
 
 	// The removed host fence also ordered read-only dispatches before later writers.

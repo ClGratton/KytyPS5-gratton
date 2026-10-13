@@ -230,6 +230,10 @@ struct ConfigOptions {
 	// --gpu-phase-stats <seconds>: report where the GPU thread spends its time every N seconds
 	// (common/gpuPhaseStats.h). 0 = off.
 	uint32_t               gpu_phase_stats_s           = 0;
+	// --compute-gpu-times <seconds>: the GPU time of each compute dispatch per shader, reported every
+	// N seconds and written to _compute_gpu_times.csv (graphics/host_gpu/renderer/computeGpuTimes.h).
+	// 0 = off.
+	uint32_t               compute_gpu_times_s         = 0;
 	// --submit-stats <seconds>: only the frame/submit/coalescing counters, no timers. 0 = off.
 	uint32_t               submit_stats_s              = 0;
 	// --submit-coalesce (K13): hold back the submit of RELEASE_MEM end-of-pipe events (up to
@@ -325,6 +329,7 @@ bool              GetPipelinesUnoptimizedFirst();
 // Both effective only with --async-pipelines on (the builds run on the pool).
 bool              GetPrecompileOnLoad();
 bool              GetGenericCompute();
+uint32_t          GetComputeGpuTimesSeconds();
 bool              GetPipelineVariantsReplay();
 uint32_t          GetPipelineLookaheadKinds();
 uint32_t          GetGpuOpsMode();
