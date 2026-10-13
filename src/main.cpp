@@ -189,6 +189,8 @@ static void PrintUsage() {
 	         "                                       fixed classes uses it, any other compiles its own\n"
 	         "                                       variant (needs --async-pipelines stall|skip).\n"
 	         "                                       Default: false.\n");
+	::printf("  --generic-compute-min-dwords <n>     Binaries shorter than n dwords get no generic variant\n"
+	         "                                       (their compile is too short to stall). Default: 512.\n");
 	::printf("  --pipeline-variants-replay <true|false>\n"
 	         "                                       Record the compute variants the game uses in\n"
 	         "                                       _PipelineCache/<TITLE>.variants and build the stored\n"
@@ -928,6 +930,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--generic-compute-min-dwords") {
+			uint64_t dwords = 0;
+			if (!ParseUint64(value, dwords) || dwords > 0x100000) {
+				::printf("invalid minimum size (expected 0-1048576 dwords): %s\n", value.c_str());
+				return false;
+			}
+			options.config.generic_compute_min_dwords = static_cast<uint32_t>(dwords);
 		} else if (arg == "--pipeline-variants-replay") {
 			if (!ParseBool(value, options.config.pipeline_variants_replay)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

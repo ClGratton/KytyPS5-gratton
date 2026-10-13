@@ -93,6 +93,7 @@ enum class GenericRefusal : uint8_t {
 	TooManyImages,
 	CallSource,        // an S_SWAP_PC program: its callee is linked at run time (set by the cache)
 	Unsupported,       // the translator does not implement the binary (set by the cache)
+	BelowMinSize,      // shorter than --generic-compute-min-dwords: no variant is built (set by the cache)
 	Count,
 };
 

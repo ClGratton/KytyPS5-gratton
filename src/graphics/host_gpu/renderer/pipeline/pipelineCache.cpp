@@ -951,6 +951,7 @@ struct PipelineCache::ProgramCache {
 		kMissRefused,      // the binary has no generic variant (LoadCounters::generic_refusal)
 		kMissOtherStatic,  // registered, but with other static state (queue, wave, dispatch mode)
 		kMissUnregistered, // never seen at registration, or not yet
+		kMissSmall,        // shorter than --generic-compute-min-dwords: no variant is built
 		kMissKinds,
 	};
 	static_assert(kMissKinds <= PipelineCache::LoadCounters::kGenericMissKinds);
@@ -992,6 +993,7 @@ struct PipelineCache::ProgramCache {
 		}
 		const auto found = generic_by_hash.find(key.hash);
 		if (found == generic_by_hash.end()) return kMissUnregistered;
+		if (found->second.refusal == ShaderRecompiler::IR::GenericRefusal::BelowMinSize) return kMissSmall;
 		return found->second.refusal != ShaderRecompiler::IR::GenericRefusal::None ? kMissRefused
 		                                                                  : kMissOtherStatic;
 	}
@@ -1953,6 +1955,7 @@ std::string PipelineCache::LoadCounters::GenericSummary() const {
 				case 1: name = "refused"; break;
 				case 2: name = "other_static_state"; break;
 				case 3: name = "unregistered"; break;
+				case 4: name = "small"; break;
 				default: break;
 			}
 		}
@@ -1968,11 +1971,11 @@ std::string PipelineCache::LoadCounters::GenericSummary() const {
 	const auto n = lead_n.load();
 	return fmt::format(
 	    "registered_cs={};jobs={};built={};refused={};dispatches={};hits={};hit_pct={:.1f};"
-	    "programs_used={};compute_ondemand={};reads_queue={};unsupported={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f}{}{}",
+	    "programs_used={};compute_ondemand={};reads_queue={};unsupported={};small={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f}{}{}",
 	    registered_cs.load(), generic_jobs.load(), generic_built.load(), generic_refused.load(),
 	    dispatches, hits, dispatches != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(dispatches) : 0.0,
 	    generic_programs_used.load(), compute_ondemand.load(), generic_reads_queue.load(),
-	    skipped_unsupported.load(), n,
+	    skipped_unsupported.load(), generic_small.load(), n,
 	    n != 0 ? static_cast<double>(lead_sum_ns.load()) / static_cast<double>(n) / 1e6 : 0.0,
 	    n != 0 ? static_cast<double>(lead_min_ns.load()) / 1e6 : 0.0, misses, refusals);
 }
@@ -2940,13 +2943,19 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 	if (Config::GetGenericCompute()) {
 		// --generic-compute: the generic variant of the binary, which a dispatch with the same
 		// hard signature uses whatever its buffers' strides and its images' swizzles are.
+		if (code_dwords < Config::GetGenericComputeMinDwords()) {
+			m_load.generic_small.fetch_add(1, std::memory_order_relaxed);
+			m_program_cache->NoteGenericVariant(reg.hash, ShaderRecompiler::IR::GenericRefusal::BelowMinSize, true);
+			return;
+		}
 		ShaderComputeInputInfo info {};
 		uint32_t               user_data_count = 0;
 		if (!implied_statics(info, user_data_count)) {
 			m_load.skipped_registers.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		submit(info, user_data_count, std::nullopt, Variants::ComputeVariant::kUnknownFirstUse, true);
+		// The pipelines are compiled longest binary first (the stall is in the long ones).
+		submit(info, user_data_count, std::nullopt, 0x7fffffffu - std::min(code_dwords, 0x3fffffffu), true);
 		return;
 	}
 	if (m_variants != nullptr) {

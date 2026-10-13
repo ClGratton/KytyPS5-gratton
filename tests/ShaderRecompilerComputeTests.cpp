@@ -1057,6 +1057,7 @@ void EnsureConfigInitialized() {
     if (const char *generic = std::getenv("KYTY_TEST_GENERIC_COMPUTE");
         generic != nullptr && std::strcmp(generic, "1") == 0) {
       options.generic_compute = true;
+      options.generic_compute_min_dwords = 4; // the test binaries are a few dwords long
       options.async_pipelines = Config::AsyncPipelineMode::Stall;
       options.pipeline_workers = 4;
     }
@@ -40092,6 +40093,8 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
   // built for, so a dispatch on the other queue would not share it.
   std::vector<u32> queue_code;
   queue_code.push_back(0xb96a0000u | 0x1818u); // s_getreg_b32 vcc_lo, HW_ID2
+  queue_code.push_back(EncodeSopp(0)); // s_nop: long enough for --generic-compute-min-dwords
+  queue_code.push_back(EncodeSopp(0));
   AppendEnd(&queue_code);
   auto *queue_memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
   std::fill(queue_memory, queue_memory + 64, 0u);
@@ -40119,6 +40122,7 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
   std::vector<u32> calls_code;
   calls_code.push_back(EncodeSop1(0x21, 20, 20)); // s_swappc_b64 s[20:21], s[20:21]
   calls_code.push_back(EncodeSop1(0x21, 20, 20));
+  calls_code.push_back(EncodeSopp(0));
   AppendEnd(&calls_code);
   auto *calls_memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
   std::fill(calls_memory, calls_memory + 64, 0u);
@@ -40141,6 +40145,29 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
               load.generic_refusal[static_cast<size_t>(ShaderRecompiler::IR::GenericRefusal::Unsupported)] == 1,
           "a binary with two calls was not skipped with a count");
   std::free(calls_memory);
+
+  // A binary shorter than --generic-compute-min-dwords gets no job: its compile is too short to stall.
+  std::vector<u32> tiny_code;
+  AppendEnd(&tiny_code);
+  auto *tiny_memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
+  std::fill(tiny_memory, tiny_memory + 64, 0u);
+  std::copy(tiny_code.begin(), tiny_code.end(), tiny_memory);
+  const auto tiny_address = reinterpret_cast<uint64_t>(tiny_memory);
+  const auto tiny_bytes = static_cast<u32>(tiny_code.size() * sizeof(u32));
+  auto tiny_registration = registration;
+  tiny_registration.address = tiny_address;
+  tiny_registration.code_size_bytes = tiny_bytes;
+  tiny_registration.hash = ShaderMapUserData(
+      tiny_address, {.type = Prospero::ShaderBinaryType::kCs, .code_size_bytes = tiny_bytes});
+  auto tiny_header = header;
+  tiny_header[0].value = static_cast<u32>(tiny_address >> 8u);
+  tiny_header[1].value = static_cast<u32>(tiny_address >> 40u) & 0xffu;
+  tiny_registration.sh_registers = tiny_header;
+  cache.NoteShaderRegistered(tiny_registration);
+  Require(name, "small idle", cache.WaitLoadIdle(120000), "load jobs did not finish");
+  Require(name, "small skipped", load.registered_cs == 4 && load.generic_small == 1 && load.generic_jobs == 3,
+          "a binary below the minimum size got a generic job");
+  std::free(tiny_memory);
   cache.WaitLoadIdle(120000);
   std::free(memory);
   std::printf("[gpu]     %-32s ok\n", name);

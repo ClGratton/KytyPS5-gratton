@@ -1323,6 +1323,7 @@ const char* GenericRefusalName(GenericRefusal refusal) {
 		case GenericRefusal::TooManyImages: return "too_many_images";
 		case GenericRefusal::CallSource: return "call_source";
 		case GenericRefusal::Unsupported: return "unsupported";
+		case GenericRefusal::BelowMinSize: return "below_min_size";
 		case GenericRefusal::Count: break;
 	}
 	return "?";

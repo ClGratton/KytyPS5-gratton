@@ -213,6 +213,11 @@ struct ConfigOptions {
 	// dispatch whose remaining (hard) fields match uses it, any other dispatch compiles the
 	// specialized variant as before. Needs --async-pipelines stall|skip. Default off.
 	bool                   generic_compute             = false;
+	// --generic-compute-min-dwords <n>: binaries shorter than this are left to the dispatch. A
+	// compute pipeline's driver compile grows faster than its size, so the stall a dispatch waits out
+	// is in the long binaries; the short ones compile in tens of milliseconds and are not worth the
+	// background compile (a game registers several times more binaries than it dispatches).
+	uint32_t               generic_compute_min_dwords  = 512;
 	// --pipeline-variants-replay: record the compute variants the game uses in
 	// _PipelineCache/<TITLE>.variants and, in the next session, build every stored variant of a
 	// shader when the guest registers it. Needs --async-pipelines stall|skip. Default off.
@@ -329,6 +334,7 @@ bool              GetPipelinesUnoptimizedFirst();
 // Both effective only with --async-pipelines on (the builds run on the pool).
 bool              GetPrecompileOnLoad();
 bool              GetGenericCompute();
+uint32_t          GetGenericComputeMinDwords();
 uint32_t          GetComputeGpuTimesSeconds();
 bool              GetPipelineVariantsReplay();
 uint32_t          GetPipelineLookaheadKinds();

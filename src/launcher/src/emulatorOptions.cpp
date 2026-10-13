@@ -93,6 +93,12 @@ QList<Option> BuildTable() {
 	             "compiles its own variant as usual. Experimental."
 	             "\n\nNeeds Async pipelines = stall or skip.",
 	             EMU_BOOL(generic_compute), {}, 0, 0, "", "", true});
+	defs.append({"generic_compute_min_dwords", "--generic-compute-min-dwords", Tab::Shaders, "Pipeline compilation",
+	             Kind::Int, "Generic compute shaders: smallest binary:",
+	             "Compute binaries shorter than this many dwords get no generic variant: their "
+	             "compile is too short to stall, and the game registers several times more binaries "
+	             "than it uses.",
+	             EMU_INT(generic_compute_min_dwords), {}, 0, 1048576, "", " dwords", true});
 	defs.append({"precompile_on_load", "--precompile-on-load", Tab::Shaders, "Pipeline compilation",
 	             Kind::Bool, "Precompile compute shaders when the game loads them (guess)",
 	             "Builds a compute shader's program and pipeline for its most likely variant when the "
