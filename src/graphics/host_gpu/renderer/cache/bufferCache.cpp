@@ -164,11 +164,11 @@ void BufferCache::DeleteBuffer(BufferId id) {
 	}
 }
 
-template <bool async>
-bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
-	std::vector<vk::BufferCopy> copies;
-	uint64_t                    total_size     = 0;
-	const auto                  buffer_address = buffer.CpuAddress();
+// Takes the GPU-modified ranges of [vaddr, vaddr + size) out of the cache's bookkeeping and lists
+// the copies that read them back; dstOffset is the offset in a staging area of `total_size` bytes.
+void BufferCache::CollectDownloadCopies(uint64_t buffer_address, uint64_t vaddr, uint64_t size,
+                                        std::vector<vk::BufferCopy>& copies,
+                                        uint64_t&                    total_size) {
 	m_memory_tracker.ForEachDownloadRange<false>(
 	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
 		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
@@ -180,6 +180,14 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
 	    });
+}
+
+template <bool async>
+bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	std::vector<vk::BufferCopy> copies;
+	uint64_t                    total_size     = 0;
+	const auto                  buffer_address = buffer.CpuAddress();
+	CollectDownloadCopies(buffer_address, vaddr, size, copies, total_size);
 	if (copies.empty()) {
 		return false;
 	}
