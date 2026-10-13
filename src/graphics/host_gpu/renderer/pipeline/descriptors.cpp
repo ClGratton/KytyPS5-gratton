@@ -1152,6 +1152,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		for (const auto* prepared: prepared_bindings) {
 			const auto& program = *prepared->runtime->program;
 			const auto  hash    = program.shader_hash;
+			const auto  hits_before = hits.size();
 			for (const auto& resource: program.info.buffers) {
 				if (resource.descriptor_index == UINT32_MAX ||
 				    resource.descriptor_index >= prepared->buffer_sources.size()) continue;
@@ -1173,11 +1174,20 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					if (resource.written || resource.atomic) note_range(range, true, {}, hash);
 				}
 			}
-			if (program.has_address_writes) {
-				SkipDeps::NoteUntracked(hash, op, "address_writes", !hits.empty());
-			} else if ((program.bindings.descriptor_mask >>
-			            static_cast<uint32_t>(BindingKind::BdaPagetable)) & 1u) {
-				SkipDeps::NoteUntracked(hash, op, "bda_reads", !hits.empty());
+			const char* blind = program.has_address_writes ? "address_writes"
+			                    : ((program.bindings.descriptor_mask >>
+			                        static_cast<uint32_t>(BindingKind::BdaPagetable)) & 1u)
+			                        ? "bda_reads"
+			                        : nullptr;
+			if (blind != nullptr) {
+				const bool reads_poison = hits.size() > hits_before;
+				SkipDeps::NoteUntracked(hash, op, blind, reads_poison);
+				// --skip-guard: what this shader dereferences through 64-bit addresses is invisible, and
+				// it reads a skipped draw's output through its bound resources: be conservative.
+				if (reads_poison) {
+					SkipDeps::NoteBdaSuspect(hash, op, blind,
+					                         std::span<const SkipDeps::Hit>(hits).subspan(hits_before));
+				}
 			}
 		}
 		for (const auto id: m_bound_images) {

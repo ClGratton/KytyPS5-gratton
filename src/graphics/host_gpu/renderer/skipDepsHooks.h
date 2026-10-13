@@ -19,10 +19,77 @@ namespace Libs::Graphics::SkipDeps {
 
 [[nodiscard]] Tracker& Global();
 
+namespace detail {
+inline std::atomic<bool> g_guard_enabled {false};
+} // namespace detail
+
+// --skip-guard is on (the tracker learns and the pipeline cache asks before it skips a draw).
+[[nodiscard]] inline bool GuardEnabled() {
+	return detail::g_guard_enabled.load(std::memory_order_relaxed);
+}
+
+// The tracker is fed: --debug-skip-log writes its rows, --skip-guard acts on what it learns.
+[[nodiscard]] inline bool Enabled() {
+	return Bench::SkipLogEnabled() || GuardEnabled();
+}
+
 // True while some skipped draw's outputs are still poison.
 [[nodiscard]] inline bool Poisoned() {
-	return Bench::SkipLogEnabled() && Global().Active();
+	return Enabled() && Global().Active();
 }
+
+// ---- --skip-guard ---------------------------------------------------------------------------
+// Called once by the pipeline cache when --async-pipelines skip is the mode and --skip-guard is on.
+void ConfigureGuard(bool enabled, bool bda);
+
+// What the draw in flight on the GPU thread would write, asked lazily at the moment the pipeline
+// cache is about to skip it (a miss; the common case never evaluates it). `collect` appends the
+// guest ranges (render targets, depth/stencil, their metadata). The answer is cached for the query.
+class GuardQuery {
+public:
+	// `collect` is a callable taking std::vector<Range>&; it must outlive the query (no allocation:
+	// one of these is built per draw).
+	template <class F>
+	explicit GuardQuery(F& collect)
+	    : m_context(&collect),
+	      m_fn([](void* context, std::vector<Range>& writes) { (*static_cast<F*>(context))(writes); }) {}
+	[[nodiscard]] bool MustWait();
+
+private:
+	void* m_context;
+	void (*m_fn)(void*, std::vector<Range>&);
+	int m_state = -1;
+};
+
+// Installs `query` for the calls that follow on this thread (GPU thread, one draw at a time).
+class GuardScope {
+public:
+	explicit GuardScope(GuardQuery* query);
+	~GuardScope();
+	GuardScope(const GuardScope&)            = delete;
+	GuardScope& operator=(const GuardScope&) = delete;
+
+private:
+	GuardQuery* m_prev;
+};
+
+// The pipeline cache calls this when it would skip a draw: true = the learned rule says the draw
+// writes memory a hard-class reader has read from a skipped draw before, so it waits (like stall
+// mode). Without an installed query the ranges are unknown and the answer is also true.
+[[nodiscard]] bool GuardVetoesSkip();
+
+// A draw waited for its program / pipeline because the guard vetoed the skip.
+void NoteGuardedWait(bool pipeline_stage);
+// A draw waited for its program / pipeline for another reason (store-safety rule, ...), skip mode.
+void NoteOtherWait();
+
+// A shader with 64-bit address loads (or computed stores) read poison through bound resources:
+// what it dereferences is invisible, so the roots it read become unsafe (guard only).
+void NoteBdaSuspect(uint64_t shader_hash, const char* op, const char* reason,
+                    std::span<const Hit> hits);
+
+// One summary line in the emulator log (periodic, and at exit).
+void GuardSummary(const char* why);
 
 // Who is reading, for the SRT-walk hook that cannot see the shader: set around a materialisation.
 class ReaderScope {
@@ -61,7 +128,7 @@ void NoteUntracked(uint64_t shader_hash, const char* op, const char* reason, boo
 // every walk, so the disabled case is one inline atomic load.
 void NoteScalarReadSlow(uint64_t address, uint64_t bytes);
 inline void NoteScalarRead(uint64_t address, uint64_t bytes) {
-	if (Bench::SkipLogEnabled()) NoteScalarReadSlow(address, bytes);
+	if (Enabled()) NoteScalarReadSlow(address, bytes);
 }
 
 // The materialisation of `shader_hash` produced something that is not a descriptor.

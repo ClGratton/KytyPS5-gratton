@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 
+#include "common/logging/log.h"
 #include "common/speculation.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
@@ -32,6 +33,14 @@ thread_local std::array<RecentRead, kRecentReads> t_recent;
 thread_local size_t                               t_recent_count = 0;
 
 std::atomic<int64_t> g_last_dump_ns {0};
+std::atomic<int64_t> g_last_guard_summary_ns {0};
+std::atomic<uint64_t> g_guard_waits_program {0};
+std::atomic<uint64_t> g_guard_waits_pipeline {0};
+std::atomic<uint64_t> g_other_waits {0};
+std::atomic<uint64_t> g_guard_unqueried {0};
+std::atomic<uint64_t> g_guard_queries {0};
+std::atomic<int64_t>  g_read_check_ns {0};
+thread_local GuardQuery* t_guard_query = nullptr;
 std::array<std::atomic<uint64_t>, kReadKinds> g_checked {};
 std::array<std::atomic<uint64_t>, kReadKinds> g_hit {};
 std::atomic<int64_t> g_last_la_dump_ns {0};
@@ -60,10 +69,10 @@ std::string FormatReads(const std::array<uint32_t, kReadKinds>& reads) {
 std::string FormatRoot(const RootStats& root, int64_t now_ns) {
 	char text[512];
 	std::snprintf(text, sizeof(text),
-	              "id=%u skips=%u dep_visual=%u dep_data=%u dep_cpu=%u dep_table=%u age_ms=%lld reads=%s "
-	              "transitive=%s",
+	              "id=%u skips=%u dep_visual=%u dep_data=%u dep_cpu=%u dep_table=%u misses=%u age_ms=%lld "
+	              "reads=%s transitive=%s",
 	              root.id, root.skips, root.dependent[0], root.dependent[1], root.dependent[2],
-	              root.dependent[3],
+	              root.dependent[3], root.misses,
 	              static_cast<long long>(((root.ready_ns != 0 ? root.ready_ns : now_ns) - root.first_ns) /
 	                                     1000000),
 	              FormatReads(root.reads).c_str(), FormatReads(root.transitive_reads).c_str());
@@ -72,6 +81,7 @@ std::string FormatRoot(const RootStats& root, int64_t now_ns) {
 
 void Row(const char* event, uint64_t vs, uint64_t ps, const char* rule, const char* draw,
          const std::string& targets) {
+	if (!Bench::SkipLogEnabled()) return; // --skip-guard alone feeds the tracker but writes no CSV
 	char head[160];
 	std::snprintf(head, sizeof(head), "%s,%016" PRIx64 ",%016" PRIx64 ",%s,%s,", event, vs, ps, rule,
 	              draw);
@@ -80,6 +90,10 @@ void Row(const char* event, uint64_t vs, uint64_t ps, const char* rule, const ch
 
 void DumpAtExit() {
 	DumpOpenRoots("exit");
+}
+
+void GuardLog(const std::string& text) {
+	Log::WriteToConsoleAndLog("SkipGuard: " + text + "\n");
 }
 
 } // namespace
@@ -126,6 +140,14 @@ ReaderScope::~ReaderScope() {
 	t_reader_op   = m_prev_op;
 }
 
+namespace {
+std::string FormatHex(uint64_t value) {
+	char text[24];
+	std::snprintf(text, sizeof(text), "0x%016" PRIx64, value);
+	return text;
+}
+} // namespace
+
 std::string FormatRange(const Range& range) {
 	char text[64];
 	std::snprintf(text, sizeof(text), "0x%" PRIx64 "+0x%" PRIx64, range.address, range.size);
@@ -158,13 +180,37 @@ void NoteDrawReady(uint64_t vs, uint64_t ps) {
 bool NoteRead(const Range& range, ReadKind kind, uint64_t shader_hash, const char* op,
               std::vector<Hit>& hits) {
 	const auto before = hits.size();
+	const bool guard  = GuardEnabled();
+	const auto t0     = guard ? Bench::NowNs() : 0;
 	// Positive control for the "0 readers of this class" results: how many reads of each kind were
 	// checked against live poison, and how many hit.
 	g_checked[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
-	if (!Global().NoteRead(range, kind, shader_hash, hits)) return false;
+	const bool any = Global().NoteRead(range, kind, shader_hash, hits);
+	if (guard) g_read_check_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
+	if (!any) return false;
 	g_hit[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 	for (auto i = before; i < hits.size(); i++) {
 		const auto& hit = hits[i];
+		if (hit.newly_unsafe || hit.new_misses != 0) {
+			// The loud line: the first hard-class read of a skipped draw's output. It makes the output
+			// unsafe (later draws writing it wait) and every skip event of that root up to now was read
+			// by a hard reader, a correctness miss.
+			std::string roots;
+			for (uint32_t r = 0; r < hit.root_count; r++) {
+				roots += (r ? "/" : "") + std::to_string(hit.roots[r]);
+			}
+			char text[640];
+			std::snprintf(text, sizeof(text),
+			              "hard-class read (%s) of a skipped draw's output: %u range(s) now unsafe, first %s; "
+			              "%u skipped draw(s) were read afterwards (correctness miss) | roots=%s derived=%d "
+			              "depth=%u root_vs=%016" PRIx64 " root_ps=%016" PRIx64 " reader=%016" PRIx64
+			              " op=%s read=%s thread=%s",
+			              ReadKindName(kind), hit.unsafe_added,
+			              hit.unsafe_added ? FormatRange(hit.unsafe_first).c_str() : "-", hit.new_misses,
+			              roots.c_str(), hit.derived ? 1 : 0, hit.depth, hit.root_vs, hit.root_ps,
+			              shader_hash, op, FormatRange(range).c_str(), ThreadName());
+			GuardLog(text);
+		}
 		if (!hit.first) continue;
 		std::string roots;
 		for (uint32_t r = 0; r < hit.root_count; r++) {
@@ -196,6 +242,90 @@ void NoteScalarReadSlow(uint64_t address, uint64_t bytes) {
 std::vector<Hit>& PendingHits() {
 	thread_local std::vector<Hit> hits;
 	return hits;
+}
+
+void ConfigureGuard(bool enabled, bool bda) {
+	Global().SetGuard(enabled, bda);
+	detail::g_guard_enabled.store(enabled, std::memory_order_relaxed);
+	if (enabled && !g_atexit_registered.exchange(true)) std::atexit(DumpAtExit);
+	if (enabled) {
+		GuardLog(std::string("on (hard-class readers: srt walk, indirect args, dma, cpu readback, ") +
+		         "index/vertex data; 64-bit-load shaders " + (bda ? "conservative" : "not handled") +
+		         "); skip itself is a bridge, a miss is a correctness bug");
+	}
+}
+
+bool GuardQuery::MustWait() {
+	if (m_state < 0) {
+		g_guard_queries.fetch_add(1, std::memory_order_relaxed);
+		std::vector<Range> writes;
+		m_fn(m_context, writes);
+		m_state = Global().MustWait(writes) ? 1 : 0;
+	}
+	return m_state == 1;
+}
+
+GuardScope::GuardScope(GuardQuery* query): m_prev(t_guard_query) {
+	t_guard_query = query;
+}
+
+GuardScope::~GuardScope() {
+	t_guard_query = m_prev;
+}
+
+bool GuardVetoesSkip() {
+	if (!GuardEnabled()) return false;
+	if (t_guard_query == nullptr) {
+		g_guard_unqueried.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+	return t_guard_query->MustWait();
+}
+
+void NoteGuardedWait(bool pipeline_stage) {
+	(pipeline_stage ? g_guard_waits_pipeline : g_guard_waits_program).fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteOtherWait() {
+	g_other_waits.fetch_add(1, std::memory_order_relaxed);
+}
+
+void NoteBdaSuspect(uint64_t shader_hash, const char* op, const char* reason,
+                    std::span<const Hit> hits) {
+	if (!GuardEnabled() || hits.empty()) return;
+	const auto added = Global().NoteBdaSuspect(hits);
+	if (added.empty()) return;
+	std::string ranges;
+	for (size_t i = 0; i < added.size() && i < 4; i++) ranges += (i ? " " : "") + FormatRange(added[i]);
+	GuardLog("shader " + FormatHex(shader_hash) + " (" + reason + ", op=" + op +
+	         ") reads a skipped draw's output and loads through 64-bit addresses (blind class): " +
+	         std::to_string(added.size()) + " range(s) now unsafe: " + ranges);
+}
+
+void GuardSummary(const char* why) {
+	const auto totals = Global().GetTotals();
+	const auto counts = Global().GetGuardCounts();
+	char       text[900];
+	std::snprintf(text, sizeof(text),
+	              "summary (%s): skipped=%" PRIu64 " guarded_waits=%" PRIu64 " (program %" PRIu64
+	              ", pipeline %" PRIu64 ") other_waits=%" PRIu64 " unqueried_vetoes=%" PRIu64
+	              " queries=%" PRIu64 " | unsafe_ranges=%zu%s by_hard_reader=%" PRIu64
+	              " by_64bit_loads=%" PRIu64 " | CORRECTNESS MISSES=%" PRIu64 " (through taint %" PRIu64
+	              ", roots %" PRIu64 ") hard hits srt=%" PRIu64 " indirect=%" PRIu64 " geometry=%" PRIu64
+	              " dma=%" PRIu64 " cpu=%" PRIu64 " | tracker_read_checks_ms=%lld",
+	              why, totals.skip_events,
+	              g_guard_waits_program.load() + g_guard_waits_pipeline.load(), g_guard_waits_program.load(),
+	              g_guard_waits_pipeline.load(), g_other_waits.load(), g_guard_unqueried.load(),
+	              g_guard_queries.load(), Global().UnsafeRangeCount(),
+	              Global().UnsafeSaturated() ? " SATURATED (everything waits)" : "", counts.hard_ranges,
+	              counts.bda_ranges, counts.misses, counts.misses_derived, counts.hard_roots,
+	              counts.hard_hits[static_cast<size_t>(ReadKind::ScalarWalk)],
+	              counts.hard_hits[static_cast<size_t>(ReadKind::IndirectArgs)],
+	              counts.hard_hits[static_cast<size_t>(ReadKind::IndexOrVertex)],
+	              counts.hard_hits[static_cast<size_t>(ReadKind::Dma)],
+	              counts.hard_hits[static_cast<size_t>(ReadKind::CpuRead)],
+	              static_cast<long long>(g_read_check_ns.load() / 1000000));
+	GuardLog(text);
 }
 
 void NoteUntracked(uint64_t shader_hash, const char* op, const char* reason, bool reads_poison) {
@@ -291,6 +421,13 @@ void DumpLookahead(const char* why) {
 
 void DumpOpenRoots(const char* why) {
 	const auto now   = Bench::NowNs();
+	if (GuardEnabled()) {
+		auto last = g_last_guard_summary_ns.load(std::memory_order_relaxed);
+		if (why[0] == 'e' || (now - last > 30'000'000'000ll &&
+		                      g_last_guard_summary_ns.compare_exchange_strong(last, now))) {
+			GuardSummary(why);
+		}
+	}
 	const auto roots = Global().OpenRoots();
 	for (const auto& root : roots) {
 		Row("open", root.vs, root.ps, why, "-", FormatRoot(root, now));
