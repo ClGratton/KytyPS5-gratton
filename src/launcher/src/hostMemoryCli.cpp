@@ -1,5 +1,7 @@
 #include "hostMemoryDialog.h"
 #include "hostMemoryProbe.h"
+#include "hostMemoryScript.h"
+#include "hostMemoryTrust.h"
 #include "launcherSelfCheck.h"
 
 #include <QCoreApplication>
@@ -17,7 +19,7 @@ QString RootArgument(const QStringList& args) {
 HostMemoryReport LinuxReportFor(const QStringList& args) {
 	HostMemory::ProbeEnv env;
 	env.root = RootArgument(args).toStdString();
-	return HostMemoryTool::MakeLinuxReport(HostMemory::ProbeLinux(env), HostMemoryTool::HelperPath());
+	return HostMemoryTool::MakeLinuxReport(HostMemory::ProbeLinux(env), HostMemoryTool::InspectHelper());
 }
 
 } // namespace
@@ -42,10 +44,27 @@ int RunHostMemory(const QStringList& args) {
 	if (!report.apply_args.isEmpty()) {
 		out << "\nApply: " << (report.can_apply ? "available" : "not available now") << " (" << report.apply_label
 		    << ")\n  pkexec " << report.helper_path << " " << report.apply_args.join(QLatin1Char(' ')) << "\n";
+		out << "Helper: " << (report.helper_state == HelperState::Current        ? "installed, current"
+		                      : report.helper_state == HelperState::Outdated     ? "installed, another version"
+		                      : report.helper_state == HelperState::NotInstalled ? "not installed yet"
+		                                                                         : "refused")
+		    << " (" << report.helper_path << ")\n";
 	}
 	out << "Undo: " << (report.can_undo ? "available" : "nothing installed") << "\n";
 	return 0;
 #endif
+}
+
+int RunPrintHostHelper(const QStringList& args) {
+	QTextStream out(stdout);
+	if (args.contains(QStringLiteral("--sha256"))) {
+		out << kHostMemoryScriptSha256 << "\n";
+	} else if (args.contains(QStringLiteral("--installer"))) {
+		out << QString::fromStdString(HostMemory::InstallScriptText());
+	} else {
+		out << kHostMemoryScriptText;
+	}
+	return 0;
 }
 
 int RunGrabHostMemory(const QStringList& args) {
@@ -56,7 +75,7 @@ int RunGrabHostMemory(const QStringList& args) {
 	}
 	HostMemoryDialog dialog;
 #if defined(_WIN32)
-	dialog.SetReport(HostMemoryTool::MakeWindowsReport(HostMemory::WindowsFacts {}, HostMemoryTool::HelperPath()));
+	dialog.SetReport(HostMemoryTool::MakeWindowsReport(HostMemory::WindowsFacts {}));
 #else
 	dialog.SetReport(LinuxReportFor(args));
 #endif

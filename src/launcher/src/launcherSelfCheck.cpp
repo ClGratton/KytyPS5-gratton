@@ -6,9 +6,12 @@
 #include "configurationEditDialog.h"
 #include "emulatorOptions.h"
 #include "hostMemoryReport.h"
+#include "hostMemoryScript.h"
 #include "mainDialog.h"
 
+#include <QByteArray>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -265,18 +268,18 @@ int RunSelfCheck(const QStringList& args) {
 	            HasFlag(preset_args, QStringLiteral("--pipeline-lookahead"), QStringLiteral("true")),
 	        QStringLiteral("preset command line passes stall + lookahead"));
 
-#if !defined(_WIN32)
-	// The "Host memory" window: its helper script is installed next to the launcher, and the report builds on this host.
+	// The "Host memory" window: the helper script is compiled into the launcher, and its hash is the one CMake computed.
 	{
-		const auto helper = HostMemoryTool::HelperPath();
-		r.Check(!helper.isEmpty() && QFileInfo(helper).isExecutable(),
-		        QStringLiteral("the host memory helper script is next to the launcher and executable"), helper);
+		const auto text = QByteArray(kHostMemoryScriptText);
+		r.Check(!text.isEmpty() && QCryptographicHash::hash(text, QCryptographicHash::Sha256).toHex() == QByteArray(kHostMemoryScriptSha256),
+		        QStringLiteral("the host memory script compiled into the launcher matches its compiled-in SHA-256"));
+#if !defined(_WIN32)  // on Windows the report arrives asynchronously from PowerShell
 		HostMemoryReport report;
 		HostMemoryTool::Detect(nullptr, [&report](const HostMemoryReport& found) { report = found; });
 		r.Check(!report.headline.isEmpty() && !report.facts.isEmpty(),
 		        QStringLiteral("the host memory report is built from this host"));
-	}
 #endif
+	}
 
 	const auto emulator = FindEmulator(args);
 	if (emulator.isEmpty()) {

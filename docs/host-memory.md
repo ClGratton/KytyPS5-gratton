@@ -56,10 +56,12 @@ zram is only ever switched off when a disk swap exists to take over.
 
 | What | Where |
 |---|---|
+| the helper (root-owned, mode 755), installed once by the first Apply or Undo | `/usr/local/libexec/kyty/kyty-host-memory`, or `/usr/libexec/kyty/kyty-host-memory` when `/usr/local` is writable by a group (Debian) |
+| a polkit action that names that exact path, `auth_admin` (best effort; without it the password prompt has the generic text) | `/usr/share/polkit-1/actions/org.kyty.host-memory.policy` |
 | a one-shot service that sets the zswap parameters at every boot | `/etc/systemd/system/kyty-host-memory.service` |
 | the script that service runs (compressor, pool size, swapon of the swapfile, zram off) | `/var/lib/kyty-host-memory/boot.sh` |
 | the previous state, for Undo | `/var/lib/kyty-host-memory/state` |
-| a drop-in that stops zram-generator from creating the zram device (only when zram is switched off and zram-generator is installed) | `/etc/systemd/zram-generator.conf.d/99-kyty-host-memory.conf` |
+| a drop-in that stops zram-generator from creating the zram device (only when zram is switched off and zram-generator is installed), one section per configured device | `/etc/systemd/zram-generator.conf.d/99-kyty-host-memory.conf` |
 | the swapfile (only when one is created; a separate btrfs subvolume with copy-on-write off on btrfs) | `/var/lib/kyty-host-memory/swap/swapfile` |
 
 It does not touch the bootloader, the kernel command line, `fstab` or the sysctl settings. The change
@@ -67,6 +69,36 @@ also takes effect immediately, so no restart is needed. If the free memory is to
 contents of zram back to RAM right now, zram goes off at the next boot instead; Apply says so.
 
 The helper refuses to run while an emulator is running.
+
+### Why the helper is installed as root
+
+Running a script as root that a normal user can modify (or that sits in a directory a normal user can
+modify) would let any program running as that user take over the machine the moment you type the
+password. So:
+
+- The helper text is compiled into the launcher together with its SHA-256. The first time you click
+  Apply or Undo, one password prompt runs an install step that checks the text against that hash and
+  installs it root-owned into a root-only directory (above). The prompt for that step names `/bin/sh`,
+  because the install step is a script passed to the shell.
+- Before every later password prompt, the launcher checks that the installed helper and every
+  directory above it are owned by root and not writable by group or others, and refuses to run it
+  otherwise. If a launcher update carries a different helper, the next Apply replaces it (same prompt).
+- Preview runs the compiled-in text as you, with `--dry-run`, so it changes nothing.
+
+The launcher binary itself is what you trust: install it where only you can write.
+
+### Removing the helper
+
+Undo removes the service, the drop-in, the swapfile and the settings, but leaves the helper installed.
+To remove it as well (as root):
+
+```
+rm -r /usr/local/libexec/kyty /usr/libexec/kyty /usr/share/polkit-1/actions/org.kyty.host-memory.policy
+```
+
+On image-based systems with a read-only `/usr` (Fedora Atomic, Bazzite) the helper still installs
+under `/usr/local`, but the polkit action cannot be written; the password prompt then has the
+generic text.
 
 ### Costs
 
@@ -78,11 +110,13 @@ The helper refuses to run while an emulator is running.
 ### Doing it by hand
 
 ```
-pkexec ~/.local/opt/<install>/kyty-host-memory apply --zswap-percent 21 --disable-zram    # or run as root
-pkexec ~/.local/opt/<install>/kyty-host-memory undo
+launcher --print-host-helper > kyty-host-memory              # the text compiled into the launcher
+sudo bash kyty-host-memory apply --zswap-percent 21 --disable-zram
+sudo bash kyty-host-memory undo
 ```
 Add `--dry-run` to see the actions without running them. `--swapfile-mib N` creates a swapfile first.
-From a terminal, `launcher --host-memory` prints what the window would show.
+From a terminal, `launcher --host-memory` prints what the window would show; `launcher --print-host-helper --sha256`
+prints the hash the install step checks.
 
 ## Windows
 
@@ -114,8 +148,9 @@ size or none) and whether memory compression is on.
 Both changes take effect after a restart. Apply records the previous settings in
 `%ProgramData%\KytyHostMemory\state.json`; Undo restores them (the previous fixed pagefile entries
 and the compression setting). The settings themselves persist in Windows; no service or scheduled
-task is installed. The helper is `kyty-host-memory.ps1` next to the launcher, started through a UAC
-prompt.
+task is installed. The helper is `kyty-host-memory.ps1`, compiled into the launcher and passed to an elevated
+PowerShell as an encoded command after the UAC prompt, so no file on disk is what runs as administrator. The
+state folder is made writable by administrators only, and a pre-existing folder owned by someone else is refused.
 
 ### Costs
 

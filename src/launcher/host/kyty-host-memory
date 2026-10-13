@@ -5,7 +5,9 @@
 #   kyty-host-memory undo
 #
 # Both take --dry-run (print what would be done, change nothing). The launcher runs this through pkexec when
-# the user clicks Apply or Undo; nobody else needs to call it.
+# the user clicks Apply or Undo; nobody else needs to call it. The launcher has this text compiled in and, the
+# first time, installs it as root:root, mode 755, into /usr/local/libexec/kyty (or /usr/libexec/kyty) after
+# checking its SHA-256; pkexec only ever runs that root-owned copy, never a file in the user's directories.
 #
 # apply: turns zswap on now and at every boot, optionally creates a swapfile first, optionally switches zram
 #        swap off (now and at boot). The previous state is recorded so that undo can restore it.

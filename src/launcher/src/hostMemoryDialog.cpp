@@ -27,16 +27,6 @@
 
 namespace {
 
-#if !defined(_WIN32)
-QString Quote(const QString& text) {
-	if (!text.contains(QRegularExpression(QStringLiteral("[^A-Za-z0-9_./:=@%+,-]")))) {
-		return text;
-	}
-	QString quoted = text;
-	quoted.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
-	return QLatin1Char('\'') + quoted + QLatin1Char('\'');
-}
-#endif
 
 #if defined(_WIN32)
 // Runs powershell.exe with `arguments` after a UAC prompt and waits for it. Returns the exit code,
@@ -159,7 +149,7 @@ QString HostMemoryDialog::ManualCommand() const {
 	return {};
 #else
 	QStringList words;
-	words << QStringLiteral("sudo") << Quote(m_report.helper_path) << m_report.apply_args;
+	words << QStringLiteral("sudo") << QStringLiteral("./kyty-host-memory") << m_report.apply_args;
 	return words.join(QLatin1Char(' '));
 #endif
 }
@@ -179,18 +169,18 @@ void HostMemoryDialog::SetReport(const HostMemoryReport& report) {
 
 	const bool has_action = !report.apply_args.isEmpty();
 	m_apply->setVisible(has_action);
-	m_preview->setVisible(has_action && !report.helper_path.isEmpty());
+	m_preview->setVisible(has_action);
 	m_undo->setVisible(report.can_undo);
 	if (has_action) {
 		m_apply->setText(report.apply_label);
 	}
 	const bool idle = !m_busy;
 	m_apply->setEnabled(idle && report.can_apply && report.elevation_available);
-	m_preview->setEnabled(idle && has_action && !report.helper_path.isEmpty());
+	m_preview->setEnabled(idle && has_action);
 	m_undo->setEnabled(idle && report.can_undo && !report.blocked && report.elevation_available);
 	m_refresh->setEnabled(idle);
 
-	const bool manual = !report.windows && has_action && !report.elevation_available && !report.helper_path.isEmpty();
+	const bool manual = !report.windows && has_action && !report.elevation_available;
 	m_manual->setVisible(manual);
 	if (manual) {
 		m_manual->setText(tr("Command: %1").arg(ManualCommand()));
@@ -211,20 +201,20 @@ void HostMemoryDialog::AppendLog(const QString& text) {
 }
 
 void HostMemoryDialog::RunHelper(const QStringList& args, bool elevated, bool dry_run) {
-	if (m_busy || m_report.helper_path.isEmpty()) {
+	if (m_busy) {
+		return;
+	}
+	// The command is built (and, on Linux, the helper re-checked) right now, not when the window was opened.
+	const HostMemoryTool::HostCommand command = HostMemoryTool::BuildHelperCommand(m_report, args, elevated, dry_run);
+	m_log->clear();
+	if (command.program.isEmpty()) {
+		AppendLog(tr("Refused: %1").arg(command.error));
 		return;
 	}
 	m_busy = true;
-	m_log->clear();
 	SetReport(m_report);  // greys the buttons
 
 #if defined(_WIN32)
-	QStringList script {QStringLiteral("-NoProfile"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
-	                    QStringLiteral("-File"), m_report.helper_path};
-	script << args;
-	if (dry_run) {
-		script << QStringLiteral("-DryRun");
-	}
 	if (!elevated) {
 		auto* process = new QProcess(this);
 		process->setProcessChannelMode(QProcess::MergedChannels);
@@ -233,12 +223,9 @@ void HostMemoryDialog::RunHelper(const QStringList& args, bool elevated, bool dr
 			process->deleteLater();
 			Finished(code, false);
 		});
-		process->start(QStringLiteral("powershell.exe"), script);
+		process->start(command.program, command.args);
 		return;
 	}
-	// For ShellExecute the arguments are one string: quote the script path.
-	QStringList quoted = script;
-	quoted[4]          = QStringLiteral("\"%1\"").arg(m_report.helper_path);
 	auto* watcher = new QFutureWatcher<int>(this);
 	connect(watcher, &QFutureWatcher<int>::finished, this, [this, watcher] {
 		const int code = watcher->result();
@@ -250,7 +237,7 @@ void HostMemoryDialog::RunHelper(const QStringList& args, bool elevated, bool dr
 		}
 		Finished(code, code == -1);
 	});
-	watcher->setFuture(QtConcurrent::run([line = quoted.join(QLatin1Char(' '))] { return RunElevatedPowerShell(line); }));
+	watcher->setFuture(QtConcurrent::run([line = command.args.join(QLatin1Char(' '))] { return RunElevatedPowerShell(line); }));
 #else
 	m_process = new QProcess(this);
 	m_process->setProcessChannelMode(QProcess::MergedChannels);
@@ -270,15 +257,7 @@ void HostMemoryDialog::RunHelper(const QStringList& args, bool elevated, bool dr
 			Finished(-1, false);
 		}
 	});
-	QStringList full = args;
-	if (dry_run) {
-		full << QStringLiteral("--dry-run");
-	}
-	if (elevated) {
-		m_process->start(QStringLiteral("pkexec"), QStringList {m_report.helper_path} + full);
-	} else {
-		m_process->start(m_report.helper_path, full);
-	}
+	m_process->start(command.program, command.args);
 #endif
 }
 

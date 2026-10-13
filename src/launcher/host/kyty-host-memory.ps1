@@ -7,6 +7,8 @@
 #   kyty-host-memory.ps1 -Action Apply [-EnableMemoryCompression] [-SystemManagedPagefile] [-DryRun]
 #   kyty-host-memory.ps1 -Action Undo [-DryRun]
 #
+# The launcher compiles this text in and passes it to an elevated powershell.exe as an encoded command, so the file
+# next to the launcher is never what runs as administrator (and the script must stay under about 11 KB: UTF-16 and base64 make the command line 2.7 times as long, and Windows allows 32767 characters).
 # The launcher starts Apply and Undo through a UAC prompt. Apply records the previous settings in
 # %ProgramData%\KytyHostMemory\state.json; Undo puts them back. The settings themselves (memory compression,
 # pagefile) are kept by Windows across reboots; no service or scheduled task is installed.
@@ -25,10 +27,28 @@ $LogFile   = Join-Path $StateDir 'last-run.log'
 
 function Write-Log([string]$Text) {
     Write-Output $Text
-    if ($Action -ne 'Status') {
-        if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
+    if ($Action -ne 'Status' -and -not $DryRun -and (Test-Admin)) {
+        Initialize-StateDir
         Add-Content -Path $LogFile -Value $Text
     }
+}
+
+# The state file decides what Undo restores, so the folder must be writable by administrators only: a folder a normal user
+# created beforehand (or can still write to) is refused.
+function Initialize-StateDir {
+    if (Test-Path $StateDir) {
+        $owner = (Get-Acl $StateDir).Owner
+        if ($owner -notmatch '(Administrators|SYSTEM|TrustedInstaller)$') { throw "refusing $StateDir: owned by $owner" }
+        return
+    }
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($who in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $who, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    Set-Acl -Path $StateDir -AclObject $acl
 }
 
 function Test-EmulatorRunning {
@@ -78,7 +98,7 @@ if (Test-EmulatorRunning) {
     if ($DryRun) { Write-Log 'note: an emulator is running; the real run would refuse' }
     else { Write-Log 'error: an emulator is running; close it and try again'; exit 1 }
 }
-if (-not $DryRun) { Set-Content -Path $LogFile -Value '' -ErrorAction SilentlyContinue }
+if (-not $DryRun) { Initialize-StateDir; Set-Content -Path $LogFile -Value '' }
 
 function Do-Step([string]$Description, [scriptblock]$Block) {
     if ($DryRun) { Write-Log "would: $Description"; return }
@@ -99,7 +119,7 @@ if ($Action -eq 'Apply') {
                                          ForEach-Object { @{ Name = $_.Name; InitialSize = $_.InitialSize; MaximumSize = $_.MaximumSize } })
         }
         Do-Step "record the previous settings in $StateFile" {
-            if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
+            Initialize-StateDir
             $state | ConvertTo-Json -Depth 4 | Set-Content -Path $StateFile
         }
     }

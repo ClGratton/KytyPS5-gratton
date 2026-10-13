@@ -51,24 +51,36 @@ add_custom_target(stage_updater
 	VERBATIM)
 add_dependencies(launcher kyty_emulator stage_updater)
 
-# Root / administrator helpers of the "Host memory" window. They sit next to the launcher binary.
-foreach(kyty_host_script kyty-host-memory kyty-host-memory.ps1)
-	add_custom_command(TARGET launcher POST_BUILD
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different
-			"${CMAKE_CURRENT_SOURCE_DIR}/host/${kyty_host_script}"
-			"$<TARGET_FILE_DIR:launcher>/${kyty_host_script}"
-		VERBATIM)
-endforeach()
+# The helper script of the "Host memory" window is compiled into the launcher, with its SHA-256: what
+# runs as root (Linux, through pkexec after a one-time install into a root-only directory) or as
+# administrator (Windows, through -EncodedCommand) is exactly the text that was built.
 if(WIN32)
-	install(FILES host/kyty-host-memory.ps1 DESTINATION .)
-elseif(NOT APPLE)
-	install(PROGRAMS host/kyty-host-memory DESTINATION .)
+	set(kyty_host_script "${CMAKE_CURRENT_SOURCE_DIR}/host/kyty-host-memory.ps1")
+else()
+	set(kyty_host_script "${CMAKE_CURRENT_SOURCE_DIR}/host/kyty-host-memory")
 endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${kyty_host_script}")
+file(READ "${kyty_host_script}" kyty_host_script_text)
+file(SHA256 "${kyty_host_script}" kyty_host_script_sha)
+if(kyty_host_script_text MATCHES "\\)KYTYHM\"")
+	message(FATAL_ERROR "${kyty_host_script} contains the raw string terminator")
+endif()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/hostMemoryScript.cpp.tmp"
+"#include \"hostMemoryScript.h\"
+const char kHostMemoryScriptSha256[] = \"${kyty_host_script_sha}\";
+const char kHostMemoryScriptText[] = R\"KYTYHM(${kyty_host_script_text})KYTYHM\";
+")
+configure_file("${CMAKE_CURRENT_BINARY_DIR}/hostMemoryScript.cpp.tmp" "${CMAKE_CURRENT_BINARY_DIR}/hostMemoryScript.cpp" COPYONLY)
+target_sources(launcher PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/hostMemoryScript.cpp")
 
 # Window-less check of the launcher's options against the emulator (defaults, flags, command lines).
 if(BUILD_TESTING AND LINUX)
 	add_test(NAME launcher_self_check
 		COMMAND launcher --self-check --emulator $<TARGET_FILE:kyty_emulator>)
+	# The helper compiled into the launcher is the source file, and the one-time root install step works (on a fake tree).
+	add_test(NAME host_memory_install
+		COMMAND bash "${KYTY_TESTS_DIR}/host_memory_install_test.sh" $<TARGET_FILE:launcher>
+			"${CMAKE_CURRENT_SOURCE_DIR}/host/kyty-host-memory")
 endif()
 
 if(KYTY_CLANG_CL)

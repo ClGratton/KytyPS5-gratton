@@ -13,6 +13,17 @@
 
 #include <functional>
 
+// Where the root helper stands (Linux). The helper is installed root-owned in a root-only directory the first time
+// Apply or Undo is used; until then, or when the installed copy is older than the launcher's, a one-time install
+// step runs first (in the same password prompt).
+enum class HelperState {
+	Current,       // installed, trusted, and the text the launcher was built with
+	Outdated,      // installed and trusted, but another version: the install step replaces it
+	NotInstalled,  // not there yet: the install step puts it in `helper_path`
+	Untrusted,     // something is there (or no safe place exists) that fails the ownership check: refuse
+	BuiltIn,       // Windows: the script is passed to an elevated PowerShell as an encoded command
+};
+
 struct HostMemoryReport {
 	HostMemory::Verdict verdict = HostMemory::Verdict::Ok;
 	bool                windows = false;
@@ -31,17 +42,40 @@ struct HostMemoryReport {
 	bool        can_undo  = false;
 	bool        blocked   = false;  // an action exists but cannot run now (emulator running)
 
-	QString helper_path;  // the helper script next to the launcher (empty when missing)
-	bool    elevation_available = true;  // pkexec (Linux) or UAC (Windows)
+	HelperState helper_state = HelperState::NotInstalled;
+	QString     helper_path;      // where the helper is, or will be installed (Linux)
+	QString     helper_problem;   // why it is refused (Untrusted)
+	bool        elevation_available = true;  // pkexec (Linux) or UAC (Windows)
 };
 
 namespace HostMemoryTool {
 
-// The helper script that sits next to the launcher (kyty-host-memory or kyty-host-memory.ps1); empty if absent.
-QString HelperPath();
+struct HelperInfo {
+	HelperState state = HelperState::NotInstalled;
+	QString     path;     // installed path, or the path an install would use
+	QString     problem;  // when Untrusted
+};
 
-HostMemoryReport MakeLinuxReport(const HostMemory::LinuxFacts& facts, const QString& helper_path);
-HostMemoryReport MakeWindowsReport(const HostMemory::WindowsFacts& facts, const QString& helper_path);
+// Looks at the installed helper on this system (ownership of the file and every directory above it, and its
+// SHA-256 against the one compiled into the launcher). Linux only.
+HelperInfo InspectHelper();
+
+HostMemoryReport MakeLinuxReport(const HostMemory::LinuxFacts& facts, const HelperInfo& helper);
+// `built_in`: the PowerShell script is compiled into the launcher (false only in tests of the report).
+HostMemoryReport MakeWindowsReport(const HostMemory::WindowsFacts& facts, bool built_in = true);
+
+// The command that runs the helper with `helper_args`.
+//  elevated: Linux -> pkexec on the installed helper (after re-checking it), or, when the helper is not installed or
+//            outdated, pkexec on /bin/sh with the one-time install step, which then runs the helper.
+//            Windows -> powershell.exe with the script as an encoded command; the caller elevates it with UAC.
+//  not elevated (Preview): the compiled-in script run by the current user with --dry-run.
+// `error` is set (and `program` empty) when the helper is refused.
+struct HostCommand {
+	QString     program;
+	QStringList args;
+	QString     error;
+};
+HostCommand BuildHelperCommand(const HostMemoryReport& report, const QStringList& helper_args, bool elevated, bool dry_run);
 
 // Detects the host and calls `done` (right away on Linux; after PowerShell has answered on Windows).
 void Detect(QObject* context, const std::function<void(const HostMemoryReport&)>& done);
