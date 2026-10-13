@@ -114,6 +114,12 @@ struct EmitterState {
 	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> memory_byte_offsets {};
 	// Generic variants: the dynamic section of the shader data, loaded once at function entry.
 	std::vector<uint32_t>                            dynamic_words;
+	// What the address arithmetic of a generic variant takes from each buffer's dynamic word,
+	// derived once at function entry (indexed like the dynamic words).
+	struct DynamicBufferFields {
+		uint32_t stride = 0, swizzle = 0, index_shift = 0, indices = 0, index_mask = 0, zero_oob = 0;
+	};
+	std::vector<DynamicBufferFields>                 dynamic_buffer_fields;
 	// Storage-buffer accesses left to robustBufferAccess2 (--spirv-robust-bounds).
 	RobustBufferPolicy                               robust_buffers {};
 	uint32_t                                         bda_pagetable_variable  = 0;
@@ -436,6 +442,7 @@ void EmitMemoryOffsets(EmitterState& state);
 void EmitDynamicWords(EmitterState& state);
 /// The run-time word of a buffer / image of a generic variant (ids loaded by EmitDynamicWords).
 uint32_t DynamicBufferWord(EmitterState& state, uint32_t resource);
+const EmitterState::DynamicBufferFields& DynamicBufferFieldsOf(EmitterState& state, uint32_t resource);
 uint32_t DynamicImageWord(EmitterState& state, uint32_t resource);
 
 uint32_t LdsDwordCount(const EmitterState& state);
