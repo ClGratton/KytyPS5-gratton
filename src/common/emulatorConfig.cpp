@@ -348,6 +348,30 @@ bool MemReleasePunchEnabled() {
 	return g_config != nullptr && g_config->mem_release_punch;
 }
 
+bool MemResidencyEnabled() {
+	return g_config != nullptr && g_config->mem_residency;
+}
+
+bool UploadRingRebarEnabled() {
+	return g_config != nullptr && g_config->upload_ring_rebar;
+}
+
+bool HeapTrimEnabled() {
+	return g_config != nullptr && g_config->heap_trim;
+}
+
+bool MemHoleReadsEnabled() {
+	return g_config != nullptr && g_config->mem_hole_reads;
+}
+
+bool SkipZeroUploadsEnabled() {
+	return g_config != nullptr && g_config->skip_zero_uploads;
+}
+
+bool VerifyZeroUploadsEnabled() {
+	return g_config != nullptr && g_config->verify_zero_uploads;
+}
+
 uint32_t VramAuditSeconds() {
 	return g_config->vram_audit_s;
 }

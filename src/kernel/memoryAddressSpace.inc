@@ -304,6 +304,46 @@ public:
 		return gauges;
 	}
 
+	// Bytes of the guest range [vaddr, vaddr + size) on resident backing pages (mincore through the
+	// writable alias; swapped-out pages do not count). Whole host pages, rounded outwards.
+	[[nodiscard]] uint64_t ResidentGuestBytes(uint64_t vaddr, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return 0;
+		}
+		std::shared_lock lock(m_mutex);
+		const auto       end     = vaddr + size;
+		auto             mapping = m_maps.upper_bound(vaddr);
+		if (mapping != m_maps.begin()) {
+			--mapping;
+		}
+		uint64_t resident = 0;
+		for (; mapping != m_maps.end() && mapping->second.vaddr < end; ++mapping) {
+			const auto& entry = mapping->second;
+			const auto  lo    = std::max(vaddr, entry.vaddr);
+			const auto  hi    = std::min(end, entry.vaddr + entry.size);
+			if (lo >= hi) {
+				continue;
+			}
+			const auto offset = entry.backing_offset + (lo - entry.vaddr);
+			resident += ResidentBytesInFile(offset, offset + (hi - lo));
+		}
+		return resident;
+#else
+		(void)vaddr;
+		(void)size;
+		return 0;
+#endif
+	}
+
+	[[nodiscard]] uint64_t ResidentTotalBytes() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+		return IsAvailable() ? ResidentBytesInFile(0, m_size) : 0;
+#else
+		return 0;
+#endif
+	}
+
 	bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
 		if (!IsAvailable() || data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
@@ -379,7 +419,7 @@ public:
 			const auto& entry  = mapping->second;
 			const auto  bytes  = std::min(end, entry.vaddr + entry.size) - current;
 			const auto  offset = entry.backing_offset + current - entry.vaddr;
-			std::memcpy(destination + (current - vaddr), m_backing_base + offset, bytes);
+			CopyFromBacking(destination + (current - vaddr), offset, bytes);
 			current += bytes;
 		}
 		return true;
@@ -415,13 +455,99 @@ public:
 			if (cursor < start) {
 				std::memset(destination + (cursor - vaddr), 0, start - cursor);
 			}
-			std::memcpy(destination + (start - vaddr), m_backing_base + offset, bytes);
+			CopyFromBacking(destination + (start - vaddr), offset, bytes);
 			cursor = start + bytes;
 		}
 		if (cursor < end) {
 			std::memset(destination + (cursor - vaddr), 0, end - cursor);
 		}
 		return true;
+	}
+
+	// True when every byte of [vaddr, vaddr + size) is mapped to the backing store and none of it was
+	// ever written (no data and no swapped page in the backing file): it reads as zeros, and
+	// checking it reads nothing and makes no page resident. False when in doubt (unmapped parts,
+	// a page that holds data, hosts without SEEK_DATA on the backing object).
+	bool RangeIsNeverWritten(uint64_t vaddr, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::shared_lock lock(m_mutex);
+		const auto       end   = vaddr + size;
+		auto             first = m_maps.upper_bound(vaddr);
+		if (first == m_maps.begin()) {
+			return false;
+		}
+		--first;
+		auto current = vaddr;
+		for (auto mapping = first; current < end; ++mapping) {
+			if (mapping == m_maps.end() || current < mapping->second.vaddr ||
+			    current >= mapping->second.vaddr + mapping->second.size) {
+				return false;
+			}
+			const auto& entry = mapping->second;
+			const auto  bytes = std::min(end, entry.vaddr + entry.size) - current;
+			const auto  lo    = entry.backing_offset + current - entry.vaddr;
+			if (!RangeOk(lo, bytes) || !FileRangeIsHole(lo, lo + bytes)) {
+				return false;
+			}
+			current += bytes;
+		}
+		return true;
+#else
+		(void)vaddr;
+		(void)size;
+		return false;
+#endif
+	}
+
+	// Debug check for RangeIsNeverWritten: reads the range with pread (no page becomes resident) and
+	// returns whether every byte is zero. False when it cannot read the range.
+	bool RangeReadsAsZero(uint64_t vaddr, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::shared_lock lock(m_mutex);
+		const auto       end   = vaddr + size;
+		auto             first = m_maps.upper_bound(vaddr);
+		if (first == m_maps.begin()) {
+			return false;
+		}
+		--first;
+		std::vector<uint8_t> scratch(1u << 20);
+		auto                 current = vaddr;
+		for (auto mapping = first; current < end; ++mapping) {
+			if (mapping == m_maps.end() || current < mapping->second.vaddr ||
+			    current >= mapping->second.vaddr + mapping->second.size) {
+				return false;
+			}
+			const auto& entry = mapping->second;
+			const auto  bytes = std::min(end, entry.vaddr + entry.size) - current;
+			const auto  lo    = entry.backing_offset + current - entry.vaddr;
+			if (!RangeOk(lo, bytes)) {
+				return false;
+			}
+			for (uint64_t done = 0; done < bytes;) {
+				const auto n = std::min<uint64_t>(scratch.size(), bytes - done);
+				if (!PreadFromBacking(scratch.data(), lo + done, n)) {
+					return false;
+				}
+				if (std::any_of(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(n),
+				                [](uint8_t b) { return b != 0; })) {
+					return false;
+				}
+				done += n;
+			}
+			current += bytes;
+		}
+		return true;
+#else
+		(void)vaddr;
+		(void)size;
+		return false;
+#endif
 	}
 
 	bool MapFixed(uint64_t vaddr, uint64_t size, uint64_t backing_offset,
@@ -659,6 +785,163 @@ public:
 
 		return true;
 	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	static uint64_t HostPageSize() {
+		static const uint64_t page = static_cast<uint64_t>(std::max<long>(sysconf(_SC_PAGESIZE), 4096));
+		return page;
+	}
+
+	// Resident bytes of the backing file in [lo, hi) (page rounded outwards), by mincore.
+	[[nodiscard]] uint64_t ResidentBytesInFile(uint64_t lo, uint64_t hi) const {
+		const uint64_t page     = HostPageSize();
+		const uint64_t first    = lo / page;
+		const uint64_t last     = std::min((hi + page - 1) / page, m_size / page);
+		constexpr uint64_t CHUNK = 1u << 16; // pages per mincore call
+		uint64_t           pages = 0;
+		std::vector<unsigned char> vec(std::min<uint64_t>(CHUNK, last > first ? last - first : 0));
+		for (uint64_t at = first; at < last; at += CHUNK) {
+			const uint64_t count = std::min(CHUNK, last - at);
+			if (mincore(m_backing_base + at * page, count * page, vec.data()) != 0) {
+				continue;
+			}
+			for (uint64_t i = 0; i < count; i++) {
+				pages += vec[i] & 1u;
+			}
+		}
+		return pages * page;
+	}
+
+	// Bytes of [lo, hi) that were never written (no data, not swapped) according to the backing
+	// file. Swapped-out shmem pages count as data for SEEK_DATA.
+	[[nodiscard]] uint64_t HoleBytesInFile(uint64_t lo, uint64_t hi) const {
+		uint64_t hole = 0;
+		uint64_t pos  = lo;
+		while (pos < hi) {
+			const off_t data = lseek(m_fd, static_cast<off_t>(pos), SEEK_DATA);
+			if (data < 0 || static_cast<uint64_t>(data) >= hi) {
+				hole += hi - pos;
+				break;
+			}
+			if (static_cast<uint64_t>(data) > pos) {
+				hole += static_cast<uint64_t>(data) - pos;
+			}
+			const off_t next_hole = lseek(m_fd, data, SEEK_HOLE);
+			if (next_hole < 0) {
+				break;
+			}
+			pos = static_cast<uint64_t>(next_hole);
+		}
+		return hole;
+	}
+
+	// True when no byte of the backing file in [lo, hi) holds data (SEEK_DATA finds nothing before hi).
+	[[nodiscard]] bool FileRangeIsHole(uint64_t lo, uint64_t hi) const {
+		const off_t data = lseek(m_fd, static_cast<off_t>(lo), SEEK_DATA);
+		if (data < 0) {
+			return errno == ENXIO; // no data at or after lo
+		}
+		return static_cast<uint64_t>(data) >= hi;
+	}
+
+	static constexpr uint64_t SCAN_READ_MIN = 16 * 1024;
+
+	// Copies a guest backing range into `destination`. With --mem-residency, large reads are
+	// classified by page residency. With --mem-hole-reads, pages that are not resident are read with
+	// pread: a read of a never-written page of a shared mapping allocates a zero page, pread of the
+	// same page returns zeros and allocates nothing.
+	void CopyFromBacking(uint8_t* destination, uint64_t offset, uint64_t bytes) const {
+		if ((g_mem_residency_on || g_mem_hole_reads_on) && bytes >= SCAN_READ_MIN) {
+			ScanCopyFromBacking(destination, offset, bytes);
+			return;
+		}
+		std::memcpy(destination, m_backing_base + offset, bytes);
+	}
+
+	// pread of [offset, offset + bytes) into `destination`; false when it could not read it all.
+	[[nodiscard]] bool PreadFromBacking(uint8_t* destination, uint64_t offset, uint64_t bytes) const {
+		uint64_t done = 0;
+		while (done < bytes) {
+			const ssize_t n =
+			    pread(m_fd, destination + done, bytes - done, static_cast<off_t>(offset + done));
+			if (n < 0 && errno == EINTR) {
+				continue;
+			}
+			if (n <= 0) {
+				return false;
+			}
+			done += static_cast<uint64_t>(n);
+		}
+		return true;
+	}
+
+	void ScanCopyFromBacking(uint8_t* destination, uint64_t offset, uint64_t bytes) const {
+		auto&          counts = g_backing_read_tag == BackingReadTag::Image ? g_backing_reads.image
+		                                                                    : g_backing_reads.other;
+		const uint64_t page   = HostPageSize();
+		const uint64_t end    = offset + bytes;
+		counts.reads.fetch_add(1, std::memory_order_relaxed);
+		counts.bytes.fetch_add(bytes, std::memory_order_relaxed);
+		constexpr uint64_t         CHUNK = 1u << 16;
+		std::vector<unsigned char> vec;
+		uint64_t                   copied      = offset; // bytes before this offset are in `destination`
+		uint64_t                   nonresident = 0;
+		uint64_t                   hole        = 0;
+		uint64_t                   preads      = 0;
+		const auto copy_run = [&](uint64_t lo, uint64_t hi, bool resident) {
+			if (hi <= lo) {
+				return;
+			}
+			uint8_t* to = destination + (lo - offset);
+			if (!resident && g_mem_hole_reads_on) {
+				if (PreadFromBacking(to, lo, hi - lo)) {
+					preads += hi - lo;
+					return;
+				}
+				g_backing_reads.pread_failures.fetch_add(1, std::memory_order_relaxed);
+			}
+			std::memcpy(to, m_backing_base + lo, hi - lo);
+		};
+		for (uint64_t at = offset / page; at * page < end;) {
+			const uint64_t last = std::min<uint64_t>(at + CHUNK, (end + page - 1) / page);
+			vec.resize(last - at);
+			if (mincore(m_backing_base + at * page, (last - at) * page, vec.data()) != 0) {
+				break; // copy the rest unclassified
+			}
+			for (uint64_t i = 0; i < last - at;) {
+				const bool resident = (vec[i] & 1u) != 0;
+				uint64_t   j        = i + 1;
+				while (j < last - at && ((vec[j] & 1u) != 0) == resident) {
+					j++;
+				}
+				const uint64_t lo = std::max(offset, (at + i) * page);
+				const uint64_t hi = std::min(end, (at + j) * page);
+				if (!resident) {
+					nonresident += hi - lo;
+					if (g_mem_residency_on) {
+						hole += HoleBytesInFile(lo, hi);
+					}
+				}
+				copy_run(lo, hi, resident);
+				copied = hi;
+				i      = j;
+			}
+			at = last;
+		}
+		if (copied < end) {
+			std::memcpy(destination + (copied - offset), m_backing_base + copied, end - copied);
+		}
+		if (g_mem_residency_on) {
+			counts.nonresident.fetch_add(nonresident, std::memory_order_relaxed);
+			counts.hole.fetch_add(hole, std::memory_order_relaxed);
+		}
+		counts.pread_bytes.fetch_add(preads, std::memory_order_relaxed);
+	}
+#else
+	void CopyFromBacking(uint8_t* destination, uint64_t offset, uint64_t bytes) const {
+		std::memcpy(destination, m_backing_base + offset, bytes);
+	}
+#endif
 
 private:
 	struct MapEntry {
@@ -1116,6 +1399,7 @@ public:
 	KYTY_CLASS_NO_COPY(GuestAddressSpace);
 
 	[[nodiscard]] uint64_t GetGranularity() const { return m_granularity; }
+	[[nodiscard]] GuestBackingStore& GetBacking() { return *m_backing; }
 	[[nodiscard]] uint64_t GetBackingBase() const { return m_backing->GetBackingBase(); }
 	[[nodiscard]] uint64_t GetBackingSize() const { return m_backing->GetBackingSize(); }
 
@@ -1175,6 +1459,32 @@ public:
 			}
 		}
 		return m_backing->TryReadSparseBacking(vaddr, data, size);
+	}
+
+	// See GuestBackingStore::RangeIsNeverWritten. Ranges that touch private (non-file) mappings
+	// are never reported as holes.
+	bool RangeIsNeverWritten(uint64_t vaddr, uint64_t size) {
+		if (!Owns(vaddr, size)) {
+			return false;
+		}
+		{
+			std::shared_lock lock(m_mutex);
+			auto            mapping = m_mapped.upper_bound(vaddr);
+			if (mapping != m_mapped.begin()) {
+				--mapping;
+			}
+			for (; mapping != m_mapped.end() && mapping->second.vaddr < vaddr + size; ++mapping) {
+				const auto& region = mapping->second;
+				if (region.type == MappingType::Private && region.vaddr + region.size > vaddr) {
+					return false;
+				}
+			}
+		}
+		return m_backing->RangeIsNeverWritten(vaddr, size);
+	}
+
+	bool RangeReadsAsZero(uint64_t vaddr, uint64_t size) {
+		return Owns(vaddr, size) && m_backing->RangeReadsAsZero(vaddr, size);
 	}
 
 	bool BackingContains(uint64_t vaddr, uint64_t size) { return m_backing->Contains(vaddr, size); }

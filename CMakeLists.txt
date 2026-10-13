@@ -431,6 +431,11 @@ add_executable(page_manager_tests EXCLUDE_FROM_ALL
 target_link_libraries(page_manager_tests common)
 target_include_directories(page_manager_tests PRIVATE ${inc_headers})
 
+add_executable(mem_residency_ranges_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/MemResidencyRangesTests.cpp"
+)
+target_include_directories(mem_residency_ranges_tests PRIVATE ${inc_headers})
+
 add_executable(archive_file_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ArchiveFileTests.cpp"
 )
@@ -498,6 +503,11 @@ add_executable(vram_policy_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/VramPolicyTests.cpp"
 )
 target_include_directories(vram_policy_tests PRIVATE ${inc_headers})
+
+add_executable(heap_trim_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HeapTrimTests.cpp"
+)
+target_include_directories(heap_trim_tests PRIVATE ${inc_headers})
 
 add_executable(texture_gc_policy_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/TextureGcPolicyTests.cpp"
@@ -857,6 +867,7 @@ if(BUILD_TESTING)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
+	add_test(NAME mem_residency_ranges COMMAND $<TARGET_FILE:mem_residency_ranges_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
@@ -868,6 +879,7 @@ if(BUILD_TESTING)
 	add_test(NAME gds_copy_plan COMMAND $<TARGET_FILE:gds_copy_plan_tests>)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME vram_policy COMMAND $<TARGET_FILE:vram_policy_tests>)
+	add_test(NAME heap_trim COMMAND $<TARGET_FILE:heap_trim_tests>)
 	add_test(NAME lds_span COMMAND $<TARGET_FILE:lds_span_tests>)
 	add_test(NAME texture_gc_policy COMMAND $<TARGET_FILE:texture_gc_policy_tests>)
 	add_test(NAME phase_timers COMMAND $<TARGET_FILE:phase_timers_tests>)
@@ -1061,6 +1073,7 @@ if(BUILD_TESTING)
 		image_page_table_tests
 		memory_tracker_tests
 		page_manager_tests
+		mem_residency_ranges_tests
 		archive_file_tests
 		trophy_system_tests
 		avplayer_file_tests
@@ -1072,6 +1085,7 @@ if(BUILD_TESTING)
 		gds_copy_plan_tests
 		lru_cache_tests
 		vram_policy_tests
+		heap_trim_tests
 		lds_span_tests
 		texture_gc_policy_tests
 		phase_timers_tests
@@ -1138,7 +1152,15 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	endif()
 endif()
 
+# Diagnostic build: a sampling heap profiler that replaces malloc (src/tools/heapProfile.cpp) and keeps the
+# symbol table. Never a release build; see the file header for the output.
+option(KYTY_HEAP_PROFILE "Sampling heap profiler in kyty_emulator (Linux diagnostic build)" OFF)
+
 add_executable(kyty_emulator "${KYTY_SOURCE_DIR}/main.cpp" ${kyty_emulator_src})
+if(KYTY_HEAP_PROFILE AND LINUX)
+	target_sources(kyty_emulator PRIVATE "${KYTY_SOURCE_DIR}/tools/heapProfile.cpp")
+	target_link_options(kyty_emulator PRIVATE -Wl,--export-dynamic)
+endif()
 configure_macos_guest_address_space(kyty_emulator)
 
 set(KYTY_TROPHY_UNLOCK_SOUND "${CMAKE_CURRENT_SOURCE_DIR}/assets/sounds/trophy-unlock.wav")
@@ -1191,7 +1213,7 @@ elseif(WIN32 OR LINUX)
 	target_link_options(kyty_emulator PRIVATE "-Wl,-Map=${KYTY_EMULATOR_MAP_LINK_PATH}")
 endif()
 
-if(LINUX)
+if(LINUX AND NOT KYTY_HEAP_PROFILE)
     target_link_options(kyty_emulator PRIVATE
         $<$<CONFIG:Release>:-Wl,--strip-all>
     )

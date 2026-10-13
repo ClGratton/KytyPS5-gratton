@@ -87,6 +87,7 @@ private:
 	std::unique_ptr<GuestGpu> m_gpu;
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 	bool                      m_fault_process_pending = false;
+	void                      SampleMemResidency();
 	bool                      m_bda_logged = false;
 	// PrepareBda skip gate (K15): the mapped-range generation changes under m_mapped_ranges_mutex.
 	BdaSync::SkipGate         m_bda_sync_gate;

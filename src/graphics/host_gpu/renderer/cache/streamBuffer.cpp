@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include <chrono>
 #include <cstring>
 #include <numeric>
 #include <vk_mem_alloc.h>
@@ -114,6 +115,7 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	VkMemoryPropertyFlags properties = 0;
 	vmaGetAllocationMemoryProperties(graphics.allocator, m_allocation, &properties);
 	m_coherent = (properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+	m_device_local = (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
 	if (allocation_result.pMappedData != nullptr) {
 		m_mapped = {static_cast<uint8_t*>(allocation_result.pMappedData),
 		            static_cast<size_t>(size)};
@@ -289,7 +291,9 @@ std::pair<uint8_t*, uint64_t> StreamBuffer::Map(uint64_t size, uint64_t alignmen
 		return {nullptr, 0};
 	}
 
+	m_ring_stats.bytes += mapped_size;
 	if (wrap) {
+		m_ring_stats.wraps++;
 		m_invalidation_mark    = invalidation_mark;
 		m_current_watch_cursor = 0;
 		std::swap(m_previous_watches, m_current_watches);
@@ -344,7 +348,17 @@ bool StreamBuffer::WaitPendingOperations(const std::vector<Watch>& watches,
 		Common::GpuPhase::DrainCauseScope drain_cause(Usage() == MemoryUsage::Download
 		                                                  ? Common::GpuPhase::DrainCause::DownloadWrap
 		                                                  : Common::GpuPhase::DrainCause::StreamWrap);
-		Scheduler().Wait(watch.tick);
+		if (!Scheduler().IsFree(watch.tick)) {
+			const auto begin = std::chrono::steady_clock::now();
+			Scheduler().Wait(watch.tick);
+			m_ring_stats.waits++;
+			m_ring_stats.wait_ns += static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(
+			        std::chrono::steady_clock::now() - begin)
+			        .count());
+		} else {
+			Scheduler().Wait(watch.tick);
+		}
 		if (Usage() == MemoryUsage::Download) {
 			Scheduler().WaitPriorityOperations(watch.tick);
 		}

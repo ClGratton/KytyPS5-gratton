@@ -98,6 +98,29 @@ struct GcThresholds {
 	return result;
 }
 
+// Where the 512 MiB upload staging ring lives. The ring is written sequentially by the CPU and read
+// once by the GPU, so write-combined device-local host-visible (ReBAR) memory suits it, and it
+// then takes 0.5 GiB of VRAM instead of 0.5 GiB of host RAM. That trade only pays off when the
+// card has the room: the host-visible device-local heap must be a real BAR (several times the
+// ring, not the legacy 256 MiB window) and the ring must stay a small share of the card's VRAM.
+// Everything else keeps the ring in system memory.
+constexpr uint64_t UploadRingBytes = 512 * MiB;
+
+struct UploadRingPlan {
+	bool     device_local = false;
+	uint64_t size         = UploadRingBytes;
+};
+
+// `device_local_total`: sum of the device-local heaps. `rebar_heap`: size of the largest heap that
+// has a DEVICE_LOCAL | HOST_VISIBLE memory type (0 when there is none).
+[[nodiscard]] inline UploadRingPlan PlanUploadRing(bool rebar_wanted, uint64_t device_local_total,
+                                                   uint64_t rebar_heap) {
+	UploadRingPlan plan;
+	plan.device_local = rebar_wanted && rebar_heap >= 2 * UploadRingBytes &&
+	                    device_local_total >= 16 * UploadRingBytes;
+	return plan;
+}
+
 enum class AllocStage {
 	Normal,       // DEVICE_LOCAL required
 	AfterReclaim, // DEVICE_LOCAL required, after the caches gave memory back

@@ -5,6 +5,7 @@
 #include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/memResidency.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
@@ -21,6 +22,7 @@ RenderContext::RenderContext(GraphicContext& graphics)
       m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
       m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	MemResidency::Enable(Config::MemResidencyEnabled());
 	// --pipelines-unoptimized-first: a pipeline replaced by its optimized build may still be used
 	// by command buffers in flight, so it is destroyed once the GPU finished the current tick.
 	m_pipeline_cache.SetRetireHandler([this](vk::Pipeline replaced) {
@@ -37,6 +39,7 @@ RenderContext::RenderContext(GraphicContext& graphics)
 RenderContext::~RenderContext() {
 	ShutdownGpu();
 	m_command_scheduler.Shutdown();
+	MemResidency::Enable(false);
 }
 
 void RenderContext::InitializeGpu(VideoOut::VideoOutDriver* video_out) {
@@ -75,6 +78,25 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	constexpr uint64_t fault_size = 1;
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
+	}
+	if (MemResidency::Enabled()) {
+		const auto actor = MemResidency::CurrentActor();
+		if (m_page_manager.ConsumeReadProbe(fault_vaddr)) {
+			// A one-shot probe on a clean uploaded texture page. The access is retried with the
+			// tracker's own protection, so a write is counted again as the write fault it is.
+			const auto cls = m_texture_cache.ClassifyAddress(fault_vaddr);
+			if (access == PageFaultAccess::Write) {
+				MemResidency::NoteProbeWrite(cls, actor);
+			} else {
+				MemResidency::NoteProbeRead(cls, actor);
+			}
+			return true;
+		}
+		if (access == PageFaultAccess::Write) {
+			MemResidency::NoteWriteFault(m_texture_cache.ClassifyAddress(fault_vaddr), actor);
+		} else {
+			MemResidency::NoteReadFault(actor);
+		}
 	}
 	if (access == PageFaultAccess::Write) {
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
@@ -190,6 +212,18 @@ void RenderContext::RunGarbageCollector() {
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();
 	m_buffer_cache.RunGarbageCollector();
+	if (MemResidency::SampleDue()) {
+		SampleMemResidency();
+	}
+}
+
+void RenderContext::SampleMemResidency() {
+	MemResidency::Snapshot snapshot;
+	snapshot.frame  = Common::GpuPhase::Frames();
+	snapshot.probes = m_page_manager.GetProbeStats();
+	m_texture_cache.CollectResidencyRanges(snapshot);
+	m_buffer_cache.CollectResidencyRanges(snapshot);
+	MemResidency::Submit(std::move(snapshot));
 }
 
 void RenderContext::AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id) {

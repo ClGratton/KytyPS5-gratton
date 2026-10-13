@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/vramPolicy.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
 
@@ -205,6 +206,8 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			if (ReadbackOnSecondQueue(buffer, buffer.last_gpu_write_tick, copies, total_size,
 			                          download, offset)) {
 				(temporary ? *temporary : m_download_buffer).Invalidate(offset, total_size);
+				const Libs::LibKernel::Memory::ScopedBackingWriteTag write_tag(
+				    Libs::LibKernel::Memory::BackingWriteTag::Download);
 				for (const auto& copy: copies) {
 					Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
 					                                      mapped + (copy.dstOffset - offset),
@@ -246,6 +249,8 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	auto publish = [this, mapped, offset, total_size, buffer_address,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
+		const Libs::LibKernel::Memory::ScopedBackingWriteTag write_tag(
+		    Libs::LibKernel::Memory::BackingWriteTag::Download);
 		for (const auto& copy: copies) {
 			Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
 			                                      mapped + (copy.dstOffset - offset), copy.size);
@@ -378,6 +383,30 @@ StreamBuffer& BufferCache::GetDrawRecordBuffer() {
 	return *m_draw_record_buffer;
 }
 
+namespace {
+
+// Sizes the placement policy needs, from the device's memory heaps.
+VramPolicy::UploadRingPlan PlanStagingRing(const GraphicContext& graphics) {
+	const auto& properties = graphics.GetPhysicalDeviceMemoryProperties();
+	uint64_t    device_local_total = 0;
+	uint64_t    rebar_heap         = 0;
+	for (uint32_t i = 0; i < properties.memoryHeapCount; i++) {
+		if (properties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+			device_local_total += properties.memoryHeaps[i].size;
+		}
+	}
+	const auto wanted = vk::MemoryPropertyFlagBits::eDeviceLocal | vk::MemoryPropertyFlagBits::eHostVisible;
+	for (uint32_t i = 0; i < properties.memoryTypeCount; i++) {
+		if ((properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+			rebar_heap = std::max<uint64_t>(rebar_heap,
+			                                properties.memoryHeaps[properties.memoryTypes[i].heapIndex].size);
+		}
+	}
+	return VramPolicy::PlanUploadRing(Config::UploadRingRebarEnabled(), device_local_total, rebar_heap);
+}
+
+} // namespace
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
@@ -385,11 +414,26 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_bda_pagetable_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                              BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
-      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB),
+      // --upload-ring-rebar: the Stream usage asks for device-local host-visible memory (sequential
+      // CPU writes, write-combined); the ring is only ever written by the CPU. VramPolicy decides
+      // from the device's heaps whether the card can spare it.
+      m_staging_buffer(graphics, scheduler,
+                       PlanStagingRing(graphics).device_local ? MemoryUsage::Stream : MemoryUsage::Upload,
+                       PlanStagingRing(graphics).size),
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
+	{
+		const auto plan = PlanStagingRing(graphics);
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "Upload ring: {} MiB in {} memory{}\n", m_staging_buffer.Size() >> 20,
+		    m_staging_buffer.IsDeviceLocal() ? "device-local host-visible (ReBAR)" : "system",
+		    m_staging_buffer.IsDeviceLocal() ? "" :
+		    !Config::UploadRingRebarEnabled() ? " (--upload-ring-rebar off)" :
+		    !plan.device_local ? " (no large host-visible device-local heap, or a card too small to spare it)" :
+		                         " (the device-local allocation failed)"));
+	}
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
@@ -779,6 +823,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 }
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t size) {
+	// --mem-residency attributes the guest reads below to GPU image uploads.
+	const Libs::LibKernel::Memory::ScopedBackingReadTag read_tag(
+	    Libs::LibKernel::Memory::BackingReadTag::Image);
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid image source\n");
 	}
@@ -926,10 +973,37 @@ void BufferCache::PollLoopGuard() {
 	}
 }
 
+void BufferCache::CollectResidencyRanges(MemResidency::Snapshot& snapshot) {
+	auto& ranges = snapshot.ranges[static_cast<size_t>(MemResidency::RangeClass::Buffer)];
+	for (const auto& [vaddr, id]: m_buffers) {
+		if (IsBufferInvalid(id)) {
+			continue;
+		}
+		ranges.emplace_back(vaddr, m_slot_buffers[id].Size());
+	}
+}
+
+void BufferCache::LogRingStatsPeriodic() {
+	if (!Config::MemStatsEnabled()) {
+		return;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now < m_ring_log_next) {
+		return;
+	}
+	m_ring_log_next = now + std::chrono::seconds(10);
+	const auto stats = m_staging_buffer.GetRingStats();
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[upload-ring] {} {} MiB: reserved {} MiB in {} wraps, {} blocking waits ({:.1f} ms total)\n",
+	    m_staging_buffer.IsDeviceLocal() ? "device-local" : "system", m_staging_buffer.Size() >> 20,
+	    stats.bytes >> 20, stats.wraps, stats.waits, static_cast<double>(stats.wait_ns) / 1e6));
+}
+
 void BufferCache::RunGarbageCollector() {
 	if ((m_gc_runs & 0xffu) == 0) {
 		PollLoopGuard();
 	}
+	LogRingStatsPeriodic();
 	const bool     frame_clock = Config::GcClockFrames();
 	const uint64_t run         = m_gc_runs++;
 	uint64_t       tick        = 0;

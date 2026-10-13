@@ -47,6 +47,7 @@ public:
 	[[nodiscard]] uint64_t           Size() const noexcept { return m_size; }
 	[[nodiscard]] std::span<uint8_t> Mapped() const noexcept { return m_mapped; }
 	[[nodiscard]] bool               IsCoherent() const noexcept { return m_coherent; }
+	[[nodiscard]] bool               IsDeviceLocal() const noexcept { return m_device_local; }
 	[[nodiscard]] MemoryUsage        Usage() const noexcept { return m_usage; }
 	[[nodiscard]] uint64_t           CpuAddress() const noexcept { return m_cpu_address; }
 	[[nodiscard]] vk::DeviceAddress BufferDeviceAddress() const noexcept;
@@ -95,6 +96,7 @@ private:
 	VmaAllocation                 m_allocation = nullptr;
 	uint64_t                      m_size;
 	bool                          m_coherent = false;
+	bool                          m_device_local = false;
 	VramClass                     m_vram_class = VramClass::BufferDeviceLocal;
 	uint64_t                      m_alloc_size = 0;
 	std::span<uint8_t>            m_mapped;
@@ -110,8 +112,19 @@ public:
 	void                                        Commit();
 	[[nodiscard]] uint64_t Copy(const void* source, uint64_t size, uint64_t alignment = 0);
 
+	// The ring's CPU side: GPU waits taken because a reservation reached data the GPU still uses.
+	struct RingStats {
+		uint64_t waits   = 0; // waits that actually blocked
+		uint64_t wait_ns = 0;
+		uint64_t wraps   = 0;
+		uint64_t bytes   = 0; // bytes reserved
+	};
+	[[nodiscard]] RingStats GetRingStats() const noexcept { return m_ring_stats; }
+
 private:
 	friend struct StreamBufferTestAccess;
+
+	RingStats m_ring_stats;
 
 	struct Watch {
 		uint64_t tick        = 0;

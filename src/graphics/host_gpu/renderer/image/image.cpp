@@ -280,6 +280,23 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }
 
+bool Image::ClearColorToZero() {
+	if (FullAspectMask(backing.format) != vk::ImageAspectFlagBits::eColor) {
+		return false;
+	}
+	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+	m_scheduler.EndRendering();
+	auto command = m_scheduler.Current().Handle();
+	Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {}, command);
+	const vk::ClearColorValue       zero {};
+	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0,
+	                                       VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+	command.clearColorImage(backing.image, vk::ImageLayout::eTransferDstOptimal, &zero, 1, &range);
+	Transit(vk::ImageLayout::eGeneral,
+	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
+	return true;
+}
+
 void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer,
                      uint64_t offset, uint64_t size) {
 	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
