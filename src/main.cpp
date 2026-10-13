@@ -139,19 +139,19 @@ static void PrintUsage() {
 	         "                                      from never-written guest memory. Default: off.\n");
 	::printf("  --heap-trim <on|off>                 Hand free pages of the host allocator back to the kernel\n"
 	         "                                      (malloc_trim, at most every 5 s) when at least 64 MiB and\n"
-	         "                                      20%% of its arenas are free. Default: off.\n");
+	         "                                      20%% of its arenas are free. Default: on.\n");
 	::printf("  --mem-hole-reads <on|off>            Read guest memory that was never written with pread\n"
 	         "                                      instead of through the writable mapping, so the read\n"
 	         "                                      does not allocate zero pages (reads of 16 KiB or more).\n"
-	         "                                      Default: off.\n");
+	         "                                      Default: on.\n");
 	::printf("  --upload-ring-rebar <on|off>         Put the 512 MiB upload staging ring in device-local\n"
-	         "                                      host-visible memory (ReBAR) instead of system RAM.\n"
-	         "                                      Falls back to system RAM, logged, when the device has\n"
-	         "                                      no such heap. Default: off.\n");
+	         "                                      host-visible memory (ReBAR) instead of system RAM, on\n"
+	         "                                      cards with a large BAR and at least 8 GiB of VRAM; other\n"
+	         "                                      cards keep it in system RAM (logged). Default: on.\n");
 	::printf("  --skip-zero-uploads <on|off>         Do not read and upload a color image whose guest memory\n"
 	         "                                      was never written (it reads as zeros): clear the GPU\n"
 	         "                                      image instead. Saves the guest read, the staging copy and\n"
-	         "                                      the detile pass. Default: off.\n");
+	         "                                      the detile pass. Default: on.\n");
 	::printf("  --verify-zero-uploads <on|off>       Debug: with --skip-zero-uploads, also pread each skipped\n"
 	         "                                      range and log an error if it holds a non-zero byte.\n");
 	::printf("  --vram-audit <seconds>               Debug: once, this many seconds after start, log the\n"

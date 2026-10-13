@@ -141,17 +141,17 @@ struct ConfigOptions {
 	bool                   mem_residency               = false;
 	// Hand free pages of the host allocator back to the kernel (malloc_trim) when a lot of freed memory
 	// sits in its arenas. See common/heapTrim.h.
-	bool                   heap_trim                   = false;
+	bool                   heap_trim                   = true;
 	// Read never-written guest memory with pread instead of through the writable mapping, so the read
 	// does not make the zero pages resident (a read of a hole in a shared mapping allocates them).
-	bool                   mem_hole_reads              = false;
+	bool                   mem_hole_reads              = true;
 	// Put the 512 MiB upload staging ring in device-local host-visible memory (ReBAR) instead of system
 	// RAM, when the device offers it. The ring is only written sequentially by the CPU.
-	bool                   upload_ring_rebar           = false;
+	bool                   upload_ring_rebar           = true;
 	// Do not read and upload a color image whose guest range was never written (it reads as zeros):
 	// clear the GPU image instead. Needs no flag to find the range, but a read of the same range
 	// through the mapping would make it resident, so it works best with mem_hole_reads.
-	bool                   skip_zero_uploads           = false;
+	bool                   skip_zero_uploads           = true;
 	// Debug: when a range is skipped as never written, also read it with pread and log loudly if it
 	// holds a non-zero byte.
 	bool                   verify_zero_uploads         = false;

@@ -139,16 +139,30 @@ void TestReadbackLinearImagesStaysOff() {
 
 } // namespace
 
-// Host-RAM features (ram.md) change how guest memory is read or where a ring lives: performance
-// features, off until measured. --mem-residency only counts.
-void TestHostMemoryFeaturesStayOff() {
+// Host-RAM features (ram.md), measured on the level route (notes/mem-footprint.md): reading never-written
+// guest memory with pread, the ReBAR upload ring (placed by VramPolicy::PlanUploadRing, with a system-RAM
+// fallback), clearing never-written images instead of uploading them and trimming the host heap are on.
+// --mem-residency only counts, so it stays off, as does the zero-upload verifier.
+void TestHostMemoryFeaturesDefaults() {
 	const Config::ConfigOptions options;
-	Check(!options.mem_residency && !options.mem_hole_reads && !options.upload_ring_rebar,
-	      "the host-memory features default to off");
+	Check(options.mem_hole_reads && options.upload_ring_rebar && options.skip_zero_uploads &&
+	          options.heap_trim,
+	      "the measured host-memory features default to on");
+	Check(!options.mem_residency && !options.verify_zero_uploads,
+	      "the diagnostics default to off");
 	Apply(options);
-	Check(!Config::MemResidencyEnabled() && !Config::MemHoleReadsEnabled() &&
-	          !Config::UploadRingRebarEnabled(),
-	      "an unconfigured emulator keeps the host-memory features off");
+	Check(Config::MemHoleReadsEnabled() && Config::UploadRingRebarEnabled() &&
+	          Config::SkipZeroUploadsEnabled() && Config::HeapTrimEnabled(),
+	      "an unconfigured emulator has the host-memory features on");
+	Check(!Config::MemResidencyEnabled() && !Config::VerifyZeroUploadsEnabled(),
+	      "an unconfigured emulator keeps the diagnostics off");
+
+	Config::ConfigOptions off;
+	off.mem_hole_reads = off.upload_ring_rebar = off.skip_zero_uploads = off.heap_trim = false;
+	Apply(off);
+	Check(!Config::MemHoleReadsEnabled() && !Config::UploadRingRebarEnabled() &&
+	          !Config::SkipZeroUploadsEnabled() && !Config::HeapTrimEnabled(),
+	      "each host-memory feature can be switched off");
 }
 
 int main() {
@@ -160,7 +174,7 @@ int main() {
 	TestPipelineCacheKeyDefault();
 	TestVramStatsAreIndependentOfPaging();
 	TestVramPagingDefault();
-	TestHostMemoryFeaturesStayOff();
+	TestHostMemoryFeaturesDefaults();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");
