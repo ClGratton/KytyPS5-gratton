@@ -10,7 +10,8 @@
 
 namespace Libs::Graphics::SrtPlan {
 
-// --srt-plan-shadow and --pipeline-lookahead are both on.
+// (--srt-plan-shadow or --srt-plans) and --pipeline-lookahead are on: the lookahead keeps plans and
+// the command processors number the draws.
 [[nodiscard]] bool Enabled();
 
 // seq: submission sequence number (GuestGpu::Enqueue, shared by the lookahead copy and the real

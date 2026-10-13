@@ -38,6 +38,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics::SrtPlan {
@@ -300,6 +301,7 @@ public:
 		std::vector<std::unique_ptr<Plan>> dropped; // freed outside the lock
 		{
 			std::lock_guard lock(m_mutex);
+			dropped.swap(m_recycled);
 			const auto      key = plan->key;
 			m_bytes += plan->Bytes();
 			auto [it, inserted] = m_map.try_emplace(key);
@@ -340,6 +342,13 @@ public:
 			}
 		}
 	}
+	// kyGpu (--srt-plans): hands back plans it is done with, so the lookahead thread frees them
+	// (and the buffers a swapped-in snapshot left in them) instead of kyGpu. Freed by the next Put.
+	void Recycle(std::vector<std::unique_ptr<Plan>>&& dead) {
+		std::lock_guard lock(m_mutex);
+		for (auto& plan: dead) m_recycled.push_back(std::move(plan));
+		dead.clear();
+	}
 	// kyGpu: removes and returns the plan for `key`, or says why there is none.
 	Lookup Take(const Key& key, std::unique_ptr<Plan>& plan) {
 		std::lock_guard lock(m_mutex);
@@ -371,6 +380,7 @@ private:
 	size_t                                       m_max_bytes;
 	size_t                                       m_bytes = 0;
 	std::unordered_map<Key, std::unique_ptr<Plan>, KeyHash> m_map;
+	std::vector<std::unique_ptr<Plan>>           m_recycled;
 	std::deque<Key>                              m_fifo;
 	std::unordered_set<uint64_t>                 m_late;
 	std::deque<uint64_t>                         m_late_fifo;
@@ -607,6 +617,86 @@ private:
 	std::vector<double>       m_interval_p10_lead_us, m_interval_p90_lead_us;
 };
 
+// ---- adoption (--srt-plans) -------------------------------------------------------------------
+
+// What kyGpu does with the plan of a draw. Adopted iff outcome == Ready and invalid == None.
+struct Decision {
+	Outcome outcome = Outcome::Missing;
+	Invalid invalid = Invalid::None;
+	[[nodiscard]] bool Adopted() const { return outcome == Outcome::Ready && invalid == Invalid::None; }
+};
+
+// Looks the draw's plan up and checks it: the plan is for this stage and shader, was made from the
+// same inputs, and the guest memory its walk read is unchanged and holds no GPU-written bytes.
+// `plan` receives the plan whenever one was found, adopted or not (the caller recycles it).
+//   read(kind, address, std::span<uint32_t>, exact) -> bool, dirty(address, bytes) -> bool: see
+//   ReadSet::Validate.
+template <class Read, class Dirty>
+[[nodiscard]] Decision Decide(Store& store, const Key& key, bool nested, uint32_t stage,
+                              uint64_t shader_hash, const Inputs& inputs, Read&& read, Dirty&& dirty,
+                              std::unique_ptr<Plan>& plan) {
+	if (nested) return {Outcome::SubDraw, Invalid::None};
+	switch (store.Take(key, plan)) {
+		case Lookup::NotReady: return {Outcome::NotReady, Invalid::None};
+		case Lookup::Missing: return {Outcome::Missing, Invalid::None};
+		case Lookup::Late: return {Outcome::Late, Invalid::None};
+		case Lookup::Evicted: return {Outcome::Evicted, Invalid::None};
+		case Lookup::Ready: break;
+	}
+	if (plan->stage != stage || plan->shader_hash != shader_hash) return {Outcome::Desync, Invalid::None};
+	if (!InputsMatch(*plan, inputs)) return {Outcome::Ready, Invalid::Inputs};
+	switch (plan->reads.Validate(read, dirty)) {
+		case ReadSet::Result::Valid: return {Outcome::Ready, Invalid::None};
+		case ReadSet::Result::Changed: return {Outcome::Ready, Invalid::Changed};
+		case ReadSet::Result::Unreadable: return {Outcome::Ready, Invalid::Unreadable};
+		case ReadSet::Result::GpuDirty: return {Outcome::Ready, Invalid::GpuDirty};
+	}
+	return {Outcome::Ready, Invalid::Changed};
+}
+
+// The adoption itself: the draw's materialization result (the program source entry's snapshot and
+// specialization) becomes the plan's, and the plan keeps the old buffers for recycling.
+inline void AdoptInto(ShaderRecompiler::IR::ResourceSnapshot&       resources,
+                      ShaderRecompiler::IR::ResourceSpecialization& specialization, Plan& plan) {
+	std::swap(resources, plan.snapshot);
+	std::swap(specialization, plan.specialization);
+}
+
+// Counters of --srt-plans, kept by kyGpu alone (no clocks, no samples: this runs on every draw).
+struct AdoptTotals {
+	uint64_t events = 0, adopted = 0, call_source = 0, new_source = 0;
+	std::array<uint64_t, static_cast<size_t>(Outcome::Count)> outcome {};
+	std::array<uint64_t, static_cast<size_t>(Invalid::Count)> invalid {};
+	// --srt-plan-shadow together with --srt-plans: every adopted plan is compared with kyGpu's own
+	// materialization of the same draw.
+	uint64_t verified = 0, mismatched = 0;
+	std::array<uint64_t, 8> diff_bits {};
+
+	void Note(const Decision& decision) {
+		++events;
+		++outcome[static_cast<size_t>(decision.outcome)];
+		if (decision.outcome == Outcome::Ready) ++invalid[static_cast<size_t>(decision.invalid)];
+		adopted += decision.Adopted();
+	}
+	void NoteVerified(uint32_t diff) {
+		++verified;
+		if (diff == 0) return;
+		++mismatched;
+		for (size_t bit = 0; bit < diff_bits.size(); ++bit) diff_bits[bit] += (diff >> bit) & 1u;
+	}
+	void Add(const AdoptTotals& o) {
+		events += o.events;
+		adopted += o.adopted;
+		call_source += o.call_source;
+		new_source += o.new_source;
+		for (size_t i = 0; i < outcome.size(); ++i) outcome[i] += o.outcome[i];
+		for (size_t i = 0; i < invalid.size(); ++i) invalid[i] += o.invalid[i];
+		verified += o.verified;
+		mismatched += o.mismatched;
+		for (size_t i = 0; i < diff_bits.size(); ++i) diff_bits[i] += o.diff_bits[i];
+	}
+};
+
 // ---- process-wide instance (srtPlan.cpp) -------------------------------------------------------
 
 [[nodiscard]] Store& GetStore();
@@ -619,6 +709,10 @@ void NoteProduced(uint64_t bytes);         // plan stored
 void NoteProduceFailed();                  // materialization failed / plan not made
 void NoteProduceCost(int64_t ns);          // recording + finishing the plan
 // kyGpu thread.
+[[nodiscard]] bool AdoptEnabled();          // --srt-plans
+[[nodiscard]] bool ShadowEnabled();         // --srt-plan-shadow
+[[nodiscard]] AdoptTotals& Adopting();      // the counters of the current window (folded into the total at Poll)
+void RecyclePlan(std::unique_ptr<Plan> plan); // batches finished plans back to the lookahead thread
 void Record(const Sample& sample);
 void NoteDrain();
 void Poll();

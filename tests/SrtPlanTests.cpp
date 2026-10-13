@@ -451,6 +451,164 @@ void TestIntervalMediansNeedEnoughSamples() {
 	Check(stats.Intervals().size() == 4, "all intervals kept");
 }
 
+// ---- adoption (--srt-plans) -----------------------------------------------------------------
+
+// A plan whose read set was recorded from `memory` (a scalar window and a clean one).
+std::unique_ptr<Plan> MakeReadPlan(Key key, FakeMemory& memory) {
+	auto plan = MakePlan(key);
+	Put(memory, 0x8000, {11, 22, 33});
+	Put(memory, 0x9000, {44});
+	ReadRecorder rec;
+	Record(rec, memory, ReadKind::Scalar, 0x8000, 3);
+	Record(rec, memory, ReadKind::Clean, 0x9000, 1);
+	plan->reads = rec.Finish();
+	return plan;
+}
+
+struct AdoptFixture {
+	Store                       store {100, 1u << 30};
+	FakeMemory                  memory;
+	std::vector<uint32_t>       user {1, 2, 3, 4};
+	std::vector<uint32_t>       groups {2, 3, 4};
+	std::unique_ptr<Plan>       plan;
+
+	Decision Decide(Key key, bool nested = false, uint32_t stage = 1, uint64_t hash = 0xabc) {
+		plan.reset();
+		return ::Libs::Graphics::SrtPlan::Decide(
+		    store, key, nested, stage, hash, Inputs {user, 0x1000, groups},
+		    [&](ReadKind k, uint64_t a, std::span<uint32_t> o, bool e) { return memory.Read(k, a, o, e); },
+		    [&](uint64_t a, uint64_t b) { return memory.Dirty(a, b); }, plan);
+	}
+	void Add(Key key) {
+		store.Put(MakeReadPlan(key, memory));
+		store.NoteProgress({key.seq, key.ordinal});
+	}
+};
+
+void TestDecideAdoptsAValidPlan() {
+	AdoptFixture f;
+	f.Add({3, 1, 0});
+	const auto decision = f.Decide({3, 1, 0});
+	Check(decision.Adopted() && decision.outcome == Outcome::Ready && decision.invalid == Invalid::None, "valid plan adopted");
+	Check(f.plan != nullptr && f.plan->key == Key {3, 1, 0}, "the plan is handed over");
+	Check(f.store.GetCounters().queued == 0, "and no longer in the store");
+}
+
+void TestDecideRejectsUnusablePlansAndStillReturnsThem() {
+	AdoptFixture f;
+	f.Add({3, 1, 0});
+	auto decision = f.Decide({3, 1, 0}, false, 2); // another stage
+	Check(!decision.Adopted() && decision.outcome == Outcome::Desync && f.plan != nullptr, "stage desync");
+	f.Add({3, 2, 0});
+	decision = f.Decide({3, 2, 0}, false, 1, 0xdef); // another shader
+	Check(decision.outcome == Outcome::Desync && f.plan != nullptr, "shader desync");
+
+	f.Add({3, 3, 0});
+	f.user[0] = 99; // inputs differ
+	decision = f.Decide({3, 3, 0});
+	Check(!decision.Adopted() && decision.outcome == Outcome::Ready && decision.invalid == Invalid::Inputs && f.plan != nullptr,
+	      "inputs differ");
+	f.user[0] = 1;
+
+	f.Add({3, 4, 0});
+	f.memory.Set(0x8004, 1234); // a scalar dword the walk read changed
+	decision = f.Decide({3, 4, 0});
+	Check(!decision.Adopted() && decision.invalid == Invalid::Changed && f.plan != nullptr, "guest memory changed");
+	f.memory.Set(0x8004, 22);
+
+	f.Add({3, 5, 0});
+	f.memory.dirty_ranges.push_back(0x9000); // the clean read is now GPU-written
+	decision = f.Decide({3, 5, 0});
+	Check(!decision.Adopted() && decision.invalid == Invalid::GpuDirty && f.plan != nullptr, "GPU-written clean read");
+	f.memory.dirty_ranges.clear();
+
+	f.Add({3, 6, 0});
+	f.memory.bytes.erase(0x9000); // the memory a clean read covered is unmapped now
+	decision = f.Decide({3, 6, 0});
+	Check(!decision.Adopted() && decision.invalid == Invalid::Unreadable && f.plan != nullptr, "unreadable");
+	f.Add({3, 7, 0});
+	f.memory.bytes.erase(0x8000); // unmapped scalar memory reads as zeros: the changed dword shows
+	decision = f.Decide({3, 7, 0});
+	Check(!decision.Adopted() && decision.invalid == Invalid::Changed && f.plan != nullptr, "unmapped scalar read is a change");
+}
+
+void TestDecideWithoutAPlan() {
+	AdoptFixture f;
+	auto decision = f.Decide({4, 1, 0});
+	Check(decision.outcome == Outcome::NotReady && !decision.Adopted() && f.plan == nullptr, "not made yet");
+	f.store.NoteProgress({4, 1});
+	decision = f.Decide({4, 1, 0});
+	Check(decision.outcome == Outcome::Missing && f.plan == nullptr, "passed without a plan");
+	f.store.NoteLate(5);
+	Check(f.Decide({5, 1, 0}).outcome == Outcome::Late, "late submission");
+	// A nested draw never takes a plan: the one of its packet stays for the draw that owns it.
+	f.Add({6, 1, 0});
+	decision = f.Decide({6, 1, 0}, true);
+	Check(decision.outcome == Outcome::SubDraw && f.plan == nullptr && f.store.GetCounters().queued == 1, "nested draw");
+	Check(f.Decide({6, 1, 0}).Adopted(), "the plan is still there for its draw");
+}
+
+void TestDecideAfterEviction() {
+	AdoptFixture f;
+	Store small(2, 1u << 30);
+	// Fill a two-plan store: the oldest falls out and is reported as evicted.
+	small.Put(MakeReadPlan({7, 1, 0}, f.memory));
+	small.Put(MakeReadPlan({7, 2, 0}, f.memory));
+	small.Put(MakeReadPlan({7, 3, 0}, f.memory));
+	small.NoteProgress({7, 3});
+	std::unique_ptr<Plan> plan;
+	const Inputs inputs {f.user, 0x1000, f.groups};
+	const auto read  = [&](ReadKind k, uint64_t a, std::span<uint32_t> o, bool e) { return f.memory.Read(k, a, o, e); };
+	const auto dirty = [&](uint64_t a, uint64_t b) { return f.memory.Dirty(a, b); };
+	Check(Decide(small, {7, 1, 0}, false, 1, 0xabc, inputs, read, dirty, plan).outcome == Outcome::Evicted, "evicted plan");
+	Check(Decide(small, {7, 3, 0}, false, 1, 0xabc, inputs, read, dirty, plan).Adopted(), "newest plan adopted");
+}
+
+void TestAdoptIntoSwapsAndKeepsTheOldBuffers() {
+	auto plan = MakePlan({1, 1, 0});
+	Libs::Graphics::ShaderRecompiler::IR::ResourceSnapshot       resources;
+	Libs::Graphics::ShaderRecompiler::IR::ResourceSpecialization specialization;
+	resources.flattened_srt = {1, 1, 1, 1, 1};
+	resources.user_data     = {5};
+	specialization.buffers.resize(3);
+	const auto expected_srt = plan->snapshot.flattened_srt;
+	const auto expected_user = plan->snapshot.user_data;
+	AdoptInto(resources, specialization, *plan);
+	Check(resources.flattened_srt == expected_srt && resources.user_data == expected_user, "entry holds the plan's snapshot");
+	Check(specialization.buffers.size() == 1 && specialization.images.size() == 1, "and its specialization");
+	Check(plan->snapshot.flattened_srt.size() == 5 && plan->specialization.buffers.size() == 3, "the plan holds the old ones");
+	Check(resources.buffers.size() == 1 && resources.images.size() == 1 && resources.samplers.size() == 1, "descriptor values moved too");
+}
+
+void TestRecycleKeepsTheStoreConsistent() {
+	AdoptFixture f;
+	std::vector<std::unique_ptr<Plan>> dead;
+	for (int i = 0; i < 5; ++i) dead.push_back(MakePlan({9, uint32_t(i + 1), 0}));
+	f.store.Recycle(std::move(dead));
+	Check(dead.empty() && f.store.GetCounters().queued == 0 && f.store.GetCounters().put == 0, "recycled plans are not stored");
+	f.Add({9, 1, 0});
+	Check(f.store.GetCounters().queued == 1 && f.store.GetCounters().put == 1, "the next put works");
+	Check(f.Decide({9, 1, 0}).Adopted(), "and is adoptable");
+}
+
+void TestAdoptTotals() {
+	AdoptTotals t;
+	t.Note({Outcome::Ready, Invalid::None});
+	t.Note({Outcome::Ready, Invalid::Changed});
+	t.Note({Outcome::NotReady, Invalid::None});
+	t.Note({Outcome::SubDraw, Invalid::None});
+	Check(t.events == 4 && t.adopted == 1, "events and adoptions");
+	Check(t.outcome[size_t(Outcome::Ready)] == 2 && t.invalid[size_t(Invalid::Changed)] == 1 && t.invalid[size_t(Invalid::None)] == 1,
+	      "plans found and why one was not used");
+	t.NoteVerified(0);
+	t.NoteVerified(DiffFlattened | DiffReads);
+	Check(t.verified == 2 && t.mismatched == 1 && t.diff_bits[0] == 1 && t.diff_bits[5] == 1 && t.diff_bits[1] == 0, "verification");
+	AdoptTotals sum;
+	sum.Add(t);
+	sum.Add(t);
+	Check(sum.events == 8 && sum.adopted == 2 && sum.mismatched == 2 && sum.diff_bits[0] == 2, "totals add up");
+}
+
 } // namespace
 
 int main() {
@@ -475,6 +633,13 @@ int main() {
 	TestPercentilesAndReservoir();
 	TestStatsCountOutcomesAndIntervals();
 	TestIntervalMediansNeedEnoughSamples();
+	TestDecideAdoptsAValidPlan();
+	TestDecideRejectsUnusablePlansAndStillReturnsThem();
+	TestDecideWithoutAPlan();
+	TestDecideAfterEviction();
+	TestAdoptIntoSwapsAndKeepsTheOldBuffers();
+	TestRecycleKeepsTheStoreConsistent();
+	TestAdoptTotals();
 	std::printf("SrtPlanTests: all passed\n");
 	return 0;
 }

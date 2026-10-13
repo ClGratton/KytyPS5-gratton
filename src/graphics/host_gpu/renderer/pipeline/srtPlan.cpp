@@ -5,7 +5,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <fmt/format.h>
 
 namespace Libs::Graphics::SrtPlan {
@@ -27,9 +29,13 @@ std::atomic<int64_t>  g_produce_ns {0};
 
 struct ConsumerState {
 	Stats          stats;
+	AdoptTotals    adopt_window; // --srt-plans: since the last report
+	AdoptTotals    adopt_total;
+	std::vector<std::unique_ptr<Plan>> dead; // finished plans, handed back in batches
 	int64_t        start_ns   = 0;
 	int64_t        last_print = 0;
 	std::FILE*     csv        = nullptr; // one row per drain interval
+	bool           csv_failed = false;
 	std::FILE*     wcsv       = nullptr; // one row per report window
 	uint64_t       drains     = 0;
 };
@@ -136,10 +142,28 @@ void WriteWindowRow(ConsumerState& c, const Stats::Window& w, double seconds) {
 	std::fflush(c.wcsv);
 }
 
+std::string FormatAdopt(const char* title, double seconds, const AdoptTotals& t) {
+	const auto outcome = [&](Outcome o) { return t.outcome[static_cast<size_t>(o)]; };
+	const uint64_t eligible = t.events - outcome(Outcome::SubDraw) - t.new_source - t.call_source;
+	std::string line = fmt::format(
+	    "SrtPlans {} {:.1f}s: draws={} eligible={} adopted={} ({}); plan found={} not_ready={} missing={} late={} evicted={} "
+	    "desync={} subdraw={} new_source={} call_source={}; unusable plans:",
+	    title, seconds, t.events, eligible, t.adopted, Pct(t.adopted, eligible), outcome(Outcome::Ready),
+	    outcome(Outcome::NotReady), outcome(Outcome::Missing), outcome(Outcome::Late), outcome(Outcome::Evicted),
+	    outcome(Outcome::Desync), outcome(Outcome::SubDraw), t.new_source, t.call_source);
+	for (size_t i = 1; i < t.invalid.size(); ++i) line += fmt::format(" {}={}", kInvalidNames[i], t.invalid[i]);
+	if (t.verified != 0) {
+		line += fmt::format("; verified against kyGpu's own result: {} mismatched={} diff bits (flat,buf,img,smp,user,reads,fill,spec):",
+		                    t.verified, t.mismatched);
+		for (const auto v: t.diff_bits) line += fmt::format(" {}", v);
+	}
+	return line + "\n";
+}
+
 std::string ProducerText() {
 	auto counters = GetStore().GetCounters();
 	return fmt::format(
-	    "SrtPlanShadow producer: events={} plans={} ({:.1f} MB total) failed={} produce_cost={:.0f} ns/plan; queue: put={} "
+	    "SrtPlan producer: events={} plans={} ({:.1f} MB total) failed={} produce_cost={:.0f} ns/plan; queue: put={} "
 	    "evicted={} queued={} ({:.1f} MB)\n",
 	    g_producer_events.load(), g_produced.load(), static_cast<double>(g_produced_bytes.load()) / 1048576.0,
 	    g_produce_failed.load(),
@@ -149,8 +173,26 @@ std::string ProducerText() {
 
 } // namespace
 
-bool Enabled() {
+bool ShadowEnabled() {
 	return Config::SrtPlanShadowEnabled();
+}
+
+bool AdoptEnabled() {
+	return Config::SrtPlansEnabled();
+}
+
+bool Enabled() {
+	return ShadowEnabled() || AdoptEnabled();
+}
+
+AdoptTotals& Adopting() {
+	return Consumer().adopt_window;
+}
+
+void RecyclePlan(std::unique_ptr<Plan> plan) {
+	auto& dead = Consumer().dead;
+	dead.push_back(std::move(plan));
+	if (dead.size() >= 128) GetStore().Recycle(std::move(dead));
 }
 
 Store& GetStore() {
@@ -194,9 +236,12 @@ void NoteDrain() {
 	const auto record = c.stats.EndInterval();
 	++c.drains;
 	if (record.events == 0) return;
-	if (c.csv == nullptr && c.start_ns != 0) {
+	if (c.csv == nullptr && c.start_ns != 0 && !c.csv_failed) {
 		c.csv = std::fopen("_srt_plan.csv", "w");
-		if (c.csv != nullptr) {
+		if (c.csv == nullptr) {
+			c.csv_failed = true; // say so once instead of every drain
+			::Log::WriteToConsoleAndLog(fmt::format("SrtPlan: cannot create _srt_plan.csv: {}\n", std::strerror(errno)));
+		} else {
 			std::fputs("wall_s,events,ready,valid,equal,lead_us_p10,lead_us_p50,lead_us_p90,lead_draws_p10,lead_draws_p50,"
 			           "lead_draws_p90\n",
 			           c.csv);
@@ -222,6 +267,12 @@ void Poll() {
 	if (now - c.last_print < kPeriodNs) return;
 	const double seconds = static_cast<double>(now - c.last_print) / 1e9;
 	c.last_print         = now;
+	if (c.adopt_window.events != 0) {
+		const auto window = c.adopt_window;
+		c.adopt_total.Add(window);
+		c.adopt_window = {};
+		::Log::WriteToConsoleAndLog(FormatAdopt("window", seconds, window) + ProducerText());
+	}
 	const auto window    = c.stats.TakeWindow();
 	if (window.totals.events == 0) return;
 	WriteWindowRow(c, window, seconds);
@@ -237,8 +288,14 @@ std::string SummaryText() {
 	}
 	const auto total = c.stats.TotalWindow();
 	const double seconds = c.start_ns != 0 ? static_cast<double>(NowNs() - c.start_ns) / 1e9 : 0.0;
-	std::string text = fmt::format("drain intervals: {}\n", c.drains);
-	text += FormatWindow("total", seconds, total, c.stats, true);
+	c.adopt_total.Add(c.adopt_window);
+	c.adopt_window = {};
+	std::string text;
+	if (c.adopt_total.events != 0) text += FormatAdopt("total", seconds, c.adopt_total);
+	if (ShadowEnabled() && !AdoptEnabled()) {
+		text += fmt::format("drain intervals: {}\n", c.drains);
+		text += FormatWindow("total", seconds, total, c.stats, true);
+	}
 	text += ProducerText();
 	if (c.csv != nullptr) std::fflush(c.csv);
 	return text;

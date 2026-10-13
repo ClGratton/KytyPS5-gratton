@@ -185,7 +185,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 
 // --srt-plan-shadow: a drain ends the span of draws whose plan lead is reported together.
 static void NoteShadowDrain() {
-	if (SrtPlan::Enabled() && GuestGpu::IsGpuThread()) SrtPlan::NoteDrain();
+	if (SrtPlan::ShadowEnabled() && !SrtPlan::AdoptEnabled() && GuestGpu::IsGpuThread()) SrtPlan::NoteDrain();
 }
 
 void CommandScheduler::FlushAndWait() {
