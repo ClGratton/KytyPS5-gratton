@@ -45042,6 +45042,25 @@ void CheckPm4IndirectControlFlow(RenderContext &renderer) {
           Gen5::AgcCbNop(reinterpret_cast<Gen5::CommandBuffer*>(&payload_dcb), 3) == payload.data() &&
               payload == std::array<uint32_t, 3>{0xc0011000u, 0x12345678u, 0x9abcdef0u},
           "NOP emitter overwrote the caller's reserved payload");
+  for (const uint32_t value : {0x68750820u, 0x68751777u, 0x68751004u}) {
+    std::array<uint32_t, 8> commands{KYTY_PM4(3, Pm4::IT_NOP, Pm4::R_ZERO), value, 0x12345678u};
+    std::copy(completion.begin(), completion.end(), commands.begin() + 3);
+    processor.SetUserDataMarker(HW::UserSgprType::Unknown);
+    selected = 0;
+    Pm4Execution execution;
+    Require(name, "opaque NOP payload",
+            processor.Process(execution, commands) == Pm4ProcessResult::Complete && selected == 7 &&
+                processor.GetUserDataMarker() == HW::UserSgprType::Unknown && commands[1] == value,
+            "a NOP payload prefix executed a marker or blocked the following packet");
+  }
+  const std::array<uint32_t, 2> vsharp_marker{
+      KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0x68750004u};
+  Pm4Execution marker_execution;
+  Require(name, "exact user-data marker",
+          processor.Process(marker_execution, vsharp_marker) == Pm4ProcessResult::Complete &&
+              processor.GetUserDataMarker() == HW::UserSgprType::Vsharp,
+          "exact marker dispatch lost the existing user-data annotation");
+  processor.SetUserDataMarker(HW::UserSgprType::Unknown);
   alignas(8) uint64_t released = 0;
   std::array<uint32_t, 20> disabled_commands{};
   const auto disabled_write = write(&returned, 99);
