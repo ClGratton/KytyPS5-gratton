@@ -381,6 +381,10 @@ folders recursively for game directories containing `eboot.bin` and ZArchive (`.
 whose archive root contains `eboot.bin`. Select a detected game and run it from the game list.
 ZArchive dumps are mounted read-only and streamed directly; they do not need to be extracted first.
 
+On computers with little RAM (about 16 GB or less), the launcher shows a **Host memory** line and offers to
+set up compressed swap (zswap) or the Windows memory settings the emulator needs, with one click and the
+system's administrator prompt; it is undoable. See [docs/host-memory.md](docs/host-memory.md).
+
 Official release builds include a built-in updater. Leave **Check for updates on startup** enabled,
 or click **Check for updates**, then choose **Install Update**. The launcher downloads the package
 for your platform from GitHub, checks its SHA-256 checksum, and restarts after installation. Close
