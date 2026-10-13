@@ -25,6 +25,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -1039,43 +1040,70 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		         shader_stage != vk::ShaderStageFlagBits::eCompute));
 	}
 	Common::GpuPhase::Scope gpu_phase_hazard(Common::GpuPhase::Phase::DescHazard);
-	for (const auto* reader: prepared_bindings) {
-		const auto& reads = reader->runtime->resources->specialization_reads;
-		if (reads.empty()) continue;
-		for (const auto* writer: prepared_bindings) {
-			if (writer->runtime->program->has_address_writes) {
-				EXIT("scalar resource reads cannot be proven disjoint from shader address writes\n");
-			}
-		}
-		for (const auto [address, size]: reads) {
-			for (const auto id: m_bound_images) {
-				const auto* image = m_context.GetTextureCache().m_slot_images.try_get(id);
-				if (image == nullptr ||
-				    (!image->binding.shader_write && !image->binding.is_target)) continue;
-				for (const auto written: {image->info.data, image->info.stencil,
-				                          image->info.metadata.range}) {
-					if (written.size != 0 && ImageRangeOverlaps(address, size,
-					                                          written.address, written.size)) {
-						EXIT("scalar resource reads overlap an image or attachment write\n");
-					}
-				}
-			}
+	{
+		// Scalar reads versus writes of the same draw (see scalarReadHazard.h): the written image and
+		// buffer ranges are collected once per commit and each read is answered by a binary search.
+		static thread_local WrittenRangeIndex image_writes;
+		static thread_local WrittenRangeIndex buffer_writes;
+		static thread_local WrittenRangeIndex buffer_writes_of_others;
+		bool collected = false;
+		auto collect_buffer_writes = [&](WrittenRangeIndex& index, const PreparedBindings* skip) {
+			index.Clear();
 			for (const auto* writer: prepared_bindings) {
+				if (writer == skip) continue;
 				const auto& program = *writer->runtime->program;
-				// A compute dispatch reading a buffer it writes itself through scalar loads is racy
-				// on hardware: the scalar cache is not coherent with the dispatch's own vector
-				// writes, so the value captured at dispatch start is a valid result. The next
-				// dispatch re-materializes its specialization from memory, so the writes are still
-				// observed from then on.
-				if (writer == reader && program.stage == ShaderType::Compute) continue;
 				for (const auto& resource: program.info.buffers) {
 					if (!resource.written || resource.descriptor_index == UINT32_MAX) continue;
 					const auto& written = writer->buffer_sources[resource.descriptor_index];
-					if (written.size != 0 && ImageRangeOverlaps(address, size,
-					                                          written.address, written.size)) {
-						EXIT("scalar resource reads overlap a shader buffer write\n");
+					index.Add(written.address, written.size);
+				}
+			}
+			index.Build();
+		};
+		for (const auto* reader: prepared_bindings) {
+			const auto& reads = reader->runtime->resources->specialization_reads;
+			if (reads.empty()) continue;
+			for (const auto* writer: prepared_bindings) {
+				if (writer->runtime->program->has_address_writes) {
+					EXIT("scalar resource reads cannot be proven disjoint from shader address writes\n");
+				}
+			}
+			if (!collected) {
+				collected = true;
+				image_writes.Clear();
+				for (const auto id: m_bound_images) {
+					const auto* image = m_context.GetTextureCache().m_slot_images.try_get(id);
+					if (image == nullptr ||
+					    (!image->binding.shader_write && !image->binding.is_target)) continue;
+					for (const auto written: {image->info.data, image->info.stencil,
+					                          image->info.metadata.range}) {
+						image_writes.Add(written.address, written.size);
 					}
 				}
+				image_writes.Build();
+				collect_buffer_writes(buffer_writes, nullptr);
+			}
+			// A compute dispatch reading a buffer it writes itself through scalar loads is racy
+			// on hardware: the scalar cache is not coherent with the dispatch's own vector
+			// writes, so the value captured at dispatch start is a valid result. The next
+			// dispatch re-materializes its specialization from memory, so the writes are still
+			// observed from then on.
+			const WrittenRangeIndex* buffers = &buffer_writes;
+			if (reader->runtime->program->stage == ShaderType::Compute) {
+				collect_buffer_writes(buffer_writes_of_others, reader);
+				buffers = &buffer_writes_of_others;
+			}
+			switch (FindScalarReadHazard(reads, image_writes, *buffers).kind) {
+				case ScalarReadHazardKind::None: break;
+				case ScalarReadHazardKind::ImageWrite:
+					EXIT("scalar resource reads overlap an image or attachment write\n");
+					break;
+				case ScalarReadHazardKind::BufferWrite:
+					EXIT("scalar resource reads overlap a shader buffer write\n");
+					break;
+				case ScalarReadHazardKind::InvalidRange:
+					EXIT("invalid image overlap range\n");
+					break;
 			}
 		}
 	}
