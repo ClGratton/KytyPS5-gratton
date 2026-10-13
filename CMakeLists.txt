@@ -589,6 +589,7 @@ add_executable(host_memory_policy_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/HostMemoryPolicyTests.cpp"
 	"${KYTY_SOURCE_DIR}/launcher/src/hostMemoryPolicy.cpp"
 	"${KYTY_SOURCE_DIR}/launcher/src/hostMemoryProbe.cpp"
+	"${KYTY_SOURCE_DIR}/launcher/src/hostMemoryTrust.cpp"
 )
 target_include_directories(host_memory_policy_tests PRIVATE "${KYTY_SOURCE_DIR}/launcher/include")
 

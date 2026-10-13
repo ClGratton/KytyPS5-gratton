@@ -4,12 +4,14 @@
 
 #include "hostMemoryPolicy.h"
 #include "hostMemoryProbe.h"
+#include "hostMemoryTrust.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 
 namespace {
@@ -366,6 +368,168 @@ void TestProbe() {
 	}
 }
 
+
+// ---- The ownership check before every pkexec, on a made-up tree ----
+
+struct FakeFs {
+	std::map<std::string, FileStat>    entries;
+	std::map<std::string, std::string> links;  // path -> target (absolute)
+
+	void Dir(const std::string& path, uint32_t uid = 0, uint32_t mode = 0755) {
+		FileStat st;
+		st.exists = st.is_dir = true;
+		st.uid                = uid;
+		st.mode               = mode;
+		entries[path]         = st;
+	}
+	void File(const std::string& path, uint32_t uid = 0, uint32_t mode = 0755) {
+		FileStat st;
+		st.exists = st.is_regular = true;
+		st.uid                    = uid;
+		st.mode                   = mode;
+		entries[path]             = st;
+	}
+	void Link(const std::string& path, const std::string& target) {
+		FileStat st;
+		st.exists = st.is_symlink = true;
+		entries[path]             = st;
+		links[path]               = target;
+	}
+	[[nodiscard]] StatFn Lstat() const {
+		return [this](const std::string& path) {
+			const auto it = entries.find(path);
+			return it == entries.end() ? FileStat {} : it->second;
+		};
+	}
+	[[nodiscard]] ResolveFn Resolve() const {
+		return [this](const std::string& path) -> std::string {
+			// resolve symlinks component by component (enough for the shapes below)
+			std::string current;
+			size_t      at = 1;
+			while (at <= path.size()) {
+				const auto next      = path.find('/', at);
+				const auto component = path.substr(at, next == std::string::npos ? std::string::npos : next - at);
+				current += "/" + component;
+				for (int hops = 0; links.count(current) != 0 && hops < 8; hops++) {
+					current = links.at(current);
+				}
+				if (entries.count(current) == 0) {
+					return {};
+				}
+				if (next == std::string::npos) {
+					break;
+				}
+				at = next + 1;
+			}
+			return current;
+		};
+	}
+};
+
+FakeFs GoodTree() {
+	FakeFs fs;
+	fs.Dir("/");
+	fs.Dir("/usr");
+	fs.Dir("/usr/local");
+	fs.Dir("/usr/local/libexec");
+	fs.Dir("/usr/local/libexec/kyty");
+	fs.File("/usr/local/libexec/kyty/kyty-host-memory");
+	return fs;
+}
+
+const char* kHelper = "/usr/local/libexec/kyty/kyty-host-memory";
+
+bool Trusted(const FakeFs& fs, const std::string& path = kHelper) {
+	return CheckRootOwnedExecutable(path, fs.Lstat(), fs.Resolve()).ok;
+}
+
+void TestTrust() {
+	Check(HelperInstallPaths().size() == 2 && HelperInstallPaths()[0] == kHelper &&
+	          HelperInstallPaths()[1] == "/usr/libexec/kyty/kyty-host-memory",
+	      "install paths: /usr/local first, /usr/libexec second");
+	Check(Trusted(GoodTree()), "trust: a root-owned helper in root-only directories");
+
+	auto fs = GoodTree();
+	fs.entries["/usr/local/libexec/kyty/kyty-host-memory"].uid = 1000;
+	Check(!Trusted(fs), "trust: a helper owned by a user is refused");
+
+	fs = GoodTree();
+	fs.entries["/usr/local/libexec/kyty/kyty-host-memory"].mode = 0775;
+	Check(!Trusted(fs), "trust: a group-writable helper is refused");
+	fs.entries["/usr/local/libexec/kyty/kyty-host-memory"].mode = 0757;
+	Check(!Trusted(fs), "trust: a world-writable helper is refused");
+	fs.entries["/usr/local/libexec/kyty/kyty-host-memory"].mode = 0644;
+	Check(!Trusted(fs), "trust: a helper that is not executable is refused");
+
+	for (const char* dir: {"/usr", "/usr/local", "/usr/local/libexec", "/usr/local/libexec/kyty", "/"}) {
+		fs = GoodTree();
+		fs.entries[dir].uid = 1000;
+		Check(!Trusted(fs), (std::string("trust: a user-owned directory is refused: ") + dir).c_str());
+		fs = GoodTree();
+		fs.entries[dir].mode = 0777;
+		Check(!Trusted(fs), (std::string("trust: a world-writable directory is refused: ") + dir).c_str());
+		fs = GoodTree();
+		fs.entries[dir].mode = 0775;
+		Check(!Trusted(fs), (std::string("trust: a group-writable directory is refused: ") + dir).c_str());
+	}
+	fs = GoodTree();
+	fs.entries["/usr/local"].mode = 02775;  // Debian: root:staff, setgid, group-writable
+	Check(!Trusted(fs), "trust: a setgid group-writable /usr/local is refused");
+	fs = GoodTree();
+	fs.entries["/usr/local/libexec"].mode = 01777;  // sticky and world-writable, like /tmp
+	Check(!Trusted(fs), "trust: a sticky world-writable directory is still refused");
+
+	// Symlinks are followed to the real path, and the real path is what is checked.
+	fs = GoodTree();
+	fs.Dir("/var");
+	fs.Dir("/var/usrlocal");
+	fs.Dir("/var/usrlocal/libexec");
+	fs.Dir("/var/usrlocal/libexec/kyty");
+	fs.File("/var/usrlocal/libexec/kyty/kyty-host-memory");
+	fs.entries.erase("/usr/local/libexec");
+	fs.entries.erase("/usr/local/libexec/kyty");
+	fs.entries.erase("/usr/local/libexec/kyty/kyty-host-memory");
+	fs.entries.erase("/usr/local");
+	fs.Link("/usr/local", "/var/usrlocal");
+	Check(Trusted(fs), "trust: /usr/local as a link to a root-only directory (image-based systems)");
+	fs.entries["/var/usrlocal/libexec"].mode = 0777;
+	Check(!Trusted(fs), "trust: the same link, with the real directory world-writable, is refused");
+
+	fs = GoodTree();
+	fs.Dir("/home");
+	fs.Dir("/home/u", 1000, 0755);
+	fs.File("/home/u/evil", 1000, 0755);
+	fs.entries.erase("/usr/local/libexec/kyty/kyty-host-memory");
+	fs.Link("/usr/local/libexec/kyty/kyty-host-memory", "/home/u/evil");
+	Check(!Trusted(fs), "trust: a link to a user-owned file is refused");
+	fs.File("/home/u/evil", 0, 0755);
+	Check(!Trusted(fs), "trust: a root-owned file that is only reachable through a user-owned directory is refused");
+
+	fs = GoodTree();
+	fs.Dir("/usr/local/libexec/kyty/kyty-host-memory2");
+	Check(!Trusted(fs, "/usr/local/libexec/kyty/kyty-host-memory2"), "trust: a directory is not a helper");
+	Check(!Trusted(fs, "/usr/local/libexec/kyty/nothing"), "trust: a missing helper is refused");
+	Check(!Trusted(fs, "usr/local/libexec/kyty/kyty-host-memory"), "trust: a relative path is refused");
+	Check(!Trusted(fs, "/usr/local/libexec/../libexec/kyty/kyty-host-memory"), "trust: a path with .. is refused");
+	Check(!Trusted(fs, "/usr/local//libexec/kyty/kyty-host-memory"), "trust: a path with // is refused");
+	Check(!Trusted(fs, "/usr/local/libexec/kyty/kyty-host-memory/"), "trust: a trailing slash is refused");
+
+	// Directory-only check, used to pick the install location.
+	fs = GoodTree();
+	Check(CheckRootOnlyDirectory("/usr/local/libexec", fs.Lstat(), fs.Resolve()).ok, "trust: a root-only directory");
+	fs.entries["/usr/local"].mode = 0775;
+	Check(!CheckRootOnlyDirectory("/usr/local/libexec", fs.Lstat(), fs.Resolve()).ok, "trust: a group-writable ancestor");
+	Check(NearestExistingDirectory("/usr/local/libexec/kyty/new/deeper", GoodTree().Lstat()) == "/usr/local/libexec/kyty",
+	      "the nearest existing directory");
+	Check(NearestExistingDirectory("/nothing/here", GoodTree().Lstat()) == "/", "the nearest existing directory is at worst /");
+	const auto refused = CheckRootOwnedExecutable(kHelper, fs.Lstat(), fs.Resolve());
+	Check(refused.reason.find("/usr/local") != std::string::npos, "the refusal names the directory");
+
+	// The real system's lstat agrees on a path that must exist.
+	Check(RealLstat("/").exists && RealLstat("/").is_dir && !RealLstat("/nonexistent-kyty-path").exists, "lstat on the real system");
+	Check(RealResolve("/").size() == 1 && RealResolve("/nonexistent-kyty-path").empty(), "realpath on the real system");
+}
+
 // ---- Windows (decision only; the probe and the elevated helper are not run here) ----
 
 WindowsFacts Pc16(PagefileMode mode, uint64_t commit_limit, uint64_t charged) {
@@ -449,6 +613,7 @@ int main() {
 	TestLinuxDecisionTable();
 	TestParsers();
 	TestProbe();
+	TestTrust();
 	TestWindows();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "HostMemoryPolicyTests: %d check(s) failed\n", g_failures);
