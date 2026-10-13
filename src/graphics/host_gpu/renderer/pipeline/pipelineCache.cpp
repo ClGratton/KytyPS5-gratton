@@ -1192,7 +1192,31 @@ struct PipelineCache::ProgramCache {
 	void NoteGraphicsProgramUse(Permutation& permutation, const ShaderParams& params,
 	                            const InputInfo& input_info, ShaderType stage, uint32_t cursor_in,
 	                            const std::vector<uint32_t>& static_state) {
-		if (variants == nullptr || permutation.used.Exchange() ||
+		const bool reglog = Bench::RegistrationLogEnabled();
+		if ((variants == nullptr && !reglog) || permutation.used.Exchange()) {
+			return;
+		}
+		if (reglog) {
+			// --debug-registration-log: which registered binary a program id stands for, and the
+			// draw-time state that went into it.
+			std::string mode;
+			if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+				mode = ";out_mode=";
+				for (uint32_t i = 0; i < 8; i++) {
+					mode += fmt::format("{}{}", i == 0 ? "" : "/", static_cast<unsigned>(input_info.target_output_mode[i]));
+				}
+			}
+			Bench::LogTiming("gfx_prog", permutation.handle.id, Bench::NowNs(), 0, true,
+			                 fmt::format("stage={};shader_hash={:016x};front_hash={:016x};back_hash={:016x};"
+			                             "code_dwords={};static_words={};static_hash={:016x};cursor={}{}",
+			                             StageShortName(stage), params.hash,
+			                             params.back_code.empty() ? 0u : XXH3_64bits(params.code.data(), params.code.size_bytes()),
+			                             params.back_code.empty() ? 0u : XXH3_64bits(params.back_code.data(), params.back_code.size_bytes()),
+			                             params.code.size(), static_state.size(),
+			                             XXH3_64bits(static_state.data(), static_state.size() * sizeof(uint32_t)),
+			                             cursor_in, mode));
+		}
+		if (variants == nullptr ||
 		    (stage != ShaderType::Vertex && stage != ShaderType::Mesh && stage != ShaderType::Pixel)) {
 			return;
 		}
@@ -3575,6 +3599,34 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
     std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
     bool primitive_restart_enable, const GraphicsPrograms& programs) {
+	if (!Bench::RegistrationLogEnabled()) {
+		return GetGraphicsPipelineImpl(colors, depth, vertex_info, command, ps_input_info, topology,
+		                               primitive_restart_enable, programs);
+	}
+	// --debug-registration-log: time the whole lookup (the GPU thread's wait for the pipeline) and
+	// say what state the pipeline was in when the draw asked for it.
+	const auto key = BuildGraphicsKey(colors, depth, vertex_info, command.GetRegisters(),
+	                                  command.GetUserConfig(), ps_input_info, topology,
+	                                  primitive_restart_enable, programs);
+	const char* outcome = "miss";
+	if (FindGraphicsPipeline(key) != nullptr) {
+		outcome = "ready";
+	} else if (const auto job = m_graphics_jobs.Find(key)) {
+		outcome = job->IsPrefetched() ? "inflight_prefetch" : "inflight";
+	}
+	const auto t0 = Bench::NowNs();
+	auto* const result = GetGraphicsPipelineImpl(colors, depth, vertex_info, command, ps_input_info,
+	                                             topology, primitive_restart_enable, programs);
+	RegLogGraphicsDraw(key, t0, Bench::NowNs() - t0, result == nullptr ? "skipped" : outcome,
+	                   programs, ps_input_info != nullptr);
+	return result;
+}
+
+PipelineCache::Pipeline* PipelineCache::GetGraphicsPipelineImpl(
+    std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
+    std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
+    const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
+    bool primitive_restart_enable, const GraphicsPrograms& programs) {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 	Common::GpuPhase::Scope gpu_phase_pipeline(Common::GpuPhase::Phase::Pipeline);
 
@@ -3707,6 +3759,88 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 	return published;
 }
 
+namespace {
+// One line of key/value text for the pipeline state of a graphics key (--debug-registration-log).
+std::string DescribeGraphicsState(const PipelineRenderingState&    rendering,
+                                  const PipelineStaticParameters&  sp,
+                                  const PipelineVertexInputState&  vin) {
+	std::string out = fmt::format("cc={};depth={};stencil={};rt=", rendering.color_count,
+	                              static_cast<int>(rendering.depth_format),
+	                              static_cast<int>(rendering.stencil_format));
+	for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
+		out += fmt::format("{}{}", i == 0 ? "" : "/", static_cast<int>(rendering.color_formats[i]));
+	}
+	out += fmt::format(";topo={};restart={};samples={};n11={};clip={};cullf={};cullb={};face={};"
+	                   "provlast={};poly={};mask=",
+	                   static_cast<int>(sp.topology), sp.primitive_restart_enable ? 1 : 0, sp.samples,
+	                   sp.negative_one_to_one ? 1 : 0, sp.depth_clip_enable ? 1 : 0,
+	                   sp.cull_front ? 1 : 0, sp.cull_back ? 1 : 0, sp.face ? 1 : 0,
+	                   sp.provoking_vtx_last ? 1 : 0, static_cast<int>(sp.polygon_mode));
+	const auto per_rt = [&](const char* name, auto&& value) {
+		out += fmt::format(";{}=", name);
+		for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
+			out += fmt::format("{}{}", i == 0 ? "" : "/", static_cast<unsigned>(value(i)));
+		}
+	};
+	for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
+		out += fmt::format("{}{:x}", i == 0 ? "" : "/", sp.color_mask[i]);
+	}
+	per_rt("blend", [&](uint32_t i) { return sp.blend_enable[i] ? 1u : 0u; });
+	per_rt("csrc", [&](uint32_t i) { return sp.color_srcblend[i]; });
+	per_rt("cdst", [&](uint32_t i) { return sp.color_destblend[i]; });
+	per_rt("cfn", [&](uint32_t i) { return sp.color_comb_fcn[i]; });
+	per_rt("asrc", [&](uint32_t i) { return sp.alpha_srcblend[i]; });
+	per_rt("adst", [&](uint32_t i) { return sp.alpha_destblend[i]; });
+	per_rt("afn", [&](uint32_t i) { return sp.alpha_comb_fcn[i]; });
+	per_rt("sepa", [&](uint32_t i) { return sp.separate_alpha_blend[i] ? 1u : 0u; });
+	out += fmt::format(";vin_b={};vin_a={};vin=", vin.binding_count, vin.attribute_count);
+	for (uint32_t i = 0; i < vin.binding_count; i++) {
+		out += fmt::format("{}b{}:{}", i == 0 ? "" : "/", vin.bindings[i].stride,
+		                   vin.bindings[i].instance ? 1 : 0);
+	}
+	for (uint32_t i = 0; i < vin.attribute_count; i++) {
+		out += fmt::format("/a{}@{}", vin.attributes[i].binding, vin.attributes[i].offset);
+	}
+	return out;
+}
+} // namespace
+
+// GPU thread, --debug-registration-log: the draw asked for `key`'s pipeline. One row per key at
+// its first draw, and one more for every later lookup that took 500 us or more (a stall).
+void PipelineCache::RegLogGraphicsDraw(const GraphicsPipelineKey& key, int64_t t_start_ns,
+                                       int64_t dur_ns, const char* outcome,
+                                       const GraphicsPrograms& programs, bool ps_active) {
+	const auto key_hash = GraphicsPipelineKeyHash {}(key);
+	const bool first    = m_reglog_draw_seen.insert(key_hash).second;
+	if (!first && dur_ns < 500'000) {
+		return;
+	}
+	std::string detail = fmt::format("first={};outcome={};vs_id={};hs_id={};ls_id={};ps_id={}",
+	                                 first ? 1 : 0, outcome, programs.vertex[0].id,
+	                                 programs.vertex[1].id, programs.vertex[2].id,
+	                                 ps_active ? programs.pixel.id : 0);
+	if (first) {
+		detail += ";" + DescribeGraphicsState(key.rendering, key.static_params, key.vertex_input);
+	}
+	Bench::LogTiming("gfx_draw", key_hash, t_start_ns, dur_ns, true, detail);
+}
+
+// Lookahead thread, --debug-registration-log: the lookahead asked for a pipeline of its own.
+void PipelineCache::RegLogGraphicsRequest(const GraphicsPipelineKey& key,
+                                          const GraphicsPrograms&    programs) {
+	const auto key_hash = GraphicsPipelineKeyHash {}(key);
+	{
+		std::lock_guard lock(m_reglog_req_mutex);
+		if (!m_reglog_req_seen.insert(key_hash).second) {
+			return;
+		}
+	}
+	Bench::LogTiming("gfx_req", key_hash, Bench::NowNs(), 0, false,
+	                 fmt::format("vs_id={};hs_id={};ls_id={};ps_id={};{}", programs.vertex[0].id,
+	                             programs.vertex[1].id, programs.vertex[2].id, programs.pixel.id,
+	                             DescribeGraphicsState(key.rendering, key.static_params, key.vertex_input)));
+}
+
 void PipelineCache::NoteGraphicsVariant(Pipeline& pipeline, const GraphicsPipelineKey& key,
                                         const GraphicsPrograms& programs, bool ps_active) {
 	if (m_variants == nullptr || pipeline.gfx_recorded) {
@@ -3797,6 +3931,9 @@ void PipelineCache::PrefetchGraphicsPipeline(std::span<const RenderColorInfo> co
 		return;
 	}
 	m_lookahead.gfx_requested.fetch_add(1, std::memory_order_relaxed);
+	if (Bench::RegistrationLogEnabled()) {
+		RegLogGraphicsRequest(key, programs);
+	}
 }
 
 PipelineCache::Pipeline&

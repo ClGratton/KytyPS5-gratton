@@ -1,6 +1,7 @@
 #include "libs/agc.h"
 
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -654,6 +655,25 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	map.scratch_size_dwords = h->scratch_size_dw_per_thread;
 
 	const auto hash = ShaderMapUserData(base, map);
+
+	if (Bench::RegistrationLogEnabled()) {
+		// --debug-registration-log: what the guest hands over with a binary. The context registers
+		// are the part of the pipeline state that travels with the shader (export formats, ...).
+		std::string cx;
+		for (uint32_t i = 0; h->cx_registers != nullptr && i < h->num_cx_registers; i++) {
+			cx += fmt::format("{}{:x}={:x}", i == 0 ? "" : ";", h->cx_registers[i].offset,
+			                  h->cx_registers[i].value);
+		}
+		std::string sh;
+		for (uint32_t i = 0; h->sh_registers != nullptr && i < h->num_sh_registers; i++) {
+			sh += fmt::format("{}{:x}={:x}", i == 0 ? "" : ";", h->sh_registers[i].offset,
+			                  h->sh_registers[i].value);
+		}
+		Bench::LogTiming("reg_shader", hash, Bench::NowNs(), 0, false,
+		                 fmt::format("type={};code_dwords={};n_inputs={};n_outputs={};cx={};sh={}",
+		                             static_cast<unsigned>(h->type), h->shader_size / 4u,
+		                             h->num_input_semantics, h->num_output_semantics, cx, sh));
+	}
 
 	EXIT_NOT_IMPLEMENTED((base & 0xFFFF0000000000FFull) != 0);
 

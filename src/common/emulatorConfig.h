@@ -176,6 +176,10 @@ struct ConfigOptions {
 	uint64_t               bench_exit_after_frames     = 0;
 	std::filesystem::path  shader_timing_log;
 	bool                   bench_gpu_trace             = false;
+	// --debug-registration-log <path>: observation only. Logs guest shader registrations and the
+	// first use of every graphics pipeline into the shader timing log (path used when
+	// --shader-timing-log is absent). Off by default.
+	std::filesystem::path  debug_registration_log;
 	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Schema;
 	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
 	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.

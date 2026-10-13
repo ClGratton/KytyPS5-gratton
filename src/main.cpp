@@ -182,6 +182,10 @@ static void PrintUsage() {
 	         "                                       revision: every commit drops it, dirty builds have none.\n");
 	::printf("  --shader-timing-log <path>           Append CSV timing rows for shader translation and\n"
 	         "                                       pipeline creation misses. Default: off.\n");
+	::printf("  --debug-registration-log <path>      Observation only: log every guest shader registration\n"
+	         "                                       (with its context registers) and the first use of every\n"
+	         "                                       graphics pipeline into the timing log (this path unless\n"
+	         "                                       --shader-timing-log is given). Default: off.\n");
 	::printf("  --bench-gpu-trace <true|false>       With --shader-timing-log: also log the guest submit /\n"
 	         "                                       GPU-thread execute timeline. Default: off.\n");
 	::printf("  --async-pipelines <off|stall|skip>   Run shader translation and Vulkan pipeline creation\n"
@@ -1076,6 +1080,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.shader_timing_log = Common::PathFromUtf8(value);
+		} else if (arg == "--debug-registration-log") {
+			if (value.empty()) {
+				::printf("invalid --debug-registration-log path\n");
+				return false;
+			}
+			options.config.debug_registration_log = Common::PathFromUtf8(value);
 		} else if (arg == "--bench-render-csv") {
 			if (value.empty()) {
 				::printf("invalid --bench-render-csv path\n");

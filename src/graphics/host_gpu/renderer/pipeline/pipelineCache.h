@@ -24,6 +24,7 @@
 #include <span>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -400,6 +401,16 @@ private:
 	    bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
 	    ShaderPixelInputInfo& pixel_info, bool prefetch);
 	void NoteDrawUse(Pipeline& pipeline, bool graphics, bool joined_in_flight);
+	Pipeline* GetGraphicsPipelineImpl(std::span<const RenderColorInfo>       colors,
+	                                  const RenderDepthInfo&                 depth,
+	                                  std::span<const ShaderVertexInputInfo> vertex_info,
+	                                  CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
+	                                  vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                                  const GraphicsPrograms& programs);
+	// --debug-registration-log (observation only).
+	void RegLogGraphicsDraw(const GraphicsPipelineKey& key, int64_t t_start_ns, int64_t dur_ns,
+	                        const char* outcome, const GraphicsPrograms& programs, bool ps_active);
+	void RegLogGraphicsRequest(const GraphicsPipelineKey& key, const GraphicsPrograms& programs);
 	GraphicsPipelineKey BuildGraphicsKey(std::span<const RenderColorInfo>       colors,
 	                                     const RenderDepthInfo&                 depth,
 	                                     std::span<const ShaderVertexInputInfo> vertex_info,
@@ -434,6 +445,10 @@ private:
 	const Config::AsyncPipelineMode m_async_mode;
 	std::unique_ptr<AsyncPipelineCompiler> m_async;
 	InFlightRegistry<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_graphics_jobs;
+	// --debug-registration-log: keys already logged (draws: GPU thread only; requests: lookahead).
+	std::unordered_set<std::size_t> m_reglog_draw_seen;
+	std::unordered_set<std::size_t> m_reglog_req_seen;
+	std::mutex                      m_reglog_req_mutex;
 	InFlightRegistry<uint64_t>                                     m_compute_jobs;
 
 	// --pipelines-unoptimized-first (fixed at construction, after the driver cache is set up).

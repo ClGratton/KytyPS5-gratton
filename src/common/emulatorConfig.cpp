@@ -41,9 +41,11 @@ void Load(const ConfigOptions& cfg) {
 	Bench::Configure({
 	    .frames_csv        = cfg.bench_frames_csv,
 	    .exit_after_frames = cfg.bench_exit_after_frames,
-	    .shader_timing_log = cfg.shader_timing_log,
+	    .shader_timing_log = !cfg.shader_timing_log.empty() ? cfg.shader_timing_log
+	                                                        : cfg.debug_registration_log,
 	    .gpu_trace         = cfg.bench_gpu_trace,
 	    .render_csv        = cfg.bench_render_csv,
+	    .registration_log  = !cfg.debug_registration_log.empty(),
 	});
 }
 

@@ -160,6 +160,7 @@ void Configure(const Options& options) {
 	detail::g_frames_enabled.store(frames, std::memory_order_relaxed);
 	detail::g_timing_enabled.store(timing, std::memory_order_relaxed);
 	detail::g_trace_enabled.store(options.gpu_trace, std::memory_order_relaxed);
+	detail::g_registration_enabled.store(options.registration_log, std::memory_order_relaxed);
 	state.passes.clear();
 	state.flip_index = 0;
 	if (!options.render_csv.empty()) {

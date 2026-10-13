@@ -28,6 +28,10 @@ struct Options {
 	// --bench-render-csv <path>: one row per guest flip with the render-pass sizes recorded since
 	// the previous flip, and the size of the buffer that was flipped.
 	std::filesystem::path render_csv;
+	// --debug-registration-log: with the timing log, also log shader registrations with their
+	// context registers and the first use of every graphics pipeline (rows reg_shader, gfx_prog,
+	// gfx_req, gfx_draw). Observation only.
+	bool registration_log = false;
 };
 
 // Called once from Config::Load(). Replaces any previous state (the buffer is flushed first).
@@ -76,6 +80,15 @@ inline std::atomic<bool> g_timing_enabled {false};
 
 [[nodiscard]] inline bool TimingEnabled() noexcept {
 	return detail::g_timing_enabled.load(std::memory_order_relaxed);
+}
+
+namespace detail {
+inline std::atomic<bool> g_registration_enabled {false};
+} // namespace detail
+
+// --debug-registration-log (implies the timing log is on).
+[[nodiscard]] inline bool RegistrationLogEnabled() noexcept {
+	return detail::g_registration_enabled.load(std::memory_order_relaxed) && TimingEnabled();
 }
 
 // steady_clock nanoseconds since the clock epoch (same clock as the frames CSV).
