@@ -15,6 +15,7 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pipelineLookahead.h"
+#include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/gpuTimestamps.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
@@ -599,6 +600,7 @@ void GuestGpu::ThreadRun(void* data) {
 
 	for (;;) {
 		Common::GpuPhase::Poll();
+		if (SrtPlan::Enabled()) SrtPlan::Poll();
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
 		bool                         has_submission = false;
@@ -716,6 +718,7 @@ bool GuestGpu::ProcessImpl(Submission& submission) {
 	if (first_slice) {
 		submission.started = true;
 		cp.SetSubmitId(++m_submit_id);
+		cp.SetPlanSequence(submission.trace_seq);
 		cp.ResetDeCe();
 		cp.SetFlip({});
 	}
@@ -1091,6 +1094,7 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
+	PlanEvent plan_event(*this);
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
@@ -1155,6 +1159,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          const volatile uint32_t* count_addr,
                                          uint32_t stride_in_bytes, IndirectDrawRegisters registers,
                                          uint32_t draw_initiator, bool indexed) {
+	PlanEvent plan_event(*this, true);
 	if (IsShadow()) {
 		if (max_count_or_count != 0) {
 			m_shadow_sink->OnDraw(*this, {.indexed             = indexed,
@@ -1300,6 +1305,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
+	PlanEvent plan_event(*this);
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	if (IsShadow()) {
 		m_shadow_sink->OnDispatch(*this,
@@ -1339,6 +1345,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
+	PlanEvent plan_event(*this, true);
 	if (IsShadow()) {
 		// Arguments are in guest memory (often written by an earlier dispatch): not read.
 		m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
@@ -1359,6 +1366,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
+	PlanEvent plan_event(*this);
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
 	}

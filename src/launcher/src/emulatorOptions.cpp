@@ -173,6 +173,12 @@ QList<Option> BuildTable() {
 	             "Remembers the graphics pipelines of the last few draws and finds them by comparing "
 	             "keys before hashing; also enables the SRT table walk below.",
 	             EMU_BOOL(draw_key_cache)});
+	defs.append({"srt_plans", "--srt-plans", Tab::Gpu, "Draw path", Kind::Bool,
+	             "Use look-ahead SRT plans (needs look-ahead)",
+	             "The GPU thread uses the shader resource tables the look-ahead thread already "
+	             "materialized for a draw, after checking that the guest memory they were read from "
+	             "is unchanged; without a valid plan it materializes them itself.",
+	             EMU_BOOL(srt_plans)});
 	defs.append({"srt_table_walk", "--srt-table-walk", Tab::Gpu, "Draw path", Kind::Bool,
 	             "SRT table walk",
 	             "Refreshes a shader's flattened SRT from a precomputed table instead of walking the "
@@ -350,6 +356,12 @@ QList<Option> BuildTable() {
 	             "With the draw key cache, also runs the full lookup on every memo hit and stops if "
 	             "the two disagree.",
 	             EMU_BOOL(draw_key_verify)});
+	defs.append({"srt_plan_shadow", "--srt-plan-shadow", Tab::Debug, "Diagnostics", Kind::Bool,
+	             "Measure SRT plans (needs look-ahead)",
+	             "The look-ahead thread keeps the shader resource tables it materializes as plans and "
+	             "the GPU thread compares each with its own result; prints lead time, validity and "
+	             "cost. Nothing is adopted.",
+	             EMU_BOOL(srt_plan_shadow)});
 	defs.append({"vram_audit", "--vram-audit", Tab::Debug, "Diagnostics", Kind::Int,
 	             "VRAM audit after:",
 	             "Once, this many seconds after start, log the resident image mix and the "
@@ -508,6 +520,7 @@ QVariantMap Recommended() {
 	values.insert(QStringLiteral("elide_barriers"), true);
 	values.insert(QStringLiteral("known_fills"), true);
 	values.insert(QStringLiteral("clean_guest_reads"), true);
+	values.insert(QStringLiteral("srt_plans"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);

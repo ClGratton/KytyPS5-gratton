@@ -64,6 +64,7 @@ enum class Phase : uint8_t {
 	DescTransit,     // CommitBindings: Image::Transit (layout transitions, barriers excluded: VkCmd)
 	DescPush,        // CommitBindings: push constants and the push-descriptor / descriptor-set update
 	SrtPlanShadow,   // --srt-plan-shadow: lookup, validity check and comparison of a plan on kyGpu
+	SrtPlanAdopt,    // --srt-plans: lookup and validity check of a plan on kyGpu (inside pipe_materialize)
 	Count
 };
 

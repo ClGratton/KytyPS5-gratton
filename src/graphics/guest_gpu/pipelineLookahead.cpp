@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/hangWatchdog.h"
 #include "common/speculation.h"
+#include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include <chrono>
@@ -192,6 +193,11 @@ void PipelineLookahead::Process(Item& item) {
 	m_item_start_ns.store(t0, std::memory_order_relaxed);
 	Common::Hang::Phase phase("lookahead_item", item.seq, static_cast<uint64_t>(item.kind));
 	auto& cp = Shadow(item.queue_id);
+	const bool plan_shadow = SrtPlan::Enabled();
+	if (plan_shadow) {
+		if (m_current_late) SrtPlan::GetStore().NoteLate(item.seq);
+		cp.SetPlanSequence(item.seq);
+	}
 	switch (item.kind) {
 		case Kind::Reset: cp.Reset(); break;
 		case Kind::Graphics:
@@ -207,11 +213,32 @@ void PipelineLookahead::Process(Item& item) {
 			break;
 		}
 	}
+	if (plan_shadow) {
+		// Everything of this submission has been looked at (also when it was dropped as late).
+		SrtPlan::GetStore().NoteProgress({item.seq, UINT32_MAX});
+	}
 	m_item_start_ns.store(0, std::memory_order_relaxed);
 	m_stats.busy_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
 }
 
+namespace {
+// --srt-plan-shadow: after the event's plans were stored, tell kyGpu's lookups how far the
+// lookahead has got (so a missing plan can be told from one that is not there yet).
+struct PlanProgress {
+	bool active = SrtPlan::Enabled();
+	PlanProgress() {
+		if (active) SrtPlan::NoteProducerEvent();
+	}
+	~PlanProgress() {
+		if (active && SrtPlan::t_context.active) {
+			SrtPlan::GetStore().NoteProgress({SrtPlan::t_context.seq, SrtPlan::t_context.ordinal});
+		}
+	}
+};
+} // namespace
+
 void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
+	PlanProgress plan_progress;
 	m_stats.draws.fetch_add(1, std::memory_order_relaxed);
 	if (m_current_late || (Config::GetPipelineLookaheadKinds() & 1u) == 0) {
 		return;
@@ -223,6 +250,7 @@ void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 }
 
 void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& dispatch) {
+	PlanProgress plan_progress;
 	m_stats.dispatches.fetch_add(1, std::memory_order_relaxed);
 	if (m_current_late || (Config::GetPipelineLookaheadKinds() & 2u) == 0) {
 		return; // already executing or executed: nothing to gain

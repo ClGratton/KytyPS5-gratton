@@ -118,6 +118,9 @@ int MapAutomaticMemory(uint64_t vaddr, size_t size, int type, int prot);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
+// GPU thread: the range holds bytes the GPU wrote that the guest backing does not have yet (a
+// TryReadBufferBacking of it would read them back). Never synchronizes.
+bool                   HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 // GPU thread: copies guest bytes from the backing, without a page fault and without a GPU
 // readback, when none of them is GPU-written (--clean-guest-reads). False reads nothing.
 bool                   TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size);

@@ -6,10 +6,12 @@
 #include "graphics/guest_gpu/command_processor/shadowTypes.h"
 #include "graphics/guest_gpu/command_processor/submitCoalescer.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/pipeline/srtPlanContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -190,11 +192,51 @@ public:
 
 	void SetFlip(const FlipInfo& flip) { m_flip = flip; }
 
+	// --srt-plan-shadow: the submission sequence number that names the draws of the stream about to
+	// be processed (the shadow and the real processor number a submission's draws identically).
+	void SetPlanSequence(uint64_t seq) {
+		m_plan_seq     = seq;
+		m_plan_ordinal = 0;
+		m_plan_sub     = 0;
+		m_plan_nest    = 0;
+	}
+
 	[[nodiscard]] uint64_t GetSubmitId() const { return m_submit_id; }
 	void                   SetSubmitId(uint64_t submit_id) { m_submit_id = submit_id; }
 	[[nodiscard]] bool     IsAsyncComputeQueue() const { return m_interrupt_event_id >= 0x20; }
 
 private:
+	// One draw/dispatch packet (--srt-plan-shadow). Counts it and publishes its key to the
+	// thread for the length of the handler. The draws a real indirect multi-draw issues are
+	// nested events: they only bump `sub`, so the ordinal still counts packets, as in the shadow.
+	class PlanEvent {
+	public:
+		explicit PlanEvent(CommandProcessor& cp, bool begins_nest = false): m_cp(cp) {
+			if (!SrtPlan::Enabled()) return;
+			if (cp.m_plan_nest == 0) {
+				++cp.m_plan_ordinal;
+				cp.m_plan_sub = 0;
+			} else {
+				++cp.m_plan_sub;
+			}
+			m_scope.emplace(cp.m_plan_seq, cp.m_plan_ordinal, cp.m_plan_sub);
+			if (begins_nest) {
+				++cp.m_plan_nest;
+				m_nest = true;
+			}
+		}
+		~PlanEvent() {
+			if (m_nest) --m_cp.m_plan_nest;
+		}
+		PlanEvent(const PlanEvent&)            = delete;
+		PlanEvent& operator=(const PlanEvent&) = delete;
+
+	private:
+		CommandProcessor&                 m_cp;
+		std::optional<SrtPlan::EventScope> m_scope;
+		bool                              m_nest = false;
+	};
+
 	template <typename T>
 	void WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type,
 	                      uint32_t cache_action, uint32_t event_index, uint32_t event_write_source,
@@ -233,6 +275,10 @@ private:
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
 	ShadowSink* m_shadow_sink               = nullptr;
+	uint64_t    m_plan_seq                  = 0;
+	uint32_t    m_plan_ordinal              = 0;
+	uint32_t    m_plan_sub                  = 0;
+	uint32_t    m_plan_nest                 = 0;
 	SubmitCoalescer m_coalescer {CoalescerConfigFromGlobals()};
 	GlobalBarrierElider m_barrier_elider;
 };
