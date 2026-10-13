@@ -2216,6 +2216,8 @@ void PipelineCache::ShutdownAsync() {
 	m_graphics_jobs.Clear();
 	m_compute_jobs.Clear();
 	PipelineCacheLog("Async pipelines: stopped ({})", m_async->Summary());
+	// --skip-guard / --debug-skip-log: the final summary (an atexit handler never runs on this path).
+	if (SkipDeps::Enabled()) SkipDeps::DumpOpenRoots("exit");
 	m_async->LogSummary();
 	if (m_unoptimized_first) {
 		const auto& c = m_unoptimized_counters;
