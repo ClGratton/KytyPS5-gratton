@@ -29,6 +29,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -1038,6 +1039,64 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		         (shader_stage & GraphicsStages) == vk::ShaderStageFlags {}) ||
 		        (pipeline_bind_point == vk::PipelineBindPoint::eCompute &&
 		         shader_stage != vk::ShaderStageFlagBits::eCompute));
+	}
+	if (SkipDeps::Poisoned()) {
+		// --debug-skip-log: what this pass reads of the memory a skipped draw left stale, and what it
+		// writes on the strength of it (the writes become poison too).
+		const bool compute = pipeline_bind_point == vk::PipelineBindPoint::eCompute;
+		const char* op     = compute ? "dispatch" : "draw";
+		auto        hits   = std::move(SkipDeps::PendingHits()); // geometry reads of this draw
+		SkipDeps::PendingHits().clear();
+		std::vector<SkipDeps::Range> writes;
+		auto&                        textures = m_context.GetTextureCache();
+		const auto note_range = [&](const GuestRange& range, bool write, SkipDeps::ReadKind kind,
+		                            uint64_t hash) {
+			if (range.Empty()) return;
+			if (write) {
+				writes.push_back({range.address, range.size});
+			} else {
+				SkipDeps::NoteRead({range.address, range.size}, kind, hash, op, hits);
+			}
+		};
+		for (const auto* prepared: prepared_bindings) {
+			const auto& program = *prepared->runtime->program;
+			const auto  hash    = program.shader_hash;
+			for (const auto& resource: program.info.buffers) {
+				if (resource.descriptor_index == UINT32_MAX ||
+				    resource.descriptor_index >= prepared->buffer_sources.size()) continue;
+				const auto& source = prepared->buffer_sources[resource.descriptor_index];
+				if (source.size == 0) continue;
+				const GuestRange range {source.address, source.size};
+				if (resource.read || !resource.written) {
+					note_range(range, false, SkipDeps::ReadKind::BufferRead, hash);
+				}
+				if (resource.written || resource.atomic) note_range(range, true, {}, hash);
+			}
+			for (uint32_t i = 0; i < program.info.images.size() && i < prepared->images.size(); i++) {
+				const auto& resource = program.info.images[i];
+				const auto* image = textures.m_slot_images.try_get(prepared->images[i].image_id);
+				if (image == nullptr) continue;
+				const bool reads = resource.read || !resource.written;
+				for (const auto& range: {image->info.data, image->info.stencil}) {
+					if (reads) note_range(range, false, SkipDeps::ReadKind::SampledImage, hash);
+					if (resource.written || resource.atomic) note_range(range, true, {}, hash);
+				}
+			}
+			if (program.has_address_writes) {
+				SkipDeps::NoteUntracked(hash, op, "address_writes", !hits.empty());
+			} else if ((program.bindings.descriptor_mask >>
+			            static_cast<uint32_t>(BindingKind::BdaPagetable)) & 1u) {
+				SkipDeps::NoteUntracked(hash, op, "bda_reads", !hits.empty());
+			}
+		}
+		for (const auto id: m_bound_images) {
+			const auto* image = textures.m_slot_images.try_get(id);
+			if (image == nullptr || (!image->binding.shader_write && !image->binding.is_target)) continue;
+			for (const auto& range: {image->info.data, image->info.stencil, image->info.metadata.range}) {
+				note_range(range, true, {}, 0);
+			}
+		}
+		if (!hits.empty()) SkipDeps::Global().NoteTaint(hits, writes);
 	}
 	Common::GpuPhase::Scope gpu_phase_hazard(Common::GpuPhase::Phase::DescHazard);
 	{

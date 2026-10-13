@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
+#include "graphics/host_gpu/renderer/skipDepsHooks.h"
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
@@ -913,10 +914,14 @@ BuildTargetExportMapping(const HW::Context& ctx, uint32_t color_output_mask) {
 }
 
 // --debug-skip-log: one row per dropped / waiting draw. Targets come from the registers, so the row
-// is the same wherever in the draw path it is written (before any image lookup).
+// is the same wherever in the draw path it is written (before any image lookup). A dropped draw also
+// registers the guest ranges it should have written (render targets, depth/stencil, their
+// metadata) as poison in the dependency tracker (skipDependencies.h).
 static void LogAsyncDrawEvent(const char* event, const CommandBuffer& buffer,
                               const DrawCallInfo& draw,
-                              const PipelineCache::GraphicsPrograms& programs) {
+                              const PipelineCache::GraphicsPrograms& programs,
+                              uint32_t render_target_slice_offset,
+                              const DrawRenderState* resolved = nullptr) {
 	const auto& ctx   = buffer.GetRegisters();
 	char        targets[512];
 	size_t      len = 0;
@@ -941,14 +946,62 @@ static void LogAsyncDrawEvent(const char* event, const CommandBuffer& buffer,
 	} else if (targets[len - 1] == ' ') {
 		targets[len - 1] = 0;
 	}
-	char row[768];
 	const bool skipped = event[0] == 's';
-	// rule: "kept" = skip mode, the store-safety rule made this draw wait instead of being skipped.
-	std::snprintf(row, sizeof(row), "%s,%016llx,%016llx,%s,%s,%s", event,
-	              static_cast<unsigned long long>(programs.vs_hash),
-	              static_cast<unsigned long long>(programs.ps_hash),
-	              skipped ? "none" : (programs.safety_kept ? "kept" : "none"), draw.Name(), targets);
-	Bench::LogSkipRow(row);
+	if (!skipped) {
+		char row[768];
+		// rule: "kept" = skip mode, the store-safety rule made this draw wait instead of being skipped.
+		std::snprintf(row, sizeof(row), "%s,%016llx,%016llx,%s,%s,%s", event,
+		              static_cast<unsigned long long>(programs.vs_hash),
+		              static_cast<unsigned long long>(programs.ps_hash),
+		              programs.safety_kept ? "kept" : "none", draw.Name(), targets);
+		Bench::LogSkipRow(row);
+		return;
+	}
+	// The ranges the dropped draw would have written, from the registers alone.
+	std::vector<SkipDeps::Range> writes;
+	std::string                  ranges;
+	const auto add = [&](const char* name, uint32_t index, const GuestRange& range) {
+		if (range.size == 0) return;
+		writes.push_back({range.address, range.size});
+		char part[96];
+		std::snprintf(part, sizeof(part), " %s%u=%s", name, index,
+		              SkipDeps::FormatRange(writes.back()).c_str());
+		ranges += part;
+	};
+	const auto add_color = [&](uint32_t slot, const RenderColorInfo& color) {
+		add("r", slot, color.desc.info.data);
+		add("rm", slot, color.desc.info.metadata.range);
+	};
+	const auto add_depth = [&](const RenderDepthInfo& depth) {
+		if (depth.depth_write_enable || depth.depth_clear_enable) {
+			add("d", 0, depth.desc.info.data);
+			add("dm", 0, depth.desc.info.metadata.range);
+		}
+		if (depth.stencil_test_enable || depth.stencil_clear_enable) {
+			add("s", 0, depth.desc.info.stencil);
+		}
+	};
+	if (resolved != nullptr) {
+		for (uint32_t i = 0; i < resolved->color_count; i++) {
+			add_color(resolved->color_info[i].target_slot, resolved->color_info[i]);
+		}
+		if (resolved->depth_info.image_id) add_depth(resolved->depth_info);
+	} else {
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+			if ((mask & (1u << slot)) == 0) continue;
+			RenderColorInfo color;
+			if (DescribeRenderColorTarget(ctx, color, render_target_slice_offset, slot)) {
+				add_color(slot, color);
+			}
+		}
+		RenderDepthInfo depth;
+		if (DescribeRenderDepthTarget(buffer.GetGraphics(), ctx, depth)) add_depth(depth);
+	}
+	// Stores other than render targets: the store-safety rule keeps every draw with image stores
+	// waiting, so a dropped one has none; buffer atomics may remain. Known only once the program is.
+	const char* stores = programs.vertex[0] ? "known" : "unknown";
+	SkipDeps::NoteSkippedDraw(event, programs.vs_hash, programs.ps_hash, draw.Name(), writes, stores,
+	                          std::string(targets) + ranges);
 }
 
 static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
@@ -984,11 +1037,12 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (state.programs.pending) {
 		// --async-pipelines skip: a program is still being built on a worker. Nothing has been
 		// resolved or touched yet, so the draw is simply dropped.
-		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_program", buffer, draw, state.programs);
+		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_program", buffer, draw, state.programs,
+		                                             render_target_slice_offset);
 		return false;
 	}
 	if (Bench::SkipLogEnabled() && state.programs.program_waited) {
-		LogAsyncDrawEvent("wait_program", buffer, draw, state.programs);
+		LogAsyncDrawEvent("wait_program", buffer, draw, state.programs, render_target_slice_offset);
 	}
 	uint32_t mrt_mask = 0;
 	if (state.ps_active) {
@@ -1311,11 +1365,32 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (pipeline_ptr == nullptr) {
 		// --async-pipelines skip: the pipeline is still being built on a worker. Drop the draw
 		// before any command that depends on it is recorded; the caller resets the bindings.
-		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_pipeline", buffer, draw, state.programs);
+		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_pipeline", buffer, draw, state.programs, 0, &state);
 		return;
 	}
 	if (Bench::SkipLogEnabled() && state.programs.pipeline_waited) {
-		LogAsyncDrawEvent("wait_pipeline", buffer, draw, state.programs);
+		LogAsyncDrawEvent("wait_pipeline", buffer, draw, state.programs, 0, &state);
+	}
+	if (Bench::SkipLogEnabled()) {
+		// --debug-skip-log: this shader pair really runs, so its earlier skipped outputs stop being
+		// poison; the geometry it reads may be poison itself (index / vertex data, draw arguments).
+		SkipDeps::NoteDrawReady(state.programs.vs_hash, state.programs.ps_hash);
+		if (SkipDeps::Poisoned()) {
+			auto& pending = SkipDeps::PendingHits();
+			pending.clear();
+			const uint64_t tag = state.programs.vs_hash ^ (state.programs.ps_hash << 1);
+			SkipDeps::NoteRead({index_source.address, index_source.size},
+			                   SkipDeps::ReadKind::IndexOrVertex, tag, "draw_index", pending);
+			if (draw.indirect_args != 0) {
+				SkipDeps::NoteRead({draw.indirect_args, MeshIndirectArgs::ArgumentsSize},
+				                   SkipDeps::ReadKind::IndirectArgs, tag, "draw_indirect", pending);
+			}
+			for (int i = 0; i < state.vertex_info[0].buffers_num; i++) {
+				SkipDeps::NoteRead({state.vertex_info[0].buffers[i].addr,
+				                    VertexBufferDescriptorSize(i, state.vertex_info[0])},
+				                   SkipDeps::ReadKind::IndexOrVertex, tag, "draw_vertex", pending);
+			}
+		}
 	}
 	auto& pipeline = *pipeline_ptr;
 	vk::ImageAspectFlags feedback_aspects;

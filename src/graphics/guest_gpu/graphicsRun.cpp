@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 
 #include "common/assert.h"
@@ -519,6 +520,20 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 		            m_submit_id, dst_gds ? "gds" : "mem", static_cast<uint64_t>(dst_address_or_offset),
 		            src_sel == 2 ? "imm" : (src_sel == 1 ? "gds" : "mem"),
 		            static_cast<uint64_t>(src_address_or_offset_or_immediate), num_bytes);
+	}
+	if (SkipDeps::Poisoned() && !dst_gds) {
+		// --debug-skip-log: a DMA fill overwrites its destination; a copy reads its source and
+		// passes the poison on to the destination.
+		if (src_sel == 2) {
+			SkipDeps::Global().NoteOverwrite({dst_address_or_offset, num_bytes});
+		} else if (src_sel == 0 || src_sel == 3) {
+			std::vector<SkipDeps::Hit> hits;
+			if (SkipDeps::NoteRead({src_address_or_offset_or_immediate, num_bytes},
+			                       SkipDeps::ReadKind::Dma, 0, "dma", hits)) {
+				const SkipDeps::Range write {dst_address_or_offset, num_bytes};
+				SkipDeps::Global().NoteTaint(hits, std::span<const SkipDeps::Range>(&write, 1));
+			}
+		}
 	}
 	if (src_sel == 2) {
 		buffer_cache.FillBuffer(
