@@ -46,6 +46,19 @@ void SetThreadAbortHandler(AbortHandler handler, void* user) noexcept;
 // Number of isolated aborts so far (all threads).
 [[nodiscard]] uint32_t IsolatedAborts() noexcept;
 
+// The lookahead scans the commands of submission `item_seq` while the GPU thread may already execute
+// it, or later ones. The guest recycles command, table and constant memory once the GPU thread has
+// started a submission, so what the lookahead reads of a started submission can be anything (garbage
+// descriptors, a recycled indirect register table). With --async-pipelines skip the GPU thread no
+// longer waits for the compile jobs the lookahead blocks on, so the lookahead regularly resumes
+// inside a submission the GPU thread has long passed.
+// SetItemWatch() names, for the calling thread, the GPU thread's "highest started sequence" and the
+// item being scanned; ItemStale() is true once the GPU thread has started that item (a conservative
+// answer: the sequence is a maximum over all queues). No watch, or item sequence 0, is never stale.
+void               SetItemWatch(const std::atomic<uint64_t>* gpu_started, uint64_t item_seq) noexcept;
+void               ClearItemWatch() noexcept;
+[[nodiscard]] bool ItemStale() noexcept;
+
 // Registers a lock the calling (speculative) thread currently holds, so Abort() can release it
 // before parking the thread. Only the shared-mutex flavour is needed.
 class HeldLock {
