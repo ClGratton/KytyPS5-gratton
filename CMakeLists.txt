@@ -504,6 +504,11 @@ add_executable(vram_policy_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(vram_policy_tests PRIVATE ${inc_headers})
 
+add_executable(heap_trim_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HeapTrimTests.cpp"
+)
+target_include_directories(heap_trim_tests PRIVATE ${inc_headers})
+
 add_executable(texture_gc_policy_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/TextureGcPolicyTests.cpp"
 )
@@ -861,6 +866,7 @@ if(BUILD_TESTING)
 	add_test(NAME gds_copy_plan COMMAND $<TARGET_FILE:gds_copy_plan_tests>)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME vram_policy COMMAND $<TARGET_FILE:vram_policy_tests>)
+	add_test(NAME heap_trim COMMAND $<TARGET_FILE:heap_trim_tests>)
 	add_test(NAME lds_span COMMAND $<TARGET_FILE:lds_span_tests>)
 	add_test(NAME texture_gc_policy COMMAND $<TARGET_FILE:texture_gc_policy_tests>)
 	add_test(NAME phase_timers COMMAND $<TARGET_FILE:phase_timers_tests>)
@@ -1056,6 +1062,7 @@ if(BUILD_TESTING)
 		gds_copy_plan_tests
 		lru_cache_tests
 		vram_policy_tests
+		heap_trim_tests
 		lds_span_tests
 		texture_gc_policy_tests
 		phase_timers_tests

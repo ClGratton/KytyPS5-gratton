@@ -13,6 +13,7 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "common/heapTrim.h"
 #include "kernel/eventQueue.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -29,6 +30,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <magic_enum.hpp>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1400,6 +1404,8 @@ static std::condition_variable g_mem_stats_cv;
 static bool                    g_mem_stats_stop = false;
 static std::chrono::steady_clock::time_point g_mem_stats_start;
 
+static void PrintHostHeap(const char* tag, long long seconds);
+
 static void PrintMemStats(const char* tag) {
 	const auto MiB = [](uint64_t bytes) { return bytes >> 20u; };
 	const auto get = [](const std::atomic<uint64_t>& value) {
@@ -1459,6 +1465,104 @@ static void PrintMemStats(const char* tag) {
 	              static_cast<long long>(seconds),
 	              static_cast<unsigned long long>(Libs::LibKernel::EventQueue::KernelCoalescedTriggerCount()));
 	Log::WriteToConsoleAndLog(equeue);
+	PrintHostHeap(tag, static_cast<long long>(seconds));
+}
+
+// Host allocator state (glibc): arenas, the free memory inside them, and the process's anonymous RSS.
+struct HostHeapSample {
+	uint64_t arena = 0, in_use = 0, free_bytes = 0, mmapped = 0, rss_anon = 0;
+};
+
+static HostHeapSample SampleHostHeap() {
+	HostHeapSample sample;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	const auto info   = mallinfo2();
+	sample.arena      = info.arena;
+	sample.in_use     = info.uordblks;
+	sample.free_bytes = info.fordblks;
+	sample.mmapped    = info.hblkhd;
+	if (FILE* status = std::fopen("/proc/self/status", "r")) {
+		char line[256];
+		while (std::fgets(line, sizeof(line), status) != nullptr) {
+			unsigned long long kb = 0;
+			if (std::sscanf(line, "RssAnon: %llu kB", &kb) == 1) {
+				sample.rss_anon = kb * 1024ull;
+				break;
+			}
+		}
+		std::fclose(status);
+	}
+#endif
+	return sample;
+}
+
+static void PrintHostHeap(const char* tag, long long seconds) {
+	const auto h = SampleHostHeap();
+	char       text[256];
+	std::snprintf(text, sizeof(text),
+	              "[mem-stats %s t=%llds] host heap: arenas %llu MiB (in use %llu, free %llu), mmapped chunks %llu MiB,"
+	              " anon RSS %llu MiB\n",
+	              tag, seconds, static_cast<unsigned long long>(h.arena >> 20),
+	              static_cast<unsigned long long>(h.in_use >> 20), static_cast<unsigned long long>(h.free_bytes >> 20),
+	              static_cast<unsigned long long>(h.mmapped >> 20), static_cast<unsigned long long>(h.rss_anon >> 20));
+	Log::WriteToConsoleAndLog(text);
+}
+
+static std::thread             g_heap_trim_thread;
+static std::mutex              g_heap_trim_mutex;
+static std::condition_variable g_heap_trim_cv;
+static bool                    g_heap_trim_stop = false;
+
+static void StartHeapTrim() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	g_heap_trim_stop   = false;
+	g_heap_trim_thread = std::thread([] {
+		KYTY_PROFILER_THREAD("kyHeapTrim");
+		const Common::HeapTrim::Policy policy;
+		auto                           last = std::chrono::steady_clock::now();
+		uint64_t                       trims = 0, returned = 0;
+		std::unique_lock<std::mutex>   lock(g_heap_trim_mutex);
+		while (!g_heap_trim_cv.wait_for(lock, std::chrono::seconds(1), [] { return g_heap_trim_stop; })) {
+			lock.unlock();
+			const auto now = std::chrono::steady_clock::now();
+			const auto since = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count());
+			const auto before = SampleHostHeap();
+			if (Common::HeapTrim::ShouldTrim({before.arena, before.free_bytes}, policy, since)) {
+				malloc_trim(0);
+				last = std::chrono::steady_clock::now();
+				const auto after = SampleHostHeap();
+				trims++;
+				returned += before.rss_anon > after.rss_anon ? before.rss_anon - after.rss_anon : 0;
+				char text[256];
+				std::snprintf(text, sizeof(text),
+				              "[heap-trim] #%llu: arenas %llu MiB, free %llu MiB; anon RSS %llu -> %llu MiB"
+				              " (%.1f ms; %llu MiB returned in total)\n",
+				              static_cast<unsigned long long>(trims),
+				              static_cast<unsigned long long>(before.arena >> 20),
+				              static_cast<unsigned long long>(before.free_bytes >> 20),
+				              static_cast<unsigned long long>(before.rss_anon >> 20),
+				              static_cast<unsigned long long>(after.rss_anon >> 20),
+				              std::chrono::duration<double, std::milli>(last - now).count(),
+				              static_cast<unsigned long long>(returned >> 20));
+				Log::WriteToConsoleAndLog(text);
+			}
+			lock.lock();
+		}
+	});
+#endif
+}
+
+static void StopHeapTrim() {
+	if (!g_heap_trim_thread.joinable()) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_heap_trim_mutex);
+		g_heap_trim_stop = true;
+	}
+	g_heap_trim_cv.notify_all();
+	g_heap_trim_thread.join();
 }
 
 static void StartMemStats() {
@@ -1506,9 +1610,13 @@ void Initialize() {
 	if (g_mem_stats_on) {
 		StartMemStats();
 	}
+	if (Config::HeapTrimEnabled()) {
+		StartHeapTrim();
+	}
 }
 
 void Shutdown() {
+	StopHeapTrim();
 	StopMemStats();
 	g_pooled_memory.reset();
 	g_flexible_memory.reset();

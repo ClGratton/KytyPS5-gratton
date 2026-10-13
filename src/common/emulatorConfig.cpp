@@ -356,6 +356,10 @@ bool UploadRingRebarEnabled() {
 	return g_config != nullptr && g_config->upload_ring_rebar;
 }
 
+bool HeapTrimEnabled() {
+	return g_config != nullptr && g_config->heap_trim;
+}
+
 bool MemHoleReadsEnabled() {
 	return g_config != nullptr && g_config->mem_hole_reads;
 }

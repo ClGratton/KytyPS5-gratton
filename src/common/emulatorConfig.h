@@ -139,6 +139,9 @@ struct ConfigOptions {
 	// Log-only host RAM residency diagnostics (mincore per GPU-registered range class, CPU faults on
 	// clean uploaded pages, reads of never-written guest memory). Costs a few read-probe faults.
 	bool                   mem_residency               = false;
+	// Hand free pages of the host allocator back to the kernel (malloc_trim) when a lot of freed memory
+	// sits in its arenas. See common/heapTrim.h.
+	bool                   heap_trim                   = false;
 	// Read never-written guest memory with pread instead of through the writable mapping, so the read
 	// does not make the zero pages resident (a read of a hole in a shared mapping allocates them).
 	bool                   mem_hole_reads              = false;
@@ -379,6 +382,7 @@ bool VramStatsEnabled();
 bool MemStatsEnabled();
 bool MemReleasePunchEnabled();
 bool MemResidencyEnabled();
+bool HeapTrimEnabled();
 bool MemHoleReadsEnabled();
 bool SkipZeroUploadsEnabled();
 bool VerifyZeroUploadsEnabled();

@@ -137,6 +137,9 @@ static void PrintUsage() {
 	         "                                      buffers, other), CPU faults on clean uploaded pages\n"
 	         "                                      (one-shot read probes on textures), and bytes Kyty reads\n"
 	         "                                      from never-written guest memory. Default: off.\n");
+	::printf("  --heap-trim <on|off>                 Hand free pages of the host allocator back to the kernel\n"
+	         "                                      (malloc_trim, at most every 5 s) when at least 64 MiB and\n"
+	         "                                      20%% of its arenas are free. Default: off.\n");
 	::printf("  --mem-hole-reads <on|off>            Read guest memory that was never written with pread\n"
 	         "                                      instead of through the writable mapping, so the read\n"
 	         "                                      does not allocate zero pages (reads of 16 KiB or more).\n"
@@ -728,6 +731,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--mem-residency") {
 			if (!ParseBool(value, options.config.mem_residency)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--heap-trim") {
+			if (!ParseBool(value, options.config.heap_trim)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
