@@ -1785,10 +1785,14 @@ struct PipelineCache::ProgramCache {
 // (an unimplemented instruction) must not end the emulator. This thread runs the guess jobs inside
 // a speculation scope like the lookahead thread: such a check parks the thread, switches the
 // speculative features off for the rest of the run and leaves the real path alone. It runs at a
-// lower scheduling priority than the game's threads.
+// lower scheduling priority than the game's threads. --generic-compute registers the generic variant
+// of every compute binary the same way (such a binary may never be dispatched either), on several
+// workers.
 class PipelineCache::GuessThread {
 public:
-	GuessThread(): m_state(std::make_shared<State>()) { SpawnWorker(m_state); }
+	explicit GuessThread(uint32_t workers = 1): m_state(std::make_shared<State>()) {
+		for (uint32_t i = 0; i < std::max(1u, workers); i++) SpawnWorker(m_state);
+	}
 	~GuessThread() { Stop(); }
 	GuessThread(const GuessThread&)            = delete;
 	GuessThread& operator=(const GuessThread&) = delete;
@@ -1984,8 +1988,9 @@ void PipelineCache::InitializeVariants() {
 		return;
 	}
 	m_program_cache->track_use = true;
-	if (Config::GetPrecompileOnLoad()) {
-		m_guess_thread = std::make_unique<GuessThread>();
+	if (Config::GetPrecompileOnLoad() || Config::GetGenericCompute()) {
+		m_guess_thread = std::make_unique<GuessThread>(
+		    Config::GetGenericCompute() ? std::max(2u, Config::GetPipelineWorkerCount() / 2u) : 1u);
 	}
 	if (!Config::GetPipelineVariantsReplay()) {
 		return;
@@ -2892,8 +2897,9 @@ void PipelineCache::NoteShaderRegistered(const ShaderRegistration& reg) {
 		}
 		(generic ? m_load.generic_jobs : job->guess ? m_load.jobs_guess : m_load.jobs_stored)
 		    .fetch_add(1, std::memory_order_relaxed);
-		if (job->guess) {
-			// Not a pool job: nothing can wait for it, and its translation is speculative.
+		if (job->guess || generic) {
+			// Not a pool job: nothing can wait for it, and its translation is speculative (the
+			// binary may never be dispatched, or hold what the translator does not implement).
 			job->joinable = false;
 			if (m_guess_thread == nullptr) {
 				m_program_cache->RemoveLoad(job.get());
