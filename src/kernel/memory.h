@@ -215,6 +215,42 @@ struct BackingReadStats {
 	uint64_t pread_failures = 0;
 };
 BackingReadStats KernelBackingReadStats();
+// --mem-residency: who writes guest memory from the host side. Kyty writes the guest copy of GPU
+// results (buffer downloads), of expanded color metadata and of timestamps; `newly_resident` is how
+// many bytes of those writes landed on pages that were not resident before, i.e. memory the
+// emulator made resident (an upper bound of what the game would not have touched itself).
+enum class BackingWriteTag : uint8_t { Other, Download, Metadata, Count };
+class ScopedBackingWriteTag {
+public:
+	explicit ScopedBackingWriteTag(BackingWriteTag tag) noexcept;
+	~ScopedBackingWriteTag();
+	KYTY_CLASS_NO_COPY(ScopedBackingWriteTag);
+
+private:
+	BackingWriteTag m_previous;
+};
+struct BackingWriteStats {
+	struct Counts {
+		uint64_t writes         = 0;
+		uint64_t bytes          = 0;
+		uint64_t newly_resident = 0;
+	};
+	Counts by_tag[static_cast<size_t>(BackingWriteTag::Count)];
+};
+BackingWriteStats KernelBackingWriteStats();
+
+// A committed range of the guest address space with the name and kind the guest gave it
+// (--mem-residency attributes resident guest memory to these).
+struct GuestRangeInfo {
+	uint64_t    start       = 0;
+	uint64_t    size        = 0;
+	int         protection  = 0;
+	int         memory_type = 0;
+	const char* kind        = "";
+	char        name[KERNEL_MAXIMUM_NAME_LENGTH] = {};
+};
+std::vector<GuestRangeInfo> KernelGuestRangesSnapshot();
+
 // Bytes of [vaddr, vaddr + size) whose backing pages are resident in RAM now (mincore on the
 // backing file; swapped-out pages do not count). Gaps in the guest mapping count as zero.
 uint64_t         KernelGuestResidentBytes(uint64_t vaddr, uint64_t size);

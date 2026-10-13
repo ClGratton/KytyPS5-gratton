@@ -1246,6 +1246,8 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& binding,
 				                                    : Common::GpuPhase::KnownFill::DiscardRefused);
 			}
 			m_buffer_cache.InvalidateMemory(address, slice_size);
+			const LibKernel::Memory::ScopedBackingWriteTag write_tag(
+			    LibKernel::Memory::BackingWriteTag::Metadata);
 			LibKernel::Memory::WriteBacking(address, bytes.data(), bytes.size());
 		}
 	}
@@ -1926,6 +1928,8 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	                                               1, &barrier, 0, nullptr);
 	m_scheduler.DeferPriorityOperation([&download, range, mapped, offset] {
 		download.Invalidate(offset, range.size);
+		const LibKernel::Memory::ScopedBackingWriteTag write_tag(
+		    LibKernel::Memory::BackingWriteTag::Download);
 		LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
 	});
 	return true;

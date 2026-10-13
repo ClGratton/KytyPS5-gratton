@@ -255,6 +255,36 @@ ScopedBackingReadTag::~ScopedBackingReadTag() {
 	g_backing_read_tag = m_previous;
 }
 
+struct BackingWriteCounters {
+	struct Counts {
+		std::atomic<uint64_t> writes {0};
+		std::atomic<uint64_t> bytes {0};
+		std::atomic<uint64_t> newly_resident {0};
+	};
+	Counts by_tag[static_cast<size_t>(BackingWriteTag::Count)];
+};
+static BackingWriteCounters g_backing_writes;
+static thread_local BackingWriteTag g_backing_write_tag = BackingWriteTag::Other;
+
+ScopedBackingWriteTag::ScopedBackingWriteTag(BackingWriteTag tag) noexcept
+    : m_previous(g_backing_write_tag) {
+	g_backing_write_tag = tag;
+}
+
+ScopedBackingWriteTag::~ScopedBackingWriteTag() {
+	g_backing_write_tag = m_previous;
+}
+
+BackingWriteStats KernelBackingWriteStats() {
+	BackingWriteStats out;
+	for (size_t i = 0; i < static_cast<size_t>(BackingWriteTag::Count); i++) {
+		const auto& c      = g_backing_writes.by_tag[i];
+		out.by_tag[i] = {c.writes.load(std::memory_order_relaxed), c.bytes.load(std::memory_order_relaxed),
+		                 c.newly_resident.load(std::memory_order_relaxed)};
+	}
+	return out;
+}
+
 static void MemStatAdd(MemStats::Pair& pair, uint64_t bytes) {
 	if (g_mem_stats_on) {
 		pair.Add(bytes);
@@ -484,6 +514,11 @@ public:
 		Common::LockGuard lock(m_mutex);
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
+	}
+
+	std::vector<Range> Snapshot() {
+		Common::LockGuard lock(m_mutex);
+		return m_ranges;
 	}
 
 	bool Query(uint64_t addr, int flags, Range* out) {
@@ -1038,8 +1073,23 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 }
 
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
-	return g_guest_address_space != nullptr &&
-	       g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	if (g_guest_address_space == nullptr) {
+		return false;
+	}
+	if (!Config::MemResidencyEnabled()) {
+		return g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	}
+	// --mem-residency: how much of this write landed on pages that were not resident.
+	const auto before = g_guest_address_space->GetBacking().ResidentGuestBytes(vaddr, size);
+	const bool ok     = g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	if (ok) {
+		const auto after = g_guest_address_space->GetBacking().ResidentGuestBytes(vaddr, size);
+		auto&      c     = g_backing_writes.by_tag[static_cast<size_t>(g_backing_write_tag)];
+		c.writes.fetch_add(1, std::memory_order_relaxed);
+		c.bytes.fetch_add(size, std::memory_order_relaxed);
+		c.newly_resident.fetch_add(after > before ? after - before : 0, std::memory_order_relaxed);
+	}
+	return ok;
 }
 
 bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
@@ -1245,6 +1295,36 @@ static bool IsInPrtAperture(uint64_t address, uint64_t size = 1) {
 	}
 
 	return false;
+}
+
+std::vector<GuestRangeInfo> KernelGuestRangesSnapshot() {
+	std::vector<GuestRangeInfo> out;
+	if (g_virtual_ranges == nullptr) {
+		return out;
+	}
+	for (const auto& r: g_virtual_ranges->Snapshot()) {
+		if (IsReservedRangeType(r.type)) {
+			continue;
+		}
+		GuestRangeInfo info;
+		info.start       = r.start;
+		info.size        = r.size;
+		info.protection  = r.protection;
+		info.memory_type = r.memory_type;
+		switch (r.type) {
+			case VirtualRangeType::Direct: info.kind = "direct"; break;
+			case VirtualRangeType::Flexible: info.kind = "flexible"; break;
+			case VirtualRangeType::Pooled: info.kind = "pooled"; break;
+			case VirtualRangeType::Stack: info.kind = "stack"; break;
+			case VirtualRangeType::Code: info.kind = "code"; break;
+			case VirtualRangeType::Runtime: info.kind = "runtime"; break;
+			default: info.kind = "other"; break;
+		}
+		std::memcpy(info.name, r.name, sizeof(info.name));
+		info.name[sizeof(info.name) - 1] = '\0';
+		out.push_back(info);
+	}
+	return out;
 }
 
 uint64_t KernelGuestResidentBytes(uint64_t vaddr, uint64_t size) {

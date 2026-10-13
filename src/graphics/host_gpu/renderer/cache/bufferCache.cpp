@@ -206,6 +206,8 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			if (ReadbackOnSecondQueue(buffer, buffer.last_gpu_write_tick, copies, total_size,
 			                          download, offset)) {
 				(temporary ? *temporary : m_download_buffer).Invalidate(offset, total_size);
+				const Libs::LibKernel::Memory::ScopedBackingWriteTag write_tag(
+				    Libs::LibKernel::Memory::BackingWriteTag::Download);
 				for (const auto& copy: copies) {
 					Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
 					                                      mapped + (copy.dstOffset - offset),
@@ -247,6 +249,8 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	auto publish = [this, mapped, offset, total_size, buffer_address,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
+		const Libs::LibKernel::Memory::ScopedBackingWriteTag write_tag(
+		    Libs::LibKernel::Memory::BackingWriteTag::Download);
 		for (const auto& copy: copies) {
 			Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
 			                                      mapped + (copy.dstOffset - offset), copy.size);

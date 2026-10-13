@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
+#include <string>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -80,6 +82,55 @@ double GiB(uint64_t bytes) {
 	return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
 }
 
+// Which guest allocations hold the resident memory that no GPU copy mirrors: every committed range
+// of the guest address space minus the GPU-registered classes, grouped by the kind and name the
+// game gave the mapping. "fill" is resident over mapped: a range the game committed but touched
+// only in part has a low fill, one the game (or Kyty) wrote end to end has fill 1.
+void ReportUnmirrored(const RangeList& claimed, double seconds) {
+	struct Group {
+		uint64_t ranges   = 0;
+		uint64_t mapped   = 0;
+		uint64_t resident = 0;
+		uint64_t mirrored = 0; // resident bytes of the same allocations that a GPU class mirrors
+	};
+	std::map<std::string, Group> groups;
+	for (const auto& info: LibKernel::Memory::KernelGuestRangesSnapshot()) {
+		const RangeList whole = {{info.start, info.size}};
+		const auto      rest  = Subtract(whole, claimed);
+		const auto      mirrored = Intersect(whole, claimed);
+		Group&          g        = groups[std::string(info.kind) + " " + info.name + " prot=" +
+		                                  std::to_string(info.protection)];
+		g.ranges++;
+		g.mapped += TotalBytes(rest);
+		g.resident += ResidentOf(rest);
+		g.mirrored += ResidentOf(mirrored);
+	}
+	std::vector<std::pair<std::string, Group>> sorted(groups.begin(), groups.end());
+	std::sort(sorted.begin(), sorted.end(),
+	          [](const auto& a, const auto& b) { return a.second.resident > b.second.resident; });
+	uint64_t sum = 0;
+	for (const auto& [name, g]: sorted) {
+		sum += g.resident;
+	}
+	Log::WriteToConsoleAndLog("[mem-residency-unmirrored t=" + std::to_string(static_cast<int>(seconds)) +
+	                          "s] resident without a GPU copy " + std::to_string(GiB(sum)) + " GiB in " +
+	                          std::to_string(sorted.size()) + " groups\n");
+	size_t shown = 0;
+	for (const auto& [name, g]: sorted) {
+		if (shown++ >= 14 || g.resident < (8u << 20)) {
+			break;
+		}
+		char buf[320];
+		std::snprintf(buf, sizeof(buf),
+		              "[mem-residency-unmirrored]   %-48s ranges=%llu mapped=%.3f GiB resident=%.3f GiB fill=%.0f%%"
+		              " (+%.3f GiB resident under GPU copies)\n",
+		              name.c_str(), static_cast<unsigned long long>(g.ranges), GiB(g.mapped), GiB(g.resident),
+		              g.mapped != 0 ? 100.0 * static_cast<double>(g.resident) / static_cast<double>(g.mapped) : 0.0,
+		              GiB(g.mirrored));
+		Log::WriteToConsoleAndLog(buf);
+	}
+}
+
 void Report(const Snapshot& snapshot) {
 	const auto seconds = std::chrono::duration_cast<std::chrono::milliseconds>(
 	                         std::chrono::steady_clock::now() - g_start)
@@ -122,6 +173,24 @@ void Report(const Snapshot& snapshot) {
 	                   " | tex_clean&buffer overlap=%.3f GiB (resident %.3f) | other_guest resident=%.3f GiB",
 	                   GiB(TotalBytes(overlap)), GiB(ResidentOf(overlap)), GiB(other));
 	Log::WriteToConsoleAndLog(std::string(text) + "\n");
+
+	// Every 30 s: which allocations hold the memory no GPU copy mirrors, and what Kyty wrote itself.
+	static int reports = 0;
+	if (reports++ % 3 == 2) {
+		ReportUnmirrored(claimed, seconds);
+		const auto writes = LibKernel::Memory::KernelBackingWriteStats();
+		static constexpr const char* tag_names[] = {"other", "gpu-download", "color-metadata"};
+		std::string                  wtext = "[mem-residency-writes t=" + std::to_string(static_cast<int>(seconds)) +
+		                    "s] host writes into guest memory:";
+		for (size_t i = 0; i < static_cast<size_t>(LibKernel::Memory::BackingWriteTag::Count); i++) {
+			char buf[200];
+			std::snprintf(buf, sizeof(buf), " %s %llu writes %.3f GiB (landed on %.3f GiB not resident before) |",
+			              tag_names[i], static_cast<unsigned long long>(writes.by_tag[i].writes),
+			              GiB(writes.by_tag[i].bytes), GiB(writes.by_tag[i].newly_resident));
+			wtext += buf;
+		}
+		Log::WriteToConsoleAndLog(wtext + "\n");
+	}
 
 	// CPU faults and probes (cumulative).
 	const auto& probes = snapshot.probes;
