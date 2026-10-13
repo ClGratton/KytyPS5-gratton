@@ -156,11 +156,7 @@ CubeMode CubeFor(ValueEmitContext& ctx, uint32_t resource) {
 	    image.class_root != IR::ImageResource::NoClassRoot) {
 		return {image.cube, 0u};
 	}
-	return {false, Binary(state, spv::OpINotEqual, TypeBool(state),
-	                      Binary(state, spv::OpBitwiseAnd, TypeU32(state),
-	                             DynamicImageWord(state, resource),
-	                             ConstantU32(state, IR::GenericImageCubeBit)),
-	                      ConstantU32(state, 0u))};
+	return {false, DynamicImageFieldsOf(state, resource).cube};
 }
 
 uint32_t CoordF32(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const IR::Inst& address,
@@ -624,13 +620,9 @@ uint32_t StoreTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t d
 	uint32_t values[4] {};
 	const bool dynamic = ctx.state.program.info.generic &&
 	                     image.dynamic_slot != IR::ImageResource::NoDynamicSlot;
-	uint32_t dynamic_swizzle = 0;
 	uint32_t raw_by_source[4] {};
 	if (dynamic) {
 		// Every source component can land in any texel component, so all of them are read.
-		dynamic_swizzle = EmitBitFieldUExtract(
-		    ctx.state, DynamicImageWord(ctx.state, resource),
-		    ConstantU32(ctx.state, IR::GenericImageSwizzleShift), ConstantU32(ctx.state, 12u));
 		for (uint32_t source = 0; source < 4u; source++) raw_by_source[source] = raw_source(source);
 	}
 	for (uint32_t component = 0; component < 4u; component++) {
@@ -639,9 +631,7 @@ uint32_t StoreTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t d
 			// InverseSwizzle: the first source whose selector names this component supplies it (a
 			// source outside the data mask supplies zero). Folded from the last source to the first.
 			for (uint32_t source = 4u; source-- > 0u;) {
-				const auto selector = EmitBitFieldUExtract(
-				    ctx.state, dynamic_swizzle, ConstantU32(ctx.state, source * 3u),
-				    ConstantU32(ctx.state, 3u));
+				const auto selector = DynamicImageFieldsOf(ctx.state, resource).selector[source];
 				const auto named = Binary(ctx.state, spv::OpIEqual, TypeBool(ctx.state), selector,
 				                          ConstantU32(ctx.state, 4u + component));
 				raw = Select(ctx.state, TypeU32(ctx.state), named, raw_by_source[source], raw);
@@ -761,9 +751,7 @@ auto EmitGroupedImageAccess(ValueEmitContext& ctx, const IR::Inst& inst, uint32_
 	if (members.size() < 2u || members.size() > 3u || image.class_root != mem.resource) {
 		ctx.Fail(inst, "has an invalid numeric-class group");
 	}
-	const auto selected = EmitBitFieldUExtract(
-	    state, DynamicImageWord(state, mem.resource),
-	    ConstantU32(state, IR::GenericImageClassShift), ConstantU32(state, 2u));
+	const auto selected = DynamicImageFieldsOf(state, mem.resource).klass;
 	return EmitIndexSwitch(state, selected, static_cast<uint32_t>(members.size()), result_type,
 	                       [&](uint32_t ordinal) { return emit(members[ordinal]); });
 }

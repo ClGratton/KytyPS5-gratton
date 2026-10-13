@@ -116,11 +116,18 @@ struct EmitterState {
 	std::vector<uint32_t>                            dynamic_words;
 	// What the address arithmetic of a generic variant takes from each buffer's dynamic word,
 	// derived once at function entry (indexed like the dynamic words). A generic variant has no
-	// swizzled address calculation: a dispatch with a swizzled buffer does not match it.
+	// swizzled address calculation and no zero-stride out-of-bounds mode: a dispatch that has either
+	// does not match it.
 	struct DynamicBufferFields {
-		uint32_t stride = 0, zero_oob = 0;
+		uint32_t stride = 0;
 	};
 	std::vector<DynamicBufferFields>                 dynamic_buffer_fields;
+	// The same for an image's dynamic word: the cube flag (a bool), the numeric class ordinal and
+	// the four swizzle selectors (indexed by IR::ImageResource::dynamic_slot).
+	struct DynamicImageFields {
+		uint32_t cube = 0, klass = 0, selector[4] = {0, 0, 0, 0};
+	};
+	std::vector<DynamicImageFields>                  dynamic_image_fields;
 	// Storage-buffer accesses left to robustBufferAccess2 (--spirv-robust-bounds).
 	RobustBufferPolicy                               robust_buffers {};
 	uint32_t                                         bda_pagetable_variable  = 0;
@@ -444,6 +451,7 @@ void EmitDynamicWords(EmitterState& state);
 /// The run-time word of a buffer / image of a generic variant (ids loaded by EmitDynamicWords).
 uint32_t DynamicBufferWord(EmitterState& state, uint32_t resource);
 const EmitterState::DynamicBufferFields& DynamicBufferFieldsOf(EmitterState& state, uint32_t resource);
+const EmitterState::DynamicImageFields& DynamicImageFieldsOf(EmitterState& state, uint32_t resource);
 uint32_t DynamicImageWord(EmitterState& state, uint32_t resource);
 
 uint32_t LdsDwordCount(const EmitterState& state);

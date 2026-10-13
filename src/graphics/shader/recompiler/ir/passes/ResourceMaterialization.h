@@ -112,6 +112,7 @@ enum class GenericMismatch : uint8_t {
 	BufferIndirect,
 	BufferAddTid,
 	BufferSwizzle,
+	BufferZeroOob,
 	ImageIndirect,
 	ImageDimension,
 	ImageClass,
@@ -132,7 +133,6 @@ enum class GenericMismatch : uint8_t {
 /// Dynamic data word of a buffer / image (the layout the emitter decodes).
 [[nodiscard]] uint32_t GenericBufferWord(const ResourceSpecialization::Buffer& live);
 [[nodiscard]] uint32_t GenericImageWord(const ResourceSpecialization::Image& live);
-constexpr uint32_t GenericBufferZeroOobBit = 1u << 21u;
 constexpr uint32_t GenericBufferAddTidBit  = 1u << 20u;
 constexpr uint32_t GenericBufferSwizzleBit = 1u << 14u; // with a stride: the tiled address calculation
 constexpr uint32_t GenericImageCubeBit     = 1u;

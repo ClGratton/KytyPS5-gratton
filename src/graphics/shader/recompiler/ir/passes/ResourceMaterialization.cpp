@@ -1338,6 +1338,7 @@ const char* GenericMismatchName(GenericMismatch mismatch) {
 		case GenericMismatch::BufferIndirect: return "buffer_indirect";
 		case GenericMismatch::BufferAddTid: return "buffer_add_tid";
 		case GenericMismatch::BufferSwizzle: return "buffer_swizzle";
+		case GenericMismatch::BufferZeroOob: return "buffer_zero_oob";
 		case GenericMismatch::ImageIndirect: return "image_indirect";
 		case GenericMismatch::ImageDimension: return "image_dimension";
 		case GenericMismatch::ImageClass: return "image_class";
@@ -1469,6 +1470,10 @@ GenericMismatch MatchGenericSpecialization(const ResourceSpecialization& generic
 		if ((buffer.packed_stride & GenericBufferSwizzleBit) != 0u && (buffer.packed_stride & 0x3fffu) != 0u) {
 			return GenericMismatch::BufferSwizzle;
 		}
+		// A zero stride with out-of-bounds mode 0 reads zeros: the select that implements it costs
+		// every read of every dispatch (about 5% of the longest shaders' run time), and the case is
+		// rare (2 of 384 buffers in the audited run).
+		if (buffer.zero_stride_oob) return GenericMismatch::BufferZeroOob;
 	}
 	// The originals come first; the members of a numeric-class group are appended after them.
 	size_t originals = generic.images.size();
@@ -1501,7 +1506,7 @@ GenericMismatch MatchGenericSpecialization(const ResourceSpecialization& generic
 }
 
 uint32_t GenericBufferWord(const ResourceSpecialization::Buffer& live) {
-	return (live.packed_stride & 0x3ffffu) | (live.zero_stride_oob ? GenericBufferZeroOobBit : 0u);
+	return live.packed_stride & 0x3fffu; // the stride; swizzle, ADD_TID and zero-stride OOB are hard fields
 }
 
 uint32_t GenericImageWord(const ResourceSpecialization::Image& live) {

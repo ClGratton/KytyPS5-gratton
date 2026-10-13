@@ -40048,19 +40048,17 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
   Require(name, "pipeline hit", pipeline.pipeline != nullptr && load.pipeline_hit_ready == 1,
           "the first dispatch did not find the pipeline built at registration");
 
-  // Another stride, a zero stride with out-of-bounds mode 0 and a written buffer with a stride the
-  // first one did not have: same program.
+  // Other strides (a zero stride with out-of-bounds mode 1 among them): same program.
   ShaderComputeInputInfo second_input{};
-  Describe(0, 4, true, false);
+  Describe(0, 4, false, false);
   const auto second = cache.GetComputeProgram(regs, {}, second_input);
   Require(name, "same program", second.id == first.id && load.generic_hits == 2 &&
               load.compute_ondemand == 0,
           "a dispatch with other strides compiled its own program");
   const auto &data2 = second_input.stage.resources->generic_data;
   Require(name, "words of dispatch 2",
-          data2.size() >= 2 && data2[0] == ShaderRecompiler::IR::GenericBufferZeroOobBit &&
-              data2[1] == 4u,
-          "the dynamic words do not carry the stride and the out-of-bounds mode");
+          data2.size() >= 2 && data2[0] == 0u && data2[1] == 4u,
+          "the dynamic words do not carry the strides");
   Require(name, "same pipeline", cache.GetComputePipeline(second_input, second).pipeline == pipeline.pipeline,
           "the pipeline was built twice");
 
@@ -40101,6 +40099,16 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
           "a dispatch with a swizzled buffer did not compile its own program");
   regs.cs_user_sgpr.value[13] &= ~(1u << 31u);
   regs.cs_user_sgpr.value[15] &= ~(3u << 21u);
+
+  // A zero stride with out-of-bounds mode 0 (reads return zero) is a hard field as well.
+  ShaderComputeInputInfo oob_input{};
+  Describe(0, 16, true, false);
+  const auto oob = cache.GetComputeProgram(regs, {}, oob_input);
+  Require(name, "zero-stride oob falls back",
+          oob.id != first.id && !oob_input.stage.program->info.generic && load.generic_hits == 3 &&
+              load.compute_ondemand == 3 &&
+              load.generic_miss[static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::BufferZeroOob)] == 1,
+          "a dispatch with a zero-stride out-of-bounds buffer did not compile its own program");
 
   // A binary that reads the queue (S_GETREG of HW_ID2) is noted: its program says which queue it was
   // built for, so a dispatch on the other queue would not share it.

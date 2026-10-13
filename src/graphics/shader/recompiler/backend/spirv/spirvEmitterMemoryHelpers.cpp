@@ -124,8 +124,8 @@ void EmitDynamicWords(EmitterState& state) {
 	for (uint32_t i = 0; i < bindings.dynamic_dwords; ++i) {
 		state.dynamic_words[i] = EmitShaderDataDwordLoad(state, bindings.dynamic_dword + i);
 	}
-	// The per-buffer values every access would otherwise derive again (stride, out-of-bounds mode):
-	// a generic variant pays for them once.
+	// The per-buffer values every access would otherwise derive again (the stride):
+	// a generic variant pays for it once.
 	state.dynamic_buffer_fields.assign(bindings.dynamic_dwords, {});
 	for (const auto& buffer: state.program.info.buffers) {
 		const auto index = buffer.descriptor_index;
@@ -134,11 +134,34 @@ void EmitDynamicWords(EmitterState& state) {
 		auto&      f    = state.dynamic_buffer_fields[index];
 		f.stride        = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
             state, word, ConstantU32(state, 0u), ConstantU32(state, 14u));
-		f.zero_oob = Binary(
-		    state, spv::OpINotEqual, TypeBool(state),
-		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), word, ConstantU32(state, IR::GenericBufferZeroOobBit)),
-		    ConstantU32(state, 0u));
 	}
+	state.dynamic_image_fields.assign(bindings.dynamic_dwords, {});
+	for (const auto& image: state.program.info.images) {
+		const auto slot = image.dynamic_slot;
+		if (!state.program.info.generic || slot == IR::ImageResource::NoDynamicSlot ||
+		    bindings.dynamic_image_base + slot >= bindings.dynamic_dwords) {
+			continue;
+		}
+		const auto word = state.dynamic_words[bindings.dynamic_image_base + slot];
+		auto&      f    = state.dynamic_image_fields[slot];
+		f.cube = Binary(state, spv::OpINotEqual, TypeBool(state),
+		                Binary(state, spv::OpBitwiseAnd, TypeU32(state), word,
+		                       ConstantU32(state, IR::GenericImageCubeBit)),
+		                ConstantU32(state, 0u));
+		f.klass = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
+		    state, word, ConstantU32(state, IR::GenericImageClassShift), ConstantU32(state, 2u));
+		const auto swizzle = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
+		    state, word, ConstantU32(state, IR::GenericImageSwizzleShift), ConstantU32(state, 12u));
+		for (uint32_t source = 0; source < 4u; source++) {
+			f.selector[source] = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
+			    state, swizzle, ConstantU32(state, source * 3u), ConstantU32(state, 3u));
+		}
+	}
+}
+
+const EmitterState::DynamicImageFields& DynamicImageFieldsOf(EmitterState& state, uint32_t resource) {
+	(void)DynamicImageWord(state, resource); // reports a missing word
+	return state.dynamic_image_fields[state.program.info.images[resource].dynamic_slot];
 }
 
 const EmitterState::DynamicBufferFields& DynamicBufferFieldsOf(EmitterState& state, uint32_t resource) {

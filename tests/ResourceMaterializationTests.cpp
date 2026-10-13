@@ -1232,7 +1232,7 @@ LiveSpecialization(const Libs::Graphics::ShaderRecompiler::IR::ResourceSpecializ
   using Libs::Graphics::Prospero::TextureNumericClass;
   // What the descriptors of a dispatch say: the originals only, with the soft fields filled in.
   ResourceSpecialization live;
-  live.buffers = {{.packed_stride = 16}, {.packed_stride = 0, .zero_stride_oob = true}};
+  live.buffers = {{.packed_stride = 16}, {.packed_stride = 0}};
   live.images.assign(4, {});
   for (uint32_t i = 0; i < 4; i++) {
     live.images[i] = generic.images[i];
@@ -1290,8 +1290,8 @@ void TestGenericSpecialization() {
         "a dispatch of the same hard signature was refused");
   {
     auto other = live;
-    other.buffers[0].packed_stride = 4 | (1u << 14u) | (2u << 16u);
-    other.buffers[1].zero_stride_oob = false;
+    other.buffers[0].packed_stride = 4 | (2u << 16u);
+    other.buffers[1].packed_stride = 8;
     other.buffers[1].descriptor_swizzle = Libs::Graphics::DstSel(7, 6, 5, 4);
     other.images[0].cube = false;
     other.images[1].numeric_class = TextureNumericClass::Sint;
@@ -1313,6 +1313,8 @@ void TestGenericSpecialization() {
   expect([](auto &l) { l.images.pop_back(); }, GenericMismatch::ImageCount, "image count");
   expect([](auto &l) { l.buffers[0].indirect_root = 0; }, GenericMismatch::BufferIndirect, "buffer indirect");
   expect([](auto &l) { l.buffers[0].packed_stride |= 1u << 20u; }, GenericMismatch::BufferAddTid, "add_tid");
+  expect([](auto &l) { l.buffers[0].packed_stride |= 1u << 14u; }, GenericMismatch::BufferSwizzle, "swizzle");
+  expect([](auto &l) { l.buffers[1].zero_stride_oob = true; }, GenericMismatch::BufferZeroOob, "zero-stride oob");
   expect([](auto &l) { l.images[0].indirect_root = 0; }, GenericMismatch::ImageIndirect, "image indirect");
   expect([](auto &l) { l.images[0].fmask = true; }, GenericMismatch::ImageFmask, "fmask");
   expect([](auto &l) { l.images[0].dimension = ImageDimension::Dim2D; }, GenericMismatch::ImageDimension, "dimension");
@@ -1336,9 +1338,8 @@ void TestGenericSpecialization() {
         "generic and specialized keys compare equal");
 
   // The words the shader reads.
-  Check(GenericBufferWord({.packed_stride = 0x24 | (1u << 14u) | (3u << 16u)}) ==
-            (0x24u | (1u << 14u) | (3u << 16u)) &&
-            GenericBufferWord({.packed_stride = 0, .zero_stride_oob = true}) == GenericBufferZeroOobBit,
+  Check(GenericBufferWord({.packed_stride = 0x24 | (3u << 16u)}) == 0x24u &&
+            GenericBufferWord({.packed_stride = 0}) == 0u,
         "buffer word");
   ResourceSpecialization::Image image;
   image.cube = true;
@@ -1475,7 +1476,7 @@ void TestGenericSpecialization() {
           "the float root of the store-only image holds the descriptor");
     Check(snapshot.generic_data.size() == 5 &&
               snapshot.generic_data[0] == 16u &&
-              snapshot.generic_data[1] == GenericBufferZeroOobBit &&
+              snapshot.generic_data[1] == 0u &&
               snapshot.generic_data[2 + 0] == GenericImageWord(live2.images[0]) &&
               snapshot.generic_data[2 + 1] == GenericImageWord(live2.images[1]) &&
               snapshot.generic_data[2 + 2] == GenericImageWord(live2.images[2]),
