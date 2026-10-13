@@ -111,6 +111,10 @@ bool SrtPlanShadowEnabled() {
 	return g_config->srt_plan_shadow && g_config->pipeline_lookahead;
 }
 
+bool SrtPlansEnabled() {
+	return g_config->srt_plans && g_config->pipeline_lookahead;
+}
+
 bool DrawKeyCacheEnabled() {
 	return g_config->draw_key_cache;
 }

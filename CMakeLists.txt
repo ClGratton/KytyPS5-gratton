@@ -877,6 +877,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_srt_plan_shadow_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plan-shadow maybe)
 	set_tests_properties(emulator_srt_plan_shadow_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_srt_plans_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plans true)
+	add_test(NAME emulator_srt_plans_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plans maybe)
+	set_tests_properties(emulator_srt_plans_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME scalar_read_hazard COMMAND $<TARGET_FILE:scalar_read_hazard_tests>)
 	add_test(NAME indirect_draw_args COMMAND $<TARGET_FILE:indirect_draw_args_tests>)
 	add_test(NAME indirect_draw_policy COMMAND $<TARGET_FILE:indirect_draw_policy_tests>)

@@ -173,6 +173,12 @@ QList<Option> BuildTable() {
 	             "Remembers the graphics pipelines of the last few draws and finds them by comparing "
 	             "keys before hashing; also enables the SRT table walk below.",
 	             EMU_BOOL(draw_key_cache)});
+	defs.append({"srt_plans", "--srt-plans", Tab::Gpu, "Draw path", Kind::Bool,
+	             "Use look-ahead SRT plans (needs look-ahead)",
+	             "The GPU thread uses the shader resource tables the look-ahead thread already "
+	             "materialized for a draw, after checking that the guest memory they were read from "
+	             "is unchanged; without a valid plan it materializes them itself.",
+	             EMU_BOOL(srt_plans)});
 	defs.append({"srt_table_walk", "--srt-table-walk", Tab::Gpu, "Draw path", Kind::Bool,
 	             "SRT table walk",
 	             "Refreshes a shader's flattened SRT from a precomputed table instead of walking the "

@@ -229,6 +229,14 @@ static void PrintUsage() {
 	         "                                       compare it with the GPU thread's own result (lead time,\n"
 	         "                                       validity, byte equality, check cost). Prints a summary\n"
 	         "                                       every 10 s and at exit; nothing is adopted. Default: false.\n");
+	::printf("  --srt-plans <true|false>             Needs --pipeline-lookahead. The GPU thread uses the shader\n"
+	         "                                       resource tables the look-ahead thread already materialized\n"
+	         "                                       for a draw (a plan) instead of materializing them itself,\n"
+	         "                                       after re-checking that the guest memory the plan was built\n"
+	         "                                       from is unchanged and not GPU-written; without a valid\n"
+	         "                                       plan it materializes as before. Same result, less work on\n"
+	         "                                       the GPU thread. With --srt-plan-shadow it also compares\n"
+	         "                                       every adopted plan with its own result. Default: false.\n");
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
 	         "                                       the guest backing without faulting when none of the bytes\n"
 	         "                                       is GPU-written (no drain). Default: false.\n");
@@ -848,6 +856,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--srt-table-walk") {
 			if (!ParseBool(value, options.config.srt_table_walk)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--srt-plans") {
+			if (!ParseBool(value, options.config.srt_plans)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
