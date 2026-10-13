@@ -211,6 +211,53 @@ void TestRuntimeToggleControlFile() {
 	          text.str().find("unknown_or_not_runtime_safe") != std::string::npos,
 	      "a flag that is not registered is refused");
 
+	// eager-readback and poll-before-wait: flipped through the accessors the consumers read.
+	{
+		Config::ConfigOptions eager;
+		eager.eager_readback      = true;
+		eager.poll_before_wait_us = 100;
+		eager.toggle_control      = control;
+		Apply(eager);
+		Check(Config::EagerReadbackEnabled() && Config::PollBeforeWaitUs() == 100, "start values");
+		{
+			std::ofstream out(dir / "toggles.tmp");
+			out << "# seq 2\neager-readback=off\npoll-before-wait=off\n";
+		}
+		std::filesystem::rename(dir / "toggles.tmp", control);
+		for (int i = 0; i < 100 && !RT::detail::g_pending.load(); i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		}
+		RT::OnFrame(43);
+		Check(!Config::EagerReadbackEnabled() && !Config::EagerReadbackVerifyEnabled() &&
+		          Config::PollBeforeWaitUs() == 0,
+		      "eager-readback and poll-before-wait are off");
+		{
+			std::ofstream out(dir / "toggles.tmp");
+			out << "# seq 3\neager-readback=on\npoll-before-wait=on\n";
+		}
+		std::filesystem::rename(dir / "toggles.tmp", control);
+		for (int i = 0; i < 100 && !RT::detail::g_pending.load(); i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		}
+		RT::OnFrame(44);
+		Check(Config::EagerReadbackEnabled() && Config::PollBeforeWaitUs() == 100,
+		      "they can be turned on again; the poll budget is the configured one");
+		// Off at start-up: poll-before-wait cannot be turned on (it has no budget).
+		Config::ConfigOptions no_poll;
+		no_poll.toggle_control = control;
+		Apply(no_poll);
+		{
+			std::ofstream out(dir / "toggles.tmp");
+			out << "# seq 4\npoll-before-wait=on\n";
+		}
+		std::filesystem::rename(dir / "toggles.tmp", control);
+		for (int i = 0; i < 100 && !RT::detail::g_pending.load(); i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		}
+		RT::OnFrame(45);
+		Check(Config::PollBeforeWaitUs() == 0, "poll-before-wait without a budget stays off");
+	}
+
 	Apply(Config::ConfigOptions {});
 	Check(!RT::Active(), "loading a config without --toggle-control stops it");
 	std::filesystem::remove_all(dir);

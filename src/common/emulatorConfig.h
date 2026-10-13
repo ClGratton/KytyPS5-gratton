@@ -302,6 +302,9 @@ struct ConfigOptions {
 	// --poll-before-wait <us>: poll the timeline semaphore for up to this long before blocking in
 	// vkWaitSemaphores. 0 (default) blocks at once.
 	uint32_t               poll_before_wait_us         = 0;
+	// Runtime state of --poll-before-wait (set from poll_before_wait_us != 0 when the configuration
+	// is loaded; --toggle-control flips it, common/runtimeToggles.h). Not a command-line option.
+	bool                   poll_before_wait_on         = false;
 	bool                   eager_readback_verify       = false;
 	std::filesystem::path  bench_render_csv;
 	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it

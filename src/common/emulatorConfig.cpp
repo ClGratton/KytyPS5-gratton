@@ -34,6 +34,7 @@ void Load(const ConfigOptions& cfg) {
 	        cfg.pad_speaker_volume > 100);
 
 	*g_config = cfg;
+	g_config->poll_before_wait_on = cfg.poll_before_wait_us != 0;
 
 	Common::Hang::Start(cfg.hang_watchdog_seconds);
 	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s != 0 ? cfg.gpu_phase_stats_s
@@ -65,6 +66,13 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("readback-queue", &g_config->readback_queue, true);
 	// The trim thread starts only when the flag was on at start-up and skips its pass while off.
 	registry.Register("heap-trim", &g_config->heap_trim, true);
+	// Polled per wait (MasterSemaphore::Wait), no state: on only when --poll-before-wait <us> != 0
+	// was given at start-up (the budget stays the configured one).
+	registry.Register("poll-before-wait", &g_config->poll_before_wait_on, true);
+	// Hot pages and copies in flight are retired whether or not the flag is on (a page whose eager
+	// copy is in flight when the flag goes off is finished by the next submit or read fault), so
+	// the flag only decides whether new pages are marked hot and new copies scheduled.
+	registry.Register("eager-readback", &g_config->eager_readback, false);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -156,15 +164,17 @@ bool GpuIndirectDrawsEnabled() {
 }
 
 uint32_t PollBeforeWaitUs() {
-	return g_config != nullptr ? g_config->poll_before_wait_us : 0u;
+	return g_config != nullptr && Common::RuntimeToggles::Read(g_config->poll_before_wait_on)
+	           ? g_config->poll_before_wait_us
+	           : 0u;
 }
 
 bool EagerReadbackEnabled() {
-	return g_config->eager_readback;
+	return Common::RuntimeToggles::Read(g_config->eager_readback);
 }
 
 bool EagerReadbackVerifyEnabled() {
-	return g_config->eager_readback && g_config->eager_readback_verify;
+	return Common::RuntimeToggles::Read(g_config->eager_readback) && g_config->eager_readback_verify;
 }
 
 bool ReadbackQueueEnabled() {
