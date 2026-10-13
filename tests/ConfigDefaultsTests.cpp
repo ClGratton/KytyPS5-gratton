@@ -139,6 +139,16 @@ void TestReadbackLinearImagesStaysOff() {
 
 } // namespace
 
+// --generic-compute is a performance option: off, and it leaves the short binaries to the dispatch.
+void TestGenericComputeDefaults() {
+	const Config::ConfigOptions options;
+	Check(!options.generic_compute, "--generic-compute defaults to off");
+	Check(options.generic_compute_min_dwords == 512, "generic compute skips binaries under 512 dwords");
+	Apply(options);
+	Check(!Config::GetGenericCompute() && Config::GetGenericComputeMinDwords() == 512,
+	      "an unconfigured emulator builds no generic variants");
+}
+
 int main() {
 	Config::Initialize();
 
@@ -148,6 +158,7 @@ int main() {
 	TestPipelineCacheKeyDefault();
 	TestVramStatsAreIndependentOfPaging();
 	TestVramPagingDefault();
+	TestGenericComputeDefaults();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");
