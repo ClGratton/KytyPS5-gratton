@@ -97,6 +97,14 @@ QList<Option> BuildTable() {
 	             "need the KYTY_PIPELINE_FAST_BUILD=1 environment variable. Experimental."
 	             "\n\nNeeds Async pipelines = stall or skip.",
 	             EMU_BOOL(pipelines_unoptimized_first), {}, 0, 0, "", "", true});
+	defs.append({"skip_guard", "--skip-guard", Tab::Shaders, "Pipeline compilation", Kind::Bool,
+	             "Skip guard (dependency-aware skip)",
+	             "Memory that a skipped draw should have written and that a later pass reads as "
+	             "descriptor tables, draw arguments, DMA or CPU readback is marked unsafe, and later "
+	             "draws writing it wait for their pipeline instead of being skipped. Skipping still "
+	             "changes the picture for a few frames; this only narrows what may be dropped."
+	             "\n\nNeeds Async pipelines = skip.",
+	             EMU_BOOL(skip_guard), {}, 0, 0, "", "", true});
 	defs.append({"pipeline_workers", "--pipeline-workers", Tab::Shaders, "Pipeline compilation",
 	             Kind::Int, "Compile worker threads:",
 	             "Worker threads for the async pipeline pool. Auto = the smaller of 8 and half the "

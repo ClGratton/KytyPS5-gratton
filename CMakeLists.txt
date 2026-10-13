@@ -914,6 +914,11 @@ if(BUILD_TESTING)
 	add_test(NAME emulator_srt_plans_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plans maybe)
 	set_tests_properties(emulator_srt_plans_invalid PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME emulator_skip_guard_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --skip-guard true --skip-guard-64bit false)
+	add_test(NAME emulator_skip_guard_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --skip-guard maybe)
+	set_tests_properties(emulator_skip_guard_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME scalar_read_hazard COMMAND $<TARGET_FILE:scalar_read_hazard_tests>)
 	add_test(NAME indirect_draw_args COMMAND $<TARGET_FILE:indirect_draw_args_tests>)
 	add_test(NAME indirect_draw_policy COMMAND $<TARGET_FILE:indirect_draw_policy_tests>)

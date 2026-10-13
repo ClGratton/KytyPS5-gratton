@@ -259,6 +259,19 @@ static void PrintUsage() {
 	         "                                       plan it materializes as before. Same result, less work on\n"
 	         "                                       the GPU thread. With --srt-plan-shadow it also compares\n"
 	         "                                       every adopted plan with its own result. Default: false.\n");
+	::printf("  --skip-guard <true|false>            Needs --async-pipelines skip. Dependency-aware skip: when\n"
+	         "                                       a shader walks a descriptor table, reads draw arguments,\n"
+	         "                                       DMAs or the guest CPU reads back memory a skipped draw\n"
+	         "                                       should have written, that memory is marked unsafe and\n"
+	         "                                       later draws writing it wait for their pipeline (like\n"
+	         "                                       stall mode) instead of being skipped. Logs the first\n"
+	         "                                       such read of each range, every skipped draw read\n"
+	         "                                       afterwards (a correctness miss) and a summary. Skip\n"
+	         "                                       itself still changes the output. Default: false.\n");
+	::printf("  --skip-guard-64bit <true|false>      With --skip-guard: a shader that loads through 64-bit\n"
+	         "                                       addresses and reads a skipped draw's output also marks\n"
+	         "                                       that output unsafe (its loads cannot be tracked).\n"
+	         "                                       Default: true.\n");
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
 	         "                                       the guest backing without faulting when none of the bytes\n"
 	         "                                       is GPU-written (no drain). Default: false.\n");
@@ -919,6 +932,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--srt-plans") {
 			if (!ParseBool(value, options.config.srt_plans)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--skip-guard") {
+			if (!ParseBool(value, options.config.skip_guard)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--skip-guard-64bit") {
+			if (!ParseBool(value, options.config.skip_guard_bda)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

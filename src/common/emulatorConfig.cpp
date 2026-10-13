@@ -116,6 +116,18 @@ bool SrtPlansEnabled() {
 	return g_config->srt_plans && g_config->pipeline_lookahead;
 }
 
+bool SkipGuardEnabled() {
+	return g_config->skip_guard && g_config->async_pipelines == AsyncPipelineMode::Skip;
+}
+
+bool SkipGuardRequested() {
+	return g_config->skip_guard;
+}
+
+bool SkipGuardBdaEnabled() {
+	return g_config->skip_guard_bda;
+}
+
 bool DrawKeyCacheEnabled() {
 	return g_config->draw_key_cache;
 }

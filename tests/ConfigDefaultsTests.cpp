@@ -165,9 +165,33 @@ void TestHostMemoryFeaturesDefaults() {
 	      "each host-memory feature can be switched off");
 }
 
+// --skip-guard is a narrowing of the opt-in skip mode: off by default, and it only acts with skip.
+void TestSkipGuardDefaults() {
+	const Config::ConfigOptions options;
+	Check(!options.skip_guard && options.skip_guard_bda, "skip guard is off, its 64-bit rule is on");
+	Apply(options);
+	Check(!Config::SkipGuardEnabled(), "an unconfigured emulator has the skip guard off");
+
+	Config::ConfigOptions on;
+	on.skip_guard = true;
+	Apply(on);
+	Check(!Config::SkipGuardEnabled() && Config::SkipGuardRequested(),
+	      "the guard does nothing without --async-pipelines skip");
+	on.async_pipelines = Config::AsyncPipelineMode::Stall;
+	Apply(on);
+	Check(!Config::SkipGuardEnabled(), "the guard does nothing in stall mode");
+	on.async_pipelines = Config::AsyncPipelineMode::Skip;
+	Apply(on);
+	Check(Config::SkipGuardEnabled() && Config::SkipGuardBdaEnabled(), "skip + guard enables it");
+	on.skip_guard_bda = false;
+	Apply(on);
+	Check(Config::SkipGuardEnabled() && !Config::SkipGuardBdaEnabled(), "the 64-bit rule can be off");
+}
+
 int main() {
 	Config::Initialize();
 
+	TestSkipGuardDefaults();
 	TestGpuTimestampsDefault();
 	TestBufferGcOwnShare();
 	TestReadbackLinearImagesStaysOff();
