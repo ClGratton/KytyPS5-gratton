@@ -271,6 +271,12 @@ struct ConfigOptions {
 	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
 	// rendering family and wait only for the work that wrote the data. Default off.
 	bool                   readback_queue              = false;
+	// --eager-readback: pages a game thread read-faulted on are written back to guest memory right
+	// after the GPU writes them (copied in the command buffer about to be submitted), so the next
+	// read needs no fault and no GPU drain. Default off. --debug-eager-readback-verify re-reads
+	// every page from the GPU before it is unprotected (slow) and reports differences.
+	bool                   eager_readback              = false;
+	bool                   eager_readback_verify       = false;
 	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
@@ -348,6 +354,8 @@ bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
 bool              ReadbackQueueEnabled();
+bool              EagerReadbackEnabled();
+bool              EagerReadbackVerifyEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

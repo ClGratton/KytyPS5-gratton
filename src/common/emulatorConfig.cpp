@@ -135,6 +135,14 @@ bool GpuIndirectDrawsEnabled() {
 	return g_config->gpu_indirect_draws;
 }
 
+bool EagerReadbackEnabled() {
+	return g_config->eager_readback;
+}
+
+bool EagerReadbackVerifyEnabled() {
+	return g_config->eager_readback && g_config->eager_readback_verify;
+}
+
 bool ReadbackQueueEnabled() {
 	return g_config->readback_queue;
 }

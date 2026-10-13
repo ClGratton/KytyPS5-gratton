@@ -246,6 +246,13 @@ static void PrintUsage() {
 	::printf("  --readback-queue <true|false>        Synchronous GPU->guest buffer readbacks copy on a second\n"
 	         "                                       queue of the rendering family and wait only for the\n"
 	         "                                       work that wrote the data. Default: false.\n");
+	::printf("  --eager-readback <true|false>        Pages a game thread read-faulted on are written back to guest\n"
+	         "                                       memory right after the GPU writes them (copied in the\n"
+	         "                                       command buffer about to be submitted), so the next read\n"
+	         "                                       needs no fault and no GPU drain. Default: false.\n");
+	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback, re-read every page from the\n"
+	         "                                       GPU (a full drain) before it is unprotected and report\n"
+	         "                                       any difference. Slow. Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -881,6 +888,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--clean-guest-reads") {
 			if (!ParseBool(value, options.config.clean_guest_reads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--eager-readback") {
+			if (!ParseBool(value, options.config.eager_readback)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-eager-readback-verify") {
+			if (!ParseBool(value, options.config.eager_readback_verify)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
