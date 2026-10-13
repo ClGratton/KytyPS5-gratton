@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/vramPolicy.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
 
@@ -378,6 +379,30 @@ StreamBuffer& BufferCache::GetDrawRecordBuffer() {
 	return *m_draw_record_buffer;
 }
 
+namespace {
+
+// Sizes the placement policy needs, from the device's memory heaps.
+VramPolicy::UploadRingPlan PlanStagingRing(const GraphicContext& graphics) {
+	const auto& properties = graphics.GetPhysicalDeviceMemoryProperties();
+	uint64_t    device_local_total = 0;
+	uint64_t    rebar_heap         = 0;
+	for (uint32_t i = 0; i < properties.memoryHeapCount; i++) {
+		if (properties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+			device_local_total += properties.memoryHeaps[i].size;
+		}
+	}
+	const auto wanted = vk::MemoryPropertyFlagBits::eDeviceLocal | vk::MemoryPropertyFlagBits::eHostVisible;
+	for (uint32_t i = 0; i < properties.memoryTypeCount; i++) {
+		if ((properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+			rebar_heap = std::max<uint64_t>(rebar_heap,
+			                                properties.memoryHeaps[properties.memoryTypes[i].heapIndex].size);
+		}
+	}
+	return VramPolicy::PlanUploadRing(Config::UploadRingRebarEnabled(), device_local_total, rebar_heap);
+}
+
+} // namespace
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
@@ -386,19 +411,24 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                              BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
       // --upload-ring-rebar: the Stream usage asks for device-local host-visible memory (sequential
-      // CPU writes, write-combined); the ring is only ever written by the CPU.
+      // CPU writes, write-combined); the ring is only ever written by the CPU. VramPolicy decides
+      // from the device's heaps whether the card can spare it.
       m_staging_buffer(graphics, scheduler,
-                       Config::UploadRingRebarEnabled() ? MemoryUsage::Stream : MemoryUsage::Upload,
-                       512 * MiB),
+                       PlanStagingRing(graphics).device_local ? MemoryUsage::Stream : MemoryUsage::Upload,
+                       PlanStagingRing(graphics).size),
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
-	if (Config::UploadRingRebarEnabled()) {
+	{
+		const auto plan = PlanStagingRing(graphics);
 		Log::WriteToConsoleAndLog(fmt::format(
-		    "Upload ring (--upload-ring-rebar): {} MiB in {} memory{}\n", m_staging_buffer.Size() >> 20,
+		    "Upload ring: {} MiB in {} memory{}\n", m_staging_buffer.Size() >> 20,
 		    m_staging_buffer.IsDeviceLocal() ? "device-local host-visible (ReBAR)" : "system",
-		    m_staging_buffer.IsDeviceLocal() ? "" : " (the device offers no host-visible device-local heap that large)"));
+		    m_staging_buffer.IsDeviceLocal() ? "" :
+		    !Config::UploadRingRebarEnabled() ? " (--upload-ring-rebar off)" :
+		    !plan.device_local ? " (no large host-visible device-local heap, or a card too small to spare it)" :
+		                         " (the device-local allocation failed)"));
 	}
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
@@ -950,7 +980,7 @@ void BufferCache::CollectResidencyRanges(MemResidency::Snapshot& snapshot) {
 }
 
 void BufferCache::LogRingStatsPeriodic() {
-	if (!Config::MemStatsEnabled() && !Config::UploadRingRebarEnabled()) {
+	if (!Config::MemStatsEnabled()) {
 		return;
 	}
 	const auto now = std::chrono::steady_clock::now();
