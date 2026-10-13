@@ -135,6 +135,10 @@ bool GpuIndirectDrawsEnabled() {
 	return g_config->gpu_indirect_draws;
 }
 
+uint32_t PollBeforeWaitUs() {
+	return g_config != nullptr ? g_config->poll_before_wait_us : 0u;
+}
+
 bool EagerReadbackEnabled() {
 	return g_config->eager_readback;
 }

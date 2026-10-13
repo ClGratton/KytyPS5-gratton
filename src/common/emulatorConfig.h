@@ -276,6 +276,9 @@ struct ConfigOptions {
 	// read needs no fault and no GPU drain. Default off. --debug-eager-readback-verify re-reads
 	// every page from the GPU before it is unprotected (slow) and reports differences.
 	bool                   eager_readback              = false;
+	// --poll-before-wait <us>: poll the timeline semaphore for up to this long before blocking in
+	// vkWaitSemaphores. 0 (default) blocks at once.
+	uint32_t               poll_before_wait_us         = 0;
 	bool                   eager_readback_verify       = false;
 	std::filesystem::path  bench_render_csv;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -355,6 +358,7 @@ bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
 bool              ReadbackQueueEnabled();
 bool              EagerReadbackEnabled();
+uint32_t          PollBeforeWaitUs();
 bool              EagerReadbackVerifyEnabled();
 
 LogDirection          GetPrintfDirection();

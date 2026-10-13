@@ -253,6 +253,10 @@ static void PrintUsage() {
 	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback, re-read every page from the\n"
 	         "                                       GPU (a full drain) before it is unprotected and report\n"
 	         "                                       any difference. Slow. Default: false.\n");
+	::printf("  --poll-before-wait <0-1000>          Microseconds to poll the GPU timeline before blocking in\n"
+	         "                                       vkWaitSemaphores (small readbacks finish in tens of\n"
+	         "                                       microseconds; a blocking wait adds the kernel sleep and\n"
+	         "                                       wake-up). 0 blocks at once. Default: 0.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -891,6 +895,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--poll-before-wait") {
+			uint64_t us = 0;
+			if (!ParseUint64(value, us) || us > 1000) {
+				::printf("invalid poll-before-wait (expected 0-1000 us): %s\n", value.c_str());
+				return false;
+			}
+			options.config.poll_before_wait_us = static_cast<uint32_t>(us);
 		} else if (arg == "--eager-readback") {
 			if (!ParseBool(value, options.config.eager_readback)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

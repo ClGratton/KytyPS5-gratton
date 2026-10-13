@@ -163,6 +163,12 @@ QList<Option> BuildTable() {
 	             "GPU to guest buffer readbacks copy on a second queue and wait only for the work "
 	             "that wrote the data. No gain measured.",
 	             EMU_BOOL(readback_queue)});
+	defs.append({"poll_before_wait_us", "--poll-before-wait", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Int, "Poll the GPU before blocking:",
+	             "Microseconds to poll the GPU timeline before blocking in a wait. Small readbacks "
+	             "finish in tens of microseconds; a blocking wait adds the sleep and wake-up. Off "
+	             "until measured.",
+	             EMU_INT(poll_before_wait_us), {}, 0, 1000, "Off", " us"});
 	defs.append({"eager_readback", "--eager-readback", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Write back pages the game reads right after the GPU writes them",
 	             "Pages a game thread read-faulted on are copied out in the command buffer about to "
