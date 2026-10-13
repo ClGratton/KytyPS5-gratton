@@ -55,6 +55,7 @@ struct Options {
 	bool        keep_nv_cache = false;
 	bool        gfx           = false;      // files are vs.spv ps.spv [vs.spv ps.spv ...]
 	bool        exec          = false;      // run the shader once and dump its storage buffers
+	std::string gfx_seq;                    // --gfx-seq a,b:v1p0,...: graphics pipeline state steps (see BenchGraphicsStates)
 	std::map<uint32_t, uint32_t> ranges;    // exec: binding -> descriptor range in bytes
 	int         gpu           = 0;
 	bool        list_only     = false;
@@ -657,6 +658,159 @@ static void BenchGraphics(const Ctx& c, const Options& o, const std::string& vs_
 	DestroyLayout(c, l);
 }
 
+
+// ---- graphics state sequence: does a second pipeline with other state reuse the driver's code? -------------
+// Files are vs0 ps0 [vs1 ps1 ...]. Every module is created once (unique per process), then the steps of
+// --gfx-seq are created one after the other and timed, with no pipeline cache. A step is
+// <state>[:v<i>p<j>]. States: base (RGBA16F colour 0, D32S8, no blend, triangle list, vertex stride 16),
+// again (= base), blend, mask7, fmt8 (RGBA8), fmt11 (B10G11R11), fmt32 (RGBA32F), nodepth, depth16,
+// cullback, strip, vstride (vertex stride 32), vfmt16 (16-bit float vertex inputs), extra (one more colour
+// attachment), msaa4, blendfmt32 (blend + RGBA32F).
+struct GfxState {
+	VkFormat color = VK_FORMAT_R16G16B16A16_SFLOAT;
+	VkFormat depth = VK_FORMAT_D32_SFLOAT_S8_UINT;
+	bool blend = false;
+	uint32_t mask = 0xf;
+	VkCullModeFlags cull = VK_CULL_MODE_NONE;
+	VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	uint32_t vstride = 16;
+	bool vfmt16 = false;
+	int extra = 0;
+	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+};
+
+static GfxState StateByName(const std::string& n) {
+	GfxState s;
+	if (n == "base" || n == "again") return s;
+	if (n == "blend") s.blend = true;
+	else if (n == "mask7") s.mask = 7;
+	else if (n == "fmt8") s.color = VK_FORMAT_R8G8B8A8_UNORM;
+	else if (n == "fmt11") s.color = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+	else if (n == "fmt32") s.color = VK_FORMAT_R32G32B32A32_SFLOAT;
+	else if (n == "nodepth") s.depth = VK_FORMAT_UNDEFINED;
+	else if (n == "depth16") s.depth = VK_FORMAT_D16_UNORM;
+	else if (n == "cullback") s.cull = VK_CULL_MODE_BACK_BIT;
+	else if (n == "strip") s.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+	else if (n == "vstride") s.vstride = 32;
+	else if (n == "vfmt16") s.vfmt16 = true;
+	else if (n == "extra") s.extra = 1;
+	else if (n == "msaa4") s.samples = VK_SAMPLE_COUNT_4_BIT;
+	else if (n == "blendfmt32") { s.blend = true; s.color = VK_FORMAT_R32G32B32A32_SFLOAT; }
+	else die("unknown graphics state %s", n.c_str());
+	return s;
+}
+
+static void BenchGraphicsStates(const Ctx& c, const Options& o) {
+	if (o.files.size() % 2 || o.files.empty()) die("--gfx-seq needs vs/ps pairs");
+	size_t n = o.files.size() / 2;
+	std::vector<std::vector<uint32_t>> vs(n), ps(n);
+	std::vector<Reflection> rv, rp;
+	Reflection merged;
+	bool first = true;
+	for (size_t i = 0; i < n; i++) {
+		vs[i] = ReadSpirv(o.files[2 * i]); ps[i] = ReadSpirv(o.files[2 * i + 1]);
+		rv.push_back(Reflect(vs[i])); rp.push_back(Reflect(ps[i]));
+		if (rv[i].stage != VK_SHADER_STAGE_VERTEX_BIT || rp[i].stage != VK_SHADER_STAGE_FRAGMENT_BIT) die("--gfx-seq expects vs/ps pairs");
+		for (auto* r : {&rv[i], &rp[i]}) {
+			if (first) { merged = *r; first = false; continue; }
+			for (auto b : r->bindings) {
+				bool found = false;
+				for (auto& m : merged.bindings) if (m.set == b.set && m.binding == b.binding) found = true;
+				if (!found) merged.bindings.push_back(b);
+			}
+			merged.has_push = merged.has_push || r->has_push;
+		}
+	}
+	Layout l = MakeLayout(c, merged, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, o.push_desc);
+	std::vector<VkShaderModule> mv(n), mp(n);
+	std::map<std::string, VkShaderModule> made; // the same file given twice is the same module
+	std::vector<VkShaderModule> owned;
+	const auto module = [&](const std::string& path, const std::vector<uint32_t>& code) {
+		auto it = made.find(path);
+		if (it != made.end()) return it->second;
+		auto u = Uniquify(code, g_tag++);
+		VkShaderModuleCreateInfo m {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+		m.codeSize = u.size() * 4; m.pCode = u.data();
+		VkShaderModule out;
+		VK_OK(vkCreateShaderModule(c.device, &m, nullptr, &out));
+		made[path] = out; owned.push_back(out);
+		return out;
+	};
+	for (size_t i = 0; i < n; i++) { mv[i] = module(o.files[2 * i], vs[i]); mp[i] = module(o.files[2 * i + 1], ps[i]); }
+	std::vector<std::string> steps;
+	{ std::string cur; for (char ch : o.gfx_seq + ",") { if (ch == ',') { if (!cur.empty()) steps.push_back(cur); cur.clear(); } else cur += ch; } }
+	int idx = 0;
+	for (auto& step : steps) {
+		std::string name = step; size_t vi = 0, pj = 0;
+		auto colon = step.find(':');
+		if (colon != std::string::npos) {
+			name = step.substr(0, colon);
+			if (std::sscanf(step.c_str() + colon + 1, "v%zup%zu", &vi, &pj) != 2 || vi >= n || pj >= n) die("bad step %s", step.c_str());
+		}
+		GfxState st = StateByName(name);
+		const Reflection& rvx = rv[vi];
+		std::vector<VkVertexInputBindingDescription>   vb;
+		std::vector<VkVertexInputAttributeDescription> va;
+		for (auto& in : rvx.inputs) {
+			vb.push_back({in.location, st.vstride, VK_VERTEX_INPUT_RATE_VERTEX});
+			VkFormat f = FormatForInput(rvx, in.type_id);
+			if (st.vfmt16 && f == VK_FORMAT_R32G32B32A32_SFLOAT) f = VK_FORMAT_R16G16B16A16_SFLOAT;
+			else if (st.vfmt16 && f == VK_FORMAT_R32G32B32_SFLOAT) f = VK_FORMAT_R16G16B16A16_SFLOAT;
+			else if (st.vfmt16 && f == VK_FORMAT_R32G32_SFLOAT) f = VK_FORMAT_R16G16_SFLOAT;
+			va.push_back({in.location, in.location, f, 0});
+		}
+		uint32_t max_loc = 0;
+		for (auto& out : rp[pj].outputs) max_loc = std::max(max_loc, out.location + 1);
+		std::vector<VkFormat> colors(max_loc + st.extra, st.color);
+		for (auto& out : rp[pj].outputs) {
+			VkFormat f = FormatForInput(rp[pj], out.type_id);
+			if (f >= VK_FORMAT_R32_UINT && f <= VK_FORMAT_R32G32B32A32_SINT) colors[out.location] = f; // integer outputs keep an integer target
+		}
+		std::vector<VkPipelineColorBlendAttachmentState> blend(colors.size());
+		for (auto& b : blend) {
+			b.colorWriteMask = st.mask;
+			if (st.blend) { b.blendEnable = VK_TRUE; b.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; b.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; b.colorBlendOp = VK_BLEND_OP_ADD; b.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; b.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; b.alphaBlendOp = VK_BLEND_OP_ADD; }
+		}
+		VkPipelineShaderStageCreateInfo sg[2] {};
+		sg[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, mv[vi], "main", nullptr};
+		sg[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, mp[pj], "main", nullptr};
+		VkPipelineVertexInputStateCreateInfo vi_ {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+		vi_.vertexBindingDescriptionCount = static_cast<uint32_t>(vb.size()); vi_.pVertexBindingDescriptions = vb.data();
+		vi_.vertexAttributeDescriptionCount = static_cast<uint32_t>(va.size()); vi_.pVertexAttributeDescriptions = va.data();
+		VkPipelineInputAssemblyStateCreateInfo ia {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+		ia.topology = st.topo;
+		VkPipelineViewportStateCreateInfo vp {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+		vp.viewportCount = 1; vp.scissorCount = 1;
+		VkPipelineRasterizationStateCreateInfo rs {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+		rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = st.cull; rs.lineWidth = 1.f;
+		VkPipelineMultisampleStateCreateInfo ms_ {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+		ms_.rasterizationSamples = st.samples;
+		VkPipelineDepthStencilStateCreateInfo ds {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+		VkPipelineColorBlendStateCreateInfo cb {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+		cb.attachmentCount = static_cast<uint32_t>(blend.size()); cb.pAttachments = blend.data();
+		const VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+		VkPipelineDynamicStateCreateInfo dsi {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+		dsi.dynamicStateCount = 2; dsi.pDynamicStates = dyn;
+		VkPipelineRenderingCreateInfo ri {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+		ri.colorAttachmentCount = static_cast<uint32_t>(colors.size()); ri.pColorAttachmentFormats = colors.data();
+		ri.depthAttachmentFormat = st.depth;
+		ri.stencilAttachmentFormat = st.depth == VK_FORMAT_D32_SFLOAT_S8_UINT ? st.depth : VK_FORMAT_UNDEFINED;
+		VkGraphicsPipelineCreateInfo gi {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+		gi.pNext = &ri; gi.stageCount = 2; gi.pStages = sg; gi.pVertexInputState = &vi_; gi.pInputAssemblyState = &ia;
+		gi.pViewportState = &vp; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms_; gi.pDepthStencilState = &ds;
+		gi.pColorBlendState = &cb; gi.pDynamicState = &dsi; gi.layout = l.pipeline; gi.basePipelineIndex = -1;
+		VkPipeline p = nullptr;
+		auto t0 = Clock::now();
+		VK_OK(vkCreateGraphicsPipelines(c.device, VK_NULL_HANDLE, 1, &gi, nullptr, &p));
+		double t = Ms(Clock::now() - t0);
+		vkDestroyPipeline(c.device, p, nullptr);
+		std::printf("{\"kind\":\"gfx-state\",\"idx\":%d,\"step\":\"%s\",\"ms\":%.3f,\"vs_words\":%u,\"ps_words\":%u}\n", idx++, step.c_str(), t, rv[vi].words, rp[pj].words);
+		std::fflush(stdout);
+	}
+	for (auto m : owned) vkDestroyShaderModule(c.device, m, nullptr);
+	DestroyLayout(c, l);
+}
+
 // ---- execute once and dump storage buffers (semantic check of rewritten variants) -------------------------
 static uint32_t FindMem(const Ctx& c, uint32_t bits, VkMemoryPropertyFlags want) {
 	for (uint32_t i = 0; i < c.mem.memoryTypeCount; i++)
@@ -771,6 +925,7 @@ int main(int argc, char** argv) {
 		else if (a == "--no-uniq") o.uniq = false;
 		else if (a == "--keep-nv-cache") o.keep_nv_cache = true;
 		else if (a == "--gfx") o.gfx = true;
+		else if (a == "--gfx-seq") o.gfx_seq = next();
 		else if (a == "--exec") o.exec = true;
 		else if (a == "--range") { unsigned b, n; if (std::sscanf(next(), "%u=%u", &b, &n) != 2) die("--range BINDING=BYTES"); o.ranges[b] = n; }
 		else if (a == "--gpu") o.gpu = std::atoi(next());
@@ -791,6 +946,8 @@ int main(int argc, char** argv) {
 	             c.name, c.driver_version, c.min_subgroup, c.max_subgroup, c.push_desc, c.shader_object, c.robustness2, static_cast<uint64_t>(c.robust_storage_align), o.robustness.c_str());
 	if (o.parallel > 0) {
 		BenchParallel(c, o);
+	} else if (!o.gfx_seq.empty()) {
+		BenchGraphicsStates(c, o);
 	} else if (o.gfx) {
 		if (o.files.size() % 2) die("--gfx needs vs/ps pairs");
 		for (size_t i = 0; i < o.files.size(); i += 2) BenchGraphics(c, o, o.files[i], o.files[i + 1]);
