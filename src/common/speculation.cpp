@@ -28,6 +28,24 @@ uint32_t IsolatedAborts() noexcept {
 	return g_isolated_aborts.load(std::memory_order_acquire);
 }
 
+thread_local const std::atomic<uint64_t>* t_gpu_started = nullptr;
+thread_local uint64_t                      t_item_seq    = 0;
+
+void SetItemWatch(const std::atomic<uint64_t>* gpu_started, uint64_t item_seq) noexcept {
+	t_gpu_started = gpu_started;
+	t_item_seq    = item_seq;
+}
+
+void ClearItemWatch() noexcept {
+	t_gpu_started = nullptr;
+	t_item_seq    = 0;
+}
+
+bool ItemStale() noexcept {
+	return t_gpu_started != nullptr && t_item_seq != 0 &&
+	       t_item_seq <= t_gpu_started->load(std::memory_order_acquire);
+}
+
 bool Active() noexcept {
 	return t_depth > 0;
 }
