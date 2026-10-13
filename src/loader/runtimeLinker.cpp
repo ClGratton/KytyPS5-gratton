@@ -738,6 +738,30 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		            info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi, info->rbp,
 		            info->rsp, info->r8, info->r9, info->r10, info->r11, info->r12, info->r13,
 		            info->r14, info->r15);
+		{
+			// What the pointer registers point at (64 bytes each): the object a faulting method was
+			// working on (a command buffer, a list, a context) is usually in one of them.
+			const struct {
+				const char* name;
+				uint64_t    value;
+			} registers[] = {{"rax", info->rax}, {"rbx", info->rbx}, {"rcx", info->rcx},
+			                 {"rdx", info->rdx}, {"rsi", info->rsi}, {"rdi", info->rdi},
+			                 {"r8", info->r8},   {"r9", info->r9},   {"r10", info->r10},
+			                 {"r11", info->r11}, {"r12", info->r12}, {"r13", info->r13},
+			                 {"r14", info->r14}, {"r15", info->r15}};
+			for (const auto& reg: registers) {
+				if (reg.value < 0x10000u || reg.value >= 0x00007fffffffffffull ||
+				    (reg.value & 7u) != 0 || !IsReadableRange(reg.value, 64)) {
+					continue;
+				}
+				const auto* words = reinterpret_cast<const uint64_t*>(reg.value);
+				std::printf("[%s] %016" PRIx64 ": %016" PRIx64 " %016" PRIx64 " %016" PRIx64
+				            " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64
+				            " %016" PRIx64 "\n",
+				            reg.name, reg.value, words[0], words[1], words[2], words[3], words[4],
+				            words[5], words[6], words[7]);
+			}
+		}
 		if (IsReadableRange(info->exception_address - 48, 96)) {
 			const auto* code = reinterpret_cast<const uint8_t*>(info->exception_address - 48);
 			std::printf("code (pc-48 .. pc+48, fault at byte 48):");
@@ -755,7 +779,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			std::printf("\n");
 		}
 		std::fflush(stdout);
-		Common::HleTrace::Dump(stdout, 96, 400, &LocateAddressText);
+		unsigned own_entries = 96;
+		if (const char* own = std::getenv("KYTY_HLE_TRACE_OWN"); own != nullptr) {
+			own_entries = static_cast<unsigned>(std::strtoul(own, nullptr, 10));
+		}
+		Common::HleTrace::Dump(stdout, own_entries, 400, &LocateAddressText);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",
