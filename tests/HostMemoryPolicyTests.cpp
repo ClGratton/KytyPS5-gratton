@@ -47,6 +47,7 @@ LinuxFacts Laptop16() {
 	facts.has_systemd       = true;
 	facts.has_pkexec        = true;
 	facts.zram_generator    = true;
+	facts.zram_at_boot      = 1;
 	facts.swaps             = {Swap("/dev/zram0", SwapKind::Zram, 15026, 100), Swap("/swap/swapfile", SwapKind::File, 15872, 0)};
 	facts.swap_dir_fstype   = "btrfs";
 	facts.swap_dir_free_mib = 200 * kGiB;
@@ -104,6 +105,7 @@ void TestLinuxDecisionTable() {
 	{
 		auto facts  = Laptop16();
 		facts.swaps = {Swap("/dev/nvme0n1p3", SwapKind::Partition, 8 * kGiB, -2)};
+		facts.zram_at_boot = 0;
 		const auto a = DecideLinux(facts);
 		Check(a.verdict == Verdict::Recommended && a.reason == Reason::ZswapOff && !a.disable_zram, "disk swap only: zswap on");
 	}
@@ -111,6 +113,8 @@ void TestLinuxDecisionTable() {
 	{
 		auto facts                = Laptop16();
 		facts.swaps               = {Swap("/swap/swapfile", SwapKind::File, 15872, 0)};
+		facts.zram_at_boot        = 0;
+		facts.zswap_persistent    = true;
 		facts.zswap_enabled       = true;
 		facts.zswap_pool_percent  = 20;
 		facts.zswap_compressor    = "zstd";
@@ -120,6 +124,17 @@ void TestLinuxDecisionTable() {
 		Check(DecideLinux(facts).undo_available, "undo is offered when the launcher's unit is installed");
 		facts.swaps.push_back(Swap("/dev/zram0", SwapKind::Zram, 1000, 100));
 		Check(DecideLinux(facts).action == Action::EnableZswap, "zswap on but zram still active: switch zram off");
+		facts.swaps.pop_back();
+		// zswap on and zram off right now, but only until the next reboot (a runtime-only setup).
+		facts.zswap_persistent = false;
+		auto b                 = DecideLinux(facts);
+		Check(b.verdict == Verdict::Recommended && b.reason == Reason::NotPersistent && b.action == Action::EnableZswap,
+		      "zswap on but not kept across reboots: make it permanent");
+		facts.zswap_persistent = true;
+		facts.zram_at_boot     = 1;
+		b                      = DecideLinux(facts);
+		Check(b.verdict == Verdict::Recommended && b.action == Action::EnableZswap && b.disable_zram,
+		      "zram is off now but comes back at boot: the drop-in is needed");
 	}
 	// Swap on a spinning disk: leave it alone.
 	{
@@ -144,6 +159,7 @@ void TestLinuxDecisionTable() {
 	{
 		auto facts  = Laptop16();
 		facts.swaps = {};
+		facts.zram_at_boot = 0;
 		const auto a = DecideLinux(facts);
 		Check(a.verdict == Verdict::Recommended && a.action == Action::CreateSwapfile && !a.disable_zram,
 		      "no swap at all: swapfile recommended");
@@ -212,6 +228,24 @@ void TestParsers() {
 	Check(swaps[2].kind == SwapKind::Partition, "partition swap");
 	Check(ParseProcSwaps("Filename Type Size Used Priority\n").empty(), "no swap devices");
 
+	// The kernel command line, tmpfiles.d and zram-generator configuration.
+	Check(ParseCmdlineZswapEnabled("quiet zswap.enabled=0 splash") == Tristate::No, "cmdline: zswap off");
+	Check(ParseCmdlineZswapEnabled("zswap.enabled=1 zswap.enabled=0") == Tristate::No, "cmdline: the last one wins");
+	Check(ParseCmdlineZswapEnabled("zswap.enabled=Y") == Tristate::Yes && ParseCmdlineZswapEnabled("quiet") == Tristate::Unknown,
+	      "cmdline: on, and not mentioned");
+	Check(ParseTmpfilesZswapEnabled({"# omarchy\nw! /sys/module/zswap/parameters/enabled - - - - N\n"}) == Tristate::No,
+	      "tmpfiles: zswap off");
+	Check(ParseTmpfilesZswapEnabled({"w! /sys/module/zswap/parameters/enabled - - - - N\n", "w /sys/module/zswap/parameters/enabled - - - - Y\n"}) ==
+	          Tristate::Yes,
+	      "tmpfiles: a later file wins");
+	Check(ParseTmpfilesZswapEnabled({"w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise\n"}) == Tristate::Unknown,
+	      "tmpfiles: other lines do not count");
+	Check(ZramDevicesAtBoot({"[zram0]\nzram-size = ram\nswap-priority = 100\n"}) == 1, "zram-generator: one device");
+	Check(ZramDevicesAtBoot({"[zram0]\nzram-size = ram\n", "[zram0]\nzram-size = 0\n"}) == 0, "zram-generator: the drop-in disables it");
+	Check(ZramDevicesAtBoot({"[zram0]\nzram-size = ram\n[zram1]\nzram-size = 2048\n"}) == 2, "zram-generator: two devices");
+	Check(ZramDevicesAtBoot({"[zram0]\nzram-size = 0\n", "[zram0]\nzram-size = ram / 2\n"}) == 1, "zram-generator: the later file re-enables it");
+	Check(ZramDevicesAtBoot({"# nothing\n"}) == 0 && ZramDevicesAtBoot({}) == 0, "zram-generator: no devices");
+
 	const std::string mountinfo =
 	    "26 1 0:25 /@ / rw,relatime shared:1 - btrfs /dev/mapper/root rw,ssd,subvolid=256\n"
 	    "27 26 0:6 / /dev rw,nosuid shared:2 - devtmpfs dev rw\n"
@@ -267,6 +301,9 @@ void FillLaptop(const FakeRoot& r) {
 	r.Write("run/systemd/system/.keep", "");
 	r.Write("usr/bin/pkexec", "");
 	r.Write("usr/lib/systemd/system-generators/zram-generator", "");
+	r.Write("proc/cmdline", "quiet splash zswap.enabled=0\n");
+	r.Write("usr/lib/tmpfiles.d/omarchy-zswap.conf", "w! /sys/module/zswap/parameters/enabled - - - - N\n");
+	r.Write("usr/lib/systemd/zram-generator.conf.d/90-omarchy.conf", "[zram0]\nzram-size = ram\nswap-priority = 100\n");
 	r.Write("proc/1/cmdline", std::string("/sbin/init\0", 11));
 	r.Write("proc/self/cmdline", std::string("launcher\0", 9));
 	fs::create_directories(r.dir / "var/lib");
@@ -284,6 +321,7 @@ void TestProbe() {
 		Check(facts.swaps.size() == 2 && ActiveZramCount(facts) == 1 && DiskSwapMiB(facts) == 15872, "probe: swaps");
 		Check(facts.zram_orig_mib == 2048, "probe: zram holds 2 GiB of pages");
 		Check(facts.has_systemd && facts.has_pkexec && facts.zram_generator, "probe: systemd, pkexec and zram-generator");
+		Check(!facts.zswap_persistent && facts.zram_at_boot == 1, "probe: zswap is turned off at boot, zram0 is created at boot");
 		Check(!facts.emulator_running && !facts.applied_unit && !facts.applied_dropin, "probe: nothing running or installed");
 		Check(facts.swap_dir_fstype == "btrfs" && facts.swap_dir_free_mib == 200 * kGiB, "probe: swapfile location");
 		const auto a = DecideLinux(facts);
@@ -299,6 +337,7 @@ void TestProbe() {
 		const auto facts = ProbeLinux(r.Env(200 * kGiB));
 		Check(facts.emulator_running, "probe: a kyty_emulator process is seen");
 		Check(facts.applied_unit && facts.applied_dropin && facts.zswap_enabled, "probe: installed files and zswap on");
+		Check(facts.zswap_persistent && facts.zram_at_boot == 0, "probe: Kyty's unit keeps zswap on, its drop-in removes zram0 at boot");
 		Check(DecideLinux(facts).undo_available && DecideLinux(facts).blocked, "decide: undo offered, apply blocked");
 	}
 	{

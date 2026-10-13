@@ -103,6 +103,7 @@ const char* ReasonName(Reason reason) {
 		case Reason::RotationalSwap: return "rotational-swap";
 		case Reason::NoSwapfileSpace: return "no-swapfile-space";
 		case Reason::NoSwapfileFs: return "no-swapfile-fs";
+		case Reason::NotPersistent: return "not-persistent";
 		case Reason::CommitLimit: return "commit-limit";
 		case Reason::CompressionOff: return "compression-off";
 		case Reason::Unknown: return "unknown";
@@ -157,7 +158,9 @@ Advice DecideLinux(const LinuxFacts& facts) {
 	}
 
 	const uint64_t disk_swap = DiskSwapMiB(facts);
-	const uint64_t zram      = ActiveZramCount(facts);
+	// zram that is active now, or that zram-generator brings back at the next boot.
+	const uint64_t zram      = ActiveZramCount(facts) + facts.zram_at_boot;
+	const bool     zram_now  = ActiveZramCount(facts) > 0;
 
 	if (disk_swap >= kMinUsefulDiskSwapMiB) {
 		for (const auto& swap: facts.swaps) {
@@ -167,13 +170,14 @@ Advice DecideLinux(const LinuxFacts& facts) {
 				return advice;
 			}
 		}
-		if (facts.zswap_enabled && facts.zswap_pool_percent >= kZswapPoolMinPercent && zram == 0) {
+		const bool on_now = facts.zswap_enabled && facts.zswap_pool_percent >= kZswapPoolMinPercent && !zram_now;
+		if (on_now && facts.zswap_persistent && facts.zram_at_boot == 0) {
 			advice.verdict = Verdict::Tuned;
 			advice.reason  = Reason::AlreadyTuned;
 			return advice;
 		}
 		advice.verdict      = Verdict::Recommended;
-		advice.reason       = zram > 0 ? Reason::ZramInFront : Reason::ZswapOff;
+		advice.reason       = on_now ? Reason::NotPersistent : (zram > 0 ? Reason::ZramInFront : Reason::ZswapOff);
 		advice.action       = Action::EnableZswap;
 		advice.disable_zram = zram > 0;
 		return advice;
@@ -220,9 +224,13 @@ std::string DescribeLinux(const LinuxFacts& facts) {
 		out << "zswap: not in this kernel\n";
 	} else if (facts.zswap_enabled) {
 		out << "zswap: on, " << (facts.zswap_compressor.empty() ? "?" : facts.zswap_compressor) << ", pool "
-		    << facts.zswap_pool_percent << "% of RAM" << (facts.zswap_shrinker ? ", shrinker on" : "") << "\n";
+		    << facts.zswap_pool_percent << "% of RAM" << (facts.zswap_shrinker ? ", shrinker on" : "")
+		    << (facts.zswap_persistent ? ", kept across reboots" : ", set for this session only") << "\n";
 	} else {
 		out << "zswap: off\n";
+	}
+	if (facts.zram_at_boot > 0 && ActiveZramCount(facts) == 0) {
+		out << "zram: off now, but zram-generator creates " << facts.zram_at_boot << " device(s) at boot\n";
 	}
 	out << "systemd: " << (facts.has_systemd ? "yes" : "no") << ", pkexec: " << (facts.has_pkexec ? "yes" : "no")
 	    << (facts.applied_unit || facts.applied_dropin ? ", Kyty tuning installed" : "") << "\n";
@@ -257,6 +265,10 @@ std::string ExplainLinux(const LinuxFacts& facts, const Advice& advice) {
 			out << "This computer has " << Gib(facts.ram_mib) << " of RAM and the emulator can use " << Gib(ExpectedEmulatorPeakMiB())
 			    << ". zswap keeps swapped pages compressed in RAM and writes the cold ones to your disk "
 			       "swap instead of letting the system stall.";
+			break;
+		case Reason::NotPersistent:
+			out << "Compressed swap with writeback to disk is on right now, but it will not survive a reboot "
+			       "(the system turns zswap off at boot, or brings zram back). Apply makes it permanent.";
 			break;
 		case Reason::RotationalSwap:
 			out << "Your swap is on a spinning disk; writing compressed pages to it would stall the game. "
@@ -317,6 +329,84 @@ std::vector<std::string> ApplyArguments(const Advice& advice) {
 		args.push_back(std::to_string(advice.swapfile_mib));
 	}
 	return args;
+}
+
+namespace {
+Tristate TruthValue(std::string value) {
+	for (auto& c: value) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
+	if (value == "1" || value == "y" || value == "yes" || value == "true" || value == "on") {
+		return Tristate::Yes;
+	}
+	if (value == "0" || value == "n" || value == "no" || value == "false" || value == "off") {
+		return Tristate::No;
+	}
+	return Tristate::Unknown;
+}
+} // namespace
+
+Tristate ParseCmdlineZswapEnabled(const std::string& cmdline) {
+	Tristate result = Tristate::Unknown;
+	for (const auto& word: SplitSpaces(cmdline)) {
+		if (word.rfind("zswap.enabled=", 0) == 0) {
+			result = TruthValue(word.substr(14));  // the last one wins
+		}
+	}
+	return result;
+}
+
+Tristate ParseTmpfilesZswapEnabled(const std::vector<std::string>& files_in_order) {
+	Tristate result = Tristate::Unknown;
+	for (const auto& text: files_in_order) {
+		std::istringstream stream(text);
+		std::string        line;
+		while (std::getline(stream, line)) {
+			const auto words = SplitSpaces(line);
+			if (words.size() >= 7 && words[0][0] == 'w' && words[1] == "/sys/module/zswap/parameters/enabled") {
+				const auto value = TruthValue(words.back());
+				if (value != Tristate::Unknown) {
+					result = value;
+				}
+			}
+		}
+	}
+	return result;
+}
+
+uint32_t ZramDevicesAtBoot(const std::vector<std::string>& files_in_order) {
+	std::vector<std::pair<std::string, bool>> devices;  // name -> size is not 0
+	for (const auto& text: files_in_order) {
+		std::istringstream stream(text);
+		std::string        line;
+		std::string        section;
+		while (std::getline(stream, line)) {
+			line = Trim(line);
+			if (line.empty() || line[0] == '#' || line[0] == ';') {
+				continue;
+			}
+			if (line.front() == '[' && line.back() == ']') {
+				section = line.substr(1, line.size() - 2);
+				if (section.rfind("zram", 0) == 0) {
+					const bool known = std::any_of(devices.begin(), devices.end(), [&](const auto& d) { return d.first == section; });
+					if (!known) {
+						devices.emplace_back(section, true);
+					}
+				}
+				continue;
+			}
+			const auto eq = line.find('=');
+			if (eq != std::string::npos && section.rfind("zram", 0) == 0 && Trim(line.substr(0, eq)) == "zram-size") {
+				const bool nonzero = Trim(line.substr(eq + 1)) != "0";
+				for (auto& device: devices) {
+					if (device.first == section) {
+						device.second = nonzero;
+					}
+				}
+			}
+		}
+	}
+	return static_cast<uint32_t>(std::count_if(devices.begin(), devices.end(), [](const auto& d) { return d.second; }));
 }
 
 MeminfoValues ParseMeminfo(const std::string& text) {

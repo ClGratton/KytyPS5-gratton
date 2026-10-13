@@ -72,6 +72,8 @@ constexpr uint64_t RequiredCommitHeadroomMiB() {
 uint32_t ZswapPoolPercent(uint64_t ram_mib);
 uint64_t SwapfileSizeMiB(uint64_t ram_mib, uint64_t free_disk_mib);  // 0: too little disk space
 
+enum class Tristate { Unknown, No, Yes };
+
 // ---- Verdicts ----
 
 enum class Verdict {
@@ -97,6 +99,7 @@ enum class Reason {
 	RotationalSwap,
 	NoSwapfileSpace,
 	NoSwapfileFs,
+	NotPersistent,
 	CommitLimit,
 	CompressionOff,
 	Unknown,
@@ -126,9 +129,13 @@ struct LinuxFacts {
 	std::string zswap_compressor;
 	uint32_t    zswap_pool_percent = 0;
 	bool        zswap_shrinker     = false;
+	// Whether zswap comes back on after a reboot: the kernel command line, a tmpfiles.d line or Kyty's
+	// own unit says so. A runtime-only `echo 1 > .../enabled` does not count.
+	bool        zswap_persistent   = false;
 
 	std::vector<SwapDevice> swaps;
 	uint64_t                zram_orig_mib = 0;  // data held by the zram devices before compression
+	uint32_t                zram_at_boot  = 0;  // zram devices zram-generator would create at the next boot
 
 	bool has_systemd    = false;
 	bool has_pkexec     = false;
@@ -184,6 +191,14 @@ struct MeminfoValues {
 	uint64_t available_kib = 0;
 };
 MeminfoValues           ParseMeminfo(const std::string& text);
+// zswap.enabled=... on the kernel command line.
+Tristate ParseCmdlineZswapEnabled(const std::string& cmdline);
+// The last `w` line for /sys/module/zswap/parameters/enabled in the given tmpfiles.d files (in the order systemd
+// applies them).
+Tristate ParseTmpfilesZswapEnabled(const std::vector<std::string>& files_in_order);
+// Number of zram devices zram-generator creates from these config texts (main file first, then drop-ins by file
+// name): [zramN] sections whose last zram-size is not 0.
+uint32_t ZramDevicesAtBoot(const std::vector<std::string>& files_in_order);
 std::vector<SwapDevice> ParseProcSwaps(const std::string& text);
 // Filesystem type of the mount that contains `path` (longest mount point), plus its "major:minor".
 struct MountEntry {
@@ -196,7 +211,6 @@ MountEntry FindMount(const std::string& mountinfo_text, const std::string& path)
 // ---- Windows ----
 
 enum class PagefileMode { Unknown, SystemManaged, Fixed, None };
-enum class Tristate { Unknown, No, Yes };
 
 struct WindowsFacts {
 	uint64_t     ram_mib            = 0;

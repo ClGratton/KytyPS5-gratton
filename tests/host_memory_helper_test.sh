@@ -75,6 +75,14 @@ R3="$T/root3"; mk_root "$R3"; rm "$R3/usr/lib/systemd/system-generators/zram-gen
 "$HELPER" apply --zswap-percent 21 --disable-zram --root "$R3" >/dev/null 2>&1
 check "no zram-generator: boot.sh switches zram off" "grep -q swapoff '$R3/var/lib/kyty-host-memory/boot.sh'"
 
+# 6b. zram that is off now but configured in zram-generator: the drop-in covers every configured device
+R6="$T/root6"; mk_root "$R6"
+printf 'Filename Type Size Used Priority\n/swap/swapfile file 16252928 0 -2\n' > "$R6/proc/swaps"
+mkdir -p "$R6/usr/lib/systemd/zram-generator.conf.d"
+printf '[zram0]\nzram-size = ram\n\n[zram1]\nzram-size = 1024\n' > "$R6/usr/lib/systemd/zram-generator.conf.d/90-test.conf"
+"$HELPER" apply --zswap-percent 21 --disable-zram --root "$R6" >/dev/null 2>&1
+check "drop-in covers every configured zram device" "grep -q '^\[zram0\]' '$R6/etc/systemd/zram-generator.conf.d/99-kyty-host-memory.conf' && grep -q '^\[zram1\]' '$R6/etc/systemd/zram-generator.conf.d/99-kyty-host-memory.conf'"
+
 # 7. argument validation
 for bad in "--zswap-percent 0" "--zswap-percent 99" "--zswap-percent x" "--zswap-percent 20 --compressor zstd;reboot" "--zswap-percent 20 --swapfile-mib 10" "--zswap-percent 20 --nope" ""; do
 	R4="$T/root4"; rm -rf "$R4"; mk_root "$R4"

@@ -90,6 +90,13 @@ mem_available_mib() { awk '/^MemAvailable:/ {print int($2 / 1024)}' "$ROOT/proc/
 
 # Active zram swap devices (names such as zram0).
 zram_swaps() { awk 'NR > 1 && $1 ~ /^\/dev\/zram/ {sub("/dev/", "", $1); print $1}' "$ROOT/proc/swaps" 2>/dev/null; }
+# zram devices that zram-generator is configured to create (sections [zramN] of its config files).
+zram_configured() {
+	cat "$ROOT"/usr/lib/systemd/zram-generator.conf "$ROOT"/etc/systemd/zram-generator.conf \
+		"$ROOT"/usr/lib/systemd/zram-generator.conf.d/*.conf "$ROOT"/usr/local/lib/systemd/zram-generator.conf.d/*.conf \
+		"$ROOT"/etc/systemd/zram-generator.conf.d/*.conf "$ROOT"/run/systemd/zram-generator.conf.d/*.conf 2>/dev/null |
+		sed -n 's/^\[\(zram[0-9][0-9]*\)\].*/\1/p'
+}
 disk_swap_count() { awk 'NR > 1 && $1 !~ /^\/dev\/zram/ {n++} END {print n + 0}' "$ROOT/proc/swaps" 2>/dev/null; }
 
 # Data held by a zram device before compression, in MiB (that is what swapoff must find room for).
@@ -221,7 +228,7 @@ apply() {
 
 	# 3. The boot-time settings: the drop-in for zram-generator (so zram is not even created) and the unit.
 	if [ "$disable_zram" = 1 ]; then
-		zram_list="$prev_zram $(zram_swaps | tr '\n' ' ')"
+		zram_list="$prev_zram $(zram_swaps | tr '\n' ' ') $(zram_configured | tr '\n' ' ')"
 		zram_list=$(printf '%s\n' $zram_list | sort -u | tr '\n' ' ')
 		zram_list=${zram_list% }
 		[ -n "$zram_list" ] || zram_list=zram0

@@ -4,7 +4,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
+#include <vector>
 
 #if !defined(_WIN32)
 #include <sys/statvfs.h>
@@ -95,6 +97,26 @@ bool EmulatorRunning(const fs::path& proc) {
 	return false;
 }
 
+// Config files of the given directories as systemd reads them: a file name in a later directory replaces the
+// same name in an earlier one, and the result is ordered by file name.
+std::vector<std::string> DropinTexts(const fs::path& root, const std::vector<std::string>& dirs, const char* suffix) {
+	std::map<std::string, std::string> by_name;
+	for (const auto& dir: dirs) {
+		std::error_code error;
+		for (fs::directory_iterator it(fs::path(root.string() + dir), error), end; !error && it != end; it.increment(error)) {
+			const std::string name = it->path().filename().string();
+			if (name.size() > std::string(suffix).size() && name.compare(name.size() - std::string(suffix).size(), std::string::npos, suffix) == 0) {
+				by_name[name] = ReadText(it->path());
+			}
+		}
+	}
+	std::vector<std::string> texts;
+	for (const auto& entry: by_name) {
+		texts.push_back(entry.second);
+	}
+	return texts;
+}
+
 bool ProgramExists(const fs::path& root, const char* name) {
 	if (root.empty()) {
 		const char* path = std::getenv("PATH");
@@ -162,6 +184,31 @@ LinuxFacts ProbeLinux(const ProbeEnv& env) {
 	facts.emulator_running = EmulatorRunning(at("/proc"));
 	facts.applied_unit     = Exists(at(kUnitPath));
 	facts.applied_dropin   = Exists(at(kZramDropinPath));
+
+	// Does zswap come back after a reboot? Later setters win: Kyty's unit and tmpfiles.d run after the kernel
+	// command line (the boot-time unit is ordered after systemd-tmpfiles-setup).
+	{
+		auto setting = ParseCmdlineZswapEnabled(ReadText(at("/proc/cmdline")));
+		const auto tmpfiles = ParseTmpfilesZswapEnabled(
+		    DropinTexts(root, {"/usr/lib/tmpfiles.d", "/run/tmpfiles.d", "/etc/tmpfiles.d"}, ".conf"));
+		if (tmpfiles != Tristate::Unknown) {
+			setting = tmpfiles;
+		}
+		facts.zswap_persistent = facts.applied_unit || setting == Tristate::Yes;
+	}
+	// zram devices zram-generator creates at the next boot (the main file has the lowest precedence).
+	if (facts.zram_generator) {
+		std::vector<std::string> texts;
+		for (const char* main_file: {"/usr/lib/systemd/zram-generator.conf", "/etc/systemd/zram-generator.conf"}) {
+			if (Exists(at(main_file))) {
+				texts.push_back(ReadText(at(main_file)));  // /etc replaces /usr/lib: the later push is last
+			}
+		}
+		const auto dropins = DropinTexts(root, {"/usr/lib/systemd/zram-generator.conf.d", "/usr/local/lib/systemd/zram-generator.conf.d",
+		                                       "/etc/systemd/zram-generator.conf.d", "/run/systemd/zram-generator.conf.d"}, ".conf");
+		texts.insert(texts.end(), dropins.begin(), dropins.end());
+		facts.zram_at_boot = ZramDevicesAtBoot(texts);
+	}
 
 	// The swapfile goes into kSwapDir; look at the nearest directory that exists now.
 	fs::path probe_path = at(kSwapDir);
