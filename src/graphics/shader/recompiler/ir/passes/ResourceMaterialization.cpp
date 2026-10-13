@@ -1247,10 +1247,15 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 				// descriptor, so say so once per slot instead of hiding it. All-zero dwords are an
 				// unbound slot rather than a wrong read, and were rejected here before as well.
 				static std::set<std::pair<uint64_t, uint32_t>> reported;
+				if (!NullImageDescriptor(snapshot.images[i])) {
+					// Every occurrence (the hook rate-limits): the print below is once per slot and
+					// would hide whether a second thread read the same garbage.
+					NoteDescriptorDiag(program.shader_hash, "image_not_a_descriptor", i,
+					                   snapshot.images[i].dwords.data(), 8);
+				}
 				if (!NullImageDescriptor(snapshot.images[i]) && reported.size() < 64 &&
 				    reported.emplace(program.shader_hash, i).second) {
 					const auto& words = snapshot.images[i].dwords;
-					NoteDescriptorDiag(program.shader_hash, "image_not_a_descriptor", i, words.data(), 8);
 					printf("image descriptor %u of shader 0x%016" PRIx64
 					       " is not a descriptor, binding null: "
 					       "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",

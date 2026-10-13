@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <mutex>
 #include <set>
 #include <atomic>
@@ -84,6 +85,11 @@ const bool g_diag_registered = [] {
 	ShaderRecompiler::IR::SetDescriptorDiagHook(&NoteBadDescriptor);
 	return true;
 }();
+
+LookaheadProgress& Progress() {
+	static LookaheadProgress progress;
+	return progress;
+}
 
 Tracker& Global() {
 	static Tracker tracker;
@@ -183,7 +189,19 @@ void NoteUntracked(uint64_t shader_hash, const char* op, const char* reason, boo
 void NoteBadDescriptor(uint64_t shader_hash, const char* what, uint32_t slot, const uint32_t* words,
                        uint32_t word_count) {
 	if (!Bench::SkipLogEnabled()) return;
-	std::string text = std::string("what=") + what + " slot=" + std::to_string(slot) +
+	// Rate limit per (thread, what): the first 200 rows of each.
+	{
+		static std::mutex                                      mutex;
+		static std::map<std::pair<std::string, std::string>, uint32_t> counts;
+		std::lock_guard lock(mutex);
+		if (++counts[{ThreadName(), what}] > 200) return;
+	}
+	const auto& progress = Progress();
+	const auto  la_seq   = progress.item_seq.load(std::memory_order_relaxed);
+	const auto  started  = progress.gpu_started.load(std::memory_order_relaxed);
+	std::string text = "la_seq=" + std::to_string(la_seq) + " gpu_started=" + std::to_string(started) +
+	                   " gpu_minus_la=" + std::to_string(static_cast<int64_t>(started - la_seq)) +
+	                   " what=" + what + " slot=" + std::to_string(slot) +
 	                   " thread=" + ThreadName() + " op=" + t_reader_op +
 	                   " open_entries=" + std::to_string(Global().EntryCount()) + " words=";
 	for (uint32_t i = 0; i < word_count; i++) {
@@ -208,6 +226,18 @@ void DumpOpenRoots(const char* why) {
 	const auto roots = Global().OpenRoots();
 	for (const auto& root : roots) {
 		Row("open", root.vs, root.ps, why, "-", FormatRoot(root, now));
+	}
+	{
+		const auto& p = Progress();
+		char        la[320];
+		std::snprintf(la, sizeof(la),
+		              "items=%" PRIu64 " items_gpu_started_at_start=%" PRIu64 " draws=%" PRIu64
+		              " draws_gpu_started=%" PRIu64 " draws_gpu_passed=%" PRIu64 " gpu_started=%" PRIu64
+		              " la_seq=%" PRIu64,
+		              p.items.load(), p.items_gpu_started_at_start.load(), p.draws.load(),
+		              p.draws_gpu_started.load(), p.draws_gpu_passed.load(), p.gpu_started.load(),
+		              p.item_seq.load());
+		Row("lookahead", 0, 0, why, "-", la);
 	}
 	const auto totals = Global().GetTotals();
 	char       text[256];

@@ -1,6 +1,9 @@
 #include "common/speculation.h"
 
+#include "common/benchInstrument.h"
+
 #include <chrono>
+#include <string>
 #include <cstdio>
 #include <thread>
 
@@ -87,6 +90,13 @@ void Abort(const char* file, int line, std::string_view text) {
 		}
 	}
 	t_held_count = 0;
+	if (Bench::SkipLogEnabled()) {
+		// --debug-skip-log: when and where the lookahead died.
+		std::string row = "spec_abort,0000000000000000,0000000000000000,none,-,";
+		row += std::string(file) + ":" + std::to_string(line) + " ";
+		for (const char c: text) row += (c == ',' || c == '\n' || c == '\r') ? ' ' : c;
+		Bench::LogSkipRow(row);
+	}
 	if (t_abort_handler != nullptr) {
 		const auto count = g_isolated_aborts.fetch_add(1, std::memory_order_acq_rel) + 1;
 		if (count <= 8) {
