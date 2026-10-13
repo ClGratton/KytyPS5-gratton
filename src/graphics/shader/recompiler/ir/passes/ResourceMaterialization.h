@@ -44,6 +44,15 @@ struct ResourceSpecialization {
 ResourcePlan ExtractResourcePlan(const Program& program);
 
 // Refreshes cached resources and specialization in place. A failed refresh must not be used.
+// --debug-skip-log: called when a materialisation or the shader-info pass meets a descriptor that
+// cannot be real (not an image descriptor, ADD_TID on a graphics buffer, ...). `what` names the
+// check, `words` are the descriptor dwords. Observation only; unset = no call.
+using DescriptorDiagHook = void (*)(uint64_t shader_hash, const char* what, uint32_t slot,
+                                    const uint32_t* words, uint32_t word_count);
+void SetDescriptorDiagHook(DescriptorDiagHook hook);
+void NoteDescriptorDiag(uint64_t shader_hash, const char* what, uint32_t slot, const uint32_t* words,
+                        uint32_t word_count);
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 

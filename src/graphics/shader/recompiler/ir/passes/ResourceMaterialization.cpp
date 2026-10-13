@@ -7,6 +7,7 @@
 #include "graphics/shader/shaderBindings.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <cstdio>
@@ -18,6 +19,21 @@
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+namespace {
+std::atomic<DescriptorDiagHook> g_descriptor_diag_hook {nullptr};
+} // namespace
+
+void SetDescriptorDiagHook(DescriptorDiagHook hook) {
+	g_descriptor_diag_hook.store(hook, std::memory_order_relaxed);
+}
+
+void NoteDescriptorDiag(uint64_t shader_hash, const char* what, uint32_t slot, const uint32_t* words,
+                        uint32_t word_count) {
+	if (const auto hook = g_descriptor_diag_hook.load(std::memory_order_relaxed)) {
+		hook(shader_hash, what, slot, words, word_count);
+	}
+}
+
 namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
@@ -1166,6 +1182,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			descriptor_value.dwords.fill(0);
 			descriptor = {};
 		}
+		if (program.stage != ShaderType::Compute && (descriptor.PackedStride() & (1u << 20u)) != 0u) {
+			NoteDescriptorDiag(program.shader_hash, "buffer_add_tid_on_graphics_shader", i,
+			                   descriptor_value.dwords.data(), 4);
+		}
 		auto       packed_stride = descriptor.PackedStride();
 		const auto stride        = packed_stride & 0x3fffu;
 		const bool swizzle       = stride != 0u && ((packed_stride >> 14u) & 1u) != 0u;
@@ -1230,6 +1250,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 				if (!NullImageDescriptor(snapshot.images[i]) && reported.size() < 64 &&
 				    reported.emplace(program.shader_hash, i).second) {
 					const auto& words = snapshot.images[i].dwords;
+					NoteDescriptorDiag(program.shader_hash, "image_not_a_descriptor", i, words.data(), 8);
 					printf("image descriptor %u of shader 0x%016" PRIx64
 					       " is not a descriptor, binding null: "
 					       "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
