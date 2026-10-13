@@ -473,6 +473,9 @@ bool BufferCache::TryGetKnownFill(uint64_t vaddr, uint64_t size, uint32_t* value
 bool BufferCache::TryDiscardGpuModified(uint64_t vaddr, uint64_t size) {
 	const uint64_t page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const uint64_t page_end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	if (HasEagerPending(page_begin, page_end - page_begin)) {
+		return false; // an eager copy would still write its bytes over what the caller is about to write
+	}
 	if ((page_begin < vaddr && m_gpu_modified_ranges.Intersects(page_begin, vaddr - page_begin)) ||
 	    (vaddr + size < page_end &&
 	     m_gpu_modified_ranges.Intersects(vaddr + size, page_end - (vaddr + size)))) {
@@ -485,7 +488,8 @@ bool BufferCache::TryDiscardGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::TryReadCleanBytes(uint64_t vaddr, void* data, uint64_t size) {
-	if (size == 0 || size > UINT64_MAX - vaddr || m_gpu_modified_ranges.Intersects(vaddr, size)) {
+	if (size == 0 || size > UINT64_MAX - vaddr || m_gpu_modified_ranges.Intersects(vaddr, size) ||
+	    HasEagerPending(vaddr, size)) {
 		return false;
 	}
 	if (m_texture_cache.HasGpuModifiedImage(vaddr, size)) {
@@ -518,10 +522,24 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 	if (cause == Common::GpuPhase::DrainCause::ReadbackFault && GuestGpu::IsGpuThread()) {
 		cause = Common::GpuPhase::DrainCause::ReadbackFaultGpu;
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cause] {
+	// A game thread's read fault (not the GPU thread's own, which an eager copy would only delay).
+	const bool guest_read_fault = cause == Common::GpuPhase::DrainCause::ReadbackFault;
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cause,
+	                                                guest_read_fault] {
 		Common::GpuPhase::DrainCauseScope drain_cause(cause);
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
+		}
+		if (Config::EagerReadbackEnabled()) {
+			if (guest_read_fault) {
+				m_hot_pages.NoteFault(Common::AlignDown(vaddr, TRACKER_PAGE_SIZE));
+			}
+			// An eager write-back in flight has already taken its bytes out of the GPU-modified
+			// ranges, so finish it (and unprotect what it covered) before looking for anything
+			// left to read.
+			const auto first_page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+			RetireHotPages(first_page, Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE) - first_page,
+			               true);
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
@@ -1125,7 +1143,7 @@ bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
-	return m_gpu_modified_ranges.Intersects(vaddr, size);
+	return m_gpu_modified_ranges.Intersects(vaddr, size) || HasEagerPending(vaddr, size);
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {

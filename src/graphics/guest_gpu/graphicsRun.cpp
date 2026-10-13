@@ -275,6 +275,15 @@ SubmitCoalescerConfig CoalescerConfigFromGlobals() {
 	return config;
 }
 
+// Every submit of the recording command buffer: first the eager write-back of hot pages (--eager-readback),
+// whose copies must be recorded into the buffer that is about to be submitted.
+void CommandProcessor::FlushScheduler() {
+	if (Config::EagerReadbackEnabled()) {
+		m_renderer.GetBufferCache().WriteBackHotPages();
+	}
+	GetScheduler().Flush();
+}
+
 void CommandProcessor::BufferFlush() {
 	if (IsShadow()) {
 		return;
@@ -283,7 +292,7 @@ void CommandProcessor::BufferFlush() {
 	if (m_coalescer.Flushed() != 0) {
 		Common::GpuPhase::NoteCoalesce(Common::GpuPhase::Coalesce::FlushForced);
 	}
-	GetScheduler().Flush();
+	FlushScheduler();
 }
 
 void CommandProcessor::BufferFlushEvent() {
@@ -307,7 +316,7 @@ void CommandProcessor::BufferFlushEvent() {
 			break;
 	}
 	(void)m_coalescer.Flushed();
-	GetScheduler().Flush();
+	FlushScheduler();
 }
 
 void CommandProcessor::FlushEventsIfDue() {
@@ -317,7 +326,7 @@ void CommandProcessor::FlushEventsIfDue() {
 	if (m_coalescer.Due(Common::Timer::QueryPerformanceCounter())) {
 		Common::GpuPhase::NoteCoalesce(Common::GpuPhase::Coalesce::FlushDeadline);
 		(void)m_coalescer.Flushed();
-		GetScheduler().Flush();
+		FlushScheduler();
 	}
 }
 
