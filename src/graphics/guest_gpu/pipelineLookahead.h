@@ -68,6 +68,7 @@ public:
 		std::atomic<uint64_t> max_queue {0};
 		std::atomic<int64_t>  busy_ns {0};
 		std::atomic<uint64_t> items_abandoned {0}; // decode budget / unreadable condition hit
+		std::atomic<uint64_t> items_stale {0};     // the GPU thread started the item while it was scanned
 		std::atomic<uint64_t> items_dropped {0};   // queue full: oldest item dropped
 	};
 	[[nodiscard]] const Stats& GetStats() const { return m_stats; }

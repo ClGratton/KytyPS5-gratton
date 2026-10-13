@@ -1509,7 +1509,13 @@ struct PipelineCache::ProgramCache {
 		};
 		const auto wait_job = [&](AsyncJob& job) {
 			if (!prefetch) async->waited = true;
-			return prefetch ? job.Wait() : pool->WaitFor(job);
+			if (!prefetch) return pool->WaitFor(job);
+			// The lookahead blocks here for as long as the compile takes. Under --async-pipelines
+			// skip the GPU thread does not wait with it, so the submission being scanned can be
+			// executed and its memory recycled meanwhile: what the lookahead reads after this wait
+			// (descriptor tables, indirect register tables) is not the draw's any more.
+			const bool done = job.Wait();
+			return done && !Common::Speculation::ItemStale();
 		};
 		const auto note_skip = [&] {
 			pool->Stats().skipped_program_draws.fetch_add(1, std::memory_order_relaxed);
@@ -1658,6 +1664,11 @@ struct PipelineCache::ProgramCache {
 		// `skipped` tells the caller to give up on the draw.
 		const auto run_job = [&](const std::shared_ptr<ProgramJob>& job, bool& skipped) -> Permutation* {
 			skipped = false;
+			// A request derived from guest memory the GPU thread may have released is dropped, not
+			// compiled: it would build a program for a specialization nobody asked for.
+			if (prefetch && Common::Speculation::ItemStale()) {
+				return nullptr;
+			}
 			bool inserted = false;
 			auto registered = program_jobs.Insert(job_key, job, inserted);
 			if (inserted) {

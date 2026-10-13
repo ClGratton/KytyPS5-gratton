@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/renderer/gpuOps.h"
 
 #include "common/assert.h"
+#include "common/speculation.h"
 #include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
@@ -903,7 +904,9 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 				execution.m_start_ns = ThreadCpuNs();
 			}
 			if (!execution.m_abandoned) {
-				if (++execution.m_steps > kShadowMaxPackets) {
+				if (Common::Speculation::ItemStale()) {
+					AbandonShadow(Pm4Execution::kStaleAbandonReason);
+				} else if (++execution.m_steps > kShadowMaxPackets) {
 					AbandonShadow("packet budget");
 				} else if ((execution.m_steps & 0x3ffu) == 0 &&
 				           ThreadCpuNs() - execution.m_start_ns > kShadowMaxCpuNs) {
