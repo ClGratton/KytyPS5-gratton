@@ -41,6 +41,9 @@ public:
 	// of the stream was dropped (docs/lookahead-notes.md, "spin guard").
 	[[nodiscard]] bool Abandoned() const noexcept { return m_abandoned; }
 	[[nodiscard]] const char* AbandonReason() const noexcept { return m_abandon_reason; }
+	// Reason a shadow decode gives up when the GPU thread has started the submission it scans: from
+	// then on the guest may have recycled the memory the packets point at (see Speculation::ItemStale).
+	static constexpr const char* kStaleAbandonReason = "submission started by the GPU thread";
 
 private:
 	friend class CommandProcessor;
