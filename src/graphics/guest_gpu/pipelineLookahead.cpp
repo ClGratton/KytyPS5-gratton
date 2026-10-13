@@ -121,11 +121,11 @@ void PipelineLookahead::Stop() {
 std::string PipelineLookahead::SummaryText() const {
 	return fmt::format(
 	    "items={};items_late={};draws={};dispatches={};max_queue={};busy_ms={};aborted={};"
-	    "abandoned={};dropped={}",
+	    "abandoned={};stale={};dropped={}",
 	    m_stats.items.load(), m_stats.items_late.load(), m_stats.draws.load(),
 	    m_stats.dispatches.load(), m_stats.max_queue.load(), m_stats.busy_ns.load() / 1000000,
 	    Common::Speculation::Aborted() ? 1 : 0, m_stats.items_abandoned.load(),
-	    m_stats.items_dropped.load());
+	    m_stats.items_stale.load(), m_stats.items_dropped.load());
 }
 
 CommandProcessor& PipelineLookahead::Shadow(uint32_t queue_id) {
@@ -169,7 +169,12 @@ void PipelineLookahead::RunStream(CommandProcessor& cp, std::span<const uint32_t
 			break;
 		}
 	}
-	if (execution.Abandoned()) {
+	if (execution.Abandoned() && execution.AbandonReason() == Pm4Execution::kStaleAbandonReason) {
+		// The GPU thread started this submission while it was scanned: nothing more to learn from it,
+		// and its memory may be recycled. Routine under --async-pipelines skip, so no log line.
+		m_stats.items_stale.fetch_add(1, std::memory_order_relaxed);
+		cp.Reset();
+	} else if (execution.Abandoned()) {
 		// The shadow's register state is now somewhere in the middle of the stream: forget it.
 		const auto count = m_stats.items_abandoned.fetch_add(1, std::memory_order_relaxed) + 1;
 		if (count <= 3) {
@@ -188,6 +193,7 @@ void PipelineLookahead::Process(Item& item) {
 	if (m_current_late) {
 		m_stats.items_late.fetch_add(1, std::memory_order_relaxed);
 	}
+	Common::Speculation::SetItemWatch(&m_started_seq, item.seq);
 	m_item_dwords.store(ItemDwords(item), std::memory_order_relaxed);
 	m_item_kind.store(static_cast<uint32_t>(item.kind), std::memory_order_relaxed);
 	m_item_start_ns.store(t0, std::memory_order_relaxed);
@@ -217,6 +223,7 @@ void PipelineLookahead::Process(Item& item) {
 		// Everything of this submission has been looked at (also when it was dropped as late).
 		SrtPlan::GetStore().NoteProgress({item.seq, UINT32_MAX});
 	}
+	Common::Speculation::ClearItemWatch();
 	m_item_start_ns.store(0, std::memory_order_relaxed);
 	m_stats.busy_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
 }
@@ -240,7 +247,8 @@ struct PlanProgress {
 void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	PlanProgress plan_progress;
 	m_stats.draws.fetch_add(1, std::memory_order_relaxed);
-	if (m_current_late || (Config::GetPipelineLookaheadKinds() & 1u) == 0) {
+	if (m_current_late || Common::Speculation::ItemStale() ||
+	    (Config::GetPipelineLookaheadKinds() & 1u) == 0) {
 		return;
 	}
 	Common::Hang::Phase phase("lookahead_draw", m_stats.draws.load(std::memory_order_relaxed));
@@ -252,7 +260,8 @@ void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& dispatch) {
 	PlanProgress plan_progress;
 	m_stats.dispatches.fetch_add(1, std::memory_order_relaxed);
-	if (m_current_late || (Config::GetPipelineLookaheadKinds() & 2u) == 0) {
+	if (m_current_late || Common::Speculation::ItemStale() ||
+	    (Config::GetPipelineLookaheadKinds() & 2u) == 0) {
 		return; // already executing or executed: nothing to gain
 	}
 	if (!dispatch.indirect && (dispatch.x == 0 || dispatch.y == 0 || dispatch.z == 0)) {
