@@ -1170,6 +1170,7 @@ struct PipelineCache::ProgramCache {
 		bool                   allow_skip = false; // graphics only; compute always waits
 		bool                   pending    = false; // out: skipped, program not ready
 		bool                   waited     = false; // out: the GPU thread waited for a program job
+		bool                   guard_waited = false; // out: ... because --skip-guard vetoed the skip
 		// Lookahead thread (--pipeline-lookahead): materialize privately, never skip, wait for
 		// jobs without accounting GPU-thread waits, never fall back to synchronous compilation.
 		bool prefetch = false;
@@ -1497,7 +1498,11 @@ struct PipelineCache::ProgramCache {
 		AsyncPipelineCompiler* const pool =
 		    (async != nullptr && async->pool != nullptr && async->pool->Running() &&
 		     verify_target == nullptr) ? async->pool : nullptr;
-		const bool may_skip = pool != nullptr && async->allow_skip && stage != ShaderType::Compute;
+		const bool skip_candidate = pool != nullptr && async->allow_skip && stage != ShaderType::Compute;
+		// --skip-guard: the draw writes memory a hard-class reader has read from a skipped draw
+		// before: wait for the program like stall mode (asked only here, on a miss).
+		const bool guard_veto = skip_candidate && SkipDeps::GuardVetoesSkip();
+		const bool may_skip   = skip_candidate && !guard_veto;
 		// Uses a permutation another thread (or an earlier request) published for this draw.
 		const auto use_published = [&](Permutation& permutation, bool miss_report) {
 			input_info.stage = {.program = &permutation.program,
@@ -1509,6 +1514,7 @@ struct PipelineCache::ProgramCache {
 		};
 		const auto wait_job = [&](AsyncJob& job) {
 			if (!prefetch) async->waited = true;
+			if (guard_veto && !prefetch) async->guard_waited = true;
 			if (!prefetch) return pool->WaitFor(job);
 			// The lookahead blocks here for as long as the compile takes. Under --async-pipelines
 			// skip the GPU thread does not wait with it, so the submission being scanned can be
@@ -2019,6 +2025,11 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	m_draw_key_cache  = Config::DrawKeyCacheEnabled();
 	m_draw_key_verify = Config::DrawKeyVerifyEnabled();
 	InitializeDriverCache();
+	if (m_async_mode == Config::AsyncPipelineMode::Skip) {
+		SkipDeps::ConfigureGuard(Config::SkipGuardEnabled(), Config::SkipGuardBdaEnabled());
+	} else if (Config::SkipGuardRequested()) {
+		PipelineCacheLog("SkipGuard: --skip-guard needs --async-pipelines skip, ignored");
+	}
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
 		const auto workers = Config::GetPipelineWorkerCount();
 		m_async            = std::make_unique<AsyncPipelineCompiler>(m_async_mode, workers);
@@ -3303,6 +3314,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 		}
 	}
 	result.program_waited = async.waited;
+	result.guard_kept     = async.guard_waited;
 	return result;
 }
 
@@ -3680,10 +3692,14 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(
 			}
 		}
 		if (job != nullptr) {
-			if (may_skip) {
+			// --skip-guard: a draw writing memory a hard-class reader has read from a skipped draw
+			// before waits for its pipeline (asked only here, when the draw would be skipped).
+			const bool guard_veto = may_skip && SkipDeps::GuardVetoesSkip();
+			if (may_skip && !guard_veto) {
 				pool->Stats().skipped_pipeline_draws.fetch_add(1, std::memory_order_relaxed);
 				return nullptr; // the caller skips this draw
 			}
+			programs.pipeline_guard_kept = guard_veto;
 			programs.pipeline_waited = true;
 			if (pool->WaitFor(*job)) {
 				if (auto* published = FindGraphicsPipeline(key)) {

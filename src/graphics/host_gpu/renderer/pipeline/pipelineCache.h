@@ -172,6 +172,10 @@ public:
 		// --debug-skip-log: skip mode, and the store-safety rule forces this draw to wait; the
 		// shader hashes of the draw; whether a program / the pipeline had to be waited for.
 		bool     safety_kept     = false;
+		// --skip-guard: the draw waited for its program / pipeline because it writes memory a
+		// hard-class reader read from a skipped draw before (skipDependencies.h).
+		bool         guard_kept          = false;
+		mutable bool pipeline_guard_kept = false;
 		bool     program_waited  = false;
 		mutable bool pipeline_waited = false;
 		uint64_t vs_hash         = 0;

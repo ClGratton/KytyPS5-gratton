@@ -917,6 +917,54 @@ BuildTargetExportMapping(const HW::Context& ctx, uint32_t color_output_mask) {
 // is the same wherever in the draw path it is written (before any image lookup). A dropped draw also
 // registers the guest ranges it should have written (render targets, depth/stencil, their
 // metadata) as poison in the dependency tracker (skipDependencies.h).
+// The guest ranges a draw writes as render outputs (colour targets, depth/stencil and their
+// metadata), from the registers alone or, once the pipeline stage resolved the targets, from
+// `resolved`. `text` (optional) receives " r0=0x..+0x.. ..." for the skip log.
+static void CollectDrawWrites(const CommandBuffer& buffer, uint32_t render_target_slice_offset,
+                              const DrawRenderState* resolved,
+                              std::vector<SkipDeps::Range>& writes, std::string* text) {
+	const auto& ctx  = buffer.GetRegisters();
+	const auto  mask = DrawColorOutputMask(ctx);
+	const auto add = [&](const char* name, uint32_t index, const GuestRange& range) {
+		if (range.size == 0) return;
+		writes.push_back({range.address, range.size});
+		if (text == nullptr) return;
+		char part[96];
+		std::snprintf(part, sizeof(part), " %s%u=%s", name, index,
+		              SkipDeps::FormatRange(writes.back()).c_str());
+		*text += part;
+	};
+	const auto add_color = [&](uint32_t slot, const RenderColorInfo& color) {
+		add("r", slot, color.desc.info.data);
+		add("rm", slot, color.desc.info.metadata.range);
+	};
+	const auto add_depth = [&](const RenderDepthInfo& depth) {
+		if (depth.depth_write_enable || depth.depth_clear_enable) {
+			add("d", 0, depth.desc.info.data);
+			add("dm", 0, depth.desc.info.metadata.range);
+		}
+		if (depth.stencil_test_enable || depth.stencil_clear_enable) {
+			add("s", 0, depth.desc.info.stencil);
+		}
+	};
+	if (resolved != nullptr) {
+		for (uint32_t i = 0; i < resolved->color_count; i++) {
+			add_color(resolved->color_info[i].target_slot, resolved->color_info[i]);
+		}
+		if (resolved->depth_info.image_id) add_depth(resolved->depth_info);
+	} else {
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+			if ((mask & (1u << slot)) == 0) continue;
+			RenderColorInfo color;
+			if (DescribeRenderColorTarget(ctx, color, render_target_slice_offset, slot)) {
+				add_color(slot, color);
+			}
+		}
+		RenderDepthInfo depth;
+		if (DescribeRenderDepthTarget(buffer.GetGraphics(), ctx, depth)) add_depth(depth);
+	}
+}
+
 static void LogAsyncDrawEvent(const char* event, const CommandBuffer& buffer,
                               const DrawCallInfo& draw,
                               const PipelineCache::GraphicsPrograms& programs,
@@ -948,6 +996,7 @@ static void LogAsyncDrawEvent(const char* event, const CommandBuffer& buffer,
 	}
 	const bool skipped = event[0] == 's';
 	if (!skipped) {
+		if (!Bench::SkipLogEnabled()) return; // --skip-guard alone only tracks the skipped draws
 		char row[768];
 		// rule: "kept" = skip mode, the store-safety rule made this draw wait instead of being skipped.
 		std::snprintf(row, sizeof(row), "%s,%016llx,%016llx,%s,%s,%s", event,
@@ -957,46 +1006,10 @@ static void LogAsyncDrawEvent(const char* event, const CommandBuffer& buffer,
 		Bench::LogSkipRow(row);
 		return;
 	}
-	// The ranges the dropped draw would have written, from the registers alone.
+	// The ranges the dropped draw would have written, from the registers alone (or the resolved state).
 	std::vector<SkipDeps::Range> writes;
 	std::string                  ranges;
-	const auto add = [&](const char* name, uint32_t index, const GuestRange& range) {
-		if (range.size == 0) return;
-		writes.push_back({range.address, range.size});
-		char part[96];
-		std::snprintf(part, sizeof(part), " %s%u=%s", name, index,
-		              SkipDeps::FormatRange(writes.back()).c_str());
-		ranges += part;
-	};
-	const auto add_color = [&](uint32_t slot, const RenderColorInfo& color) {
-		add("r", slot, color.desc.info.data);
-		add("rm", slot, color.desc.info.metadata.range);
-	};
-	const auto add_depth = [&](const RenderDepthInfo& depth) {
-		if (depth.depth_write_enable || depth.depth_clear_enable) {
-			add("d", 0, depth.desc.info.data);
-			add("dm", 0, depth.desc.info.metadata.range);
-		}
-		if (depth.stencil_test_enable || depth.stencil_clear_enable) {
-			add("s", 0, depth.desc.info.stencil);
-		}
-	};
-	if (resolved != nullptr) {
-		for (uint32_t i = 0; i < resolved->color_count; i++) {
-			add_color(resolved->color_info[i].target_slot, resolved->color_info[i]);
-		}
-		if (resolved->depth_info.image_id) add_depth(resolved->depth_info);
-	} else {
-		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
-			if ((mask & (1u << slot)) == 0) continue;
-			RenderColorInfo color;
-			if (DescribeRenderColorTarget(ctx, color, render_target_slice_offset, slot)) {
-				add_color(slot, color);
-			}
-		}
-		RenderDepthInfo depth;
-		if (DescribeRenderDepthTarget(buffer.GetGraphics(), ctx, depth)) add_depth(depth);
-	}
+	CollectDrawWrites(buffer, render_target_slice_offset, resolved, writes, &ranges);
 	// Stores other than render targets: the store-safety rule keeps every draw with image stores
 	// waiting, so a dropped one has none; buffer atomics may remain. Known only once the program is.
 	const char* stores = programs.vertex[0] ? "known" : "unknown";
@@ -1033,13 +1046,30 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	state.ps_active = buffer.GetShaders().GetPs().ps_regs.data_addr != 0 &&
 	                  (color_output_mask != 0 ||
 	                   PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
-	RefreshShaders(buffer, draw, color_output_mask, state);
+	{
+		// --skip-guard: if the pipeline cache is about to skip this draw for a program that is not
+		// ready, it asks whether the draw writes memory a hard-class reader has read from a skipped
+		// draw before (then it waits instead). The ranges come from the registers alone here.
+		auto collect = [&](std::vector<SkipDeps::Range>& writes) {
+			CollectDrawWrites(buffer, render_target_slice_offset, nullptr, writes, nullptr);
+		};
+		SkipDeps::GuardQuery query(collect);
+		SkipDeps::GuardScope scope(&query);
+		RefreshShaders(buffer, draw, color_output_mask, state);
+	}
 	if (state.programs.pending) {
 		// --async-pipelines skip: a program is still being built on a worker. Nothing has been
 		// resolved or touched yet, so the draw is simply dropped.
-		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_program", buffer, draw, state.programs,
-		                                             render_target_slice_offset);
+		if (SkipDeps::Enabled()) LogAsyncDrawEvent("skip_program", buffer, draw, state.programs,
+		                                          render_target_slice_offset);
 		return false;
+	}
+	if (SkipDeps::GuardEnabled()) {
+		if (state.programs.guard_kept) {
+			SkipDeps::NoteGuardedWait(false);
+		} else if (state.programs.program_waited) {
+			SkipDeps::NoteOtherWait();
+		}
 	}
 	if (Bench::SkipLogEnabled() && state.programs.program_waited) {
 		LogAsyncDrawEvent("wait_program", buffer, draw, state.programs, render_target_slice_offset);
@@ -1358,21 +1388,37 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
-	auto* const pipeline_ptr = m_context.GetPipelineCache().GetGraphicsPipeline(
-	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
-	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
-	    state.programs);
+	// --skip-guard: asked only when the pipeline is not ready and the cache would skip the draw; the
+	// ranges are the resolved targets this time.
+	auto collect_resolved = [&](std::vector<SkipDeps::Range>& writes) {
+		CollectDrawWrites(buffer, 0, &state, writes, nullptr);
+	};
+	SkipDeps::GuardQuery pipeline_query(collect_resolved);
+	auto* const pipeline_ptr = [&] {
+		SkipDeps::GuardScope scope(&pipeline_query);
+		return m_context.GetPipelineCache().GetGraphicsPipeline(
+		    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
+		    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
+		    state.programs);
+	}();
 	if (pipeline_ptr == nullptr) {
 		// --async-pipelines skip: the pipeline is still being built on a worker. Drop the draw
 		// before any command that depends on it is recorded; the caller resets the bindings.
-		if (Bench::SkipLogEnabled()) LogAsyncDrawEvent("skip_pipeline", buffer, draw, state.programs, 0, &state);
+		if (SkipDeps::Enabled()) LogAsyncDrawEvent("skip_pipeline", buffer, draw, state.programs, 0, &state);
 		return;
+	}
+	if (SkipDeps::GuardEnabled()) {
+		if (state.programs.pipeline_guard_kept) {
+			SkipDeps::NoteGuardedWait(true);
+		} else if (state.programs.pipeline_waited) {
+			SkipDeps::NoteOtherWait();
+		}
 	}
 	if (Bench::SkipLogEnabled() && state.programs.pipeline_waited) {
 		LogAsyncDrawEvent("wait_pipeline", buffer, draw, state.programs, 0, &state);
 	}
-	if (Bench::SkipLogEnabled()) {
-		// --debug-skip-log: this shader pair really runs, so its earlier skipped outputs stop being
+	if (SkipDeps::Enabled()) {
+		// --debug-skip-log / --skip-guard: this shader pair really runs, so its earlier skipped outputs stop being
 		// poison; the geometry it reads may be poison itself (index / vertex data, draw arguments).
 		SkipDeps::NoteDrawReady(state.programs.vs_hash, state.programs.ps_hash);
 		if (SkipDeps::Poisoned()) {
