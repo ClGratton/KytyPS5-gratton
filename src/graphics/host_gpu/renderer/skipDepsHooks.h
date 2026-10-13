@@ -57,8 +57,12 @@ bool NoteRead(const Range& range, ReadKind kind, uint64_t shader_hash, const cha
 // whether it also read tracked poison. Writes one `untracked` row per (shader, reason).
 void NoteUntracked(uint64_t shader_hash, const char* op, const char* reason, bool reads_poison);
 
-// SRT walk reads (all threads); uses the ReaderScope for attribution.
-void NoteScalarRead(uint64_t address, uint64_t bytes);
+// SRT walk reads (all threads); uses the ReaderScope for attribution. Called for every scalar read of
+// every walk, so the disabled case is one inline atomic load.
+void NoteScalarReadSlow(uint64_t address, uint64_t bytes);
+inline void NoteScalarRead(uint64_t address, uint64_t bytes) {
+	if (Bench::SkipLogEnabled()) NoteScalarReadSlow(address, bytes);
+}
 
 // The materialisation of `shader_hash` produced something that is not a descriptor.
 void NoteBadDescriptor(uint64_t shader_hash, const char* what, uint32_t slot,

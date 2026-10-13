@@ -32,6 +32,8 @@ thread_local std::array<RecentRead, kRecentReads> t_recent;
 thread_local size_t                               t_recent_count = 0;
 
 std::atomic<int64_t> g_last_dump_ns {0};
+std::array<std::atomic<uint64_t>, kReadKinds> g_checked {};
+std::array<std::atomic<uint64_t>, kReadKinds> g_hit {};
 std::atomic<int64_t> g_last_la_dump_ns {0};
 std::atomic<bool>    g_atexit_registered {false};
 
@@ -156,7 +158,11 @@ void NoteDrawReady(uint64_t vs, uint64_t ps) {
 bool NoteRead(const Range& range, ReadKind kind, uint64_t shader_hash, const char* op,
               std::vector<Hit>& hits) {
 	const auto before = hits.size();
+	// Positive control for the "0 readers of this class" results: how many reads of each kind were
+	// checked against live poison, and how many hit.
+	g_checked[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 	if (!Global().NoteRead(range, kind, shader_hash, hits)) return false;
+	g_hit[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 	for (auto i = before; i < hits.size(); i++) {
 		const auto& hit = hits[i];
 		if (!hit.first) continue;
@@ -176,8 +182,7 @@ bool NoteRead(const Range& range, ReadKind kind, uint64_t shader_hash, const cha
 	return true;
 }
 
-void NoteScalarRead(uint64_t address, uint64_t bytes) {
-	if (!Bench::SkipLogEnabled()) return;
+void NoteScalarReadSlow(uint64_t address, uint64_t bytes) {
 	// Remember the last reads of this thread so a bad descriptor can name where it came from.
 	auto& slot = t_recent[t_recent_count++ % kRecentReads];
 	slot.address = address;
@@ -301,6 +306,14 @@ void DumpOpenRoots(const char* why) {
 	              totals.dependent[0], totals.dependent[1], totals.dependent[2], totals.dependent[3],
 	              Global().EntryCount());
 	Row("summary", 0, 0, why, "-", text);
+	std::string checks;
+	for (size_t k = 0; k < kReadKinds; k++) {
+		char part[96];
+		std::snprintf(part, sizeof(part), "%s%s:%" PRIu64 "/%" PRIu64, k ? " " : "",
+		              ReadKindName(static_cast<ReadKind>(k)), g_checked[k].load(), g_hit[k].load());
+		checks += part;
+	}
+	Row("read_checks", 0, 0, why, "-", "checked/hit " + checks);
 }
 
 } // namespace Libs::Graphics::SkipDeps
