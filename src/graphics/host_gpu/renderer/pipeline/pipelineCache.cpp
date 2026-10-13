@@ -956,11 +956,26 @@ struct PipelineCache::ProgramCache {
 	static_assert(kMissKinds <= PipelineCache::LoadCounters::kGenericMissKinds);
 
 	bool generic = false; // --generic-compute is on (set by the PipelineCache before the first dispatch)
-	std::unordered_map<uint64_t, ShaderRecompiler::IR::GenericRefusal> generic_by_hash; // load_mutex
+	struct GenericNote {
+		ShaderRecompiler::IR::GenericRefusal refusal = ShaderRecompiler::IR::GenericRefusal::None;
+		bool                                 reads_queue = false; // S_GETREG of the queue (HW_ID2)
+	};
+	std::unordered_map<uint64_t, GenericNote> generic_by_hash; // load_mutex
 
-	void NoteGenericVariant(uint64_t hash, ShaderRecompiler::IR::GenericRefusal refusal) {
+	void NoteGenericVariant(uint64_t hash, ShaderRecompiler::IR::GenericRefusal refusal, bool reads_queue) {
 		std::lock_guard lock(load_mutex);
-		generic_by_hash[hash] = refusal;
+		generic_by_hash[hash] = {refusal, reads_queue};
+	}
+
+	// Whether the program of this binary is the same whichever queue a dispatch runs on: only
+	// S_GETREG of HW_ID2 tells the queues apart (Translator::graphics_compute), and the registration
+	// job has decoded the binary. A dispatch on the async compute queue of such a binary shares the
+	// graphics-queue key, so the variant built at registration serves both queues. Unknown (not
+	// registered, or not decoded yet): false.
+	[[nodiscard]] bool QueueIndependent(uint64_t hash) {
+		std::lock_guard lock(load_mutex);
+		const auto found = generic_by_hash.find(hash);
+		return found != generic_by_hash.end() && !found->second.reads_queue;
 	}
 
 	[[nodiscard]] size_t ClassifyGenericMiss(SourceEntry* entry, const ProgramKey& key,
@@ -977,7 +992,7 @@ struct PipelineCache::ProgramCache {
 		}
 		const auto found = generic_by_hash.find(key.hash);
 		if (found == generic_by_hash.end()) return kMissUnregistered;
-		return found->second != ShaderRecompiler::IR::GenericRefusal::None ? kMissRefused
+		return found->second.refusal != ShaderRecompiler::IR::GenericRefusal::None ? kMissRefused
 		                                                                  : kMissOtherStatic;
 	}
 
@@ -1232,6 +1247,13 @@ struct PipelineCache::ProgramCache {
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = params.user_data_count;
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			// --generic-compute: the queue changes nothing in a program that does not read it, so
+			// such a dispatch on the async compute queue shares the key of the registration job.
+			if (generic && input_info.async_compute && QueueIndependent(params.hash)) {
+				input_info.async_compute = false;
+			}
+		}
 		BuildStageStaticKey(input_info, lookup_key.static_state);
 		const bool timing = Bench::TimingEnabled();
 		StepTime   refresh_time;
@@ -1942,10 +1964,10 @@ std::string PipelineCache::LoadCounters::GenericSummary() const {
 	const auto n = lead_n.load();
 	return fmt::format(
 	    "registered_cs={};jobs={};built={};refused={};dispatches={};hits={};hit_pct={:.1f};"
-	    "programs_used={};compute_ondemand={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f}{}{}",
+	    "programs_used={};compute_ondemand={};reads_queue={};lead_n={};lead_avg_ms={:.1f};lead_min_ms={:.1f}{}{}",
 	    registered_cs.load(), generic_jobs.load(), generic_built.load(), generic_refused.load(),
 	    dispatches, hits, dispatches != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(dispatches) : 0.0,
-	    generic_programs_used.load(), compute_ondemand.load(), n,
+	    generic_programs_used.load(), compute_ondemand.load(), generic_reads_queue.load(), n,
 	    n != 0 ? static_cast<double>(lead_sum_ns.load()) / static_cast<double>(n) / 1e6 : 0.0,
 	    n != 0 ? static_cast<double>(lead_min_ns.load()) / 1e6 : 0.0, misses, refusals);
 }
@@ -2672,7 +2694,7 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 	if (source.call) {
 		counters.skipped_call.fetch_add(1, std::memory_order_relaxed);
 		if (generic) {
-			cache.NoteGenericVariant(key.hash, ShaderRecompiler::IR::GenericRefusal::CallSource);
+			cache.NoteGenericVariant(key.hash, ShaderRecompiler::IR::GenericRefusal::CallSource, true);
 			counters.generic_refused.fetch_add(1, std::memory_order_relaxed);
 			counters.generic_refusal[static_cast<size_t>(ShaderRecompiler::IR::GenericRefusal::CallSource)]
 			    .fetch_add(1, std::memory_order_relaxed);
@@ -2680,6 +2702,11 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 		Unregister();
 		return;
 	}
+	// Whether the binary tells the queues apart: S_GETREG is the only thing that does (the
+	// translator answers HW_ID2 for the graphics queue only).
+	const bool reads_queue = std::any_of(
+	    source.decoded.instructions.begin(), source.decoded.instructions.end(),
+	    [](const auto& inst) { return inst.opcode == ShaderRecompiler::Decoder::Opcode::S_GETREG_B32; });
 	auto translated = ShaderRecompiler::TranslateProgram(source.decoded, options);
 	const int64_t frontend_ns = sw.Lap();
 	auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
@@ -2692,7 +2719,8 @@ void PipelineCache::ProgramCache::LoadJob::Execute() {
 	} else if (generic) {
 		// The generic variant of the binary: what the instructions fix, nothing a descriptor says.
 		const auto refusal = ShaderRecompiler::IR::MakeGenericSpecialization(plan, wanted);
-		cache.NoteGenericVariant(key.hash, refusal);
+		cache.NoteGenericVariant(key.hash, refusal, reads_queue);
+		if (reads_queue) counters.generic_reads_queue.fetch_add(1, std::memory_order_relaxed);
 		if (refusal != ShaderRecompiler::IR::GenericRefusal::None) {
 			usable = false;
 			counters.generic_refused.fetch_add(1, std::memory_order_relaxed);

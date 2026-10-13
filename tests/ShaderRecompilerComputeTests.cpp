@@ -40076,15 +40076,42 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
               load.generic_miss[static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::BufferAddTid)] == 1,
           "a dispatch outside the hard signature did not compile its own program");
 
-  // The async compute queue is part of the program key, not of the generic variant.
+  // The async compute queue changes nothing in this program (it never reads the queue), so the
+  // dispatch on that queue uses the program built at registration.
   ShaderComputeInputInfo async_input{};
   async_input.async_compute = true;
   Describe(16, 16, false, false);
   const auto fourth = cache.GetComputeProgram(regs, {}, async_input);
-  Require(name, "other static state",
-          fourth.id != first.id && load.generic_hits == 2 && load.generic_dispatches == 4 &&
-              load.generic_miss[static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::Count) + 2] == 1,
-          "an async-queue dispatch must be counted as another static state");
+  Require(name, "async queue hits",
+          fourth.id == first.id && async_input.stage.program->info.generic &&
+              load.generic_hits == 3 && load.generic_dispatches == 4 && load.generic_reads_queue == 0 &&
+              load.compute_ondemand == 1,
+          "an async-queue dispatch of a queue-independent binary did not use the generic program");
+
+  // A binary that reads the queue (S_GETREG of HW_ID2) is noted: its program says which queue it was
+  // built for, so a dispatch on the other queue would not share it.
+  std::vector<u32> queue_code;
+  queue_code.push_back(0xb96a0000u | 0x1818u); // s_getreg_b32 vcc_lo, HW_ID2
+  AppendEnd(&queue_code);
+  auto *queue_memory = static_cast<u32 *>(std::aligned_alloc(256, 256));
+  std::fill(queue_memory, queue_memory + 64, 0u);
+  std::copy(queue_code.begin(), queue_code.end(), queue_memory);
+  const auto queue_address = reinterpret_cast<uint64_t>(queue_memory);
+  const auto queue_bytes = static_cast<u32>(queue_code.size() * sizeof(u32));
+  auto queue_registration = registration;
+  queue_registration.address = queue_address;
+  queue_registration.code_size_bytes = queue_bytes;
+  queue_registration.hash = ShaderMapUserData(
+      queue_address, {.type = Prospero::ShaderBinaryType::kCs, .code_size_bytes = queue_bytes});
+  auto queue_header = header;
+  queue_header[0].value = static_cast<u32>(queue_address >> 8u);
+  queue_header[1].value = static_cast<u32>(queue_address >> 40u) & 0xffu;
+  queue_registration.sh_registers = queue_header;
+  cache.NoteShaderRegistered(queue_registration);
+  Require(name, "queue reader idle", cache.WaitLoadIdle(120000), "load jobs did not finish");
+  Require(name, "queue reader noted", load.registered_cs == 2 && load.generic_reads_queue == 1,
+          "a binary reading the queue was not noted");
+  std::free(queue_memory);
   cache.WaitLoadIdle(120000);
   std::free(memory);
   std::printf("[gpu]     %-32s ok\n", name);

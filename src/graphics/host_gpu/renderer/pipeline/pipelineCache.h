@@ -326,6 +326,7 @@ public:
 		std::atomic<uint64_t> generic_hits {0};        // ... that ran a generic variant
 		std::atomic<uint64_t> generic_programs_used {0}; // distinct generic permutations dispatched
 		std::atomic<uint64_t> generic_joined {0};      // hits that waited for the variant to finish
+		std::atomic<uint64_t> generic_reads_queue {0}; // binaries that read the queue (S_GETREG): keyed by queue
 		std::atomic<uint64_t> compute_ondemand {0};    // specialized compute programs a dispatch built
 		std::array<std::atomic<uint64_t>, kGenericMissKinds> generic_miss {};   // by reason, see names
 		std::array<std::atomic<uint64_t>, kGenericMissKinds> generic_refusal {}; // by GenericRefusal
