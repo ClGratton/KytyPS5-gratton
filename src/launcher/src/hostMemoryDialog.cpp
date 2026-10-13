@@ -12,6 +12,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QString>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -19,12 +20,14 @@
 #include <QFile>
 #include <QFutureWatcher>
 #include <QtConcurrent>
+#include <string>
 #include <windows.h>
 #include <shellapi.h>
 #endif
 
 namespace {
 
+#if !defined(_WIN32)
 QString Quote(const QString& text) {
 	if (!text.contains(QRegularExpression(QStringLiteral("[^A-Za-z0-9_./:=@%+,-]")))) {
 		return text;
@@ -33,6 +36,7 @@ QString Quote(const QString& text) {
 	quoted.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
 	return QLatin1Char('\'') + quoted + QLatin1Char('\'');
 }
+#endif
 
 #if defined(_WIN32)
 // Runs powershell.exe with `arguments` after a UAC prompt and waits for it. Returns the exit code,
@@ -94,7 +98,7 @@ HostMemoryDialog::HostMemoryDialog(QWidget* parent): QDialog(parent) {
 	m_facts->setReadOnly(true);
 	m_facts->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
 	m_facts->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-	m_facts->setMinimumHeight(130);
+	m_facts->setMinimumHeight(170);
 	facts_layout->addWidget(m_facts);
 	layout->addWidget(facts_box);
 

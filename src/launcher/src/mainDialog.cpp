@@ -236,6 +236,10 @@ void MainDialogPrivate::FindInterpreter() {
 }
 
 void MainDialogPrivate::CheckHostMemory(bool propose) {
+	// macOS has no zswap and no pagefile setting to tune: no Host memory line there.
+#if defined(__APPLE__)
+	Q_UNUSED(propose);
+#else
 	HostMemoryTool::Detect(this, [this, propose](const HostMemoryReport& report) {
 		m_host_memory_report = report;
 		m_host_memory_label->setText(HostMemoryTool::StatusLine(report) + QStringLiteral(" - <a href=\"details\">") +
@@ -245,6 +249,7 @@ void MainDialogPrivate::CheckHostMemory(bool propose) {
 			OpenHostMemory(&report);
 		}
 	});
+#endif
 }
 
 void MainDialogPrivate::OpenHostMemory(const HostMemoryReport* known) {
