@@ -533,6 +533,10 @@ add_executable(draw_key_memo_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/DrawKeyMemoTests.cpp"
 )
 target_include_directories(draw_key_memo_tests PRIVATE ${inc_headers})
+add_executable(scalar_read_hazard_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ScalarReadHazardTests.cpp"
+)
+target_include_directories(scalar_read_hazard_tests PRIVATE ${inc_headers})
 add_executable(indirect_draw_args_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/IndirectDrawArgsTests.cpp"
 )
@@ -863,6 +867,7 @@ if(BUILD_TESTING)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
 	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
 	add_test(NAME draw_key_memo COMMAND $<TARGET_FILE:draw_key_memo_tests>)
+	add_test(NAME scalar_read_hazard COMMAND $<TARGET_FILE:scalar_read_hazard_tests>)
 	add_test(NAME indirect_draw_args COMMAND $<TARGET_FILE:indirect_draw_args_tests>)
 	add_test(NAME indirect_draw_policy COMMAND $<TARGET_FILE:indirect_draw_policy_tests>)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
@@ -1057,6 +1062,7 @@ if(BUILD_TESTING)
 		barrier_elision_tests
 		known_fills_tests
 		draw_key_memo_tests
+		scalar_read_hazard_tests
 		indirect_draw_args_tests
 		indirect_draw_policy_tests
 		readback_plan_tests

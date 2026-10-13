@@ -32,7 +32,8 @@ constexpr std::array<const char*, kPhases> kNames = {
     "idle", "pm4", "draw", "pipeline", "pipeline_job", "srt", "descriptors", "vkcmd", "vkalloc",
     "submit", "drain_tick", "drain_flush", "drain_finish", "gc", "pipe_prepare", "pipe_programkey",
     "pipe_materialize", "pipe_keybuild", "pipe_find", "pipe_entrylock", "pipe_srtread",
-    "pipe_permsearch"};
+    "pipe_permsearch", "desc_buffers", "desc_upload", "desc_images", "desc_resolve", "desc_findtex",
+    "desc_commit", "desc_hazard", "desc_writes", "desc_transit", "desc_push", "srt_shadow"};
 
 // Tracy zone per phase (--profile): named "gpu:<phase>" and emitted only on the GPU thread, so
 // `tracy-csvexport -e -f gpu:` yields the exclusive time per phase of that thread alone.
@@ -199,6 +200,27 @@ namespace {
 thread_local detail::ThreadState* t_report = nullptr;
 } // namespace
 
+namespace {
+// Cost of one Scope (rdtsc, Enter, rdtsc, Exit) measured in a tight loop on a throw-away state.
+// A lower bound: the real scopes run with colder caches between them.
+double g_scope_ns = 0.0;
+
+double MeasureScopeNs() {
+	auto* state = new detail::ThreadState();
+	state->zones = false;
+	constexpr int kRounds = 200000;
+	const auto    t0      = WallNs();
+	for (int i = 0; i < kRounds; ++i) {
+		const auto start = detail::Now();
+		detail::Enter(state, Phase::Pm4);
+		detail::Exit(state, Phase::Pm4, start);
+	}
+	const auto t1 = WallNs();
+	delete state;
+	return static_cast<double>(t1 - t0) / kRounds;
+}
+} // namespace
+
 void Configure(uint32_t interval_seconds, bool phases) {
 	g_phases.store(phases, std::memory_order_relaxed);
 	g_interval_s.store(interval_seconds, std::memory_order_relaxed);
@@ -334,6 +356,7 @@ void AttachGpuThread() {
 	}
 	t_report = state;
 	if (state->phases) {
+		if (stats) g_scope_ns = MeasureScopeNs();
 		detail::t_state = state; // --gpu-phase-stats or --profile: the scopes are live
 	}
 }
@@ -442,6 +465,30 @@ void Report(detail::ThreadState& s, bool final_report) {
 			line += fmt::format(" {}={:.1f}%", kNames[i], pct[i]);
 		}
 		line += fmt::format(" unscoped={:.1f}%\n", std::max(0.0, 100.0 - scoped));
+		{
+			// Descriptor family (the former single "descriptors" phase) and its parts.
+			constexpr std::array<Phase, 10> kDesc = {Phase::DescBuffers,     Phase::DescUpload,  Phase::DescImages,
+			                                         Phase::DescResolve,     Phase::DescFindTexture,
+			                                         Phase::DescCommit,      Phase::DescHazard,  Phase::DescWrites,
+			                                         Phase::DescTransit,     Phase::DescPush};
+			double total = pct[static_cast<size_t>(Phase::Descriptors)];
+			for (const auto phase: kDesc) total += pct[static_cast<size_t>(phase)];
+			line += fmt::format("GpuPhase descriptors_total={:.1f}% [", total);
+			for (const auto phase: kDesc) {
+				const auto i = static_cast<size_t>(phase);
+				line += fmt::format(" {}={:.1f}% ({}x{})", kNames[i], pct[i], calls[i],
+				                    frames != 0 ? fmt::format(", {:.0f}/frame", static_cast<double>(calls[i]) / static_cast<double>(frames)) : std::string());
+			}
+			line += " ]\n";
+			uint64_t scopes = 0;
+			for (const auto c: calls) scopes += c;
+			if (g_scope_ns > 0.0) {
+				line += fmt::format(
+				    "GpuPhase timer overhead: {:.1f} ns/scope (tight-loop microbench) x {} scopes = {:.2f}% of wall ({:.0f} scopes/frame)\n",
+				    g_scope_ns, scopes, static_cast<double>(scopes) * g_scope_ns * 100.0 / wall_ns,
+				    frames != 0 ? static_cast<double>(scopes) / static_cast<double>(frames) : 0.0);
+			}
+		}
 
 		// Drains: count by cause (the phases are exclusive, so the shares above are pure wait
 		// time), and the PM4 packets that were current when they happened.

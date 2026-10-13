@@ -25,6 +25,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -744,6 +745,7 @@ static vk::Sampler NativeSampler(RenderContext&                       context,
 
 static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
                                              std::span<const uint32_t> data) {
+	Common::GpuPhase::Scope gpu_phase_upload(Common::GpuPhase::Phase::DescUpload);
 	EXIT_IF(data.empty());
 	auto& command_buffer = context.GetCommandScheduler().Current();
 	EXIT_IF(command_buffer.IsInvalid());
@@ -878,7 +880,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 }
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
-	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::DescBuffers);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program   = *prepared.runtime->program;
@@ -912,7 +914,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 }
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
-	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::DescImages);
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program  = *prepared.runtime->program;
@@ -928,6 +930,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
 			}
+			Common::GpuPhase::Scope gpu_phase_resolve(Common::GpuPhase::Phase::DescResolve);
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
@@ -947,10 +950,12 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				desc.view_info.level_count = 1;
 				// The shader selects the mip after applying the guest minimum LOD.
 				desc.view_info.min_lod = 0;
+				Common::GpuPhase::Scope gpu_phase_find(Common::GpuPhase::Phase::DescFindTexture);
 				binding.mip_views.push_back(texture_cache.FindTexture(binding.image_id, desc));
 			}
 			binding.image_view = binding.mip_views.front();
 		} else {
+			Common::GpuPhase::Scope gpu_phase_find(Common::GpuPhase::Phase::DescFindTexture);
 			binding.image_view = texture_cache.FindTexture(binding.image_id, binding.desc);
 		}
 		auto&      image   = texture_cache.GetImage(binding.image_id);
@@ -1002,7 +1007,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
-	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::Descriptors);
+	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::DescCommit);
 	auto   vk_buffer        = buffer.Handle();
 	size_t image_descriptor_count = 0;
 	size_t write_count      = 0;
@@ -1034,52 +1039,82 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		        (pipeline_bind_point == vk::PipelineBindPoint::eCompute &&
 		         shader_stage != vk::ShaderStageFlagBits::eCompute));
 	}
-	for (const auto* reader: prepared_bindings) {
-		const auto& reads = reader->runtime->resources->specialization_reads;
-		if (reads.empty()) continue;
-		for (const auto* writer: prepared_bindings) {
-			if (writer->runtime->program->has_address_writes) {
-				EXIT("scalar resource reads cannot be proven disjoint from shader address writes\n");
-			}
-		}
-		for (const auto [address, size]: reads) {
-			for (const auto id: m_bound_images) {
-				const auto* image = m_context.GetTextureCache().m_slot_images.try_get(id);
-				if (image == nullptr ||
-				    (!image->binding.shader_write && !image->binding.is_target)) continue;
-				for (const auto written: {image->info.data, image->info.stencil,
-				                          image->info.metadata.range}) {
-					if (written.size != 0 && ImageRangeOverlaps(address, size,
-					                                          written.address, written.size)) {
-						EXIT("scalar resource reads overlap an image or attachment write\n");
-					}
-				}
-			}
+	Common::GpuPhase::Scope gpu_phase_hazard(Common::GpuPhase::Phase::DescHazard);
+	{
+		// Scalar reads versus writes of the same draw (see scalarReadHazard.h): the written image and
+		// buffer ranges are collected once per commit and each read is answered by a binary search.
+		static thread_local WrittenRangeIndex image_writes;
+		static thread_local WrittenRangeIndex buffer_writes;
+		static thread_local WrittenRangeIndex buffer_writes_of_others;
+		bool collected = false;
+		auto collect_buffer_writes = [&](WrittenRangeIndex& index, const PreparedBindings* skip) {
+			index.Clear();
 			for (const auto* writer: prepared_bindings) {
+				if (writer == skip) continue;
 				const auto& program = *writer->runtime->program;
-				// A compute dispatch reading a buffer it writes itself through scalar loads is racy
-				// on hardware: the scalar cache is not coherent with the dispatch's own vector
-				// writes, so the value captured at dispatch start is a valid result. The next
-				// dispatch re-materializes its specialization from memory, so the writes are still
-				// observed from then on.
-				if (writer == reader && program.stage == ShaderType::Compute) continue;
 				for (const auto& resource: program.info.buffers) {
 					if (!resource.written || resource.descriptor_index == UINT32_MAX) continue;
 					const auto& written = writer->buffer_sources[resource.descriptor_index];
-					if (written.size != 0 && ImageRangeOverlaps(address, size,
-					                                          written.address, written.size)) {
-						EXIT("scalar resource reads overlap a shader buffer write\n");
+					index.Add(written.address, written.size);
+				}
+			}
+			index.Build();
+		};
+		for (const auto* reader: prepared_bindings) {
+			const auto& reads = reader->runtime->resources->specialization_reads;
+			if (reads.empty()) continue;
+			for (const auto* writer: prepared_bindings) {
+				if (writer->runtime->program->has_address_writes) {
+					EXIT("scalar resource reads cannot be proven disjoint from shader address writes\n");
+				}
+			}
+			if (!collected) {
+				collected = true;
+				image_writes.Clear();
+				for (const auto id: m_bound_images) {
+					const auto* image = m_context.GetTextureCache().m_slot_images.try_get(id);
+					if (image == nullptr ||
+					    (!image->binding.shader_write && !image->binding.is_target)) continue;
+					for (const auto written: {image->info.data, image->info.stencil,
+					                          image->info.metadata.range}) {
+						image_writes.Add(written.address, written.size);
 					}
 				}
+				image_writes.Build();
+				collect_buffer_writes(buffer_writes, nullptr);
+			}
+			// A compute dispatch reading a buffer it writes itself through scalar loads is racy
+			// on hardware: the scalar cache is not coherent with the dispatch's own vector
+			// writes, so the value captured at dispatch start is a valid result. The next
+			// dispatch re-materializes its specialization from memory, so the writes are still
+			// observed from then on.
+			const WrittenRangeIndex* buffers = &buffer_writes;
+			if (reader->runtime->program->stage == ShaderType::Compute) {
+				collect_buffer_writes(buffer_writes_of_others, reader);
+				buffers = &buffer_writes_of_others;
+			}
+			switch (FindScalarReadHazard(reads, image_writes, *buffers).kind) {
+				case ScalarReadHazardKind::None: break;
+				case ScalarReadHazardKind::ImageWrite:
+					EXIT("scalar resource reads overlap an image or attachment write\n");
+					break;
+				case ScalarReadHazardKind::BufferWrite:
+					EXIT("scalar resource reads overlap a shader buffer write\n");
+					break;
+				case ScalarReadHazardKind::InvalidRange:
+					EXIT("invalid image overlap range\n");
+					break;
 			}
 		}
 	}
+	gpu_phase_hazard.End();
 	m_descriptor_images.resize(image_descriptor_count);
 	m_descriptor_writes.clear();
 	m_descriptor_writes.reserve(write_count);
 	size_t image_cursor = 0;
 	std::array<vk::DescriptorBufferInfo, 2> address_buffers;
 
+	Common::GpuPhase::Scope gpu_phase_writes(Common::GpuPhase::Phase::DescWrites);
 	for (auto* prepared: prepared_bindings) {
 		const auto& program       = *prepared->runtime->program;
 		auto&       descriptors   = *prepared;
@@ -1124,6 +1159,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					         static_cast<unsigned long long>(image.info.data.address), count);
 				}
 			}
+			Common::GpuPhase::Scope gpu_phase_transit(Common::GpuPhase::Phase::DescTransit);
 			if (image.info.data.Empty()) {
 				image.Transit(vk::ImageLayout::eGeneral,
 				              storage ? vk::AccessFlagBits2::eShaderRead |
@@ -1162,6 +1198,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				              vk::AccessFlagBits2::eShaderRead, range, vk_buffer);
 			}
 			binding.layout = image.backing.state.layout;
+			gpu_phase_transit.End();
 		}
 
 		std::array<size_t, ShaderRecompiler::IR::ImageBindingCount> image_starts {};
@@ -1248,14 +1285,15 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 	}
 
+	gpu_phase_writes.End();
 	if (has_push_data) {
-		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
 		vk_buffer.pushConstants(pipeline.pipeline_layout, push_stages, 0, sizeof(push_data),
 		                        push_data.dwords.data());
 	}
 
 	if (!m_descriptor_writes.empty()) {
-		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
 			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,
