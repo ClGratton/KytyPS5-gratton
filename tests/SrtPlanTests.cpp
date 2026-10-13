@@ -2,9 +2,11 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <atomic>
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -333,7 +335,7 @@ void TestStoreReadyTakeAndClassification() {
 	Check(store.Take({5, 1, 0}, plan) == Lookup::NotReady, "before the lookahead got there");
 	store.Put(MakePlan({5, 1, 0}));
 	store.Put(MakePlan({5, 1, 1}));
-	store.NoteProgress({5, 1});
+	store.NoteProgress({5, 1}); // kyGpu asked about submission 5: the plans are visible at once
 	Check(store.Take({5, 1, 0}, plan) == Lookup::Ready && plan != nullptr && plan->key == Key {5, 1, 0}, "plan found");
 	plan.reset();
 	Check(store.Take({5, 1, 0}, plan) == Lookup::Missing, "a plan is taken once");
@@ -355,17 +357,20 @@ void TestStoreLateSubmissions() {
 	Check(store.Take({10, 3, 0}, plan) != Lookup::Late, "others are not late");
 }
 
-void TestStoreEvictsOldestAndRemembersIt() {
+void TestStoreEvictsOldestSubmissionsAndRemembersIt() {
 	Store store(3, 1u << 30);
-	for (uint32_t i = 1; i <= 5; ++i) store.Put(MakePlan({1, i, 0}));
-	store.NoteProgress({1, 5});
+	for (uint64_t seq = 1; seq <= 3; ++seq) {
+		store.Put(MakePlan({seq, 1, 0}));
+		store.Put(MakePlan({seq, 2, 0}));
+		store.NoteProgress({seq, UINT32_MAX});
+	}
 	std::unique_ptr<Plan> plan;
-	Check(store.Take({1, 1, 0}, plan) == Lookup::Evicted, "oldest evicted");
-	Check(store.Take({1, 2, 0}, plan) == Lookup::Evicted, "second oldest evicted");
-	Check(store.Take({1, 3, 0}, plan) == Lookup::Ready, "newest three kept");
-	Check(store.Take({1, 5, 0}, plan) == Lookup::Ready, "newest kept");
+	Check(store.Take({1, 1, 0}, plan) == Lookup::Evicted, "oldest submission evicted");
+	Check(store.Take({2, 2, 0}, plan) == Lookup::Evicted, "second oldest evicted");
+	Check(store.Take({3, 1, 0}, plan) == Lookup::Ready, "newest kept");
+	Check(store.Take({3, 2, 0}, plan) == Lookup::Ready, "newest kept, second plan");
 	const auto counters = store.GetCounters();
-	Check(counters.put == 5 && counters.evictions == 2, "counters");
+	Check(counters.put == 6 && counters.evictions == 4, "counters");
 }
 
 void TestStoreByteLimitAndReplacement() {
@@ -373,18 +378,87 @@ void TestStoreByteLimitAndReplacement() {
 	const auto size = big->Bytes();
 	Store store(100, size * 2 + size / 2);
 	store.Put(std::move(big));
-	store.Put(MakePlan({1, 2, 0}));
-	store.Put(MakePlan({1, 3, 0}));
+	store.NoteProgress({1, UINT32_MAX});
+	store.Put(MakePlan({2, 1, 0}));
+	store.NoteProgress({2, UINT32_MAX});
+	store.Put(MakePlan({3, 1, 0}));
+	store.NoteProgress({3, UINT32_MAX});
 	std::unique_ptr<Plan> plan;
-	store.NoteProgress({1, 3});
 	Check(store.Take({1, 1, 0}, plan) == Lookup::Evicted, "byte limit evicts");
-	Check(store.Take({1, 3, 0}, plan) == Lookup::Ready, "newest stays");
+	Check(store.Take({3, 1, 0}, plan) == Lookup::Ready, "newest stays");
 	Store again(100, 1u << 30);
 	again.Put(MakePlan({2, 1, 0}, 1, 0x111));
 	again.Put(MakePlan({2, 1, 0}, 1, 0x222));
-	again.NoteProgress({2, 1});
+	again.NoteProgress({2, UINT32_MAX});
 	Check(again.Take({2, 1, 0}, plan) == Lookup::Ready && plan->shader_hash == 0x222, "a second plan replaces the first");
 	Check(again.GetCounters().queued == 0 && again.GetCounters().queued_bytes == 0, "byte accounting returns to zero");
+}
+
+// Submissions are consumed in any order and resumed; a submission published in several pieces is one bucket.
+void TestStoreOutOfOrderAndPieces() {
+	Store store(100000, 1u << 30);
+	std::unique_ptr<Plan> plan;
+	// Two queues' submissions interleave on kyGpu: 11 is asked about before 10.
+	for (uint32_t i = 1; i <= 200; ++i) store.Put(MakePlan({10, i, 0})); // more than one publish piece
+	store.NoteProgress({10, UINT32_MAX});
+	for (uint32_t i = 1; i <= 100; ++i) store.Put(MakePlan({11, i, 0}));
+	store.NoteProgress({11, UINT32_MAX});
+	for (uint32_t i = 1; i <= 100; ++i) {
+		Check(store.Take({11, i, 0}, plan) == Lookup::Ready && plan->key == Key {11, i, 0}, "submission 11 in order");
+		if (i % 10 == 0) {
+			const uint32_t j = i / 10; // resume 10 in between
+			Check(store.Take({10, j, 0}, plan) == Lookup::Ready && plan->key == Key {10, j, 0}, "submission 10 resumed");
+		}
+	}
+	Check(store.Take({10, 150, 0}, plan) == Lookup::Ready, "skipping ahead inside a submission");
+	Check(store.Take({10, 120, 0}, plan) == Lookup::Ready, "and back");
+	Check(store.Take({10, 120, 0}, plan) == Lookup::Missing, "taken once");
+	Check(store.Take({10, 200, 0}, plan) == Lookup::Ready, "the last plan");
+	// More pieces of an already detached submission are merged.
+	store.Put(MakePlan({12, 1, 0}));
+	store.NoteProgress({12, 1});
+	Check(store.Take({12, 1, 0}, plan) == Lookup::Ready, "first piece");
+	store.Put(MakePlan({12, 2, 0}));
+	store.NoteProgress({12, 2});
+	Check(store.Take({12, 2, 0}, plan) == Lookup::Ready, "a piece published after the bucket was detached");
+}
+
+// A producer thread and a consumer thread: every plan arrives exactly once, with its own key.
+void TestStoreConcurrentHandoff() {
+	Store           store(1u << 20, 1u << 30);
+	constexpr uint64_t Seqs = 300;
+	constexpr uint32_t Draws = 150;
+	std::atomic<bool> producer_done {false};
+	std::thread       producer([&] {
+		for (uint64_t seq = 1; seq <= Seqs; ++seq) {
+			for (uint32_t i = 1; i <= Draws; ++i) {
+				if (i % 7 != 0) store.Put(MakePlan({seq, i, 0})); // some draws have no plan
+				store.NoteProgress({seq, i});
+			}
+			store.NoteProgress({seq, UINT32_MAX});
+		}
+		producer_done = true;
+	});
+	uint64_t ready = 0, wrong = 0;
+	for (uint64_t seq = 1; seq <= Seqs; ++seq) {
+		for (uint32_t i = 1; i <= Draws; ++i) {
+			std::unique_ptr<Plan> plan;
+			Lookup                result;
+			do {
+				result = store.Take({seq, i, 0}, plan);
+			} while (result == Lookup::NotReady);
+			if (result == Lookup::Ready) {
+				++ready;
+				wrong += plan->key != Key {seq, i, 0};
+			} else {
+				wrong += i % 7 != 0; // a missing plan must be a draw that had none
+			}
+		}
+	}
+	producer.join();
+	Check(wrong == 0, "no wrong or lost plan across threads");
+	Check(ready == Seqs * (Draws - Draws / 7), "every plan was taken once");
+	Check(store.GetCounters().queued == 0, "nothing is left");
 }
 
 // ---- statistics ---------------------------------------------------------------------------------
@@ -481,7 +555,7 @@ struct AdoptFixture {
 	}
 	void Add(Key key) {
 		store.Put(MakeReadPlan(key, memory));
-		store.NoteProgress({key.seq, key.ordinal});
+		store.NoteProgress({key.seq, UINT32_MAX});
 	}
 };
 
@@ -551,17 +625,17 @@ void TestDecideWithoutAPlan() {
 void TestDecideAfterEviction() {
 	AdoptFixture f;
 	Store small(2, 1u << 30);
-	// Fill a two-plan store: the oldest falls out and is reported as evicted.
-	small.Put(MakeReadPlan({7, 1, 0}, f.memory));
-	small.Put(MakeReadPlan({7, 2, 0}, f.memory));
-	small.Put(MakeReadPlan({7, 3, 0}, f.memory));
-	small.NoteProgress({7, 3});
+	// Fill a two-plan store: the oldest submission falls out and is reported as evicted.
+	for (uint64_t seq = 7; seq <= 9; ++seq) {
+		small.Put(MakeReadPlan({seq, 1, 0}, f.memory));
+		small.NoteProgress({seq, UINT32_MAX});
+	}
 	std::unique_ptr<Plan> plan;
 	const Inputs inputs {f.user, 0x1000, f.groups};
 	const auto read  = [&](ReadKind k, uint64_t a, std::span<uint32_t> o, bool e) { return f.memory.Read(k, a, o, e); };
 	const auto dirty = [&](uint64_t a, uint64_t b) { return f.memory.Dirty(a, b); };
 	Check(Decide(small, {7, 1, 0}, false, 1, 0xabc, inputs, read, dirty, plan).outcome == Outcome::Evicted, "evicted plan");
-	Check(Decide(small, {7, 3, 0}, false, 1, 0xabc, inputs, read, dirty, plan).Adopted(), "newest plan adopted");
+	Check(Decide(small, {9, 1, 0}, false, 1, 0xabc, inputs, read, dirty, plan).Adopted(), "newest plan adopted");
 }
 
 void TestAdoptIntoSwapsAndKeepsTheOldBuffers() {
@@ -628,8 +702,10 @@ int main() {
 	TestDiffNamesTheDifferingPart();
 	TestStoreReadyTakeAndClassification();
 	TestStoreLateSubmissions();
-	TestStoreEvictsOldestAndRemembersIt();
+	TestStoreEvictsOldestSubmissionsAndRemembersIt();
 	TestStoreByteLimitAndReplacement();
+	TestStoreOutOfOrderAndPieces();
+	TestStoreConcurrentHandoff();
 	TestPercentilesAndReservoir();
 	TestStatsCountOutcomesAndIntervals();
 	TestIntervalMediansNeedEnoughSamples();
