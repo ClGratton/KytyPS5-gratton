@@ -491,6 +491,7 @@ QVariantMap Recommended() {
 	values.insert(QStringLiteral("elide_barriers"), true);
 	values.insert(QStringLiteral("known_fills"), true);
 	values.insert(QStringLiteral("clean_guest_reads"), true);
+	values.insert(QStringLiteral("srt_plans"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);
