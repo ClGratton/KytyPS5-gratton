@@ -11,10 +11,13 @@
 // poison on ("taint"), so a descriptor table built by a compute pass from a skipped draw's output is
 // still attributed to the skipped draw.
 //
-// Nothing here changes what the emulator does: it is the evidence for a dependency-aware skip rule
-// (what an off-by-default skip could safely drop). Pure data structure with one mutex, so it can be
-// fed from the GPU thread, the lookahead thread and guest threads; unit tested in
-// tests/SkipDependenciesTests.cpp.
+// Without --skip-guard nothing here changes what the emulator does: it is the evidence for a
+// dependency-aware skip rule. With --skip-guard the tracker also learns (see "Guard" below): a
+// hard-class reader (descriptor-table walk, indirect arguments, CP DMA, CPU readback, index / vertex
+// data) hitting a skipped draw's output marks that output's ranges unsafe, and later draws that
+// would write an unsafe range wait for their pipeline instead of being skipped. Pure data structure
+// with one mutex, so it can be fed from the GPU thread, the lookahead thread and guest threads;
+// unit tested in tests/SkipDependenciesTests.cpp.
 
 #include <algorithm>
 #include <array>
@@ -51,6 +54,54 @@ struct Range {
 	return outer.address <= inner.address && i_end <= o_end;
 }
 
+[[nodiscard]] constexpr uint64_t RangeEnd(const Range& r) {
+	return r.address > UINT64_MAX - r.size ? UINT64_MAX : r.address + r.size;
+}
+
+// A sorted set of disjoint guest ranges (adjacent and overlapping ranges merge). It is capped: past
+// kMaxRanges disjoint ranges the set is "saturated" and answers true to every overlap query, which
+// is the safe direction for a set of ranges a skipped draw must not write.
+class RangeSet {
+public:
+	static constexpr size_t kMaxRanges = 4096;
+
+	// Adds `r`; true when some part of it was not covered before.
+	bool Add(const Range& r) {
+		if (r.size == 0) return false;
+		const uint64_t b = r.address, e = RangeEnd(r);
+		auto it = std::lower_bound(m_ranges.begin(), m_ranges.end(), b,
+		                           [](const Range& x, uint64_t v) { return RangeEnd(x) < v; });
+		if (it != m_ranges.end() && it->address <= b && RangeEnd(*it) >= e) return false;
+		uint64_t nb = b, ne = e;
+		const auto first = it;
+		while (it != m_ranges.end() && it->address <= e) {
+			nb = std::min(nb, it->address);
+			ne = std::max(ne, RangeEnd(*it));
+			++it;
+		}
+		it = m_ranges.erase(first, it);
+		m_ranges.insert(it, Range {nb, ne - nb});
+		if (m_ranges.size() > kMaxRanges) m_saturated = true;
+		return true;
+	}
+
+	[[nodiscard]] bool Overlaps(const Range& r) const {
+		if (r.size == 0) return false;
+		if (m_saturated) return true;
+		const uint64_t b = r.address;
+		const auto it = std::lower_bound(m_ranges.begin(), m_ranges.end(), b,
+		                                 [](const Range& x, uint64_t v) { return RangeEnd(x) <= v; });
+		return it != m_ranges.end() && it->address < RangeEnd(r);
+	}
+
+	[[nodiscard]] size_t Size() const { return m_ranges.size(); }
+	[[nodiscard]] bool   Saturated() const { return m_saturated; }
+
+private:
+	std::vector<Range> m_ranges;
+	bool               m_saturated = false;
+};
+
 enum class ReadKind : uint8_t {
 	SampledImage,  // an image sampled or loaded by a draw or dispatch
 	BufferRead,    // a buffer a shader reads
@@ -79,6 +130,21 @@ inline constexpr size_t kSinks = 4;
 		case ReadKind::IndirectArgs: return Sink::Table;
 		case ReadKind::CpuRead: return Sink::Cpu;
 		default: return Sink::Data;
+	}
+}
+
+// The readers --skip-guard learns from: the data they read decides what later passes do (descriptor
+// tables, draw arguments, geometry, DMA'd or CPU-read data), so a stale value is not just a wrong
+// pixel. Sampled images (the visual effect skip accepts) and buffer bindings (binding extents
+// over-approximate; a table built from such a read is caught through the taint) are not hard.
+[[nodiscard]] constexpr bool IsHardRead(ReadKind kind) {
+	switch (kind) {
+		case ReadKind::ScalarWalk:
+		case ReadKind::IndirectArgs:
+		case ReadKind::IndexOrVertex:
+		case ReadKind::Dma:
+		case ReadKind::CpuRead: return true;
+		default: return false;
 	}
 }
 
@@ -117,6 +183,12 @@ struct Hit {
 	std::array<uint32_t, kMaxRoots> roots {};
 	uint64_t root_vs = 0, root_ps = 0; // shader pair of the first root
 	uint32_t depth = 0;                // 0 = direct output of a skipped draw
+	// --skip-guard learning: this hit was a hard-class read.
+	bool     hard         = false;
+	bool     newly_unsafe = false; // it made at least one range unsafe (first hard hit of that range)
+	uint32_t unsafe_added = 0;     // ranges newly unsafe because of it
+	Range    unsafe_first {};      // the first of them
+	uint32_t new_misses   = 0;     // skip events newly known to have been read by a hard reader
 };
 
 struct RootStats {
@@ -126,6 +198,7 @@ struct RootStats {
 	std::array<uint32_t, kSinks> dependent {}; // skip events that had a reader of at least this sink
 	std::array<uint32_t, kReadKinds> reads {};
 	std::array<uint32_t, kReadKinds> transitive_reads {};
+	uint32_t misses = 0; // skip events a hard-class reader read before the pipeline was ready
 	int64_t first_ns = 0, ready_ns = 0;
 	bool resolved = false;
 };
@@ -138,8 +211,50 @@ struct Totals {
 	std::array<uint64_t, kSinks> dependent {}; // skip events with a reader of at least this sink
 };
 
+// --skip-guard bookkeeping.
+struct GuardCounts {
+	uint64_t hard_ranges     = 0; // ranges made unsafe by a hard-class reader
+	uint64_t bda_ranges      = 0; // ... by a shader with 64-bit loads that read poison
+	uint64_t misses          = 0; // skip events a hard reader read afterwards (correctness misses)
+	uint64_t misses_derived  = 0; // ... of which seen through a taint (a pass derived data from them)
+	uint64_t hard_roots      = 0; // roots with at least one miss
+	std::array<uint64_t, kReadKinds> hard_hits {}; // hard reads that hit poison, by kind
+};
+
 class Tracker {
 public:
+	// --skip-guard: learn unsafe ranges. `bda` also treats a shader with 64-bit address loads that
+	// reads poison as a possible hard reader (the blind class: its loads are invisible).
+	void SetGuard(bool enabled, bool bda) {
+		std::lock_guard lock(m_mutex);
+		m_guard     = enabled;
+		m_guard_bda = enabled && bda;
+	}
+	[[nodiscard]] bool GuardEnabled() const {
+		std::lock_guard lock(m_mutex);
+		return m_guard;
+	}
+
+	// True when a draw writing `writes` must wait for its pipeline instead of being skipped.
+	[[nodiscard]] bool MustWait(std::span<const Range> writes) const {
+		std::lock_guard lock(m_mutex);
+		if (!m_guard) return false;
+		return std::ranges::any_of(writes, [&](const Range& w) { return m_unsafe.Overlaps(w); });
+	}
+
+	[[nodiscard]] GuardCounts GetGuardCounts() const {
+		std::lock_guard lock(m_mutex);
+		return m_guard_counts;
+	}
+	[[nodiscard]] size_t UnsafeRangeCount() const {
+		std::lock_guard lock(m_mutex);
+		return m_unsafe.Size();
+	}
+	[[nodiscard]] bool UnsafeSaturated() const {
+		std::lock_guard lock(m_mutex);
+		return m_unsafe.Saturated();
+	}
+
 	[[nodiscard]] bool Active() const { return m_active.load(std::memory_order_relaxed) != 0; }
 
 	// A draw of pipeline `key` (shader pair vs/ps) was dropped; `writes` is what it would have written.
@@ -233,9 +348,37 @@ public:
 				(e.root ? r->stats.reads : r->stats.transitive_reads)[static_cast<size_t>(kind)]++;
 				MarkDependent(*r, SinkOf(kind));
 			}
+			if (m_guard && IsHardRead(kind)) LearnLocked(e, range, kind, hit);
 			hits.push_back(hit);
 		}
 		return any;
+	}
+
+	// --skip-guard, the blind class: a shader with 64-bit address loads (or computed stores) read the
+	// poison `hits`, and what it dereferences through addresses is invisible to this tracker. The
+	// outputs of the roots it hit become unsafe. Not a miss: nothing is known to have been read.
+	// Returns the ranges newly made unsafe.
+	std::vector<Range> NoteBdaSuspect(std::span<const Hit> hits) {
+		std::vector<Range> added;
+		std::lock_guard lock(m_mutex);
+		if (!m_guard_bda) return added;
+		std::vector<uint32_t> roots;
+		for (const auto& h: hits) {
+			for (uint32_t i = 0; i < h.root_count; i++) {
+				if (std::ranges::find(roots, h.roots[i]) == roots.end()) roots.push_back(h.roots[i]);
+			}
+		}
+		for (const auto id: roots) {
+			const auto* r = FindRootLocked(id);
+			if (r == nullptr) continue;
+			for (const auto& range: r->ranges) {
+				if (m_unsafe.Add(range)) {
+					added.push_back(range);
+					m_guard_counts.bda_ranges++;
+				}
+			}
+		}
+		return added;
 	}
 
 	// A pass that read poison wrote `writes`: they derive from the same roots (a taint entry per
@@ -335,6 +478,7 @@ private:
 		std::vector<Range>    ranges;
 		std::vector<uint32_t> roots;
 		std::array<uint32_t, kSinks> marked {};
+		uint32_t              hard_marked = 0; // skip events already counted as misses
 	};
 
 	static bool SameRanges(const std::vector<Range>& a, std::span<const Range> b) {
@@ -352,6 +496,42 @@ private:
 		return nullptr;
 	}
 
+	// A hard-class read hit entry `e`: the roots' output ranges it touched (all of them, for a
+	// taint: the read range is not the draw's output) become unsafe, and skip events that had not
+	// yet been counted as read by a hard reader become misses.
+	void LearnLocked(const Entry& e, const Range& range, ReadKind kind, Hit& hit) {
+		hit.hard = true;
+		m_guard_counts.hard_hits[static_cast<size_t>(kind)]++;
+		const auto add = [&](const Range& r) {
+			if (m_unsafe.Add(r)) {
+				if (hit.unsafe_added++ == 0) hit.unsafe_first = r;
+				m_guard_counts.hard_ranges++;
+			}
+		};
+		if (e.root) {
+			for (const auto& r: e.ranges) {
+				if (Overlaps(r, range)) add(r);
+			}
+		}
+		for (const auto id: e.roots) {
+			auto* root = FindRootLocked(id);
+			if (root == nullptr) continue;
+			if (!e.root) {
+				for (const auto& r: root->ranges) add(r);
+			}
+			const uint32_t fresh = root->stats.skips - root->hard_marked;
+			if (fresh != 0) {
+				if (root->hard_marked == 0) m_guard_counts.hard_roots++;
+				root->hard_marked = root->stats.skips;
+				root->stats.misses += fresh;
+				hit.new_misses += fresh;
+				m_guard_counts.misses += fresh;
+				if (!e.root) m_guard_counts.misses_derived += fresh;
+			}
+		}
+		hit.newly_unsafe = hit.unsafe_added != 0;
+	}
+
 	// Every skip event so far had a reader of this sink class (and the classes below it).
 	static void MarkDependent(Entry& root, Sink sink) {
 		for (size_t k = 0; k <= static_cast<size_t>(sink); k++) {
@@ -364,6 +544,10 @@ private:
 	std::vector<Entry>                                     m_entries;
 	std::set<std::tuple<uint32_t, uint8_t, uint64_t>>      m_seen;
 	Totals                                                 m_totals;
+	bool                                                   m_guard     = false;
+	bool                                                   m_guard_bda = false;
+	RangeSet                                               m_unsafe;
+	GuardCounts                                            m_guard_counts;
 	uint32_t                                               m_next_id = 1;
 	std::atomic<uint32_t>                                  m_active {0};
 };
