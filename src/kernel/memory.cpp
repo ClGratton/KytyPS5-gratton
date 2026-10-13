@@ -13,6 +13,7 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "kernel/eventQueue.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 
@@ -1365,6 +1366,11 @@ static void PrintMemStats(const char* tag) {
 	    static_cast<unsigned long long>(MiB(get(g_mem_stats.punch_resident_bytes))),
 	    static_cast<unsigned long long>(get(g_mem_stats.punch_failures)));
 	Log::WriteToConsoleAndLog(text);
+	char equeue[160];
+	std::snprintf(equeue, sizeof(equeue), "[mem-stats %s t=%llds] equeue coalesced_triggers %llu\n", tag,
+	              static_cast<long long>(seconds),
+	              static_cast<unsigned long long>(Libs::LibKernel::EventQueue::KernelCoalescedTriggerCount()));
+	Log::WriteToConsoleAndLog(equeue);
 }
 
 static void StartMemStats() {
