@@ -190,9 +190,89 @@ static size_t ReadFileIntoMemory(FILE* f, void* data, size_t size) {
 	return w + ReadFileViaBounceBuffer(f, static_cast<uint8_t*>(data) + w, size - w);
 }
 
+// Debug aid: KYTY_SYSFILE_VERIFY_READS=1 compares the destination with the file right after every
+// read into it (a second pread of the same range) and logs a mismatch: bytes that the host or the
+// guest memory system changed under the read, or that a short-read repair got wrong. The first 16
+// mismatches are printed with the file, the offset and the page-level shape of the damage.
+static bool VerifyReadsEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SYSFILE_VERIFY_READS");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+
+static std::atomic<uint64_t> g_verify_read_checked {0};
+static std::atomic<uint64_t> g_verify_read_mismatch {0};
+
+uint64_t SysFileReadVerifyMismatchCount() {
+	return g_verify_read_mismatch.load(std::memory_order_relaxed);
+}
+
+static void VerifyReadAgainstFile(FILE* f, const void* data, size_t size, bool repaired) {
+	if (size == 0) {
+		return;
+	}
+	const off_t end = ftello(f);
+	if (end < 0 || static_cast<size_t>(end) < size) {
+		return;
+	}
+	const off_t   start = end - static_cast<off_t>(size);
+	const int     fd    = fileno(f);
+	thread_local std::vector<uint8_t> expect;
+	constexpr size_t chunk = size_t {1} << 20u;
+	expect.resize(std::min(chunk, size));
+	g_verify_read_checked.fetch_add(1, std::memory_order_relaxed);
+	size_t bad_bytes = 0, bad_pages = 0, first_bad = SIZE_MAX, zero_bad = 0;
+	size_t last_page_bad = SIZE_MAX;
+	for (size_t done = 0; done < size;) {
+		const size_t step = std::min(chunk, size - done);
+		const ssize_t got = pread(fd, expect.data(), step, start + static_cast<off_t>(done));
+		if (got <= 0) {
+			return;
+		}
+		const auto* have = static_cast<const uint8_t*>(data) + done;
+		for (size_t i = 0; i < static_cast<size_t>(got); i++) {
+			if (have[i] != expect[i]) {
+				bad_bytes++;
+				zero_bad += have[i] == 0 ? 1 : 0;
+				if (first_bad == SIZE_MAX) {
+					first_bad = done + i;
+				}
+				const size_t page = (reinterpret_cast<uintptr_t>(have + i) >> 12u);
+				if (page != last_page_bad) {
+					bad_pages++;
+					last_page_bad = page;
+				}
+			}
+		}
+		done += static_cast<size_t>(got);
+	}
+	if (bad_bytes == 0) {
+		return;
+	}
+	const auto index = g_verify_read_mismatch.fetch_add(1, std::memory_order_relaxed);
+	if (index < 16) {
+		char path[64];
+		char target[512] = {};
+		snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+		const auto length = readlink(path, target, sizeof(target) - 1);
+		printf("SysFileRead: VERIFY MISMATCH #%" PRIu64 ": %zu of %zu bytes differ from the file (%zu pages, "
+		       "%zu now zero), first at +%zu, offset %jd, dest %p, repaired=%d, file %s\n",
+		       index + 1, bad_bytes, size, bad_pages, zero_bad, first_bad, static_cast<intmax_t>(start),
+		       data, repaired ? 1 : 0, length > 0 ? target : "?");
+		std::fflush(stdout);
+	}
+}
+
 void SysFileRead(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read) {
 	if (f.type == SYS_FILE_FILE) {
+		const uint64_t fallbacks_before = g_read_fallback_count.load(std::memory_order_relaxed);
 		const size_t w = ReadFileIntoMemory(f.f, data, size);
+		if (VerifyReadsEnabled()) {
+			VerifyReadAgainstFile(f.f, data, w,
+			                      g_read_fallback_count.load(std::memory_order_relaxed) != fallbacks_before);
+		}
 		if (bytes_read != nullptr) {
 			*bytes_read = static_cast<uint32_t>(w);
 		}

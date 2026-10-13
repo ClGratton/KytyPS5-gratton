@@ -969,7 +969,7 @@ if(BUILD_TESTING)
 	add_test(NAME hle_trace COMMAND $<TARGET_FILE:hle_trace_tests>)
 	add_test(NAME sys_file_read_chaos COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_chaos PROPERTIES
-		ENVIRONMENT "KYTY_SYSFILE_CHAOS_EFAULT=1000")
+		ENVIRONMENT "KYTY_SYSFILE_CHAOS_EFAULT=1000;KYTY_SYSFILE_VERIFY_READS=1")
 	add_test(NAME sys_file_read_chaos_no_fallback COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_chaos_no_fallback PROPERTIES
 		ENVIRONMENT "KYTY_SYSFILE_CHAOS_EFAULT=1000;KYTY_SYSFILE_NO_READ_FALLBACK=1")

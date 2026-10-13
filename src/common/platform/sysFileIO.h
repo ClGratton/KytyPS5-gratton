@@ -27,6 +27,8 @@ struct sys_dir_entry_t {
 // Linux: number of reads that hit a short read into write-protected guest memory and were
 // finished through a host buffer (see SysFileRead). Always 0 elsewhere.
 uint64_t    SysFileReadFallbackCount();
+// Linux, KYTY_SYSFILE_VERIFY_READS=1: reads whose destination differed from the file right after the read.
+uint64_t    SysFileReadVerifyMismatchCount();
 
 void        SysFileRead(void* data, uint32_t size, sys_file_t& f,
                         uint32_t* bytes_read = nullptr); // NOLINT(google-runtime-references)

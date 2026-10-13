@@ -90,6 +90,8 @@ int main() {
 				Check(got == file_size - 4096, "the fallback completes an injected short read");
 				Check(std::memcmp(g_region + offset, content.data(), got) == 0,
 				      "the completed read delivers the right bytes");
+				Check(SysFileReadVerifyMismatchCount() == 0,
+				      "the independent re-read (KYTY_SYSFILE_VERIFY_READS) finds no difference");
 			}
 		}
 		Check(SysFileReadFallbackCount() == 3, "every injected failure was counted");

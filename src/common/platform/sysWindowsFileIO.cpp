@@ -68,6 +68,10 @@ uint64_t SysFileReadFallbackCount() {
 	return 0;
 }
 
+uint64_t SysFileReadVerifyMismatchCount() {
+	return 0;
+}
+
 void SysFileRead(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read) {
 	if (f.type == SYS_FILE_FILE) {
 		DWORD w = 0;
