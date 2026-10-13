@@ -5,6 +5,7 @@
 #include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
 #include "common/hleTrace.h"
+#include "common/runtimeToggles.h"
 
 #include <algorithm>
 #include <memory>
@@ -21,6 +22,7 @@ void Initialize() {
 }
 
 void Shutdown() {
+	Common::RuntimeToggles::Stop();
 	g_config.reset();
 }
 
@@ -45,6 +47,24 @@ void Load(const ConfigOptions& cfg) {
 	    .gpu_trace         = cfg.bench_gpu_trace,
 	    .render_csv        = cfg.bench_render_csv,
 	});
+	Common::RuntimeToggles::Start(cfg.toggle_control.empty() ? std::string {} : cfg.toggle_control.string());
+}
+
+// The flags a harness may flip while the emulator runs (common/runtimeToggles.h). A flag is listed
+// here only after every consumer was checked to read it per call; the readers below use Read().
+// Correctness flags are never listed.
+void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
+	registry.Register("submit-coalesce", &g_config->submit_coalesce, false);
+	registry.Register("elide-barriers", &g_config->elide_barriers, false);
+	registry.Register("bda-sync-skip", &g_config->bda_sync_skip, false);
+	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
+	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
+	// the middle of a submission costs plans (misses), never a wrong draw.
+	registry.Register("srt-plans", &g_config->srt_plans, true);
+	// The second queue exists only when the flag was on at start-up.
+	registry.Register("readback-queue", &g_config->readback_queue, true);
+	// The trim thread starts only when the flag was on at start-up and skips its pass while off.
+	registry.Register("heap-trim", &g_config->heap_trim, true);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -72,11 +92,11 @@ bool GcClockFrames() {
 }
 
 bool BdaSyncSkip() {
-	return g_config->bda_sync_skip;
+	return Common::RuntimeToggles::Read(g_config->bda_sync_skip);
 }
 
 bool SubmitCoalesceEnabled() {
-	return g_config->submit_coalesce;
+	return Common::RuntimeToggles::Read(g_config->submit_coalesce);
 }
 
 uint32_t GetSubmitCoalesceMax() {
@@ -100,7 +120,7 @@ bool GetPipelineVariantsReplay() {
 }
 
 bool ElideBarriersEnabled() {
-	return g_config->elide_barriers;
+	return Common::RuntimeToggles::Read(g_config->elide_barriers);
 }
 
 bool KnownFillsEnabled() {
@@ -112,7 +132,7 @@ bool SrtPlanShadowEnabled() {
 }
 
 bool SrtPlansEnabled() {
-	return g_config->srt_plans && g_config->pipeline_lookahead;
+	return Common::RuntimeToggles::Read(g_config->srt_plans) && g_config->pipeline_lookahead;
 }
 
 bool DrawKeyCacheEnabled() {
@@ -128,7 +148,7 @@ bool DrawKeyVerifyEnabled() {
 }
 
 bool CleanGuestReadsEnabled() {
-	return g_config->clean_guest_reads;
+	return Common::RuntimeToggles::Read(g_config->clean_guest_reads);
 }
 
 bool GpuIndirectDrawsEnabled() {
@@ -136,7 +156,7 @@ bool GpuIndirectDrawsEnabled() {
 }
 
 bool ReadbackQueueEnabled() {
-	return g_config->readback_queue;
+	return Common::RuntimeToggles::Read(g_config->readback_queue);
 }
 
 bool GetLookaheadVerify() {
@@ -365,7 +385,7 @@ bool UploadRingRebarEnabled() {
 }
 
 bool HeapTrimEnabled() {
-	return g_config != nullptr && g_config->heap_trim;
+	return g_config != nullptr && Common::RuntimeToggles::Read(g_config->heap_trim);
 }
 
 bool MemHoleReadsEnabled() {
