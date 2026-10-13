@@ -35,11 +35,9 @@ struct BufferAddress {
 	uint32_t byte;
 };
 
-// `hoisted`: a generic variant's index shift, index count and index mask, derived at function entry.
 BufferAddress CalculateBufferAddress(EmitterState& state, uint32_t index, uint32_t offset,
                                      uint32_t soffset, uint32_t immediate, uint32_t stride,
-                                     uint32_t swizzle, uint32_t index_stride,
-                                     const EmitterState::DynamicBufferFields* hoisted = nullptr) {
+                                     uint32_t swizzle, uint32_t index_stride) {
 	const auto zero = ConstantU32(state, 0);
 	const auto one  = ConstantU32(state, 1);
 	const auto add = [&](uint32_t lhs, uint32_t rhs) {
@@ -57,16 +55,15 @@ BufferAddress CalculateBufferAddress(EmitterState& state, uint32_t index, uint32
 	}
 	auto address = add(mul(index, stride), offset);
 	if (swizzle != 0u) {
-		const auto index_shift = hoisted != nullptr ? hoisted->index_shift
-		    : Binary(state, spv::OpIAdd, TypeU32(state), index_stride, ConstantU32(state, 3));
-		const auto indices = hoisted != nullptr ? hoisted->indices
-		    : Binary(state, spv::OpShiftLeftLogical, TypeU32(state), ConstantU32(state, 1), index_shift);
+		const auto index_shift =
+		    Binary(state, spv::OpIAdd, TypeU32(state), index_stride, ConstantU32(state, 3));
+		const auto indices = Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
+		                            ConstantU32(state, 1), index_shift);
 		const auto index_msb =
 		    Binary(state, spv::OpShiftRightLogical, TypeU32(state), index, index_shift);
 		const auto index_lsb =
 		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), index,
-		           hoisted != nullptr ? hoisted->index_mask
-		               : Binary(state, spv::OpISub, TypeU32(state), indices, ConstantU32(state, 1)));
+		           Binary(state, spv::OpISub, TypeU32(state), indices, ConstantU32(state, 1)));
 		const auto offset_msb =
 		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), offset, ConstantU32(state, ~3u));
 		const auto offset_lsb =
@@ -87,11 +84,11 @@ uint32_t BufferLane(EmitterState& state) {
 uint32_t BufferByteAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
 	auto&      state  = ctx.state;
 	if (state.program.info.generic) {
-		// Generic variant: stride, swizzle and index stride come from the descriptor, through the
-		// dynamic section of the shader data. The arithmetic is the one the constants fold from.
+		// Generic variant: the stride comes from the descriptor, through the dynamic section of the
+		// shader data; the address is linear (a swizzled buffer does not match the variant).
 		const auto& f = DynamicBufferFieldsOf(state, mem.resource);
 		return CalculateBufferAddress(state, ctx.Arg(inst, 1), ctx.Arg(inst, 2), ctx.Arg(inst, 3),
-		                              mem.offset, f.stride, f.swizzle, 0, &f)
+		                              mem.offset, f.stride, 0, 0)
 		    .byte;
 	}
 	const auto packed = StorageBufferPackedStride(state, mem);

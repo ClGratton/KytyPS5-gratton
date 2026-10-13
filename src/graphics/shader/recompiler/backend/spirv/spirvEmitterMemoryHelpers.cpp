@@ -124,8 +124,8 @@ void EmitDynamicWords(EmitterState& state) {
 	for (uint32_t i = 0; i < bindings.dynamic_dwords; ++i) {
 		state.dynamic_words[i] = EmitShaderDataDwordLoad(state, bindings.dynamic_dword + i);
 	}
-	// The per-buffer values every access would otherwise derive again (stride, swizzle, index shift,
-	// out-of-bounds mode): a generic variant pays for them once.
+	// The per-buffer values every access would otherwise derive again (stride, out-of-bounds mode):
+	// a generic variant pays for them once.
 	state.dynamic_buffer_fields.assign(bindings.dynamic_dwords, {});
 	for (const auto& buffer: state.program.info.buffers) {
 		const auto index = buffer.descriptor_index;
@@ -134,15 +134,6 @@ void EmitDynamicWords(EmitterState& state) {
 		auto&      f    = state.dynamic_buffer_fields[index];
 		f.stride        = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
             state, word, ConstantU32(state, 0u), ConstantU32(state, 14u));
-		const auto index_stride = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
-		    state, word, ConstantU32(state, 16u), ConstantU32(state, 2u));
-		f.swizzle = Binary(
-		    state, spv::OpINotEqual, TypeBool(state),
-		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), word, ConstantU32(state, 1u << 14u)),
-		    ConstantU32(state, 0u));
-		f.index_shift = Binary(state, spv::OpIAdd, TypeU32(state), index_stride, ConstantU32(state, 3));
-		f.indices = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), ConstantU32(state, 1), f.index_shift);
-		f.index_mask = Binary(state, spv::OpISub, TypeU32(state), f.indices, ConstantU32(state, 1));
 		f.zero_oob = Binary(
 		    state, spv::OpINotEqual, TypeBool(state),
 		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), word, ConstantU32(state, IR::GenericBufferZeroOobBit)),

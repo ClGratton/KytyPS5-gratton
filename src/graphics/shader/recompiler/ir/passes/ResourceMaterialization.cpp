@@ -1337,6 +1337,7 @@ const char* GenericMismatchName(GenericMismatch mismatch) {
 		case GenericMismatch::ImageCount: return "image_count";
 		case GenericMismatch::BufferIndirect: return "buffer_indirect";
 		case GenericMismatch::BufferAddTid: return "buffer_add_tid";
+		case GenericMismatch::BufferSwizzle: return "buffer_swizzle";
 		case GenericMismatch::ImageIndirect: return "image_indirect";
 		case GenericMismatch::ImageDimension: return "image_dimension";
 		case GenericMismatch::ImageClass: return "image_class";
@@ -1463,6 +1464,11 @@ GenericMismatch MatchGenericSpecialization(const ResourceSpecialization& generic
 	for (const auto& buffer: live.buffers) {
 		if (buffer.indirect_root != BufferResource::NoIndirectBuffer) return GenericMismatch::BufferIndirect;
 		if ((buffer.packed_stride & GenericBufferAddTidBit) != 0u) return GenericMismatch::BufferAddTid;
+		// The swizzled (tiled) address calculation is about twenty operations more per access, on
+		// every access of every dispatch, for a descriptor bit no dispatch of the audited game sets.
+		if ((buffer.packed_stride & GenericBufferSwizzleBit) != 0u && (buffer.packed_stride & 0x3fffu) != 0u) {
+			return GenericMismatch::BufferSwizzle;
+		}
 	}
 	// The originals come first; the members of a numeric-class group are appended after them.
 	size_t originals = generic.images.size();

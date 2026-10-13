@@ -115,9 +115,10 @@ struct EmitterState {
 	// Generic variants: the dynamic section of the shader data, loaded once at function entry.
 	std::vector<uint32_t>                            dynamic_words;
 	// What the address arithmetic of a generic variant takes from each buffer's dynamic word,
-	// derived once at function entry (indexed like the dynamic words).
+	// derived once at function entry (indexed like the dynamic words). A generic variant has no
+	// swizzled address calculation: a dispatch with a swizzled buffer does not match it.
 	struct DynamicBufferFields {
-		uint32_t stride = 0, swizzle = 0, index_shift = 0, indices = 0, index_mask = 0, zero_oob = 0;
+		uint32_t stride = 0, zero_oob = 0;
 	};
 	std::vector<DynamicBufferFields>                 dynamic_buffer_fields;
 	// Storage-buffer accesses left to robustBufferAccess2 (--spirv-robust-bounds).

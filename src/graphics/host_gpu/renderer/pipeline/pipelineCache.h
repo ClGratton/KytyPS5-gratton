@@ -319,7 +319,7 @@ public:
 		std::atomic<uint64_t> gfx_hit_ready {0};       // first draw found the pipeline finished
 		std::atomic<uint64_t> gfx_hit_inflight {0};    // first draw waited for it
 		// --generic-compute. A dispatch is counted once, when its program is found or built.
-		static constexpr size_t kGenericMissKinds = 16;
+		static constexpr size_t kGenericMissKinds = 24;
 		std::atomic<uint64_t> generic_jobs {0};        // generic load jobs queued at registration
 		std::atomic<uint64_t> generic_built {0};       // generic permutations published
 		std::atomic<uint64_t> generic_refused {0};     // binaries whose variant cannot be built

@@ -40048,11 +40048,10 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
   Require(name, "pipeline hit", pipeline.pipeline != nullptr && load.pipeline_hit_ready == 1,
           "the first dispatch did not find the pipeline built at registration");
 
-  // Another stride, a zero stride with out-of-bounds mode 0 and a swizzled written buffer: same program.
+  // Another stride, a zero stride with out-of-bounds mode 0 and a written buffer with a stride the
+  // first one did not have: same program.
   ShaderComputeInputInfo second_input{};
   Describe(0, 4, true, false);
-  regs.cs_user_sgpr.value[13] |= (1u << 31u); // swizzle enable
-  regs.cs_user_sgpr.value[15] |= (2u << 21u); // index stride
   const auto second = cache.GetComputeProgram(regs, {}, second_input);
   Require(name, "same program", second.id == first.id && load.generic_hits == 2 &&
               load.compute_ondemand == 0,
@@ -40060,7 +40059,7 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
   const auto &data2 = second_input.stage.resources->generic_data;
   Require(name, "words of dispatch 2",
           data2.size() >= 2 && data2[0] == ShaderRecompiler::IR::GenericBufferZeroOobBit &&
-              data2[1] == (4u | (1u << 14u) | (2u << 16u)),
+              data2[1] == 4u,
           "the dynamic words do not carry the stride and the out-of-bounds mode");
   Require(name, "same pipeline", cache.GetComputePipeline(second_input, second).pipeline == pipeline.pipeline,
           "the pipeline was built twice");
@@ -40088,6 +40087,20 @@ void CheckGenericCompute(VulkanHarness &vulkan) {
               load.generic_hits == 3 && load.generic_dispatches == 4 && load.generic_reads_queue == 0 &&
               load.compute_ondemand == 1,
           "an async-queue dispatch of a queue-independent binary did not use the generic program");
+
+  // A swizzled (tiled) buffer is a hard field: the variant has no tiled address calculation.
+  ShaderComputeInputInfo swizzled_input{};
+  Describe(16, 16, false, false);
+  regs.cs_user_sgpr.value[13] |= (1u << 31u); // swizzle enable
+  regs.cs_user_sgpr.value[15] |= (2u << 21u); // index stride
+  const auto swizzled = cache.GetComputeProgram(regs, {}, swizzled_input);
+  Require(name, "swizzle falls back",
+          swizzled.id != first.id && !swizzled_input.stage.program->info.generic &&
+              load.generic_hits == 3 && load.compute_ondemand == 2 &&
+              load.generic_miss[static_cast<size_t>(ShaderRecompiler::IR::GenericMismatch::BufferSwizzle)] == 1,
+          "a dispatch with a swizzled buffer did not compile its own program");
+  regs.cs_user_sgpr.value[13] &= ~(1u << 31u);
+  regs.cs_user_sgpr.value[15] &= ~(3u << 21u);
 
   // A binary that reads the queue (S_GETREG of HW_ID2) is noted: its program says which queue it was
   // built for, so a dispatch on the other queue would not share it.
