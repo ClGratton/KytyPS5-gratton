@@ -197,6 +197,7 @@ void PipelineLookahead::Process(Item& item) {
 		m_stats.items_late.fetch_add(1, std::memory_order_relaxed);
 	}
 	Common::Speculation::SetItemWatch(&Common::GuestRetirement::Global(), item.queue_id, item.seq);
+	SkipDeps::NoteLookaheadItem(item.seq, m_current_late);
 	m_item_dwords.store(ItemDwords(item), std::memory_order_relaxed);
 	m_item_kind.store(static_cast<uint32_t>(item.kind), std::memory_order_relaxed);
 	m_item_start_ns.store(t0, std::memory_order_relaxed);
@@ -250,6 +251,7 @@ struct PlanProgress {
 void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	PlanProgress plan_progress;
 	m_stats.draws.fetch_add(1, std::memory_order_relaxed);
+	SkipDeps::NoteLookaheadDraw(m_current_seq);
 	if (m_current_late || Common::Speculation::ItemStale() ||
 	    (Config::GetPipelineLookaheadKinds() & 1u) == 0) {
 		return;

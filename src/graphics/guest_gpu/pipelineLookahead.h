@@ -12,6 +12,7 @@
 // lookahead cannot answer exactly is dropped, and a wrong request only costs worker time.
 
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
+#include "graphics/host_gpu/renderer/skipDepsHooks.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -49,7 +50,10 @@ public:
 	// Guest thread (under the GuestGpu queue lock): cheap, only queues the copy.
 	void Push(Item item);
 	// GPU thread: the highest submission sequence number the GPU thread has started executing.
-	void NoteStarted(uint64_t seq) { m_started_seq.store(seq, std::memory_order_release); }
+	void NoteStarted(uint64_t seq) {
+		m_started_seq.store(seq, std::memory_order_release);
+		SkipDeps::NoteGpuStarted(seq);
+	}
 	// Stops the thread (waits briefly; a parked thread is abandoned). Idempotent.
 	void Stop();
 

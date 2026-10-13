@@ -9,6 +9,7 @@
 #include "common/benchInstrument.h"
 #include "graphics/host_gpu/renderer/skipDependencies.h"
 
+#include <atomic>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -62,6 +63,39 @@ void NoteScalarRead(uint64_t address, uint64_t bytes);
 // The materialisation of `shader_hash` produced something that is not a descriptor.
 void NoteBadDescriptor(uint64_t shader_hash, const char* what, uint32_t slot,
                        const uint32_t* words, uint32_t word_count);
+
+// Lookahead / GPU-thread progress (--pipeline-lookahead), for the bad-descriptor rows: the lookahead
+// item (submission sequence) being scanned, the highest sequence the GPU thread has started, and how
+// many draws the lookahead scanned after the GPU thread had started (or passed) their submission.
+struct LookaheadProgress {
+	std::atomic<uint64_t> item_seq {0};
+	std::atomic<uint64_t> gpu_started {0};
+	std::atomic<uint64_t> draws {0};
+	std::atomic<uint64_t> draws_gpu_started {0}; // the GPU thread had started this draw's submission
+	std::atomic<uint64_t> draws_gpu_passed {0};  // ... and has started a later one
+	std::atomic<uint64_t> items {0};
+	std::atomic<uint64_t> items_gpu_started_at_start {0};
+};
+[[nodiscard]] LookaheadProgress& Progress();
+inline void NoteLookaheadItem(uint64_t seq, bool started_at_start) {
+	if (!Bench::SkipLogEnabled()) return;
+	auto& p = Progress();
+	p.item_seq.store(seq, std::memory_order_relaxed);
+	p.items.fetch_add(1, std::memory_order_relaxed);
+	if (started_at_start) p.items_gpu_started_at_start.fetch_add(1, std::memory_order_relaxed);
+}
+inline void NoteGpuStarted(uint64_t seq) {
+	if (!Bench::SkipLogEnabled()) return;
+	Progress().gpu_started.store(seq, std::memory_order_relaxed);
+}
+inline void NoteLookaheadDraw(uint64_t item_seq) {
+	if (!Bench::SkipLogEnabled()) return;
+	auto&      p       = Progress();
+	const auto started = p.gpu_started.load(std::memory_order_relaxed);
+	p.draws.fetch_add(1, std::memory_order_relaxed);
+	if (item_seq != 0 && item_seq <= started) p.draws_gpu_started.fetch_add(1, std::memory_order_relaxed);
+	if (item_seq != 0 && item_seq < started) p.draws_gpu_passed.fetch_add(1, std::memory_order_relaxed);
+}
 
 // Writes the rows of still-waiting roots (periodically from NoteSkippedDraw, and at exit).
 void DumpOpenRoots(const char* why);
