@@ -12,6 +12,10 @@
 
 #include "common/loopGuard.h"
 
+namespace Common::RuntimeToggles {
+class Registry;
+}
+
 namespace Config {
 
 void Initialize();
@@ -291,6 +295,9 @@ struct ConfigOptions {
 	// rendering family and wait only for the work that wrote the data. Default off.
 	bool                   readback_queue              = false;
 	std::filesystem::path  bench_render_csv;
+	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
+	// names at the next presented frame (common/runtimeToggles.h). Default off.
+	std::filesystem::path  toggle_control;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -300,6 +307,10 @@ struct ConfigOptions {
 };
 
 void Load(const ConfigOptions& cfg);
+
+// Registers the flags that may change at run time (common/runtimeToggles.h).
+void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry);
+
 
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();

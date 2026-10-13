@@ -1529,6 +1529,10 @@ static void StartHeapTrim() {
 		std::unique_lock<std::mutex>   lock(g_heap_trim_mutex);
 		while (!g_heap_trim_cv.wait_for(lock, std::chrono::seconds(1), [] { return g_heap_trim_stop; })) {
 			lock.unlock();
+			if (!Config::HeapTrimEnabled()) { // --toggle-control turned it off: skip the pass
+				lock.lock();
+				continue;
+			}
 			const auto now = std::chrono::steady_clock::now();
 			const auto since = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count());

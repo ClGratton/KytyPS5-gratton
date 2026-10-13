@@ -174,6 +174,14 @@ static void PrintUsage() {
 	::printf("  --rd                                 Enable RenderDoc capture.\n");
 	::printf("  --bench-frames-csv <path>            Append \"frame_idx,t_ns\" (steady_clock) per presented\n"
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
+	::printf("  --toggle-control <path>              Poll this file (name=value lines) and flip the runtime-\n"
+	         "                                       safe performance flags it names (submit-coalesce,\n"
+	         "                                       elide-barriers, bda-sync-skip, clean-guest-reads,\n"
+	         "                                       srt-plans, readback-queue, heap-trim) at the next\n"
+	         "                                       presented frame; applied changes are logged and appended\n"
+	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
+	         "                                       (srt-plans, readback-queue, heap-trim) can only be turned\n"
+	         "                                       on again if it was on at start. Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
 	::printf("  --pipeline-cache-key <value>         schema (default) or revision. schema keys the driver\n"
 	         "                                       pipeline cache on a schema version + GPU/driver ids,\n"
@@ -829,6 +837,12 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.bench_frames_csv = Common::PathFromUtf8(value);
+		} else if (arg == "--toggle-control") {
+			if (value.empty()) {
+				::printf("invalid --toggle-control path\n");
+				return false;
+			}
+			options.config.toggle_control = Common::PathFromUtf8(value);
 		} else if (arg == "--pipeline-cache-key") {
 			if (Common::EqualNoCase(value, "revision")) {
 				options.config.pipeline_cache_key = Config::PipelineCacheKey::Revision;
