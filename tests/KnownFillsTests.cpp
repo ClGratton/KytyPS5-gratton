@@ -111,9 +111,31 @@ void TestReadDwords() {
 	Check(!h.TryReadDwords(0x3004, 4, out), "a fill with a misaligned start never answers");
 }
 
+void TestCollectDwords() {
+	KnownFills f;
+	f.Record(0x1000, 4, 1);
+	f.Record(0x1018, 8, 2);
+	f.Record(0x2000, 4, 3);
+	std::vector<std::pair<uint64_t, uint32_t>> out;
+	f.CollectDwords(0x1000, 0x20, out, 100);
+	Check(out.size() == 3 && out[0] == std::make_pair<uint64_t, uint32_t>(0x1000, 1) &&
+	          out[1] == std::make_pair<uint64_t, uint32_t>(0x1018, 2) && out[2].first == 0x101c,
+	      "the known dwords of a range, in order");
+	out.clear();
+	f.CollectDwords(0x101c, 4, out, 100);
+	Check(out.size() == 1 && out[0].first == 0x101c, "a range that starts inside a fill");
+	out.clear();
+	f.CollectDwords(0x1000, 0x2000, out, 2);
+	Check(out.size() == 2, "the limit");
+	out.clear();
+	f.CollectDwords(0x3000, 0x100, out, 100);
+	Check(out.empty(), "nothing known there");
+}
+
 } // namespace
 
 int main() {
+	TestCollectDwords();
 	TestReadDwords();
 	TestRecordAndGet();
 	TestOverwriteReplaces();

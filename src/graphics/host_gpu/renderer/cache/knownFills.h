@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <iterator>
 #include <map>
+#include <utility>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -103,6 +105,30 @@ public:
 			++it;
 		}
 		return true;
+	}
+
+	// Appends (address, value) for every known dword of [address, address + size), at most `limit`
+	// of them in all. Fills that start or end off a dword boundary contribute nothing.
+	void CollectDwords(uint64_t address, uint64_t size, std::vector<std::pair<uint64_t, uint32_t>>& out,
+	                   size_t limit) const {
+		if (size == 0 || m_fills.empty()) {
+			return;
+		}
+		const uint64_t end = address + size;
+		auto           it  = m_fills.upper_bound(address);
+		if (it != m_fills.begin()) {
+			--it;
+		}
+		for (; it != m_fills.end() && it->first < end && out.size() < limit; ++it) {
+			if ((it->first & 3u) != 0 || (it->second.end & 3u) != 0 || it->second.end <= address) {
+				continue;
+			}
+			const uint64_t from = it->first > address ? it->first : address;
+			const uint64_t to   = it->second.end < end ? it->second.end : end;
+			for (uint64_t a = (from + 3u) & ~uint64_t {3}; a + 4 <= to && out.size() < limit; a += 4) {
+				out.emplace_back(a, it->second.value);
+			}
+		}
 	}
 
 	[[nodiscard]] size_t Count() const { return m_fills.size(); }
