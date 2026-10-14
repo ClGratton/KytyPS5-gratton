@@ -3,7 +3,60 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+
 namespace Libs::Graphics {
+
+namespace {
+
+// KYTY_TRACKER_LOCKFREE_VERIFY=1: every lock-free query also takes the region lock and checks that
+// the mirrors equal the dirty bits (the invariant the lock-free answer rests on) and that the
+// locked answer equals the lock-free one. Under the lock nothing can change, so there is no race to
+// excuse a mismatch. A line with the totals goes to stdout every 2^22 queries.
+struct LockFreeVerifier {
+	bool                  enabled = std::getenv("KYTY_TRACKER_LOCKFREE_VERIFY") != nullptr;
+	std::atomic<uint64_t> checked {0};
+	std::atomic<uint64_t> mismatches {0};
+	void Note(bool agree) {
+		const auto n = checked.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (!agree) {
+			mismatches.fetch_add(1, std::memory_order_relaxed);
+			std::printf("MemoryTracker lock-free verify: MISMATCH at query %" PRIu64 "\n", n);
+			std::fflush(stdout);
+		}
+		if ((n & ((1u << 22) - 1u)) == 0) {
+			std::printf("MemoryTracker lock-free verify: %" PRIu64 " queries checked against the locked path, %" PRIu64
+			            " mismatches\n",
+			            n, mismatches.load(std::memory_order_relaxed));
+			std::fflush(stdout);
+		}
+	}
+};
+LockFreeVerifier g_verifier;
+
+template <DirtySource source>
+bool LockFreeQuery(RegionManager* manager, uint64_t offset, uint64_t bytes) {
+	if (!g_verifier.enabled) {
+		return manager->IsModifiedLockFree<source>(offset, bytes);
+	}
+	std::scoped_lock lock(manager->lock);
+	const bool       fast   = manager->IsModifiedLockFree<source>(offset, bytes);
+	const bool       locked = manager->IsModified<source>(offset, bytes);
+	g_verifier.Note(manager->MirrorsMatch() && fast == locked);
+	return locked;
+}
+
+} // namespace
+
+bool MemoryTracker::CpuModifiedLockFree(RegionManager* manager, uint64_t offset, uint64_t bytes) {
+	return LockFreeQuery<DirtySource::Cpu>(manager, offset, bytes);
+}
+
+bool MemoryTracker::GpuModifiedLockFree(RegionManager* manager, uint64_t offset, uint64_t bytes) {
+	return LockFreeQuery<DirtySource::Gpu>(manager, offset, bytes);
+}
 
 static_assert(std::atomic<void*>::is_always_lock_free);
 
@@ -80,6 +133,20 @@ bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	return Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
 		return manager->IsModified<DirtySource::Gpu>(offset, bytes);
+	});
+}
+
+bool MemoryTracker::IsRegionCpuModifiedLockFree(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	return Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		return CpuModifiedLockFree(manager, offset, bytes);
+	});
+}
+
+bool MemoryTracker::IsRegionGpuModifiedLockFree(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	return Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		return GpuModifiedLockFree(manager, offset, bytes);
 	});
 }
 

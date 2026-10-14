@@ -25,6 +25,12 @@ public:
 
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// The same answers without taking the region locks (--tracker-lockfree): each region keeps an
+	// atomic mirror of its dirty bits that every change publishes under the lock (see
+	// common/atomicBitMirror.h for why the answer is that of the locked query). With
+	// KYTY_TRACKER_LOCKFREE_VERIFY=1 each call also takes the lock and compares.
+	[[nodiscard]] bool IsRegionCpuModifiedLockFree(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool IsRegionGpuModifiedLockFree(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
@@ -85,12 +91,17 @@ public:
 
 	template <typename RangeFunc, typename UploadFunc>
 	void ForEachUploadRange(uint64_t vaddr, uint64_t size, bool is_written, RangeFunc&& range_func,
-	                        UploadFunc&& upload_func) {
+	                        UploadFunc&& upload_func, bool lock_free_clean_skip = false) {
 		static_assert(std::is_nothrow_invocable_v<RangeFunc&, uint64_t, uint64_t>);
 		static_assert(std::is_nothrow_invocable_v<UploadFunc&>);
 		CheckNotInUploadCallback();
 		const auto* previous_upload_owner = std::exchange(s_upload_owner, this);
 		Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+			// A read-only pass over a region with no CPU-dirty page in the range copies and changes
+			// nothing: skip the lock (--tracker-lockfree).
+			if (lock_free_clean_skip && !is_written && !CpuModifiedLockFree(manager, offset, bytes)) {
+				return;
+			}
 			manager->lock.lock();
 			manager->ForEachModifiedRange<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset,
 			                                                      bytes, range_func);
@@ -149,6 +160,10 @@ private:
 		}
 		return false;
 	}
+
+	// Lock-free dirty queries of one region; the verifier (env) compares with the locked answer.
+	static bool CpuModifiedLockFree(RegionManager* manager, uint64_t offset, uint64_t bytes);
+	static bool GpuModifiedLockFree(RegionManager* manager, uint64_t offset, uint64_t bytes);
 
 	static void    ValidateRange(uint64_t vaddr, uint64_t size);
 	RegionManager* GetOrCreateRegion(uint64_t index);
