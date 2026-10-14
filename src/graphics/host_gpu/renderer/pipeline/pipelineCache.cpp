@@ -331,7 +331,11 @@ bool RecordingSpecializationRead(void* userdata, uint64_t address, std::span<uin
 bool ShadowRead(SrtPlan::ReadKind kind, uint64_t address, std::span<uint32_t> values, bool exact) {
 	if (values.empty()) return true;
 	if (exact) {
-		return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+		if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) return false;
+		if (kind == SrtPlan::ReadKind::Clean) {
+			Libs::LibKernel::Memory::OverlayKnownGpuBytes(address, values.data(), values.size_bytes());
+		}
+		return true;
 	}
 	if (kind == SrtPlan::ReadKind::Scalar) {
 		if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
@@ -340,11 +344,15 @@ bool ShadowRead(SrtPlan::ReadKind kind, uint64_t address, std::span<uint32_t> va
 		return true;
 	}
 	if (ReadGuestNullPage(address, values)) return true;
-	return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+	if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) return false;
+	// --known-stores: a GPU-dirty dword a recorded dispatch is proven to have stored holds that value
+	// (ShadowDirty does not count it as dirty).
+	Libs::LibKernel::Memory::OverlayKnownGpuBytes(address, values.data(), values.size_bytes());
+	return true;
 }
 
 bool ShadowDirty(uint64_t address, uint64_t bytes) {
-	return Libs::LibKernel::Memory::HasGpuDirtyBytes(address, bytes);
+	return Libs::LibKernel::Memory::HasUnknownGpuDirtyBytes(address, bytes);
 }
 
 // --srt-plan-shadow, kyGpu thread: kyGpu has materialized the draw's resources itself; look up the

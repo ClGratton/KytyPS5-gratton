@@ -252,6 +252,25 @@ void TestGpuDirtyWindowsInvalidate() {
 	Check(memory.Validate(rec2.Finish()) == ReadSet::Result::Valid, "scalar reads do not ask about GPU-dirty memory");
 }
 
+// Only the bytes the walk read decide: a GPU-written byte in the gap that bridges two runs of one
+// window does not invalidate the plan, a GPU-written run does (--known-stores asks per run).
+void TestGpuDirtyGapIsHarmless() {
+	FakeMemory memory;
+	Put(memory, 0xc000, {1, 2, 0x99, 0x98, 3});
+	ReadRecorder rec;
+	Record(rec, memory, ReadKind::Clean, 0xc000, 2);
+	Record(rec, memory, ReadKind::Clean, 0xc010, 1);
+	const auto set = rec.Finish();
+	Check(set.windows.size() == 1 && set.windows[0].run_count == 2, "two runs bridged into one window");
+	const auto read = [&](ReadKind k, uint64_t a, std::span<uint32_t> o, bool e) { return memory.Read(k, a, o, e); };
+	const auto dirty_at = [](uint64_t base, uint64_t size) {
+		return [base, size](uint64_t a, uint64_t b) { return a < base + size && base < a + b; };
+	};
+	Check(set.Validate(read, dirty_at(0xc008, 8)) == ReadSet::Result::Valid, "a dirty gap is not read by the walk");
+	Check(set.Validate(read, dirty_at(0xc004, 4)) == ReadSet::Result::GpuDirty, "a dirty dword of a run");
+	Check(set.Validate(read, dirty_at(0xc010, 4)) == ReadSet::Result::GpuDirty, "a dirty dword of the second run");
+}
+
 void TestEmptyReadSet() {
 	ReadRecorder rec;
 	const auto   set = rec.Finish();
@@ -697,6 +716,7 @@ int main() {
 	TestUnmappedMemory();
 	TestBridgedWindowOverUnmappedGapFallsBackToRuns();
 	TestGpuDirtyWindowsInvalidate();
+	TestGpuDirtyGapIsHarmless();
 	TestEmptyReadSet();
 	TestInputsMatch();
 	TestDiffNamesTheDifferingPart();

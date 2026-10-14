@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <iterator>
 #include <map>
+#include <utility>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -71,6 +73,62 @@ public:
 		}
 		*value = it->second.value;
 		return true;
+	}
+
+	// The known value of every dword of [address, address + size): `out` receives size / 4 dwords.
+	// False (and `out` unspecified) when the range is not dword aligned or any dword of it is not
+	// covered by a recorded fill that starts on a dword boundary. The reader of a GPU-dirty range
+	// (a CPU-side dependent read on the GPU thread) can take its answer from here instead of waiting
+	// for the GPU, when every dword it needs was last written by a store of a known constant.
+	[[nodiscard]] bool TryReadDwords(uint64_t address, uint64_t size, uint32_t* out) const {
+		if (size == 0 || ((address | size) & 3u) != 0 || m_fills.empty()) {
+			return false;
+		}
+		const uint64_t end = address + size;
+		uint64_t       at  = address;
+		auto           it  = m_fills.upper_bound(address);
+		if (it == m_fills.begin()) {
+			return false;
+		}
+		--it;
+		while (at < end) {
+			if (it == m_fills.end() || it->first > at || it->second.end <= at || (it->first & 3u) != 0) {
+				return false;
+			}
+			const uint64_t stop = it->second.end < end ? it->second.end : end;
+			if ((stop & 3u) != 0) {
+				return false; // a dword straddles the end of the fill
+			}
+			for (; at < stop; at += 4) {
+				*out++ = it->second.value;
+			}
+			++it;
+		}
+		return true;
+	}
+
+	// Appends (address, value) for every known dword of [address, address + size), at most `limit`
+	// of them in all. Fills that start or end off a dword boundary contribute nothing.
+	void CollectDwords(uint64_t address, uint64_t size, std::vector<std::pair<uint64_t, uint32_t>>& out,
+	                   size_t limit) const {
+		if (size == 0 || m_fills.empty()) {
+			return;
+		}
+		const uint64_t end = address + size;
+		auto           it  = m_fills.upper_bound(address);
+		if (it != m_fills.begin()) {
+			--it;
+		}
+		for (; it != m_fills.end() && it->first < end && out.size() < limit; ++it) {
+			if ((it->first & 3u) != 0 || (it->second.end & 3u) != 0 || it->second.end <= address) {
+				continue;
+			}
+			const uint64_t from = it->first > address ? it->first : address;
+			const uint64_t to   = it->second.end < end ? it->second.end : end;
+			for (uint64_t a = (from + 3u) & ~uint64_t {3}; a + 4 <= to && out.size() < limit; a += 4) {
+				out.emplace_back(a, it->second.value);
+			}
+		}
 	}
 
 	[[nodiscard]] size_t Count() const { return m_fills.size(); }

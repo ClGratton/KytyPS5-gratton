@@ -12,6 +12,10 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/knownCopies.h"
+#include "graphics/host_gpu/renderer/cache/knownStores.h"
+#include "graphics/host_gpu/renderer/cache/storeExtents.h"
+#include "kernel/memory.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -43,6 +47,121 @@
 #include <vector>
 
 namespace Libs::Graphics {
+// --known-stores. Around one real (recorded) compute dispatch of a shader whose every memory write is
+// an analysed store (UniformStoreProgram): before its buffers are bound, decide which stores can run
+// (branch conditions are evaluated from memory the GPU thread has without waiting) and set aside the
+// known dwords of the ranges it binds for writing; after it is recorded, tell the buffer cache which
+// dwords it left with a constant value and which of the set-aside ones it provably did not touch
+// (binding forgot them, the cache cannot tell which bytes of a bound range a shader writes). Dispatches
+// of the guest's async compute queues are included: the emulator processes every guest queue on the
+// GPU thread and records it into the same stream, in the order it processes it, which is the order the
+// reasoning here follows. See knownStores.h for the exactness argument.
+struct UniformStoreScope {
+	bool                                       active = false;
+	std::vector<StoreExtent>                   extents;
+	std::vector<SiteState>                     states;
+	std::vector<std::pair<uint64_t, uint32_t>> candidates, claims, kept;
+};
+
+static void PrepareUniformStores(RenderContext& context, const ShaderComputeInputInfo& input,
+                                 uint64_t invocations, UniformStoreScope& scope) {
+	scope.active = false;
+	if (!Config::KnownStoresEnabled() || input.stage.resources == nullptr ||
+	    input.stage.resources->uniform_stores == nullptr) {
+		return;
+	}
+	const auto& resources = *input.stage.resources;
+	const auto& program   = *input.stage.program;
+	MakeStoreExtents(resources, scope.extents);
+	auto& buffers = context.GetBufferCache();
+	EvaluateStoreFlow(*resources.uniform_stores, scope.extents, invocations <= 32,
+	                  [&](uint64_t address, uint32_t& value) { return buffers.TryReadCurrentDword(address, &value); },
+	                  scope.states);
+	scope.candidates.clear();
+	for (uint32_t i = 0; i < program.info.buffers.size() && i < scope.extents.size(); i++) {
+		if (program.info.buffers[i].written && scope.extents[i].base != 0) {
+			buffers.CollectKnownStores(scope.extents[i].base, scope.extents[i].size, scope.candidates, 256);
+		}
+	}
+	scope.active = true;
+}
+
+static void FinishUniformStores(RenderContext& context, const ShaderComputeInputInfo& input,
+                                UniformStoreScope& scope) {
+	if (!scope.active) {
+		return;
+	}
+	scope.active = false;
+	ResolveKnownStores(*input.stage.resources->uniform_stores, scope.states, scope.extents,
+	                   scope.candidates, scope.claims, scope.kept);
+	auto& buffers = context.GetBufferCache();
+	buffers.RecordKnownStores(scope.kept);
+	buffers.RecordKnownStores(scope.claims);
+}
+
+// --known-copies: a dispatch of a copy shader (UniformCopy) that is an exact dword copy leaves the
+// destination holding the source's content; the buffer cache records it when the source can be read
+// without waiting for the GPU (knownCopies.h). Called after the dispatch was recorded.
+static CopyDescriptor MakeCopyDescriptor(const ShaderBufferResource& d) {
+	constexpr std::array formats {Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32_32UInt,
+	                              Prospero::BufferFormat::k32_32_32UInt,
+	                              Prospero::BufferFormat::k32_32_32_32UInt};
+	CopyDescriptor result;
+	result.base         = d.Base48();
+	result.num_records  = d.NumRecords();
+	result.stride       = d.Stride();
+	result.dst_sel      = d.DstSelXYZW();
+	result.swizzle      = d.SwizzleEnabled();
+	result.add_tid      = d.AddTid();
+	result.index_stride = d.IndexStride();
+	for (uint32_t i = 0; i < formats.size(); ++i) {
+		if (d.Format() == formats[i]) {
+			result.words = i + 1;
+		}
+	}
+	result.mapped = result.base != 0 && LibKernel::Memory::IsFullyMapped(result.base, d.GetSize());
+	return result;
+}
+
+static void RecordUniformCopy(RenderContext& context, const ShaderComputeInputInfo& input, uint32_t group_x,
+                              uint32_t group_y, uint32_t group_z, uint32_t mode) {
+	if (!Config::KnownCopiesEnabled() || input.stage.resources == nullptr) {
+		return;
+	}
+	const auto& resources = *input.stage.resources;
+	const auto& copy      = resources.uniform_copy;
+	if (!copy.valid || copy.src_resource >= resources.buffers.size() || copy.dst_resource >= resources.buffers.size()) {
+		return;
+	}
+	CopyLaunch launch;
+	launch.groups[0]         = group_x;
+	launch.groups[1]         = group_y;
+	launch.groups[2]         = group_z;
+	launch.threads[0]        = input.threads_num[0];
+	launch.threads[1]        = input.threads_num[1];
+	launch.threads[2]        = input.threads_num[2];
+	launch.thread_dimensions = input.dispatch_thread_dimensions;
+	launch.use_plain_mode    = mode == 0x41u;
+	KnownCopy resolved;
+	const auto reason = ResolveKnownCopyReason(
+	    copy, MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.src_resource])),
+	    MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.dst_resource])),
+	    launch, resolved);
+	if (reason == CopyReject::None) {
+		context.GetBufferCache().RecordKnownCopy(resolved);
+	} else {
+		// Loud, once per reason: a copy shader that cannot be tracked costs the clear-code drain.
+		static std::atomic<uint32_t> logged {0};
+		const uint32_t bit = 1u << static_cast<uint32_t>(reason);
+		if ((logged.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+			std::printf("known-copies: a metadata-style copy dispatch (shader 0x%016" PRIx64 ") is not tracked: %s "
+			            "(further ones are not logged)\n",
+			            input.stage.program->shader_hash, kCopyRejectNames[static_cast<uint32_t>(reason)]);
+			std::fflush(stdout);
+		}
+	}
+}
+
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -418,6 +537,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		DebugLogDispatchInputs(m_context, input_info.stage, submit_id, thread_group_x,
 		                       thread_group_y, thread_group_z);
 	}
+	static thread_local UniformStoreScope store_scope;
+	PrepareUniformStores(m_context, input_info,
+	                     static_cast<uint64_t>(thread_group_x) * thread_group_y * thread_group_z *
+	                         input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2],
+	                     store_scope);
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
@@ -538,6 +662,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		// After binding, which registered this dispatch's writes and forgot older fills.
 		m_context.GetBufferCache().RecordKnownFill(fill_descriptor.Base48(), fill_size, fill_value);
 	}
+	FinishUniformStores(m_context, input_info, store_scope);
+	RecordUniformCopy(m_context, input_info, thread_group_x, thread_group_y, thread_group_z, mode);
 	TrackMetaFills(input_info, buffer);
 	ResetBindings();
 }
@@ -616,6 +742,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
+	// The group counts of an indirect dispatch are in GPU memory: more than one wave is assumed.
+	static thread_local UniformStoreScope store_scope;
+	PrepareUniformStores(m_context, input_info, UINT64_MAX, store_scope);
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
 	FindBuffers(std::span {&descriptor_stage, 1u});
@@ -673,6 +802,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	FinishUniformStores(m_context, input_info, store_scope);
 	TrackMetaFills(input_info, buffer);
 	ResetBindings();
 }

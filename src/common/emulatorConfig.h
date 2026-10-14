@@ -267,6 +267,23 @@ struct ConfigOptions {
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
 	// clear discovery needs no GPU->CPU readback for them. Default off.
 	bool                   known_fills                 = false;
+	// --known-stores (performance, exact): the GPU thread takes the value of a dword a dispatch
+	// stored as an immediate (queue headers, flags) from what the dispatch is proven to write
+	// (renderer/cache/knownStores.h) instead of draining the GPU when it has to read that dword
+	// itself (the SRT walk). Runtime toggle. Default off until measured.
+	bool                   known_stores                = false;
+	// --known-copies (performance, exact): a compute dispatch proven to copy records from one buffer
+	// to another (the color-metadata copy of fast-cleared targets) leaves the destination known when
+	// the CPU can read the source without waiting; clear discovery then needs no GPU->CPU readback
+	// for the slices it knows. Runtime toggle. Default off until measured.
+	bool                   known_copies                = false;
+	// --debug-known-verify <seconds>: with --known-stores, once per this many seconds per kind a
+	// known value is not used: the GPU is drained, the real bytes are read and compared (loud log and
+	// the knowledge dropped on a mismatch; counters in --gpu-phase-stats). 0 = off.
+	uint32_t               debug_known_verify_s        = 0;
+	// --debug-known-verify-all: verify every known answer (a GPU drain each; a correctness run, not a
+	// benchmark).
+	bool                   debug_known_verify_all      = false;
 	// --image-lookup-memo: FindImage remembers unique matches until the set of registered images
 	// changes (renderer/cache/imageLookupMemo.h). Exact; default off until measured.
 	bool                   image_lookup_memo           = false;
@@ -307,6 +324,11 @@ struct ConfigOptions {
 	// vkCmdDrawIndexedIndirect (point/line/triangle lists) or vkCmdDrawMeshTasksIndirectEXT
 	// (mesh-emulated draws). Default off.
 	bool                   gpu_indirect_draws          = false;
+	// Runtime request for --gpu-indirect-draws (--toggle-control): the GPU thread copies it into
+	// gpu_indirect_draws at a guest flip (LatchGpuIndirectDraws), so the route decision of a draw
+	// packet and the mesh-shader variant it builds can never disagree. Not a command-line option;
+	// starts equal to the flag.
+	bool                   gpu_indirect_draws_request  = false;
 	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
 	// rendering family and wait only for the work that wrote the data. Default off.
 	bool                   readback_queue              = false;
@@ -388,6 +410,10 @@ uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
+bool              KnownStoresEnabled();
+bool              KnownCopiesEnabled();
+uint32_t          DebugKnownVerifySeconds();
+bool              DebugKnownVerifyAll();
 bool              ImageLookupMemoEnabled();
 bool              TextureBindingReuseEnabled();
 bool              CleanGuestReadsEnabled();
@@ -400,6 +426,7 @@ bool              SkipGuardBdaEnabled();
 bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
+void              LatchGpuIndirectDraws();
 bool              ReadbackQueueEnabled();
 
 LogDirection          GetPrintfDirection();

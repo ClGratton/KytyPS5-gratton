@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/verifyRation.h"
 #include "graphics/host_gpu/vramPolicy.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
@@ -1208,27 +1209,82 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& binding,
 	// so discovery runs before final draw uploads and never holds the texture lock across it.
 	// --known-fills: when the GPU wrote the whole range with one byte-uniform fill, its value is
 	// known and the readback (a full GPU drain) is skipped.
+	// --known-copies: when the GPU wrote the range by copying it from a source the CPU could read,
+	// each slice it needs may be known on its own (one run of equal dwords).
 	const bool gpu_modified = m_buffer_cache.IsRegionGpuModified(range.address, range.size);
 	uint32_t   fill_value   = 0;
-	const bool known_fill   = gpu_modified &&
+	bool       known_fill   = gpu_modified &&
 	                        m_buffer_cache.TryGetKnownFill(range.address, range.size, &fill_value) &&
 	                        (fill_value & 0xffu) * 0x01010101u == fill_value;
+	const auto slice_size   = range.size / layers;
+	std::array<uint32_t, 16> slice_values {};
+	bool                     known_slices = false;
+	if (gpu_modified && !known_fill && Config::KnownCopiesEnabled() && count <= slice_values.size()) {
+		known_slices = true;
+		for (uint32_t slice = 0; slice < count && known_slices; slice++) {
+			known_slices = m_buffer_cache.TryGetKnownCopy(range.address + slice_size * (first + slice),
+			                                              slice_size, &slice_values[slice]);
+		}
+	}
+	// --debug-known-verify: once per interval a known answer is not used. The GPU is drained as
+	// usual and the real bytes are compared with what was known (see below).
+	static Common::VerifyRation verify_ration;
+	bool                        verifying = false;
+	if (known_slices) {
+		const auto seconds = Config::DebugKnownVerifySeconds();
+		const auto now_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                        std::chrono::steady_clock::now().time_since_epoch())
+		                        .count();
+		verifying = Config::DebugKnownVerifyAll() || (seconds != 0 && verify_ration.Due(now_ns, seconds));
+	}
 	if (gpu_modified) {
 		if (known_fill) {
 			Common::GpuPhase::NoteKnownFill(Common::GpuPhase::KnownFill::Hit);
+		} else if (known_slices && !verifying) {
+			Common::GpuPhase::NoteKnownCopy(Common::GpuPhase::KnownCopy::Hit, count);
 		} else {
 			if (Config::KnownFillsEnabled()) {
 				Common::GpuPhase::NoteKnownFill(Common::GpuPhase::KnownFill::Readback);
 			}
+			if (Config::KnownCopiesEnabled() && !known_slices) {
+				Common::GpuPhase::NoteKnownCopy(Common::GpuPhase::KnownCopy::Partial);
+			}
 			m_buffer_cache.ReadMemory(range.address, range.size, false,
 			                          Common::GpuPhase::DrainCause::ReadbackTextureMeta);
+			if (verifying) {
+				// The drain is done: the guest copy now holds the GPU's bytes.
+				bool mismatch = false;
+				for (uint32_t slice = 0; slice < count; slice++) {
+					std::vector<uint32_t> real(slice_size / 4);
+					const auto address = range.address + slice_size * (first + slice);
+					if (!LibKernel::Memory::TryReadBacking(address, real.data(), slice_size)) {
+						continue;
+					}
+					mismatch |= !std::all_of(real.begin(), real.end(),
+					                         [&](uint32_t w) { return w == slice_values[slice]; });
+				}
+				Common::GpuPhase::NoteKnownCopy(Common::GpuPhase::KnownCopy::Verified);
+				if (mismatch) {
+					Common::GpuPhase::NoteKnownCopy(Common::GpuPhase::KnownCopy::Mismatch);
+					std::printf("KNOWN-COPIES MISMATCH metadata range=0x%016" PRIx64 "+0x%" PRIx64
+					            ": the recorded copy knowledge was wrong, dropped\n",
+					            range.address, range.size);
+					std::fflush(stdout);
+					m_buffer_cache.ForgetKnownCopies(range.address, range.size);
+				}
+				known_slices = false;
+			}
 		}
 	}
-	const auto slice_size = range.size / layers;
+	const bool known = known_fill || known_slices;
 	for (uint32_t slice = 0; slice < count; slice++) {
 		const auto address = range.address + slice_size * (first + slice);
-		uint8_t code = static_cast<uint8_t>(fill_value);
-		if (!known_fill && !LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
+		const auto value   = known_fill ? fill_value : (known_slices ? slice_values[slice] : 0u);
+		if (known_slices && (value & 0xffu) * 0x01010101u != value) {
+			continue; // bytes that differ cannot be a clear: what the read would have found
+		}
+		uint8_t code = static_cast<uint8_t>(value);
+		if (!known && !LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
 			EXIT("TextureCache: failed to read color metadata backing\n");
 		}
 		vk::ClearValue clear {};
@@ -1236,7 +1292,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& binding,
 			continue;
 		}
 		std::vector<uint8_t> bytes(slice_size);
-		if (!known_fill) {
+		if (!known) {
 			if (!LibKernel::Memory::TryReadBacking(address, bytes.data(), bytes.size())) {
 				EXIT("TextureCache: failed to read color metadata slice\n");
 			}
@@ -1262,7 +1318,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& binding,
 		// to overlapping image data. Invalidate the buffer before updating its backing.
 		if (desc.type != BindingType::VideoOut) {
 			std::fill(bytes.begin(), bytes.end(), uint8_t {0xff});
-			if (known_fill) {
+			if (known) {
 				// The CPU is about to overwrite the whole slice: the GPU's fill need not be
 				// downloaded first (InvalidateMemory would drain the GPU for it).
 				Common::GpuPhase::NoteKnownFill(m_buffer_cache.TryDiscardGpuModified(address, slice_size)

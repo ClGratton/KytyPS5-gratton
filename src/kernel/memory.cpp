@@ -1101,6 +1101,23 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+// --known-stores: the GPU thread needs [vaddr, vaddr + size) itself and the GPU holds bytes the guest
+// backing lacks. When a dispatch recorded earlier is proven to have stored every dword of it as a
+// constant, that is the value; no drain (BufferCache::UseKnownStores, which also does the
+// --debug-known-verify drain and compare). False: not (fully) known, the caller drains.
+static bool TryReadKnownDirty(Graphics::BufferCache& buffers, uint64_t vaddr, void* data, uint64_t size) {
+	if (!Config::KnownStoresEnabled()) {
+		return false;
+	}
+	std::array<uint32_t, 256> known;
+	if (!buffers.UseKnownStores(vaddr, size, known.data(), true)) {
+		Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Partial);
+		return false;
+	}
+	std::memcpy(data, known.data(), size);
+	return true;
+}
+
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (!Graphics::GuestGpu::IsGpuThread()) {
@@ -1108,6 +1125,10 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 		}
 		auto& buffers = GetGpuResources().GetBufferCache();
 		if (buffers.HasGpuDirtyBytes(vaddr, size)) {
+			if (size <= 1024 && (size & 3u) == 0 && (vaddr & 3u) == 0 &&
+			    TryReadKnownDirty(buffers, vaddr, data, size)) {
+				return true;
+			}
 			Common::GpuPhase::NoteGpuThreadFault(); // stack of the emulator's own dependent read
 			buffers.ReadMemory(vaddr, size);
 		}
@@ -1118,6 +1139,17 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
 	       GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size);
+}
+
+bool HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
+	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
+	       GetGpuResources().GetBufferCache().HasUnknownGpuDirtyBytes(vaddr, size);
+}
+
+void OverlayKnownGpuBytes(uint64_t vaddr, uint32_t* data, uint64_t bytes) {
+	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, bytes)) {
+		GetGpuResources().GetBufferCache().OverlayKnownDirtyDwords(vaddr, bytes, data);
+	}
 }
 
 bool TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size) {

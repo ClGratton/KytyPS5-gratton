@@ -13,8 +13,11 @@
 #include <cstdio>
 #include <fmt/format.h>
 #include <functional>
+#include <memory>
 #include <numeric>
+#include <optional>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -780,6 +783,44 @@ static bool IsFullDispatchPredicate(Value value, uint32_t depth = 0) {
 	return axis.IsImmediate() && axis.U32() < 3 && extent->Arg(0).Resolve() == axis;
 }
 
+// True when a lane exec guard holds for the first invocation of a dispatch (local index 0, global id
+// 0): the guard is `true`, a bound the first invocation satisfies (the translator's initial exec of
+// a workgroup that does not fill its last wave is `LocalInvocationIndex < threads`), or an `and` of
+// such. A store behind it runs on at least one lane of every non-empty dispatch.
+static bool HoldsForFirstInvocation(Value value, uint32_t depth = 0) {
+	value = value.Resolve();
+	if (value == Value(true)) return true;
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr || depth > 32) return false;
+	if (inst->GetOpcode() == ValueOpcode::LogicalAnd) {
+		return HoldsForFirstInvocation(inst->Arg(0), depth + 1) && HoldsForFirstInvocation(inst->Arg(1), depth + 1);
+	}
+	if (inst->GetOpcode() != ValueOpcode::ULessThan32) return false;
+	const auto* lhs = inst->Arg(0).Resolve().TryInstruction();
+	if (lhs == nullptr || lhs->GetOpcode() != ValueOpcode::GetBuiltin) return false;
+	if (lhs->Arg(0).Resolve() == Value(static_cast<uint32_t>(StageInputKind::LocalInvocationIndex))) {
+		const auto bound = inst->Arg(1).Resolve();
+		return bound.IsImmediate() && bound.GetType() == Type::U32 && bound.U32() >= 1u;
+	}
+	return IsFullDispatchPredicate(value);
+}
+
+// The value of `value` as the first invocation of the dispatch computes it: a lane-masked write
+// (`select(exec, new, old)`, how a vector move under a partial exec is lowered) is its new value when
+// the mask holds for the first invocation.
+static Value FirstInvocationValue(Value value) {
+	for (uint32_t depth = 0; depth < 32; ++depth) {
+		value = value.Resolve();
+		const auto* inst = value.TryInstruction();
+		if (inst == nullptr || (inst->GetOpcode() != ValueOpcode::SelectU32 && inst->GetOpcode() != ValueOpcode::SelectU1) ||
+		    !HoldsForFirstInvocation(inst->Arg(0))) {
+			return value;
+		}
+		value = inst->Arg(1);
+	}
+	return value;
+}
+
 // Nonnegative affine coefficients for constant, local and workgroup coordinates. Reject modular
 // arithmetic that could wrap; runtime coverage also bounds the largest invocation index.
 static std::optional<std::array<uint64_t, 3>> FillIndex(Value value, uint32_t axis, Value guard,
@@ -928,6 +969,392 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 	return result;
 }
 
+// The memory writes of a compute shader, when every one of them is a dword buffer store whose
+// address only the descriptor decides: the index, the vector offset and the scalar offset are
+// immediates (so every lane and wave writes the same dwords) and the descriptor is a direct buffer.
+// The renderer turns the sites into dwords whose final value it knows, and into dwords it knows the
+// dispatch does not touch (knownStores.h). Anything else that writes (an atomic, a sub-dword or
+// formatted store, an image or address write, an indirect descriptor) makes the shader ineligible
+// (null). Branches are allowed when the control flow is acyclic; each condition becomes an
+// expression the renderer evaluates when it can (loads from descriptor-decided addresses, ALU on
+// them) and treats as undecided when it cannot.
+class UniformStoreBuilder {
+public:
+	explicit UniformStoreBuilder(const Program& program): m_program(program) {}
+
+	std::shared_ptr<const UniformStoreProgram> Build() {
+		if (m_program.stage != ShaderType::Compute || m_program.blocks.empty() ||
+		    m_program.has_address_writes) {
+			return nullptr;
+		}
+		for (uint32_t i = 0; i < m_program.blocks.size(); ++i) {
+			if (!m_index.emplace(m_program.blocks[i], i).second) return nullptr;
+		}
+		if (!Order()) return nullptr;
+		auto& out = m_out;
+		out.blocks.resize(m_program.blocks.size());
+		for (const auto index: out.order) {
+			if (!BuildBlock(index)) return nullptr;
+		}
+		if (out.sites.empty() || m_failed) return nullptr;
+		return std::make_shared<const UniformStoreProgram>(std::move(m_out));
+	}
+
+private:
+	static constexpr size_t kMaxExprs = 64;
+
+	// Reverse post-order from the entry; a back edge (a loop) makes the shader ineligible.
+	bool Order() {
+		enum : uint8_t { White, Grey, Black };
+		std::vector<uint8_t> color(m_program.blocks.size(), White);
+		std::vector<std::pair<uint32_t, uint32_t>> stack; // block, next successor
+		std::vector<uint32_t> post;
+		stack.emplace_back(0u, 0u);
+		color[0] = Grey;
+		while (!stack.empty()) {
+			auto& [block, next] = stack.back();
+			const auto successors = Successors(block);
+			if (!successors) return false;
+			if (next < successors->size()) {
+				const auto s = (*successors)[next++];
+				if (color[s] == Grey) return false;
+				if (color[s] == White) {
+					color[s] = Grey;
+					stack.emplace_back(s, 0u);
+				}
+			} else {
+				color[block] = Black;
+				post.push_back(block);
+				stack.pop_back();
+			}
+		}
+		m_out.order.assign(post.rbegin(), post.rend());
+		return true;
+	}
+
+	std::optional<std::vector<uint32_t>> Successors(uint32_t index) const {
+		const auto& term = m_program.blocks[index]->terminator;
+		std::vector<uint32_t> result;
+		const auto add = [&](const Block* b) {
+			const auto found = m_index.find(b);
+			if (found == m_index.end()) return false;
+			result.push_back(found->second);
+			return true;
+		};
+		switch (term.kind) {
+			case CFG::TerminatorKind::Return: return result;
+			case CFG::TerminatorKind::Branch:
+				if (!add(term.true_block)) return std::nullopt;
+				return result;
+			case CFG::TerminatorKind::ConditionalBranch:
+				if (!add(term.true_block) || !add(term.false_block)) return std::nullopt;
+				return result;
+			default: return std::nullopt;
+		}
+	}
+
+	bool DirectBuffer(const MemoryInfo& memory) const {
+		if (memory.planning_only || memory.typed || memory.formatted || memory.data_bits != 32 ||
+		    memory.resource >= m_program.info.buffers.size()) {
+			return false;
+		}
+		const auto& buffer = m_program.info.buffers[memory.resource];
+		return buffer.indirect_root != memory.resource && buffer.indirect_resources.empty() &&
+		       buffer.image_alias == BufferResource::NoImageAlias &&
+		       buffer.source < m_program.descriptor_sources.size() &&
+		       !m_program.descriptor_sources[buffer.source].indirect_descriptor.has_value() &&
+		       memory.resource <= UINT16_MAX;
+	}
+
+	bool BuildBlock(uint32_t index) {
+		const auto& block = *m_program.blocks[index];
+		auto&       out   = m_out.blocks[index];
+		out.site_begin    = static_cast<uint32_t>(m_out.sites.size());
+		for (const auto& inst: block) {
+			const auto op = inst.GetOpcode();
+			if (!inst.MayHaveSideEffects()) continue;
+			if (SharedAccessOf(op) != SharedAccess::None || op == ValueOpcode::Barrier ||
+			    op == ValueOpcode::Reference || op == ValueOpcode::ReferenceU32 ||
+			    op == ValueOpcode::StoreCompletion) {
+				continue; // LDS / GDS (not guest memory), ordering, liveness: no guest bytes written
+			}
+			constexpr std::array stores {ValueOpcode::StoreBufferU32, ValueOpcode::StoreBufferU32x2,
+			                             ValueOpcode::StoreBufferU32x3, ValueOpcode::StoreBufferU32x4};
+			const auto           store_op = std::ranges::find(stores, op);
+			if (store_op == stores.end()) return false;
+			const auto&    memory = m_program.memory_info.at(inst.Flags<MemoryFlags>().index);
+			const uint32_t dwords = static_cast<uint32_t>(store_op - stores.begin()) + 1u;
+			if (memory.kind != ResourceKind::Buffer || memory.data_dwords != dwords || !DirectBuffer(memory)) {
+				return false;
+			}
+			const auto idx  = inst.Arg(1).Resolve();
+			const auto voff = inst.Arg(2).Resolve();
+			const auto soff = inst.Arg(3).Resolve();
+			if (!IsU32Imm(idx) || !IsU32Imm(voff) || !IsU32Imm(soff)) return false;
+			const uint64_t offset = static_cast<uint64_t>(voff.U32()) + soff.U32() + memory.offset;
+			if (offset > UINT32_MAX - 16u) return false;
+			UniformStoreSite site;
+			site.resource    = memory.resource;
+			site.index       = idx.U32();
+			site.byte_offset = static_cast<uint32_t>(offset);
+			site.block       = index;
+			site.dwords      = dwords;
+			const auto guard = inst.Arg(5).Resolve();
+			site.executes    = HoldsForFirstInvocation(guard);
+			const auto  data   = FirstInvocationValue(inst.Arg(4));
+			const auto* vector = data.TryInstruction();
+			constexpr std::array composites {ValueOpcode::CompositeConstructU32x2,
+			                                 ValueOpcode::CompositeConstructU32x3,
+			                                 ValueOpcode::CompositeConstructU32x4};
+			if (dwords > 1 && (vector == nullptr || vector->GetOpcode() != composites[dwords - 2])) {
+				return false;
+			}
+			for (uint32_t d = 0; d < dwords; ++d) {
+				const auto word = dwords == 1 ? data : FirstInvocationValue(vector->Arg(d));
+				if (IsU32Imm(word)) {
+					site.known_mask |= static_cast<uint8_t>(1u << d);
+					site.value[d] = word.U32();
+				}
+			}
+			m_out.sites.push_back(site);
+		}
+		out.site_end = static_cast<uint32_t>(m_out.sites.size());
+		const auto& term = block.terminator;
+		const auto  successors = Successors(index);
+		if (!successors) return false;
+		if (term.kind == CFG::TerminatorKind::Branch) {
+			out.succ_true = (*successors)[0];
+		} else if (term.kind == CFG::TerminatorKind::ConditionalBranch) {
+			out.succ_true  = (*successors)[0];
+			out.succ_false = (*successors)[1];
+			out.cond       = Compile(block.condition);
+		}
+		return true;
+	}
+
+	static bool IsU32Imm(Value v) { return v.IsImmediate() && v.GetType() == Type::U32; }
+
+	// A full expression table makes the whole shader ineligible (m_failed); the index returned then
+	// is only a placeholder.
+	int32_t Node(StoreExpr e) {
+		if (m_out.exprs.size() >= kMaxExprs) {
+			m_failed = true;
+			return 0;
+		}
+		m_out.exprs.push_back(e);
+		return static_cast<int32_t>(m_out.exprs.size() - 1);
+	}
+
+	// Always returns a valid node index (Unknown when the value cannot be expressed).
+	int32_t Compile(Value value, uint32_t depth = 0) {
+		value = value.Resolve();
+		if (value.IsEmpty()) return Unknown();
+		if (value.IsImmediate()) {
+			StoreExpr e;
+			e.op = StoreExpr::Op::Imm;
+			if (value.GetType() == Type::U32) e.imm = value.U32();
+			else if (value.GetType() == Type::U1) e.imm = value == Value(true) ? 1u : 0u;
+			else return Unknown();
+			return Node(e);
+		}
+		const auto* inst = value.TryInstruction();
+		if (inst == nullptr || depth > 24) return Unknown();
+		if (const auto found = m_memo.find(inst); found != m_memo.end()) return found->second;
+		if (inst->GetType() == Type::U1 && HoldsForFirstInvocation(value)) {
+			// The initial exec of the dispatch (a partial wave's mask): true for every active lane.
+			StoreExpr e;
+			e.op  = StoreExpr::Op::Imm;
+			e.imm = 1;
+			const auto result = Node(e);
+			m_memo.emplace(inst, result);
+			return result;
+		}
+		const auto result = CompileInst(*inst, depth);
+		m_memo.emplace(inst, result);
+		return result;
+	}
+
+	int32_t Unknown() { return Node({}); }
+
+	int32_t Binary(StoreExpr::Op op, const Inst& inst, uint32_t depth) {
+		const auto a = Compile(inst.Arg(0), depth + 1);
+		const auto b = Compile(inst.Arg(1), depth + 1);
+		if (a < 0 || b < 0) return Unknown();
+		StoreExpr e;
+		e.op = op;
+		e.a  = static_cast<uint16_t>(a);
+		e.b  = static_cast<uint16_t>(b);
+		return Node(e);
+	}
+
+	int32_t CompileInst(const Inst& inst, uint32_t depth) {
+		using Op = StoreExpr::Op;
+		switch (inst.GetOpcode()) {
+			case ValueOpcode::ConditionRef:
+			case ValueOpcode::Identity: return Compile(inst.Arg(0), depth + 1);
+			case ValueOpcode::BitwiseAnd32: return Binary(Op::And, inst, depth);
+			case ValueOpcode::BitwiseOr32: return Binary(Op::Or, inst, depth);
+			case ValueOpcode::BitwiseXor32: return Binary(Op::Xor, inst, depth);
+			case ValueOpcode::ShiftLeftLogical32: return Binary(Op::Shl, inst, depth);
+			case ValueOpcode::ShiftRightLogical32: return Binary(Op::Shr, inst, depth);
+			case ValueOpcode::IAdd32: return Binary(Op::Add, inst, depth);
+			case ValueOpcode::ISub32: return Binary(Op::Sub, inst, depth);
+			case ValueOpcode::IEqual32: return Binary(Op::Eq, inst, depth);
+			case ValueOpcode::INotEqual32: return Binary(Op::Ne, inst, depth);
+			case ValueOpcode::ULessThan32: return Binary(Op::Ult, inst, depth);
+			case ValueOpcode::ULessThanEqual32: return Binary(Op::Ule, inst, depth);
+			case ValueOpcode::UGreaterThan32: return Binary(Op::Ugt, inst, depth);
+			case ValueOpcode::UGreaterThanEqual32: return Binary(Op::Uge, inst, depth);
+			case ValueOpcode::LogicalAnd: return Binary(Op::LogicalAnd, inst, depth);
+			case ValueOpcode::LogicalOr: return Binary(Op::LogicalOr, inst, depth);
+			case ValueOpcode::LogicalNot: {
+				const auto a = Compile(inst.Arg(0), depth + 1);
+				if (a < 0) return Unknown();
+				StoreExpr e;
+				e.op = Op::Not;
+				e.a  = static_cast<uint16_t>(a);
+				return Node(e);
+			}
+			case ValueOpcode::SelectU32:
+			case ValueOpcode::SelectU1: {
+				// A write under the initial exec of a partial wave: the first invocation sees the new value.
+				if (HoldsForFirstInvocation(inst.Arg(0))) return Compile(inst.Arg(1), depth + 1);
+				const auto a = Compile(inst.Arg(0), depth + 1);
+				const auto b = Compile(inst.Arg(1), depth + 1);
+				const auto c = Compile(inst.Arg(2), depth + 1);
+				if (a < 0 || b < 0 || c < 0) return Unknown();
+				StoreExpr e;
+				e.op = Op::Select;
+				e.a = static_cast<uint16_t>(a);
+				e.b = static_cast<uint16_t>(b);
+				e.c = static_cast<uint16_t>(c);
+				return Node(e);
+			}
+			case ValueOpcode::LoadBufferU32: {
+				const auto& memory = m_program.memory_info.at(inst.Flags<MemoryFlags>().index);
+				if (inst.NumArgs() != 5u || memory.kind != ResourceKind::Buffer || memory.data_dwords != 1u ||
+				    !DirectBuffer(memory) || !HoldsForFirstInvocation(inst.Arg(4))) {
+					return Unknown();
+				}
+				const auto idx  = inst.Arg(1).Resolve();
+				const auto voff = inst.Arg(2).Resolve();
+				const auto soff = inst.Arg(3).Resolve();
+				if (!IsU32Imm(idx) || !IsU32Imm(voff) || !IsU32Imm(soff)) return Unknown();
+				const uint64_t offset = static_cast<uint64_t>(voff.U32()) + soff.U32() + memory.offset;
+				if (offset > UINT32_MAX - 16u) return Unknown();
+				StoreExpr e;
+				e.op       = Op::Load;
+				e.resource = static_cast<uint16_t>(memory.resource);
+				e.index    = idx.U32();
+				e.offset   = static_cast<uint32_t>(offset);
+				return Node(e);
+			}
+			case ValueOpcode::ReadConstBuffer: {
+				const auto& memory = m_program.memory_info.at(inst.Flags<MemoryFlags>().index);
+				const auto  off    = inst.Arg(1).Resolve();
+				if (memory.kind != ResourceKind::ScalarBuffer || !DirectBuffer(memory) || !IsU32Imm(off)) {
+					return Unknown();
+				}
+				StoreExpr e;
+				e.op       = Op::ScalarLoad;
+				e.resource = static_cast<uint16_t>(memory.resource);
+				e.offset   = ((off.U32() >> 2) + (memory.offset >> 2)) * 4u;
+				return Node(e);
+			}
+			default: return Unknown();
+		}
+	}
+
+	const Program&                                m_program;
+	std::unordered_map<const Block*, uint32_t>    m_index;
+	std::unordered_map<const Inst*, int32_t>      m_memo;
+	UniformStoreProgram                           m_out;
+	bool                                          m_failed = false;
+};
+
+static std::shared_ptr<const UniformStoreProgram> AnalyzeUniformStores(const Program& program) {
+	return UniformStoreBuilder(program).Build();
+}
+
+// A compute shader whose only write is the copy of a record: store_format(dst, i, load_format(src, i))
+// for the same index i = local id + stride * workgroup id (UniformCopy). Anything else that writes, a
+// condition, a second load or a different index makes it ineligible.
+static UniformCopy AnalyzeUniformCopy(const Program& program) {
+	if (program.stage != ShaderType::Compute || program.blocks.empty() || program.info.uses_dma ||
+	    !program.info.samplers.empty() || !program.info.images.empty()) {
+		return {};
+	}
+	std::unordered_set<const Block*> visited;
+	const auto*                      block = program.blocks.front();
+	const Inst*                      store = nullptr;
+	const Inst*                      load  = nullptr;
+	for (;;) {
+		if (block == nullptr || !visited.insert(block).second) return {};
+		for (const auto& inst: *block) {
+			const auto op = inst.GetOpcode();
+			if (op == ValueOpcode::LoadBufferU32x4) {
+				if (load != nullptr) return {};
+				load = &inst;
+				continue;
+			}
+			if (BufferAccessOf(op) == BufferAccess::Read) return {}; // any other read: not a pure copy
+			if (!inst.MayHaveSideEffects()) continue;
+			if (op == ValueOpcode::Reference || op == ValueOpcode::ReferenceU32) continue;
+			if (store != nullptr || op != ValueOpcode::StoreBufferU32x4) return {};
+			store = &inst;
+		}
+		const auto& term = block->terminator;
+		if (term.kind == CFG::TerminatorKind::Return) break;
+		if (term.kind != CFG::TerminatorKind::Branch) return {};
+		block = term.true_block;
+	}
+	if (store == nullptr || load == nullptr || visited.size() != program.blocks.size()) return {};
+	const auto check = [&](const Inst& inst, bool is_store) -> const MemoryInfo* {
+		const auto& memory = program.memory_info.at(inst.Flags<MemoryFlags>().index);
+		if (memory.kind != ResourceKind::Buffer || memory.planning_only || !memory.formatted || memory.typed ||
+		    !memory.idxen || memory.offen || memory.offset != 0 || memory.data_bits != 32 ||
+		    memory.data_dwords != 4 || memory.resource >= program.info.buffers.size()) {
+			return nullptr;
+		}
+		const auto& buffer = program.info.buffers[memory.resource];
+		if (buffer.indirect_root == memory.resource || !buffer.indirect_resources.empty() ||
+		    buffer.image_alias != BufferResource::NoImageAlias ||
+		    program.descriptor_sources.at(buffer.source).indirect_descriptor.has_value() ||
+		    (is_store ? buffer.read : buffer.written)) {
+			return nullptr;
+		}
+		const auto guard = inst.Arg(is_store ? 5 : 4).Resolve();
+		if (guard != Value(true) || inst.Arg(2).Resolve() != Value(0u) || inst.Arg(3).Resolve() != Value(0u)) {
+			return nullptr;
+		}
+		return &memory;
+	};
+	const auto* load_memory  = check(*load, false);
+	const auto* store_memory = check(*store, true);
+	if (load_memory == nullptr || store_memory == nullptr || load_memory->resource == store_memory->resource ||
+	    load->Arg(1).Resolve() != store->Arg(1).Resolve()) {
+		return {};
+	}
+	// The stored value is exactly the loaded one: component i of the load is component i of the store.
+	const auto* data = store->Arg(4).ResolveInstruction();
+	if (data == nullptr || data->GetOpcode() != ValueOpcode::CompositeConstructU32x4) return {};
+	for (uint32_t i = 0; i < 4; ++i) {
+		const auto* extract = data->Arg(i).ResolveInstruction();
+		if (extract == nullptr || extract->GetOpcode() != ValueOpcode::CompositeExtractU32x4 ||
+		    extract->Arg(0).ResolveInstruction() != load || extract->Arg(1).Resolve() != Value(i)) {
+			return {};
+		}
+	}
+	const auto index = FillIndex(store->Arg(1), 0, Value(true));
+	if (!index || (*index)[0] != 0 || (*index)[1] != 1 || (*index)[2] == 0) return {};
+	UniformCopy copy;
+	copy.valid        = true;
+	copy.src_resource = load_memory->resource;
+	copy.dst_resource = store_memory->resource;
+	copy.group_stride = static_cast<uint32_t>((*index)[2]);
+	return copy;
+}
+
 ResourcePlan ExtractResourcePlan(const Program& program) {
 	ResourcePlan plan;
 	plan.stage                      = program.stage;
@@ -1058,6 +1485,8 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	};
 	plan.control_flow = ResourceControlFlow(program, ClonePredicate);
 	plan.uniform_fill = AnalyzeUniformFill(program);
+	plan.uniform_stores = AnalyzeUniformStores(program);
+	plan.uniform_copy   = AnalyzeUniformCopy(program);
 	for (uint32_t i = 0; i < plan.uniform_fill.fill.words; ++i) {
 		plan.uniform_fill.values[i] = Clone(plan.uniform_fill.values[i]);
 	}
@@ -1128,6 +1557,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	}
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	snapshot.uniform_fill = {};
+	snapshot.uniform_stores = program.uniform_stores;
+	snapshot.uniform_copy   = program.uniform_copy;
 	const auto& fill = program.uniform_fill;
 	const auto words = fill.fill.words;
 	std::array<uint32_t, 4> stored {};

@@ -12,11 +12,14 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
 #include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
+#include "graphics/host_gpu/renderer/cache/knownCopies.h"
+#include "graphics/host_gpu/renderer/cache/storeExtents.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
+#include "graphics/host_gpu/renderer/cache/storeExtents.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/frontend/translate/Translate.h"
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
@@ -46,8 +49,10 @@
 #include <deque>
 #include <initializer_list>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <span>
+#include <tuple>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -16282,6 +16287,214 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
 
 #include "ShaderRayTracingTests.inc"
 
+
+// --known-stores on translated GCN: a queue-header builder (two vector stores of immediates and a GDS
+// counter) and a conditional initialiser (a store that only runs when a state bit is set and the
+// header is not initialised yet), assembled from the shapes GPU-driven titles use for control blocks.
+// The resolver must claim exactly the immediates, decide the initialiser from memory, and keep a flag
+// dword that the initialiser provably does not touch.
+void TestKnownStoresOnTranslatedProducers() {
+  const uint32_t builder[] = {
+      0xbfa00002u, 0xd7660003u, 0x0001007fu, 0xbefc0308u, 0x7e020281u, 0xd8fa0000u,
+      0x00000000u, 0x7e040281u, 0xd7650005u, 0x0002067eu, 0x7e060280u, 0x7e0802ffu,
+      0x0000005au, 0x7e0c0280u, 0x7e0e0280u, 0xbf8cc07fu, 0x4a0a0b00u, 0xbf8cff0fu,
+      0xd8f60000u, 0x00000000u, 0x7e100280u, 0x7e120280u, 0x7e140280u, 0xbf8cc00fu,
+      0x34000a86u, 0x7e160305u, 0xe0780000u, 0x80010400u, 0xd7460000u, 0x04010300u,
+      0xe0780010u, 0x80010800u, 0x2c000086u, 0xe0780000u, 0x80000000u, 0xbbfd0000u,
+      0xbf810000u};
+  const uint32_t initialiser[] = {
+      0xe0300000u, 0x80000000u, 0xf4201a86u, 0xfa000000u, 0xbf8cc07fu, 0x8f6a6a81u,
+      0xbf8c3f70u, 0x3600006au, 0x7d8c0080u, 0xbf860004u, 0x7e000280u, 0xe0700000u,
+      0x80010000u, 0xbf82000du, 0xe0300000u, 0x80010000u, 0xbf8c3f70u, 0x7d8a0080u,
+      0xbf870008u, 0x7e0402ffu, 0x0000005au, 0x7e000281u, 0x7e0202c0u, 0xe0700000u,
+      0x80010200u, 0xe0740018u, 0x80020000u, 0xbf810000u};
+
+  // User data: s[0:3] state dwords, s[4:7] header, s[8:11] flag buffer (aliases the header),
+  // s[12:15] constants. All raw buffers (stride 0, offset bounds).
+  std::array<uint32_t, 64> user_data{};
+  const auto Descriptor = [&](uint32_t first, uint64_t base, uint32_t bytes) {
+    user_data[first + 0] = static_cast<uint32_t>(base);
+    user_data[first + 1] = static_cast<uint32_t>(base >> 32);
+    user_data[first + 2] = bytes;
+    user_data[first + 3] = 3u << 28u;
+  };
+  Descriptor(0, 0x10000, 16);
+  Descriptor(4, 0x20000, 32);
+  Descriptor(8, 0x20000, 32);
+  Descriptor(12, 0x30000, 16);
+
+  struct Guest {
+    std::map<uint64_t, uint32_t> words;
+  };
+  const auto ReadGuest = +[](void *data, uint64_t address, std::span<uint32_t> values) {
+    const auto &guest = *static_cast<Guest *>(data);
+    for (size_t i = 0; i < values.size(); ++i) {
+      const auto it = guest.words.find(address + i * 4);
+      values[i] = it != guest.words.end() ? it->second : 0u;
+    }
+    return true;
+  };
+
+  // The producers are one-thread workgroups on a 64-wide wave and a 32-wide host subgroup: the
+  // translator's initial exec is then `LocalInvocationIndex < 1`, not `true`.
+  ShaderComputeInputInfo partial_wave = RegressionComputeInputInfo();
+  partial_wave.host_subgroup_size = 32;
+  partial_wave.wave_size = 64;
+  bool use_partial_wave = false;
+  const auto Plan = [&](std::span<const uint32_t> code, Guest &guest, ShaderRecompiler::IR::ResourceSnapshot &snapshot) {
+    auto options = MakeCompileOptions(ShaderType::Compute);
+    options.user_data = user_data;
+    if (use_partial_wave) options.input_info.compute = &partial_wave;
+    auto translated = ShaderRecompiler::TranslateProgram(code, options);
+    auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+    ShaderRecompiler::IR::ResourceSpecialization specialization;
+    Check(ShaderRecompiler::IR::MaterializeResources(
+              plan, {.user_data = user_data, .shader_base = reinterpret_cast<uint64_t>(code.data()),
+                     .read_memory = ReadGuest, .userdata = &guest, .read_specialization_memory = ReadGuest},
+              snapshot, specialization),
+          "producer resources did not materialize");
+    return plan.uniform_stores;
+  };
+  const auto Resolve = [&](const ShaderRecompiler::IR::UniformStoreProgram &program,
+                           const ShaderRecompiler::IR::ResourceSnapshot &snapshot, const Guest &memory,
+                           std::vector<std::pair<uint64_t, uint32_t>> candidates, bool single_wave,
+                           std::vector<SiteState> &states) {
+    std::vector<StoreExtent> extents;
+    MakeStoreExtents(snapshot, extents);
+    EvaluateStoreFlow(program, extents, single_wave,
+                      [&](uint64_t address, uint32_t &value) {
+                        const auto it = memory.words.find(address);
+                        if (it == memory.words.end()) return false;
+                        value = it->second;
+                        return true;
+                      },
+                      states);
+    std::vector<std::pair<uint64_t, uint32_t>> claims, kept;
+    ResolveKnownStores(program, states, extents, candidates, claims, kept);
+    return std::make_pair(std::map<uint64_t, uint32_t>(claims.begin(), claims.end()),
+                          std::map<uint64_t, uint32_t>(kept.begin(), kept.end()));
+  };
+
+  for (const bool partial : {false, true}) {
+    use_partial_wave = partial;
+  {
+    Guest guest;
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    const auto program = Plan(builder, guest, snapshot);
+    Check(program != nullptr && program->sites.size() == 3, "the header builder was not analysed");
+    std::vector<SiteState> states;
+    const auto [claims, kept] = Resolve(*program, snapshot, guest, {}, true, states);
+    Check(std::all_of(states.begin(), states.end(), [](SiteState s) { return s == SiteState::Definite; }),
+          "every store of a straight-line kernel surely runs");
+    // Header (s[4:7] at 0x20000): {0x5a, N, 0, 0} then {0, 0, 0, N}; arguments (s[0:3] at 0x10000): {3N, 1, 1, 0}.
+    Check(claims.size() == 9 && claims.at(0x20000) == 0x5a && claims.at(0x20008) == 0 &&
+              claims.at(0x2000c) == 0 && claims.at(0x20010) == 0 && claims.at(0x20014) == 0 &&
+              claims.at(0x20018) == 0 && !claims.count(0x20004) && !claims.count(0x2001c) &&
+              claims.at(0x10004) == 1 && claims.at(0x10008) == 1 && claims.at(0x1000c) == 0 && !claims.count(0x10000),
+          "the header builder's immediates are claimed, its counts are not");
+  }
+  {
+    // The header was initialised (0x5a) and the state bit (3) is set: no store runs; the flag stays.
+    Guest guest;
+    guest.words = {{0x10000, 0x8}, {0x30000, 3}, {0x20000, 0x5a}};
+    ShaderRecompiler::IR::ResourceSnapshot snapshot;
+    const auto program = Plan(initialiser, guest, snapshot);
+    Check(program != nullptr && program->sites.size() == 3, "the initialiser was not analysed");
+    const std::vector<std::pair<uint64_t, uint32_t>> candidates {{0x20000, 0x5a}, {0x20018, 0}, {0x2001c, 0x40}};
+    std::vector<SiteState> states;
+    auto [claims, kept] = Resolve(*program, snapshot, guest, candidates, true, states);
+    Check(std::all_of(states.begin(), states.end(), [](SiteState s) { return s == SiteState::Unreached; }) &&
+              claims.empty() && kept.size() == 3,
+          "an initialised header: nothing runs, everything stays known");
+    // The state bit is clear: the clear path surely runs and stores a known zero.
+    guest.words[0x10000] = 0;
+    std::tie(claims, kept) = Resolve(*program, snapshot, guest, candidates, true, states);
+    Check(claims.size() == 1 && claims.at(0x20000) == 0 && kept.size() == 2 && kept.count(0x20018),
+          "a clear state bit: the header is zeroed, the flag stays known");
+    // The state dword is not available without waiting for the GPU: the clear path only may run,
+    // the initialiser is still excluded by the initialised header, so the flag stays known.
+    guest.words.erase(0x10000);
+    std::tie(claims, kept) = Resolve(*program, snapshot, guest, candidates, true, states);
+    Check(claims.empty() && kept.size() == 2 && kept.count(0x20018) && kept.count(0x2001c),
+          "an undecided state bit: the flag is still untouched");
+    // Not initialised yet and the bit set: the initialiser surely runs.
+    guest.words = {{0x10000, 0x8}, {0x30000, 3}, {0x20000, 0}};
+    std::tie(claims, kept) = Resolve(*program, snapshot, guest, candidates, true, states);
+    Check(claims.size() == 3 && claims.at(0x20000) == 0x5a && claims.at(0x20018) == 1 &&
+              claims.at(0x2001c) == 0x40 && kept.empty(),
+          "an uninitialised header: the initialiser's constants are claimed");
+    // The header itself is GPU-written and unknown: the initialiser may run, the flag is not known.
+    guest.words = {{0x10000, 0x8}, {0x30000, 3}};
+    std::tie(claims, kept) = Resolve(*program, snapshot, guest, candidates, true, states);
+    Check(claims.empty() && kept.empty(), "an unknown header: nothing is known afterwards");
+    // A dispatch of many threads never decides from memory.
+    guest.words = {{0x10000, 0x8}, {0x30000, 3}, {0x20000, 0x5a}};
+    std::tie(claims, kept) = Resolve(*program, snapshot, guest, candidates, false, states);
+    Check(claims.empty() && kept.empty(), "a multi-wave dispatch decides nothing from memory");
+  }
+  }
+}
+
+// --known-copies on translated GCN: the color-metadata copy of fast-cleared targets (a formatted load
+// of the four components at the global index and a formatted store of them to another buffer) is a
+// UniformCopy, resolves to an exact dword copy for 32-bit unsigned integer records, and the source's
+// content becomes runs of equal dwords.
+void TestKnownCopyOnTranslatedShader() {
+  const uint32_t copy_shader[] = {0xd7460004u, 0x04010c08u, 0xe00c2000u, 0x80000004u,
+                                  0xbf8c3f70u, 0xe01c2000u, 0x80010004u, 0xbf810000u};
+  std::array<uint32_t, 8> user_data{};
+  user_data[1] = 4u << 16; // source: stride 4
+  user_data[2] = 1024;
+  user_data[3] = 3u << 28 | 20u << 12 | (4u | 5u << 3 | 6u << 6 | 7u << 9); // k32UInt, identity select
+  user_data[0] = 0x100000;
+  user_data[5] = 4u << 16;
+  user_data[6] = 1024;
+  user_data[7] = user_data[3];
+  user_data[4] = 0x200000;
+  ShaderComputeInputInfo input_info = RegressionComputeInputInfo();
+  input_info.thread_ids_num = 1;
+  input_info.workgroup_register = 8;
+  input_info.group_id[0] = true;
+  input_info.threads_num[0] = 64;
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.user_data = user_data;
+  options.input_info.compute = &input_info;
+  auto translated = ShaderRecompiler::TranslateProgram(copy_shader, options);
+  auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+  Check(plan.uniform_copy.valid && plan.uniform_copy.group_stride == 64,
+        "the translated metadata copy is not a UniformCopy");
+  ShaderRecompiler::IR::ResourceSnapshot snapshot;
+  ShaderRecompiler::IR::ResourceSpecialization specialization;
+  Check(ShaderRecompiler::IR::MaterializeResources(plan, {.user_data = user_data}, snapshot, specialization),
+        "copy resources did not materialize");
+  const auto Describe = [&](const ShaderRecompiler::IR::DescriptorValue &value) {
+    const auto d = DecodeNativeDescriptor<ShaderBufferResource>(value);
+    CopyDescriptor result;
+    result.base = d.Base48();
+    result.num_records = d.NumRecords();
+    result.stride = d.Stride();
+    result.dst_sel = d.DstSelXYZW();
+    result.words = d.Format() == Prospero::BufferFormat::k32UInt ? 1u : 0u;
+    result.mapped = true;
+    return result;
+  };
+  CopyLaunch launch;
+  launch.groups[0] = 4;
+  launch.groups[1] = launch.groups[2] = 1;
+  launch.threads[0] = 64;
+  launch.threads[1] = launch.threads[2] = 1;
+  launch.use_plain_mode = true;
+  KnownCopy copy;
+  Check(ResolveKnownCopy(snapshot.uniform_copy, Describe(snapshot.buffers[plan.uniform_copy.src_resource]),
+                         Describe(snapshot.buffers[plan.uniform_copy.dst_resource]), launch, copy) &&
+            copy.src == 0x100000 && copy.dst == 0x200000 && copy.bytes == 1024,
+        "the metadata copy is not resolved to an exact copy of 256 of 1024 records");
+  launch.groups[0] = 17;
+  Check(!ResolveKnownCopy(snapshot.uniform_copy, Describe(snapshot.buffers[plan.uniform_copy.src_resource]),
+                          Describe(snapshot.buffers[plan.uniform_copy.dst_resource]), launch, copy),
+        "1088 invocations over 1024 records are not a copy");
+}
+
 } // namespace
 } // namespace Libs::Graphics
 
@@ -16289,6 +16502,8 @@ int main() {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  TestKnownStoresOnTranslatedProducers();
+  TestKnownCopyOnTranslatedShader();
   TestRobustBufferPolicy();
   TestDrawSkipSafety();
   TestRobustBufferBoundsEmission();

@@ -247,6 +247,22 @@ static void PrintUsage() {
 	::printf("  --known-fills <true|false>           Remember ranges last written by one GPU uniform fill so\n"
 	         "                                       color-metadata clear discovery needs no GPU->CPU\n"
 	         "                                       readback for them. Default: false.\n");
+	::printf("  --known-stores <true|false>          The GPU thread takes the value of a dword that a compute\n"
+	         "                                       dispatch stored as an immediate (queue headers, flags)\n"
+	         "                                       from what the dispatch is proven to write, instead of\n"
+	         "                                       draining the GPU to read it (SRT walk). Exact, runtime\n"
+	         "                                       toggle. Default: false.\n");
+	::printf("  --debug-known-verify-all <true|false> Verify every known answer (a GPU drain each). A correctness run,\n"
+	         "                                       not a benchmark. Default: false.\n");
+	::printf("  --known-copies <true|false>          A compute dispatch proven to copy records from one buffer to\n"
+	         "                                       another (the color-metadata copy of fast-cleared targets)\n"
+	         "                                       leaves the destination known when the source is readable\n"
+	         "                                       without waiting for the GPU, so clear discovery needs no\n"
+	         "                                       GPU->CPU readback for it. Exact, runtime toggle. Default: false.\n");
+	::printf("  --debug-known-verify <seconds>       With --known-stores / --known-clear-codes: once per N\n"
+	         "                                       seconds per kind, drain the GPU instead of using the\n"
+	         "                                       known value and compare (loud log on a mismatch; counters\n"
+	         "                                       in --gpu-phase-stats). 0 = off. Default: 0.\n");
 	::printf("  --draw-key-cache <true|false>        Per-draw lookup fast paths: remember the graphics pipelines of\n"
 	         "                                       the last few draws and find them by comparing keys, and\n"
 	         "                                       refresh shader SRT tables from a table (--srt-table-walk).\n"
@@ -942,6 +958,28 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--known-stores") {
+			if (!ParseBool(value, options.config.known_stores)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-known-verify-all") {
+			if (!ParseBool(value, options.config.debug_known_verify_all)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--known-copies") {
+			if (!ParseBool(value, options.config.known_copies)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-known-verify") {
+			uint64_t n = 0;
+			if (!ParseUint64(value, n) || n > 86400) {
+				::printf("invalid --debug-known-verify (expected 0-86400 seconds): %s\n", value.c_str());
+				return false;
+			}
+			options.config.debug_known_verify_s = static_cast<uint32_t>(n);
 		} else if (arg == "--draw-key-cache") {
 			if (!ParseBool(value, options.config.draw_key_cache)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

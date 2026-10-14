@@ -78,6 +78,9 @@ void Configure(uint32_t interval_seconds, bool phases = true);
 void AttachGpuThread();
 // Prints a report when the interval has elapsed (call between scopes, on the attached thread).
 void Poll();
+// Ends the current report window at the next Poll() whatever the interval (a runtime toggle was just
+// applied: every window then lies inside one toggle state). Any thread, relaxed.
+void RequestCut() noexcept;
 // Final report for the time since the last one (on the attached thread, at shutdown).
 void Finish();
 
@@ -88,6 +91,16 @@ void NoteBarrier(bool elided) noexcept;
 // --known-fills: color-metadata clear discovery outcomes (see TextureCache::MaterializeColorClear).
 enum class KnownFill : uint8_t { Hit, Readback, Discarded, DiscardRefused, Count };
 void NoteKnownFill(KnownFill kind) noexcept;
+// --known-stores: dwords recorded after a dispatch (`Recorded`), dependent reads of GPU-dirty bytes
+// answered from them (`Hit`) or not fully covered and drained as before (`Partial`), and the
+// --debug-known-verify drains that compared a known value with the GPU's (`Verified`, `Mismatch`).
+enum class KnownStore : uint8_t { Recorded, Hit, Partial, Verified, Mismatch, Count };
+void NoteKnownStore(KnownStore kind, uint64_t n = 1) noexcept;
+// --known-copies: runs recorded after a proven copy (`Recorded`), color-metadata slices answered from
+// them (`Hit`) or not known (`Partial`, drained as before), and --debug-known-verify drains that
+// compared a known slice with the GPU's (`Verified`, `Mismatch`).
+enum class KnownCopy : uint8_t { Recorded, Hit, Partial, Verified, Mismatch, Count };
+void NoteKnownCopy(KnownCopy kind, uint64_t n = 1) noexcept;
 // --gpu-indirect-draws: how `draws` indirect draws of one packet were routed. The first time each
 // fallback reason is seen it is printed once.
 void NoteIndirectDraw(IndirectDraw::Route route, uint32_t draws) noexcept;

@@ -1731,6 +1731,280 @@ void TestComputeBufferFill() {
   Run({.clean = true, .branch = true});
 }
 
+void TestUniformStores() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  struct Options {
+    bool conditional = false;
+    bool atomic = false;
+    bool branch = false;
+    bool voffset_from_lane = false;
+    bool formatted = false;
+    bool second_buffer_store = false;
+    bool shared_write = false;
+    bool subdword = false;
+    bool indexed_by_lane = false;
+    bool loop = false;
+    uint32_t index_guard = 0; // 1: LocalInvocationIndex < 4, 2: LocalInvocationIndex < 0
+  };
+  const auto Run = [](Options options) {
+    Fixture fixture;
+    fixture.program.blocks[0]->terminator.kind = CFG::TerminatorKind::Return;
+    const auto buffer =
+        fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                        fixture.UserData(2), fixture.UserData(3)});
+    const auto local = fixture.Emit(
+        ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)),
+         Value(0u)});
+    MemoryInfo store;
+    store.kind = ResourceKind::Buffer;
+    store.formatted = options.formatted;
+    store.data_dwords = 4;
+    store.offset = 16;
+    const auto flags = fixture.AddMemory(store, 16);
+    Value predicate =
+        options.conditional
+            ? fixture.Emit(ValueOpcode::ULessThan32, {local, Value(32u)})
+            : Value(true);
+    if (options.index_guard != 0) {
+      const auto index = fixture.Emit(
+          ValueOpcode::GetBuiltin,
+          {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationIndex)), Value(0u)});
+      predicate = fixture.Emit(ValueOpcode::ULessThan32,
+                               {index, Value(options.index_guard == 1 ? 4u : 0u)});
+    }
+    // {0xc0, lane, 0, 7}: three immediates and a lane-dependent dword.
+    const auto data = fixture.Emit(ValueOpcode::CompositeConstructU32x4,
+                                   {Value(0xc0u), local, Value(0u), Value(7u)});
+    fixture.Emit(ValueOpcode::StoreBufferU32x4,
+                 {buffer, options.indexed_by_lane ? local : Value(0u),
+                  options.voffset_from_lane ? local : Value(8u), Value(4u), data,
+                  predicate},
+                 flags);
+    if (options.second_buffer_store) {
+      MemoryInfo one;
+      one.kind = ResourceKind::Buffer;
+      one.data_dwords = 1;
+      const auto one_flags = fixture.AddMemory(one, 24);
+      fixture.Emit(ValueOpcode::StoreBufferU32,
+                   {buffer, Value(0u), Value(0u), Value(0u), Value(1u), Value(true)},
+                   one_flags);
+    }
+    if (options.subdword) {
+      MemoryInfo one;
+      one.kind = ResourceKind::Buffer;
+      one.data_bits = 8;
+      const auto one_flags = fixture.AddMemory(one, 24);
+      fixture.Emit(ValueOpcode::StoreBufferU8,
+                   {buffer, Value(0u), Value(0u), Value(0u), Value(uint8_t {1}), Value(true)},
+                   one_flags);
+    }
+    if (options.atomic) {
+      MemoryInfo atomic;
+      atomic.kind = ResourceKind::Buffer;
+      const auto atomic_flags = fixture.AddMemory(atomic, 32);
+      fixture.Emit(ValueOpcode::BufferAtomicIAdd32,
+                   {buffer, Value(0u), Value(0u), Value(0u), Value(1u), Value(true)},
+                   atomic_flags);
+    }
+    if (options.shared_write) {
+      MemoryInfo shared;
+      shared.kind = ResourceKind::Gds;
+      const auto shared_flags = fixture.AddMemory(shared, 40);
+      fixture.Emit(ValueOpcode::WriteSharedU32,
+                   {Value(0u), Value(1u), Value(true)}, shared_flags);
+    }
+    if (options.branch || options.loop) {
+      // block 0 -> (cond) block 1 / block 2; block 1 -> block 2 (or back to block 0 in the loop case).
+      auto *b1 = fixture.AddBlock();
+      auto *b2 = fixture.AddBlock();
+      b1->terminator.kind = CFG::TerminatorKind::Branch;
+      b1->terminator.true_block = options.loop ? fixture.program.blocks[0] : b2;
+      b2->terminator.kind = CFG::TerminatorKind::Return;
+      fixture.program.blocks[0]->terminator.kind = CFG::TerminatorKind::ConditionalBranch;
+      fixture.program.blocks[0]->terminator.true_block = b1;
+      fixture.program.blocks[0]->terminator.false_block = b2;
+      MemoryInfo load;
+      load.kind = ResourceKind::Buffer;
+      load.data_dwords = 1;
+      const auto load_flags = fixture.AddMemory(load, 48);
+      const auto loaded = fixture.Emit(ValueOpcode::LoadBufferU32,
+                                       {buffer, Value(0u), Value(0u), Value(0u), Value(true)}, load_flags);
+      fixture.program.blocks[0]->condition =
+          fixture.Emit(ValueOpcode::IEqual32, {loaded, Value(0u)});
+      MemoryInfo one;
+      one.kind = ResourceKind::Buffer;
+      one.data_dwords = 1;
+      one.offset = 64;
+      const auto one_flags = fixture.AddMemory(one, 56);
+      fixture.Emit(ValueOpcode::StoreBufferU32,
+                   {buffer, Value(0u), Value(0u), Value(0u), Value(9u), Value(true)}, one_flags, b1);
+    }
+    fixture.PlanAndTrack();
+    auto plan = ExtractResourcePlan(fixture.program);
+    const bool eligible = !options.atomic && !options.formatted && !options.voffset_from_lane &&
+                          !options.indexed_by_lane && !options.subdword && !options.loop;
+    return std::make_pair(std::move(plan), eligible);
+  };
+  {
+    auto [plan, eligible] = Run({});
+    Check(eligible && plan.uniform_stores != nullptr && plan.uniform_stores->sites.size() == 1,
+          "the uniform store was not found");
+    const auto &program = *plan.uniform_stores;
+    const auto &site = program.sites[0];
+    Check(site.dwords == 4 && site.byte_offset == 8 + 4 + 16 && site.known_mask == 0b1101 &&
+              site.value[0] == 0xc0 && site.value[2] == 0 && site.value[3] == 7 && site.executes &&
+              site.block == 0,
+          "the site lost its address or its immediate dwords");
+    Check(program.blocks.size() == 1 && program.order.size() == 1 && program.blocks[0].cond < 0 &&
+              program.blocks[0].site_begin == 0 && program.blocks[0].site_end == 1,
+          "a straight shader is one block without a condition");
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    std::array<uint32_t, 4> userdata{0x200000u, 4u << 16, 0x4000u, 0x14204u};
+    Check(MaterializeResources(plan, {.user_data = userdata}, snapshot, specialization) &&
+              snapshot.uniform_stores == plan.uniform_stores,
+          "the snapshot does not carry the program");
+  }
+  { auto [plan, eligible] = Run({.conditional = true});
+    Check(plan.uniform_stores != nullptr && !plan.uniform_stores->sites[0].executes,
+          "a conditional store was taken to run"); (void)eligible; }
+  {
+    // The translator's initial exec of a workgroup that does not fill its last wave.
+    auto [plan, eligible] = Run({.index_guard = 1});
+    Check(plan.uniform_stores != nullptr && plan.uniform_stores->sites[0].executes,
+          "a bound the first invocation satisfies was not accepted");
+    (void)eligible;
+    auto [plan0, eligible0] = Run({.index_guard = 2});
+    Check(plan0.uniform_stores != nullptr && !plan0.uniform_stores->sites[0].executes,
+          "a bound of zero was accepted");
+    (void)eligible0;
+  }
+  { auto [plan, eligible] = Run({.shared_write = true});
+    Check(plan.uniform_stores != nullptr, "a GDS write made the shader ineligible"); (void)eligible; }
+  { auto [plan, eligible] = Run({.second_buffer_store = true});
+    Check(plan.uniform_stores != nullptr && plan.uniform_stores->sites.size() == 2 &&
+              plan.uniform_stores->sites[1].known_mask == 1, "two stores"); (void)eligible; }
+  for (const auto &options :
+       {Options {.atomic = true}, Options {.voffset_from_lane = true},
+        Options {.formatted = true}, Options {.indexed_by_lane = true}, Options {.subdword = true},
+        Options {.loop = true}}) {
+    auto [plan, eligible] = Run(options);
+    Check(!eligible && plan.uniform_stores == nullptr,
+          "a shader with a write or a loop the analysis does not model was accepted");
+  }
+  {
+    // A branch on a loaded dword: the condition becomes Load / Imm / Eq, the store behind it a site
+    // of its own block.
+    auto [plan, eligible] = Run({.branch = true});
+    Check(eligible && plan.uniform_stores != nullptr, "a branching shader was not analysed");
+    const auto &program = *plan.uniform_stores;
+    Check(program.sites.size() == 2 && program.blocks.size() == 3 && program.order.size() == 3 &&
+              program.order.front() == 0 && program.order.back() == 2,
+          "blocks and order of a diamond");
+    Check(program.blocks[0].cond >= 0 && program.blocks[0].succ_true == 1 &&
+              program.blocks[0].succ_false == 2 && program.blocks[1].succ_true == 2 &&
+              program.sites[1].block == 1 && program.sites[1].byte_offset == 64,
+          "edges and the site behind the branch");
+    bool load = false, imm = false, eq = false;
+    for (const auto &e : program.exprs) {
+      load |= e.op == StoreExpr::Op::Load && e.offset == 0;
+      imm |= e.op == StoreExpr::Op::Imm && e.imm == 0;
+      eq |= e.op == StoreExpr::Op::Eq;
+    }
+    Check(load && imm && eq && program.exprs[static_cast<size_t>(program.blocks[0].cond)].op == StoreExpr::Op::Eq,
+          "the condition was not expressed");
+  }
+}
+
+void TestUniformCopy() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  struct Options {
+    bool other_index = false;
+    bool extra_store = false;
+    bool same_resource = false;
+    bool conditional = false;
+    bool permuted = false;
+    bool offset = false;
+    bool branch = false;
+  };
+  const auto Run = [](Options options) {
+    Fixture fixture;
+    fixture.program.blocks[0]->terminator.kind = CFG::TerminatorKind::Return;
+    const auto source = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                                        fixture.UserData(2), fixture.UserData(3)});
+    const auto target = options.same_resource
+                            ? source
+                            : fixture.Buffer({fixture.UserData(4), fixture.UserData(5),
+                                              fixture.UserData(6), fixture.UserData(7)}, 8);
+    const auto local = fixture.Emit(
+        ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    const auto group = fixture.Emit(
+        ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::WorkgroupId)), Value(0u)});
+    const auto index = fixture.Emit(
+        ValueOpcode::IAdd32,
+        {local, fixture.Emit(ValueOpcode::ShiftLeftLogical32, {group, Value(6u)})});
+    MemoryInfo load;
+    load.kind = ResourceKind::Buffer;
+    load.formatted = true;
+    load.idxen = true;
+    load.data_dwords = 4;
+    const auto loaded = fixture.Emit(
+        ValueOpcode::LoadBufferU32x4,
+        {source, index, Value(0u), Value(0u), options.conditional ? fixture.Emit(ValueOpcode::ULessThan32, {local, Value(8u)}) : Value(true)},
+        fixture.AddMemory(load, 4));
+    std::array<Value, 4> components;
+    for (uint32_t i = 0; i < 4; ++i) {
+      components[i] = fixture.Emit(ValueOpcode::CompositeExtractU32x4,
+                                   {loaded, Value(options.permuted && i < 2 ? 1u - i : i)});
+    }
+    const auto data = fixture.Emit(ValueOpcode::CompositeConstructU32x4,
+                                   {components[0], components[1], components[2], components[3]});
+    MemoryInfo store = load;
+    store.offset = options.offset ? 16 : 0;
+    const auto store_index =
+        options.other_index ? fixture.Emit(ValueOpcode::IAdd32, {index, Value(1u)}) : index;
+    const auto store_flags = fixture.AddMemory(store, 12);
+    fixture.Emit(ValueOpcode::StoreBufferU32x4,
+                 {target, store_index, Value(0u), Value(0u), data, Value(true)}, store_flags);
+    if (options.extra_store) {
+      fixture.Emit(ValueOpcode::StoreBufferU32x4,
+                   {target, store_index, Value(0u), Value(0u), data, Value(true)}, store_flags);
+    }
+    if (options.branch) {
+      auto *b1 = fixture.AddBlock();
+      b1->terminator.kind = CFG::TerminatorKind::Return;
+      fixture.program.blocks[0]->terminator.kind = CFG::TerminatorKind::ConditionalBranch;
+      fixture.program.blocks[0]->terminator.true_block = b1;
+      fixture.program.blocks[0]->terminator.false_block = b1;
+      fixture.program.blocks[0]->condition = Value(true);
+    }
+    fixture.PlanAndTrack();
+    return ExtractResourcePlan(fixture.program);
+  };
+  {
+    const auto plan = Run({});
+    Check(plan.uniform_copy.valid && plan.uniform_copy.group_stride == 64 &&
+              plan.uniform_copy.src_resource != plan.uniform_copy.dst_resource,
+          "the copy shader was not found");
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    std::array<uint32_t, 8> userdata{0x200000u, 4u << 16, 0x4000u, 0x14204u,
+                                     0x300000u, 4u << 16, 0x4000u, 0x14204u};
+    Check(MaterializeResources(plan, {.user_data = userdata}, snapshot, specialization) &&
+              snapshot.uniform_copy == plan.uniform_copy,
+          "the snapshot does not carry the copy");
+  }
+  for (const auto &options :
+       {Options {.other_index = true}, Options {.extra_store = true}, Options {.same_resource = true},
+        Options {.conditional = true}, Options {.permuted = true}, Options {.offset = true},
+        Options {.branch = true}}) {
+    Check(!Run(options).uniform_copy.valid, "a shader that is not a plain record copy was accepted");
+  }
+}
+
 void TestDenseBufferTracking() {
   Fixture fixture;
   std::array<Value, 8> userdata;
@@ -3714,6 +3988,8 @@ int main() {
     };
     Run("dense buffers", TestDenseBufferTracking);
     Run("compute buffer fill", TestComputeBufferFill);
+    Run("uniform stores", TestUniformStores);
+    Run("uniform copy", TestUniformCopy);
     Run("scalar/vector alias", TestScalarAndVectorBufferAlias);
     Run("runtime unsigned min", TestRuntimeUnsignedMinDescriptor);
     Run("images and samplers", TestImagesSamplersAndAliases);

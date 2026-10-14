@@ -121,6 +121,12 @@ bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t
 // GPU thread: the range holds bytes the GPU wrote that the guest backing does not have yet (a
 // TryReadBufferBacking of it would read them back). Never synchronizes.
 bool                   HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
+// --known-stores: GPU-dirty bytes whose value the GPU thread does not already know (a dirty range
+// every dword of which a recorded dispatch is proven to have stored as a constant is not counted).
+bool                   HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size);
+// Replaces the GPU-dirty, known dwords of `data` (a copy of [vaddr, vaddr + bytes) from the guest
+// backing) by their known values.
+void                   OverlayKnownGpuBytes(uint64_t vaddr, uint32_t* data, uint64_t bytes);
 // GPU thread: copies guest bytes from the backing, without a page fault and without a GPU
 // readback, when none of them is GPU-written (--clean-guest-reads). False reads nothing.
 bool                   TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size);
