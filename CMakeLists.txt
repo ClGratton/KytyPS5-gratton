@@ -544,6 +544,11 @@ add_executable(known_fills_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(known_fills_tests PRIVATE ${inc_headers})
 
+add_executable(known_copies_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/KnownCopiesTests.cpp"
+)
+target_include_directories(known_copies_tests PRIVATE ${inc_headers})
+
 add_executable(known_stores_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/KnownStoresTests.cpp"
 )
@@ -928,6 +933,7 @@ if(BUILD_TESTING)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
 	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
 	add_test(NAME known_stores COMMAND $<TARGET_FILE:known_stores_tests>)
+	add_test(NAME known_copies COMMAND $<TARGET_FILE:known_copies_tests>)
 	add_test(NAME draw_key_memo COMMAND $<TARGET_FILE:draw_key_memo_tests>)
 	add_test(NAME image_lookup_memo COMMAND $<TARGET_FILE:image_lookup_memo_tests>)
 	add_test(NAME srt_plan COMMAND $<TARGET_FILE:srt_plan_tests>)
@@ -1157,6 +1163,7 @@ if(BUILD_TESTING)
 		barrier_elision_tests
 		known_fills_tests
 		known_stores_tests
+		known_copies_tests
 		draw_key_memo_tests
 		image_lookup_memo_tests
 		srt_plan_tests
