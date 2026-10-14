@@ -25,6 +25,13 @@ public:
 
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// Both answers in one pass over the regions (one lock round trip each) instead of two. Like
+	// IsRegionCpuModified it creates the regions of the range.
+	struct DirtyState {
+		bool cpu = false;
+		bool gpu = false;
+	};
+	[[nodiscard]] DirtyState QueryDirty(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
@@ -36,6 +43,11 @@ public:
 	// more than the pair of calls did and costs only redundant uploads.
 	void               TakeGpuPagesForCpu(uint64_t vaddr, uint64_t size);
 	void               UntrackMemory(uint64_t vaddr, uint64_t size);
+	// The epochs of the (at most two) tracking regions that [vaddr, vaddr + size) touches, for callers
+	// that remember that the range was clean (RegionManager::Epoch). Returns the number of epochs
+	// written to `out`, or 0 when the range is not covered by one or two existing regions (a region
+	// that does not exist yet starts out CPU-dirty, so nothing about it can be remembered). Lock-free.
+	[[nodiscard]] uint32_t RangeEpochs(uint64_t vaddr, uint64_t size, uint32_t (&out)[2]) const noexcept;
 	// Removes protection from a range and flushes GPU-owned data when required.
 	template <typename Flush>
 	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {
