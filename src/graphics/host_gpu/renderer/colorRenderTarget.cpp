@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -11,6 +12,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/resolvedDrawStats.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -259,14 +261,97 @@ bool DescribeRenderColorTarget(const HW::Context& hw, RenderColorInfo& r,
 	return true;
 }
 
+// ---- resolved draw: memo of DescribeRenderColorTarget -------------------------------------------------
+//
+// The description is a pure function of one slot's registers, the slot's four mask bits, the draw's
+// slice offset and the ignore flag. Consecutive draws of a pass program the same targets again and
+// again, so kyGpu keeps the last result per slot and compares the inputs field by field. A match
+// returns exactly what the function returned for the same inputs (including "no color output");
+// a call that would have stopped the emulator never gets stored.
+namespace {
+struct ColorDescribeMemo {
+	bool            valid = false;
+	HW::RenderTarget input;
+	uint32_t        mask         = 0;
+	uint32_t        slice_offset = 0;
+	bool            ignore       = false;
+	bool            ok           = false;
+	RenderColorInfo result;
+};
+
+bool SameColorDescription(const RenderColorInfo& a, const RenderColorInfo& b) {
+	const auto& x = a.desc.info;
+	const auto& y = b.desc.info;
+	bool same = a.desc.type == b.desc.type && a.desc.view_info == b.desc.view_info && x.data == y.data &&
+	            x.stencil == y.stencil && x.extent == y.extent && x.resources == y.resources &&
+	            x.pixel_format == y.pixel_format && x.guest_format == y.guest_format &&
+	            x.bytes_per_block == y.bytes_per_block && x.samples == y.samples &&
+	            x.tile_mode == y.tile_mode && x.type == y.type && x.pitch == y.pitch &&
+	            x.bgra16 == y.bgra16 && x.metadata.range == y.metadata.range &&
+	            x.metadata.kind == y.metadata.kind && x.metadata.dcc_alpha_msb == y.metadata.dcc_alpha_msb &&
+	            x.metadata.clear_word == y.metadata.clear_word &&
+	            x.metadata.clear_word_hi == y.metadata.clear_word_hi &&
+	            x.metadata.clear_register_valid == y.metadata.clear_register_valid &&
+	            a.target_slot == b.target_slot && a.guest_mip_level == b.guest_mip_level &&
+	            a.guest_array_layer == b.guest_array_layer && a.export_mapping.packed == b.export_mapping.packed;
+	for (uint32_t level = 0; same && level < x.resources.levels && level < x.mip_layout.size(); ++level) {
+		same = x.mip_layout[level] == y.mip_layout[level];
+	}
+	return same;
+}
+} // namespace
+
+static bool DescribeColorTargetMemoized(const HW::Context& hw, RenderColorInfo& r,
+                                        uint32_t slice_offset, uint32_t slot, bool ignore) {
+	if (!Config::ResolvedDrawEnabled() || slot >= RENDER_COLOR_ATTACHMENTS_MAX) {
+		return DescribeRenderColorTarget(hw, r, slice_offset, slot, ignore);
+	}
+	static thread_local std::array<ColorDescribeMemo, RENDER_COLOR_ATTACHMENTS_MAX> memos;
+	auto&       memo = memos[slot];
+	const auto  mask = render_target_mask_slot(hw.GetRenderTargetMask(), slot);
+	const auto& rt   = hw.GetRenderTarget(slot);
+	auto&       stats = ResolvedDraw::GetStats().color_target;
+	if (memo.valid && memo.mask == mask && memo.slice_offset == slice_offset && memo.ignore == ignore &&
+	    memo.input == rt) {
+		if (memo.ok) {
+			r = memo.result;
+		} else {
+			r             = {};
+			r.target_slot = slot;
+		}
+		stats.Used();
+		if (Config::ResolvedDrawVerify()) {
+			RenderColorInfo fresh;
+			const bool      fresh_ok = DescribeRenderColorTarget(hw, fresh, slice_offset, slot, ignore);
+			if (fresh_ok != memo.ok || (fresh_ok && !SameColorDescription(fresh, r))) {
+				EXIT("resolved draw: the memoized render-target description differs from a fresh one, slot %u\n", slot);
+			}
+			stats.Verified();
+		}
+		return memo.ok;
+	}
+	stats.Fallback();
+	const bool ok = DescribeRenderColorTarget(hw, r, slice_offset, slot, ignore);
+	memo.valid        = true;
+	memo.input        = rt;
+	memo.mask         = mask;
+	memo.slice_offset = slice_offset;
+	memo.ignore       = ignore;
+	memo.ok           = ok;
+	if (ok) {
+		memo.result = r;
+	}
+	return ok;
+}
+
 void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
                                               uint32_t         render_target_slice_offset,
                                               uint32_t rt_slot, bool ignore_target_mask,
                                               bool exact_format) {
 	KYTY_PROFILER_FUNCTION();
 	Common::GpuPhase::Scope gpu_phase_describe(Common::GpuPhase::Phase::DrawDescribe);
-	if (!DescribeRenderColorTarget(buffer.GetRegisters(), r, render_target_slice_offset, rt_slot,
-	                               ignore_target_mask)) {
+	if (!DescribeColorTargetMemoized(buffer.GetRegisters(), r, render_target_slice_offset, rt_slot,
+	                                 ignore_target_mask)) {
 		return;
 	}
 	gpu_phase_describe.End();

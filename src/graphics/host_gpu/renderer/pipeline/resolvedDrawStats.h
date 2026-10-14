@@ -32,6 +32,7 @@ struct Counter {
 struct Stats {
 	Counter hazard_hull;
 	Counter permutation;
+	Counter color_target; // DescribeRenderColorTarget memo
 };
 
 inline Stats& GetStats() {
@@ -41,7 +42,7 @@ inline Stats& GetStats() {
 
 [[nodiscard]] inline std::string SummaryText() {
 	auto& s = GetStats();
-	return "ResolvedDraw " + s.hazard_hull.Text("hazard_hull") + "; " + s.permutation.Text("permutation");
+	return "ResolvedDraw " + s.hazard_hull.Text("hazard_hull") + "; " + s.permutation.Text("permutation") + "; " + s.color_target.Text("color_target");
 }
 
 } // namespace Libs::Graphics::ResolvedDraw
