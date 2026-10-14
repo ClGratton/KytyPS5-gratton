@@ -254,7 +254,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	const auto  descriptor_bytes = dword_count * sizeof(uint32_t);
 	const auto& sources = indirect.sources;
 	const auto* selector = indirect.selector ? &*indirect.selector : nullptr;
-	auto& keys = program.material_keys;
+	auto& keys = program.ThreadScratch().material_keys;
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
 	const auto intern_candidate = [&](const DescriptorValue& candidate, uint32_t& ordinal) {
@@ -1127,7 +1127,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
 		return false;
 	}
-	const auto active = std::span<const uint8_t>(program.active_sources);
+	const auto active = std::span<const uint8_t>(program.ThreadScratch().active_sources);
 	snapshot.uniform_fill = {};
 	const auto& fill = program.uniform_fill;
 	const auto words = fill.fill.words;

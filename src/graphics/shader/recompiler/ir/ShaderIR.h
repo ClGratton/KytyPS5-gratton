@@ -654,14 +654,20 @@ struct ResourcePlan {
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
 	SrtTable                              srt_table; // empty unless the plan is native-eligible
 	std::vector<SrtFastRead>              fast_reads; // per srt_reads slot; see BuildFastReads
-	// GPU-thread scratch for nested clean/EXEC memos, activity and material keys.
-	mutable std::deque<EvaluationContext> evaluation_contexts;
-	mutable uint32_t                       evaluation_value_count = 0;
-	mutable uint32_t                       evaluation_depth       = 0;
-	mutable std::vector<uint8_t>            active_sources;
-	mutable std::vector<uint8_t>            visited_blocks;
-	mutable std::vector<uint32_t>           pending_blocks;
-	mutable std::vector<uint32_t>           material_keys;
+	// Number of memo slots the instructions of this plan need (instructions are numbered on first use).
+	mutable EvaluationCounter               evaluation_value_count;
+	// Scratch for nested clean/EXEC memos, activity and material keys. Each thread that evaluates the
+	// plan has its own, so several threads can materialize one plan at once (the plan itself is only
+	// read while evaluating).
+	struct Scratch {
+		std::deque<EvaluationContext> evaluation_contexts;
+		uint32_t                      evaluation_depth = 0;
+		std::vector<uint8_t>          active_sources;
+		std::vector<uint8_t>          visited_blocks;
+		std::vector<uint32_t>         pending_blocks;
+		std::vector<uint32_t>         material_keys;
+	};
+	[[nodiscard]] Scratch& ThreadScratch() const;
 };
 
 struct Program: ResourcePlan {

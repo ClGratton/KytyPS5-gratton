@@ -599,9 +599,9 @@ SrtWalker::SrtWalker(const ResourcePlan& program, const SrtRuntime& runtime,
                      SrtWalker* clean_evaluator, Value active_mask)
     : m_program(program), m_runtime(runtime), m_clean_evaluator(clean_evaluator),
       m_active_mask(active_mask.Resolve()),
-      m_context(AcquireContext(program)) {}
+      m_scratch(program.ThreadScratch()), m_context(AcquireContext(m_scratch)) {}
 
-SrtWalker::~SrtWalker() { --m_program.evaluation_depth; }
+SrtWalker::~SrtWalker() { --m_scratch.evaluation_depth; }
 
 bool SrtWalker::Evaluate(Value value, uint32_t& result) {
 	uint64_t wide = 0;
@@ -612,11 +612,11 @@ bool SrtWalker::Evaluate(Value value, uint32_t& result) {
 	return true;
 }
 
-ResourcePlan::EvaluationContext& SrtWalker::AcquireContext(const ResourcePlan& program) {
-	if (program.evaluation_depth == program.evaluation_contexts.size()) {
-		program.evaluation_contexts.emplace_back();
+ResourcePlan::EvaluationContext& SrtWalker::AcquireContext(ResourcePlan::Scratch& scratch) {
+	if (scratch.evaluation_depth == scratch.evaluation_contexts.size()) {
+		scratch.evaluation_contexts.emplace_back();
 	}
-	auto& context = program.evaluation_contexts[program.evaluation_depth++];
+	auto& context = scratch.evaluation_contexts[scratch.evaluation_depth++];
 	context.generation += 2;
 	return context;
 }
@@ -1199,7 +1199,7 @@ bool SrtWalker::RefreshFlatTable(std::vector<uint32_t>& flat) {
 		return false;
 	}
 	flat.resize(m_program.srt_reads.size());
-	m_program.active_sources.clear();
+	m_scratch.active_sources.clear();
 	m_context.values.resize(m_program.evaluation_value_count);
 	constexpr uint64_t kPointerMask = AddressMask & ~uint64_t {3};
 	for (const auto& node: table.nodes) {
@@ -1298,7 +1298,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	}
 	if (m_program.srt_code && m_runtime.read_memory == nullptr) {
 		flat.resize(m_program.srt_reads.size());
-		m_program.active_sources.clear();
+		m_scratch.active_sources.clear();
 		m_context.values.resize(m_program.evaluation_value_count);
 		using Walker = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 		    ResourcePlan::EvaluationContext::Entry*, uint64_t, size_t);
@@ -1321,7 +1321,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		}
 		return read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
 	};
-	auto& active = m_program.active_sources;
+	auto& active = m_scratch.active_sources;
 	if (m_program.control_flow.empty()) {
 		active.clear();
 		flat.resize(m_program.srt_reads.size());
@@ -1336,8 +1336,8 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	for (const auto& block: m_program.control_flow) {
 		for (const auto source: block.sources) active.at(source) = 0u;
 	}
-	auto& visited = m_program.visited_blocks;
-	auto& pending = m_program.pending_blocks;
+	auto& visited = m_scratch.visited_blocks;
+	auto& pending = m_scratch.pending_blocks;
 	visited.assign(m_program.control_flow.size(), 0u);
 	pending.clear();
 	pending.push_back(0u);

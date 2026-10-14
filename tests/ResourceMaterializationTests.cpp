@@ -2,6 +2,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <map>
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <thread>
 
 namespace {
 
@@ -170,6 +172,43 @@ void TestMappedSrtUsesDirectReaderByDefault() {
   Check(snapshot.flattened_srt.size() == 1 &&
             snapshot.flattened_srt[0] == dword,
         "cache rematerialization did not use the direct reader by default");
+}
+
+// Several threads materialize one plan at once, each with its own inputs (the lookahead's workers do
+// this with a shared program entry): evaluation scratch and memo generations are per thread, and the
+// lazily assigned instruction numbers are claimed with a compare-and-swap, so every thread must get
+// exactly what it would get alone.
+void TestConcurrentMaterializationOfOnePlan() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  constexpr uint32_t kThreads = 8;
+  constexpr uint32_t kRounds = 4000;
+  const uint32_t table_word = 0xabcdef01u;
+  auto srt_plan = ExtractResourcePlan(SrtProgram(reinterpret_cast<uint64_t>(&table_word)));
+  auto buffer_plan = UserDataBufferPlan();
+  std::atomic<uint32_t> failures{0};
+  std::vector<std::thread> threads;
+  for (uint32_t t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&, t] {
+      ResourceSnapshot srt_snapshot;
+      ResourceSpecialization srt_specialization;
+      ResourceSnapshot buffer_snapshot;
+      ResourceSpecialization buffer_specialization;
+      for (uint32_t round = 0; round < kRounds; ++round) {
+        if (!MaterializeResources(srt_plan, {}, srt_snapshot, srt_specialization) ||
+            srt_snapshot.flattened_srt.size() != 1 || srt_snapshot.flattened_srt[0] != table_word) {
+          failures.fetch_add(1);
+        }
+        const std::array<uint32_t, 4> user_data{0x1000u * (t + 1u) + round, round, t, 7u};
+        const SrtRuntime runtime{.user_data = user_data};
+        if (!MaterializeResources(buffer_plan, runtime, buffer_snapshot, buffer_specialization) ||
+            buffer_snapshot.buffers.size() != 1 || buffer_snapshot.buffers[0].dwords[0] != user_data[0]) {
+          failures.fetch_add(1);
+        }
+      }
+    });
+  }
+  for (auto &thread : threads) thread.join();
+  Check(failures.load() == 0, "concurrent materialization of one plan gave a wrong result");
 }
 
 void TestNativeNestedSrtRefresh() {
@@ -948,7 +987,7 @@ void TestSharedControlPredicates() {
             "shared predicate changed its uniform factor or cached runtime values");
       std::vector<uint32_t> flat;
       Check(walker.RefreshFlatBuffer(flat) &&
-                plan.visited_blocks == (known
+                plan.ThreadScratch().visited_blocks == (known
                     ? (conjunction ? std::vector<uint8_t>{1, 1, 0, 1}
                                    : std::vector<uint8_t>{1, 0, 1, 0})
                     : std::vector<uint8_t>{1, 1, 1, 1}),
@@ -1188,6 +1227,7 @@ void TestGuessSpecialization() {
 
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
+  TestConcurrentMaterializationOfOnePlan();
   TestNativeNestedSrtRefresh();
   TestTableWalkMatchesTheGraphWalk();
   TestFastReadsMatchTheGraphWalk();

@@ -78,7 +78,7 @@ private:
 	bool FastSource(const SrtFastRead::Source& source, uint64_t& result);
 	bool FastRead(const SrtFastRead& fast, const SrtRead& read, std::vector<uint32_t>& flat);
 	void VerifyFlatTable(const std::vector<uint32_t>& flat);
-	static ResourcePlan::EvaluationContext& AcquireContext(const ResourcePlan& program);
+	static ResourcePlan::EvaluationContext& AcquireContext(ResourcePlan::Scratch& scratch);
 	static float Float32(uint64_t bits);
 	bool EvaluateWide(Value value, uint64_t& result);
 	bool Arg(const Inst& inst, size_t index, uint64_t& result);
@@ -91,6 +91,7 @@ private:
 	SrtRuntime                      m_runtime;
 	SrtWalker*                      m_clean_evaluator = nullptr;
 	Value                           m_active_mask;
+	ResourcePlan::Scratch&           m_scratch; // this thread's scratch for m_program
 	ResourcePlan::EvaluationContext& m_context;
 };
 

@@ -17,6 +17,7 @@
 #include "common/threads.h"
 #include "graphics/guest_gpu/csRegisters.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "common/fairSharedMutex.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -715,7 +716,7 @@ struct PipelineCache::ProgramCache {
 		// same permutation search runs. The plan keeps the entry's old buffers for recycling.
 		Permutation* FindPermutationAdopting(SrtPlan::Plan& plan, uint32_t push_data_cursor,
 		                                     ShaderRecompiler::IR::ResourceSpecialization* specialization_out) {
-			std::unique_lock lock(mutex, std::defer_lock);
+			std::shared_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_gpu");
 			SrtPlan::AdoptInto(resources, specialization, plan);
 			Permutation* found = nullptr;
@@ -772,9 +773,9 @@ struct PipelineCache::ProgramCache {
 		                             ShaderRecompiler::IR::ResourceSpecialization& specialization_out,
 		                             bool&                                   materialized,
 		                             ShaderRecompiler::IR::ResourceSnapshot* keep = nullptr) {
-			std::unique_lock lock(mutex, std::defer_lock);
+			std::shared_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_lookahead");
-			Common::Speculation::HeldLock held(&mutex);
+			Common::Speculation::HeldLock held(mutex.Raw(), true);
 			Common::Hang::Phase phase("lookahead_materialize");
 			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead");
 			{
@@ -794,9 +795,9 @@ struct PipelineCache::ProgramCache {
 
 		bool MaterializePrivate(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                        ShaderRecompiler::IR::ResourceSpecialization& specialization_out) {
-			std::unique_lock lock(mutex, std::defer_lock);
+			std::shared_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_lookahead");
-			Common::Speculation::HeldLock held(&mutex);
+			Common::Speculation::HeldLock held(mutex.Raw(), true);
 			Common::Hang::Phase phase("lookahead_materialize");
 			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead_private");
 			ShaderRecompiler::IR::ResourceSnapshot snapshot;
@@ -834,11 +835,15 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::deque<Permutation>                      permutations;
-		mutable std::shared_mutex                    mutex;
+		// Shared by the lookahead's materializations (private output, per-thread scratch) and by
+		// kyGpu's adoption; exclusive for whoever changes the entry itself (publishing a permutation,
+		// refreshing a call source, kyGpu's own materialization into `resources`).
+		mutable Common::FairSharedMutex              mutex;
 
 	private:
 		// Takes the entry lock, publishing "waiting for the entry lock" for the hang watchdog.
-		void LockEntry(std::unique_lock<std::shared_mutex>& lock, const char* what) {
+		template <class Lock>
+		void LockEntry(Lock& lock, const char* what) {
 			Common::GpuPhase::Scope gpu_phase_lock(Common::GpuPhase::Phase::PipeEntryLock);
 			Common::Hang::Phase phase(what);
 			auto&      stats = LockStats();
