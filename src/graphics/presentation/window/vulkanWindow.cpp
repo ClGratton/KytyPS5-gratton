@@ -612,6 +612,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 #if !defined(__APPLE__)
 	device_features.depthBounds = VK_TRUE; // unsupported by MoltenVK
 	device_features.depthClamp  = VK_TRUE;
+	device_features.occlusionQueryPrecise = supported_features2.features.occlusionQueryPrecise;
+	graphics.occlusion_query_precise_enabled = device_features.occlusionQueryPrecise == VK_TRUE;
 #endif
 	device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 	device_features.shaderImageGatherExtended            = VK_TRUE;

@@ -247,6 +247,10 @@ static void PrintUsage() {
 	::printf("  --known-fills <true|false>           Remember ranges last written by one GPU uniform fill so\n"
 	         "                                       color-metadata clear discovery needs no GPU->CPU\n"
 	         "                                       readback for them. Default: false.\n");
+	::printf("  --occlusion-queries <true|false>     Back the guest's ZPASS_DONE occlusion counters with host\n"
+	         "                                       occlusion queries, so a title that culls with them sees what\n"
+	         "                                       is really hidden. False: every query reads visible.\n"
+	         "                                       Default: true.\n");
 	::printf("  --draw-key-cache <true|false>        Per-draw lookup fast paths: remember the graphics pipelines of\n"
 	         "                                       the last few draws and find them by comparing keys, and\n"
 	         "                                       refresh shader SRT tables from a table (--srt-table-walk).\n"
@@ -939,6 +943,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--known-fills") {
 			if (!ParseBool(value, options.config.known_fills)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--occlusion-queries") {
+			if (!ParseBool(value, options.config.occlusion_queries)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

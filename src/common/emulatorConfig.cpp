@@ -142,6 +142,10 @@ bool TextureBindingReuseEnabled() {
 	return Common::RuntimeToggles::Read(g_config->texture_binding_reuse);
 }
 
+bool OcclusionQueriesEnabled() {
+	return g_config->occlusion_queries;
+}
+
 bool SrtPlanShadowEnabled() {
 	return g_config->srt_plan_shadow && g_config->pipeline_lookahead;
 }

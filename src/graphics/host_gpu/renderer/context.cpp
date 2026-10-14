@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/occlusionQueries.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -117,6 +118,7 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	Handle().beginRendering(rendering);
 	m_render_state = state;
 	m_rendering    = true;
+	OcclusionQueries::OnBeginRendering(*this);
 }
 
 void CommandBuffer::EndRendering() const {
@@ -124,6 +126,7 @@ void CommandBuffer::EndRendering() const {
 		return;
 	}
 	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+	OcclusionQueries::OnEndRendering(*this);
 	Handle().endRendering();
 	m_rendering    = false;
 	m_render_state = {};

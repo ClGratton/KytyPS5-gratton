@@ -56,6 +56,7 @@ struct GraphicContext {
 	// Host GPU timestamps for the guest GPU clock (--gpu-timestamps gpu).
 	bool                               calibrated_timestamps_enabled         = false;
 	bool                               host_query_reset_enabled              = false;
+	bool                               occlusion_query_precise_enabled       = false;
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	// firstInstance may be non-zero in indirect draw commands (--gpu-indirect-draws, plain draws).

@@ -167,6 +167,12 @@ QList<Option> BuildTable() {
 	             "cached images are unchanged, instead of decoding and looking it up again. Exact; "
 	             "lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(texture_binding_reuse)});
+	defs.append({"occlusion_queries", "--occlusion-queries", Tab::Gpu, "Draw path", Kind::Bool,
+	             "Occlusion queries",
+	             "Counts the samples of a title's occlusion queries (ZPASS_DONE) with host occlusion "
+	             "queries, so a title that culls with them sees what is really hidden. Off: every "
+	             "query reads visible, and such a title draws everything.",
+	             EMU_BOOL(occlusion_queries)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

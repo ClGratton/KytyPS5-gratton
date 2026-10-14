@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/gpuTimestamps.h"
+#include "graphics/host_gpu/renderer/occlusionQueries.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -1806,10 +1807,17 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				     "\n",
 				     event_index, event_address);
 			}
+			{
+				Common::LockGuard lock(m_renderer.GetMutex());
+				if (OcclusionQueries::Dump(CurrentBuffer(), event_address)) {
+					break;
+				}
+			}
 			static std::once_flag warning_once;
 			std::call_once(warning_once, [] {
-				std::printf("Warning: game uses occlusion queries, which are currently treated as "
-				            "always visible; GPU usage may be higher and FPS may be lower.\n");
+				std::printf("Warning: game uses occlusion queries, which are treated as always "
+				            "visible here (--occlusion-queries false, or the device cannot count "
+				            "samples); GPU usage may be higher and FPS may be lower.\n");
 			});
 
 			// Until host occlusion queries are implemented, publish an always-visible result. The
@@ -1847,6 +1855,8 @@ void CommandProcessor::Flip() {
 		LOGF("CommandProcessor::Flip()\n");
 	}
 
+	// The counters of earlier frames must be in guest memory by this flip.
+	OcclusionQueries::OnGuestFlip(CurrentBuffer());
 	auto& command = CurrentBuffer();
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
@@ -1860,6 +1870,8 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	if (IsShadow()) {
 		return;
 	}
+	// The counters of earlier frames must be in guest memory by this flip.
+	OcclusionQueries::OnGuestFlip(CurrentBuffer());
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -1884,6 +1896,8 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	if (IsShadow()) {
 		return;
 	}
+	// The counters of earlier frames must be in guest memory by this flip.
+	OcclusionQueries::OnGuestFlip(CurrentBuffer());
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
