@@ -34,6 +34,7 @@ void Load(const ConfigOptions& cfg) {
 	        cfg.pad_speaker_volume > 100);
 
 	*g_config = cfg;
+	g_config->gpu_indirect_draws_request = cfg.gpu_indirect_draws;
 
 	Common::Hang::Start(cfg.hang_watchdog_seconds);
 	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s != 0 ? cfg.gpu_phase_stats_s
@@ -75,6 +76,10 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per dependent read and per recorded dispatch; knowledge recorded while on is forgotten by
 	// the same write tracking whether or not the flag is on, and is only consulted while on.
 	registry.Register("known-stores", &g_config->known_stores, false);
+	// Not read directly: the GPU thread latches the request at a guest flip (LatchGpuIndirectDraws),
+	// so the route of a draw packet and its mesh-shader variant agree. The mesh draw-record ring is
+	// created on first use, so the flag can be turned on at run time.
+	registry.Register("gpu-indirect-draws", &g_config->gpu_indirect_draws_request, false);
 	// Read when a copy dispatch is recorded and when a color-metadata range is looked up; what it
 	// recorded is forgotten by the same write tracking as known fills, whether or not it is on.
 	registry.Register("known-copies", &g_config->known_copies, false);
@@ -197,7 +202,12 @@ bool CleanGuestReadsEnabled() {
 }
 
 bool GpuIndirectDrawsEnabled() {
-	return g_config->gpu_indirect_draws;
+	return Common::RuntimeToggles::Read(g_config->gpu_indirect_draws);
+}
+
+void LatchGpuIndirectDraws() {
+	Common::RuntimeToggles::Write(g_config->gpu_indirect_draws,
+	                              Common::RuntimeToggles::Read(g_config->gpu_indirect_draws_request));
 }
 
 bool ReadbackQueueEnabled() {

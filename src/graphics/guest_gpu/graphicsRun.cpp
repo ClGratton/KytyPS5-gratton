@@ -1785,6 +1785,7 @@ void CommandProcessor::Flip() {
 	if (IsShadow()) {
 		return;
 	}
+	Config::LatchGpuIndirectDraws();
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::Flip()\n");
 	}
@@ -1802,6 +1803,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	if (IsShadow()) {
 		return;
 	}
+	Config::LatchGpuIndirectDraws();
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -1826,6 +1828,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	if (IsShadow()) {
 		return;
 	}
+	Config::LatchGpuIndirectDraws();
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {

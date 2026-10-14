@@ -216,6 +216,55 @@ void TestRuntimeToggleControlFile() {
 	std::filesystem::remove_all(dir);
 }
 
+// --known-stores, --known-copies and --gpu-indirect-draws are exact performance features: off by
+// default, runtime toggles. gpu-indirect-draws is latched by the GPU thread at a guest flip, so the
+// route of a draw packet and the mesh variant it builds agree.
+void TestExactChainToggles() {
+	namespace RT = Common::RuntimeToggles;
+	const Config::ConfigOptions defaults;
+	Check(!defaults.known_stores && !defaults.known_copies && !defaults.gpu_indirect_draws &&
+	          defaults.debug_known_verify_s == 0,
+	      "the exact drain cuts default to off, the verifier too");
+	const auto dir = std::filesystem::temp_directory_path() / "kyty-toggle-test-chain";
+	std::filesystem::create_directories(dir);
+	const auto control = dir / "toggles.ctl";
+	std::filesystem::remove(control);
+	std::filesystem::remove(dir / "toggles.ctl.applied.csv");
+	Config::ConfigOptions options;
+	options.toggle_control = control;
+	Apply(options);
+	Check(!Config::KnownStoresEnabled() && !Config::KnownCopiesEnabled() && !Config::GpuIndirectDrawsEnabled(),
+	      "off at start-up");
+	{
+		std::ofstream out(dir / "toggles.tmp");
+		out << "# seq 1\nknown-stores=on\nknown-copies=on\ngpu-indirect-draws=on\n";
+	}
+	std::filesystem::rename(dir / "toggles.tmp", control);
+	for (int i = 0; i < 100 && !RT::detail::g_pending.load(); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	RT::OnFrame(7);
+	Check(Config::KnownStoresEnabled() && Config::KnownCopiesEnabled(), "the two drain cuts are on after the frame boundary");
+	Check(!Config::GpuIndirectDrawsEnabled(), "gpu-indirect-draws waits for the GPU thread to latch it");
+	Config::LatchGpuIndirectDraws();
+	Check(Config::GpuIndirectDrawsEnabled(), "latched at a guest flip");
+	{
+		std::ofstream out(dir / "toggles.tmp");
+		out << "# seq 2\nknown-stores=off\ngpu-indirect-draws=off\n";
+	}
+	std::filesystem::rename(dir / "toggles.tmp", control);
+	for (int i = 0; i < 100 && !RT::detail::g_pending.load(); i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	RT::OnFrame(8);
+	Check(!Config::KnownStoresEnabled() && Config::KnownCopiesEnabled(), "each one flips on its own");
+	Check(Config::GpuIndirectDrawsEnabled(), "still latched on until the next flip");
+	Config::LatchGpuIndirectDraws();
+	Check(!Config::GpuIndirectDrawsEnabled(), "latched off");
+	Apply(Config::ConfigOptions {});
+	std::filesystem::remove_all(dir);
+}
+
 // --skip-guard is a narrowing of the opt-in skip mode: off by default, and it only acts with skip.
 void TestSkipGuardDefaults() {
 	const Config::ConfigOptions options;
@@ -251,6 +300,7 @@ int main() {
 	TestVramPagingDefault();
 	TestHostMemoryFeaturesDefaults();
 	TestRuntimeToggleControlFile();
+	TestExactChainToggles();
 
 	Config::Shutdown();
 	std::printf("ConfigDefaultsTests: ok\n");

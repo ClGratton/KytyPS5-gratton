@@ -321,6 +321,11 @@ struct ConfigOptions {
 	// vkCmdDrawIndexedIndirect (point/line/triangle lists) or vkCmdDrawMeshTasksIndirectEXT
 	// (mesh-emulated draws). Default off.
 	bool                   gpu_indirect_draws          = false;
+	// Runtime request for --gpu-indirect-draws (--toggle-control): the GPU thread copies it into
+	// gpu_indirect_draws at a guest flip (LatchGpuIndirectDraws), so the route decision of a draw
+	// packet and the mesh-shader variant it builds can never disagree. Not a command-line option;
+	// starts equal to the flag.
+	bool                   gpu_indirect_draws_request  = false;
 	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
 	// rendering family and wait only for the work that wrote the data. Default off.
 	bool                   readback_queue              = false;
@@ -417,6 +422,7 @@ bool              SkipGuardBdaEnabled();
 bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
+void              LatchGpuIndirectDraws();
 bool              ReadbackQueueEnabled();
 
 LogDirection          GetPrintfDirection();
