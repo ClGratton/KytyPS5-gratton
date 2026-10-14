@@ -47,6 +47,9 @@ void Tag(uint64_t shader0, uint64_t shader1);
 void DescribeShader(const char* stage, const ShaderRecompiler::IR::CompiledShaderInfo& program,
                     uint32_t threads_per_group);
 
+// KYTY_GPU_COST_DROP bit 2: the per-draw GDS buffer barrier (and the render pass break before it) is left out.
+[[nodiscard]] bool DropGdsBarrier() noexcept;
+
 // A guest flip was recorded: the frame boundary.
 void OnFlip();
 

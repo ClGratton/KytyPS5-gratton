@@ -640,6 +640,10 @@ void Initialize(GraphicContext& graphics) {
 	    s->window, s->every, s->start, s->period);
 }
 
+bool DropGdsBarrier() noexcept {
+	return g_state != nullptr && (g_state->drop & 2u) != 0;
+}
+
 void Tag(uint64_t shader0, uint64_t shader1) {
 	t_tag0 = shader0;
 	t_tag1 = shader1;

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/host_gpu/renderer/gpuCost.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -1280,7 +1281,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		auto&       descriptors   = *prepared;
 		const auto  shader_stage  = NativeShaderStage(program.stage);
 		const auto  shader_stages = ShaderPipelineStages(shader_stage);
-		if (descriptors.gds.buffer != nullptr) {
+		if (descriptors.gds.buffer != nullptr && !(GpuCost::Enabled() && GpuCost::DropGdsBarrier())) {
 			buffer.EndRendering();
 			const auto barrier = MakeGdsDependency(descriptors.gds.buffer);
 			Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
