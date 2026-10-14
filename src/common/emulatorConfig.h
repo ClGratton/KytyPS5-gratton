@@ -272,6 +272,11 @@ struct ConfigOptions {
 	// (renderer/cache/knownStores.h) instead of draining the GPU when it has to read that dword
 	// itself (the SRT walk). Runtime toggle. Default off until measured.
 	bool                   known_stores                = false;
+	// --known-copies (performance, exact): a compute dispatch proven to copy records from one buffer
+	// to another (the color-metadata copy of fast-cleared targets) leaves the destination known when
+	// the CPU can read the source without waiting; clear discovery then needs no GPU->CPU readback
+	// for the slices it knows. Runtime toggle. Default off until measured.
+	bool                   known_copies                = false;
 	// --debug-known-verify <seconds>: with --known-stores, once per this many seconds per kind a
 	// known value is not used: the GPU is drained, the real bytes are read and compared (loud log and
 	// the knowledge dropped on a mismatch; counters in --gpu-phase-stats). 0 = off.
@@ -398,6 +403,7 @@ uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
 bool              KnownStoresEnabled();
+bool              KnownCopiesEnabled();
 uint32_t          DebugKnownVerifySeconds();
 bool              ImageLookupMemoEnabled();
 bool              TextureBindingReuseEnabled();

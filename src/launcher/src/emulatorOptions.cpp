@@ -162,6 +162,12 @@ QList<Option> BuildTable() {
 	             "to read it back. Exact; only pays together with GPU-built indirect draws and "
 	             "known clear codes.",
 	             EMU_BOOL(known_stores)});
+	defs.append({"known_copies", "--known-copies", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
+	             "Know the result of GPU metadata copies",
+	             "When a compute shader copies the color-metadata keys of one surface to another, "
+	             "the GPU thread knows what the destination holds and does not drain the GPU to "
+	             "read the clear colour back. Exact; only pays together with the other drain cuts.",
+	             EMU_BOOL(known_copies)});
 	defs.append({"image_lookup_memo", "--image-lookup-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Remember texture lookups",
 	             "A texture lookup remembers which cached image it found until an image is added "

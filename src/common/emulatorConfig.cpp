@@ -75,6 +75,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per dependent read and per recorded dispatch; knowledge recorded while on is forgotten by
 	// the same write tracking whether or not the flag is on, and is only consulted while on.
 	registry.Register("known-stores", &g_config->known_stores, false);
+	// Read when a copy dispatch is recorded and when a color-metadata range is looked up; what it
+	// recorded is forgotten by the same write tracking as known fills, whether or not it is on.
+	registry.Register("known-copies", &g_config->known_copies, false);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -135,6 +138,10 @@ bool ElideBarriersEnabled() {
 
 bool KnownFillsEnabled() {
 	return g_config->known_fills;
+}
+
+bool KnownCopiesEnabled() {
+	return Common::RuntimeToggles::Read(g_config->known_copies);
 }
 
 bool KnownStoresEnabled() {

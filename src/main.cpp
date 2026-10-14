@@ -252,6 +252,11 @@ static void PrintUsage() {
 	         "                                       from what the dispatch is proven to write, instead of\n"
 	         "                                       draining the GPU to read it (SRT walk). Exact, runtime\n"
 	         "                                       toggle. Default: false.\n");
+	::printf("  --known-copies <true|false>          A compute dispatch proven to copy records from one buffer to\n"
+	         "                                       another (the color-metadata copy of fast-cleared targets)\n"
+	         "                                       leaves the destination known when the source is readable\n"
+	         "                                       without waiting for the GPU, so clear discovery needs no\n"
+	         "                                       GPU->CPU readback for it. Exact, runtime toggle. Default: false.\n");
 	::printf("  --debug-known-verify <seconds>       With --known-stores / --known-clear-codes: once per N\n"
 	         "                                       seconds per kind, drain the GPU instead of using the\n"
 	         "                                       known value and compare (loud log on a mismatch; counters\n"
@@ -953,6 +958,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--known-stores") {
 			if (!ParseBool(value, options.config.known_stores)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--known-copies") {
+			if (!ParseBool(value, options.config.known_copies)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
