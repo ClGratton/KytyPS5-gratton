@@ -805,15 +805,57 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		EXIT("BufferCache: buffer request requires a recording command buffer\n");
 	}
 
-	if (!is_written && size <= CACHING_PAGESIZE &&
-	    !m_memory_tracker.IsRegionGpuModified(vaddr, size) &&
-	    m_memory_tracker.IsRegionCpuModified(vaddr, size)) {
+	// --resolved-draw: a read-only range found clean earlier whose tracker epochs and buffer-set
+	// generation have not moved is still clean, in the same buffer. Texel buffers also look at images
+	// and written ranges mark GPU ownership, so neither is memoized.
+	const bool memoizable = Config::ResolvedDrawEnabled() && !is_written && !is_texel_buffer;
+	ObtainMemo* memo      = nullptr;
+	uint32_t    epochs[2] = {};
+	uint32_t    epoch_count = 0;
+	m_obtain_stats.calls++;
+	m_obtain_stats.written += is_written;
+	m_obtain_stats.texel += !is_written && is_texel_buffer;
+	if (memoizable) {
+		memo = &m_obtain_memo[((vaddr >> 4) * 0x9e3779b97f4a7c15ull ^ size) >> 40 & (kObtainMemoSlots - 1)];
+		epoch_count = m_memory_tracker.RangeEpochs(vaddr, size, epochs);
+		if (memo->valid && memo->vaddr == vaddr && memo->size == size && epoch_count != 0 &&
+		    memo->epoch_count == epoch_count && memo->epochs[0] == epochs[0] &&
+		    (epoch_count < 2 || memo->epochs[1] == epochs[1]) &&
+		    memo->buffer_generation == BufferSetGeneration()) {
+			BufferId use = memo->id;
+			if (!IsBufferInvalid(id) && m_slot_buffers[id].IsInBounds(vaddr, size)) {
+				use = id; // the caller's own buffer wins, as in the full path
+			}
+			if (!IsBufferInvalid(use) && m_slot_buffers[use].IsInBounds(vaddr, size)) {
+				auto& buffer = m_slot_buffers[use];
+				if (Config::ResolvedDrawVerify()) {
+					const auto q = m_memory_tracker.QueryDirty(vaddr, size);
+					if (q.cpu || q.gpu) {
+						EXIT("resolved draw: a remembered clean range is dirty (cpu=%d gpu=%d) addr=0x%016" PRIx64
+						     " size=%" PRIu64 "\n",
+						     q.cpu ? 1 : 0, q.gpu ? 1 : 0, vaddr, size);
+					}
+				}
+				TouchBuffer(buffer);
+				m_obtain_stats.memo_hits++;
+				return {&buffer, buffer.Offset(vaddr)};
+			}
+		}
+	}
+	MemoryTracker::DirtyState dirty {true, true};
+	bool                      dirty_known = false;
+	if (!is_written && (size <= CACHING_PAGESIZE || (memo != nullptr && memo->seen))) {
+		dirty       = m_memory_tracker.QueryDirty(vaddr, size);
+		dirty_known = true;
+	}
+	if (!is_written && size <= CACHING_PAGESIZE && !dirty.gpu && dirty.cpu) {
 		const auto alignment = std::max<uint64_t>(
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
 		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 		if (mapped != nullptr) {
 			std::memcpy(mapped, reinterpret_cast<const void*>(vaddr), size);
 			m_stream_buffer.Commit();
+			m_obtain_stats.small_copies++;
 			return {&m_stream_buffer, offset};
 		}
 	}
@@ -824,6 +866,19 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	auto& buffer = m_slot_buffers[id];
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
+	if (memo != nullptr) {
+		if (dirty_known && !dirty.cpu && !dirty.gpu && epoch_count != 0) {
+			// Clean when the epochs were read (before the query): remember it.
+			*memo = {.vaddr = vaddr, .size = size, .id = id, .buffer_generation = BufferSetGeneration(),
+			         .epoch_count = epoch_count, .epochs = {epochs[0], epochs[1]}, .valid = true, .seen = true};
+			m_obtain_stats.stored++;
+		} else {
+			memo->valid = false;
+			memo->vaddr = vaddr;
+			memo->size  = size;
+			memo->seen  = true;
+		}
+	}
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
 		buffer.last_gpu_write_tick = m_scheduler.CurrentTick();
@@ -1007,6 +1062,10 @@ void BufferCache::LogRingStatsPeriodic() {
 	    "[upload-ring] {} {} MiB: reserved {} MiB in {} wraps, {} blocking waits ({:.1f} ms total)\n",
 	    m_staging_buffer.IsDeviceLocal() ? "device-local" : "system", m_staging_buffer.Size() >> 20,
 	    stats.bytes >> 20, stats.wraps, stats.waits, static_cast<double>(stats.wait_ns) / 1e6));
+	const auto& o = m_obtain_stats;
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[obtain-buffer] total: calls={} memo_hits={} stored={} small_copies={} written={} texel={}\n", o.calls,
+	    o.memo_hits, o.stored, o.small_copies, o.written, o.texel));
 }
 
 void BufferCache::RunGarbageCollector() {

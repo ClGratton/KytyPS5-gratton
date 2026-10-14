@@ -69,6 +69,13 @@ public:
 	                                                        bool     is_written,
 	                                                        bool     is_texel_buffer = false,
 	                                                        BufferId id              = {});
+	// --resolved-draw: ObtainBuffer calls (read-only, non-texel) answered from the memo of ranges found
+	// clean, those that found the range dirty, small constants copied to the stream buffer, and the
+	// rest. Kept by the GPU thread; read for the exit summary.
+	struct ObtainStats {
+		uint64_t calls = 0, memo_hits = 0, small_copies = 0, written = 0, texel = 0, stored = 0;
+	};
+	[[nodiscard]] const ObtainStats& GetObtainStats() const noexcept { return m_obtain_stats; }
 	[[nodiscard]] StreamBuffer&                GetUtilityBuffer(MemoryUsage usage) noexcept {
 		switch (usage) {
 			case MemoryUsage::Upload: return m_staging_buffer;
@@ -202,6 +209,21 @@ private:
 	// when the driver reports it). Input of BufferGcGate.
 	uint64_t                                          m_registered_bytes   = 0;
 	std::atomic<uint64_t>                             m_buffer_set_generation {0};
+	// --resolved-draw: ranges ObtainBuffer found clean (no CPU- or GPU-dirty page) with the tracker
+	// epochs read before the check and the buffer-set generation; an equal epoch and generation later
+	// mean the range is still clean and its buffer is still the one found (direct mapped, GPU thread).
+	struct ObtainMemo {
+		uint64_t vaddr = 0, size = 0;
+		BufferId id;
+		uint64_t buffer_generation = 0;
+		uint32_t epoch_count       = 0;
+		uint32_t epochs[2]         = {};
+		bool     valid             = false;
+		bool     seen              = false; // this key missed before: worth the extra check next time
+	};
+	static constexpr size_t kObtainMemoSlots = 512;
+	std::array<ObtainMemo, kObtainMemoSlots> m_obtain_memo {};
+	ObtainStats                              m_obtain_stats {};
 	// Cumulative garbage-collection counters (GPU thread only), logged under memory pressure.
 	struct GcStats {
 		uint64_t runs       = 0; // collector runs past the trigger
