@@ -324,9 +324,10 @@ static void PrintUsage() {
 	         "                                       stop the GPU thread: it copies the bytes out, submits and\n"
 	         "                                       goes on, and only the faulting thread waits for the copy to\n"
 	         "                                       land (frame pipelining). Default: false.\n");
-	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback, re-read every page from the\n"
-	         "                                       GPU (a full drain) before it is unprotected and report\n"
-	         "                                       any difference. Slow. Default: false.\n");
+	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback or --readback-futures,\n"
+	         "                                       re-read every page from the GPU (a full drain) before it\n"
+	         "                                       is unprotected and report any difference. Slow.\n"
+	         "                                       Default: false.\n");
 	::printf("  --poll-before-wait <0-1000>          Microseconds to poll the GPU timeline before blocking in\n"
 	         "                                       vkWaitSemaphores (small readbacks finish in tens of\n"
 	         "                                       microseconds; a blocking wait adds the kernel sleep and\n"

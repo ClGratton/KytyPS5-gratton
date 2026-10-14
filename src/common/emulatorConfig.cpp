@@ -240,7 +240,9 @@ bool ReadbackFuturesEnabled() {
 }
 
 bool EagerReadbackVerifyEnabled() {
-	return Common::RuntimeToggles::Read(g_config->eager_readback) && g_config->eager_readback_verify;
+	return (Common::RuntimeToggles::Read(g_config->eager_readback) ||
+	        Common::RuntimeToggles::Read(g_config->readback_futures)) &&
+	       g_config->eager_readback_verify;
 }
 
 bool ReadbackQueueEnabled() {
