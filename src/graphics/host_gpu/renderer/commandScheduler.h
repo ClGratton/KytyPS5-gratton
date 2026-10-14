@@ -9,6 +9,7 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <atomic>
 #include <queue>
 #include <thread>
 #include <vector>
@@ -94,6 +95,7 @@ private:
 	CommandBuffer                m_command;
 	DynamicState                 m_dynamic_state;
 	std::queue<PendingOperation> m_pending_operations;
+	std::atomic<uint32_t>        m_pending_count {0}; // size of m_pending_operations, readable without the lock
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;
 	std::condition_variable      m_operation_available;
