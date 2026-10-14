@@ -9,6 +9,7 @@
 #include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
 #include "common/speculation.h"
+#include "common/drawRepeat.h"
 #include "common/emulatorConfig.h"
 #include "common/loopGuard.h"
 #include "common/file.h"
@@ -1419,6 +1420,16 @@ struct PipelineCache::ProgramCache {
 						const auto bytes      = plan->Bytes();
 						SrtPlan::NoteProduceCost(SrtPlan::NowNs() - t_plan);
 						plan->produced_ns = SrtPlan::NowNs();
+						if (Common::DrawRepeat::Enabled()) {
+							// Debug only (KYTY_DRAW_REPEAT): the dwords this draw's scalar walk read, with its inputs.
+							uint64_t h = Common::DrawRepeat::HashBytes(
+							    plan->reads.values.data(), plan->reads.values.size() * 4u, plan->shader_hash);
+							h = Common::DrawRepeat::HashBytes(plan->snapshot.user_data.data(),
+							                                  plan->snapshot.user_data.size() * 4u, h);
+							h = Common::DrawRepeat::HashBytes(plan->workgroup_counts.data(),
+							                                  plan->workgroup_counts.size() * 4u, h);
+							Common::DrawRepeat::NoteReads(Common::DrawRepeat::Mix(h, plan->shader_base));
+						}
 						SrtPlan::GetStore().Put(std::move(plan));
 						SrtPlan::NoteProduced(bytes);
 					} else {

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
+#include "common/drawRepeat.h"
 #include "common/emulatorConfig.h"
 #include "common/framePath.h"
 #include "common/hangWatchdog.h"
@@ -206,6 +207,7 @@ void PipelineLookahead::Process(Item& item) {
 	m_item_start_ns.store(t0, std::memory_order_relaxed);
 	Common::Hang::Phase phase("lookahead_item", item.seq, static_cast<uint64_t>(item.kind));
 	auto& cp = Shadow(item.queue_id);
+	Common::DrawRepeat::BeginItem(item.kind == Kind::Reset);
 	const bool plan_shadow = SrtPlan::Enabled();
 	if (plan_shadow) {
 		if (m_current_late) SrtPlan::GetStore().NoteLate(item.seq);
@@ -267,6 +269,20 @@ void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	const auto                         call_start = Bench::NowNs();
 	(void)m_renderer.GetRenderExecutor().PrefetchDraw(cp.GetCtx(), cp.GetShCtx(), cp.GetUcfg(),
 	                                                  draw, status);
+	if (Common::DrawRepeat::Enabled()) {
+		const auto& vs = cp.GetShCtx().GetVs();
+		Common::DrawRepeat::Inputs in;
+		in.kind    = Common::DrawRepeat::Draw;
+		in.program = Common::DrawRepeat::Mix(
+		    Common::DrawRepeat::Mix(Common::DrawRepeat::Mix(vs.es_regs.data_addr, vs.ls_regs.data_addr),
+		                            Common::DrawRepeat::Mix(vs.hs_regs.data_addr, vs.gs_regs.data_addr)),
+		    cp.GetShCtx().GetPs().ps_regs.data_addr);
+		in.ctx  = Common::DrawRepeat::HashBytes(&cp.GetCtx(), sizeof(cp.GetCtx()));
+		in.sh   = Common::DrawRepeat::HashBytes(&cp.GetShCtx(), sizeof(cp.GetShCtx()));
+		in.args = Common::DrawRepeat::HashBytes(&cp.GetUcfg(), sizeof(cp.GetUcfg()),
+		                                        Common::DrawRepeat::HashBytes(&draw, sizeof(draw)));
+		Common::DrawRepeat::NoteDraw(in);
+	}
 	SkipDeps::NoteLookaheadCall("draw", call_start, Bench::NowNs() - call_start);
 }
 
@@ -287,6 +303,16 @@ void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& d
 	m_renderer.GetPipelineCache().PrefetchCompute(cp.GetShCtx().GetCs(),
 	                                              cp.GetCtx().GetShaderRegisters(), dispatch.mode,
 	                                              cp.IsAsyncComputeQueue(), groups);
+	if (Common::DrawRepeat::Enabled()) {
+		Common::DrawRepeat::Inputs in;
+		in.kind    = Common::DrawRepeat::Dispatch;
+		in.program = cp.GetShCtx().GetCs().cs_regs.data_addr;
+		in.ctx     = Common::DrawRepeat::HashBytes(&cp.GetCtx().GetShaderRegisters(),
+		                                           sizeof(cp.GetCtx().GetShaderRegisters()));
+		in.sh      = Common::DrawRepeat::HashBytes(&cp.GetShCtx().GetCs(), sizeof(cp.GetShCtx().GetCs()));
+		in.args    = Common::DrawRepeat::HashBytes(&dispatch, sizeof(dispatch));
+		Common::DrawRepeat::NoteDraw(in);
+	}
 	SkipDeps::NoteLookaheadCall("dispatch", call_start, Bench::NowNs() - call_start);
 }
 
