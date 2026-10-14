@@ -106,6 +106,7 @@ struct State {
 	Mode            mode = Mode::Bottom;
 	double          period = 1.0;
 	uint64_t        every = 100, window = 20, start = 0;
+	uint32_t        drop = 0; // KYTY_GPU_COST_DROP: 1 = leave out barriers that carry no image barrier (measurement only, unsafe)
 	std::atomic<uint64_t> frame {0};
 	std::atomic<uint64_t> serial {0};
 	std::atomic<uint32_t> cursor {0};
@@ -368,7 +369,9 @@ void VKAPI_CALL W_Barrier(VkCommandBuffer cb, VkPipelineStageFlags src, VkPipeli
                           VkDependencyFlags flags, uint32_t mc, const VkMemoryBarrier* m,
                           uint32_t bc, const VkBufferMemoryBarrier* b, uint32_t ic,
                           const VkImageMemoryBarrier* i) {
-	o_barrier(cb, src, dst, flags, mc, m, bc, b, ic, i);
+	if ((g_state->drop & 1u) == 0 || ic != 0) {
+		o_barrier(cb, src, dst, flags, mc, m, bc, b, ic, i);
+	}
 	uint32_t changes = 0;
 	for (uint32_t k = 0; k < ic; k++) changes += i[k].oldLayout != i[k].newLayout;
 	After(cb, KBarrier, src, dst, (mc & 0xffu) | ((bc & 0xffu) << 8) | ((ic & 0xffu) << 16),
@@ -396,11 +399,15 @@ void Barrier2(VkCommandBuffer cb, const VkDependencyInfo* info) {
 	      changes);
 }
 void VKAPI_CALL W_Barrier2(VkCommandBuffer cb, const VkDependencyInfo* info) {
-	o_barrier2(cb, info);
+	if ((g_state->drop & 1u) == 0 || info->imageMemoryBarrierCount != 0) {
+		o_barrier2(cb, info);
+	}
 	Barrier2(cb, info);
 }
 void VKAPI_CALL W_Barrier2Khr(VkCommandBuffer cb, const VkDependencyInfo* info) {
-	o_barrier2_khr(cb, info);
+	if ((g_state->drop & 1u) == 0 || info->imageMemoryBarrierCount != 0) {
+		o_barrier2_khr(cb, info);
+	}
 	Barrier2(cb, info);
 }
 void BeginRendering(VkCommandBuffer cb, const VkRenderingInfo* info) {
@@ -560,6 +567,7 @@ void Initialize(GraphicContext& graphics) {
 	if (const char* v = std::getenv("KYTY_GPU_COST_EVERY")) s->every = std::strtoull(v, nullptr, 10);
 	if (const char* v = std::getenv("KYTY_GPU_COST_WINDOW")) s->window = std::strtoull(v, nullptr, 10);
 	if (const char* v = std::getenv("KYTY_GPU_COST_START")) s->start = std::strtoull(v, nullptr, 10);
+	if (const char* v = std::getenv("KYTY_GPU_COST_DROP")) s->drop = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
 	if (s->every == 0) s->every = 1;
 
 	vk::QueryPoolCreateInfo info {};
@@ -623,6 +631,9 @@ void Initialize(GraphicContext& graphics) {
 	Wrap(d.vkCmdEndRenderingKHR, o_end_rendering_khr, W_EndRenderingKhr);
 	Wrap(d.vkEndCommandBuffer, o_end_command_buffer, W_EndCommandBuffer);
 	g_enabled.store(true, std::memory_order_release);
+	if (s->drop != 0) {
+		Say("GPU cost: DROP=%u, barriers without image barriers are NOT recorded (measurement only, output may be wrong)\n", s->drop);
+	}
 	Say("GPU cost: on, output %s.*.csv, mode %s, window %" PRIu64 " frames every %" PRIu64
 	    " from frame %" PRIu64 " (%.3f ns per tick)\n",
 	    prefix, s->mode == Mode::CommandBuffers ? "cb" : (s->mode == Mode::Top ? "top" : (s->mode == Mode::Both ? "both" : "bottom")),
