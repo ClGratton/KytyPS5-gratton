@@ -60,17 +60,17 @@ struct KernelEqueueEvent {
 
 [[nodiscard]] KernelEqueueRef KernelPinEqueue(KernelEqueue eq);
 
-// kqueue trigger semantics for a filter whose event is edge-triggered and carries a count:
-// triggering an event that has not been consumed yet does not queue a second occurrence, it
-// updates the pending one in place (the occurrence count in fflags goes up, saturating at
-// fflags_max, and data becomes the latest payload). The queue therefore never holds more than
-// one entry per (ident, filter) however long the guest goes without waiting. Called with the
-// queue mutex held, from a filter's trigger_func.
-void KernelCoalesceTrigger(KernelEqueueEvent* event, intptr_t data,
-                           uint32_t fflags_max = UINT32_MAX);
+// A filter whose triggers carry a payload (a GPU interrupt's context id): every trigger is delivered
+// as its own event with its own payload, in order. The first one becomes the current event, later
+// ones wait in pending_events until the guest has consumed the earlier ones. The queue is bounded:
+// when the guest has not waited for max_pending triggers the oldest is dropped (counted, logged).
+// Called with the queue mutex held, from a filter's trigger_func.
+constexpr size_t KERNEL_PENDING_EVENTS_MAX = 65536;
+void KernelQueueTrigger(KernelEqueueEvent* event, intptr_t data,
+                        size_t max_pending = KERNEL_PENDING_EVENTS_MAX);
 
-// Number of triggers that were folded into an already pending event (diagnostics, --mem-stats).
-uint64_t KernelCoalescedTriggerCount();
+// Number of pending events dropped because the guest was not waiting (diagnostics, --mem-stats).
+uint64_t KernelDroppedPendingCount();
 
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event);
 int KYTY_SYSV_ABI KernelTriggerEvent(KernelEqueue eq, uintptr_t ident, int16_t filter,

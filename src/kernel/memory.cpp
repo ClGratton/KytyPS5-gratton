@@ -1466,9 +1466,9 @@ static void PrintMemStats(const char* tag) {
 	    static_cast<unsigned long long>(get(g_mem_stats.punch_failures)));
 	Log::WriteToConsoleAndLog(text);
 	char equeue[160];
-	std::snprintf(equeue, sizeof(equeue), "[mem-stats %s t=%llds] equeue coalesced_triggers %llu\n", tag,
+	std::snprintf(equeue, sizeof(equeue), "[mem-stats %s t=%llds] equeue dropped_pending %llu\n", tag,
 	              static_cast<long long>(seconds),
-	              static_cast<unsigned long long>(Libs::LibKernel::EventQueue::KernelCoalescedTriggerCount()));
+	              static_cast<unsigned long long>(Libs::LibKernel::EventQueue::KernelDroppedPendingCount()));
 	Log::WriteToConsoleAndLog(equeue);
 	PrintHostHeap(tag, static_cast<long long>(seconds));
 }

@@ -226,10 +226,8 @@ static void InterruptEventTriggerFunc(LibKernel::EventQueue::KernelEqueueEvent* 
                                       void*                                     trigger_data) {
 	EXIT_IF(event == nullptr);
 
-	// A GPU interrupt that the guest has not waited for yet is folded into the pending event,
-	// as the FreeBSD kqueue does for a re-triggered event: one entry per (ident, filter), the
-	// occurrence count in fflags, the latest context id in data.
-	LibKernel::EventQueue::KernelCoalesceTrigger(event, reinterpret_cast<intptr_t>(trigger_data));
+	// Every interrupt is delivered with its own context id (the guest tells them apart by it).
+	LibKernel::EventQueue::KernelQueueTrigger(event, reinterpret_cast<intptr_t>(trigger_data));
 }
 
 int AddEqEvent(RenderContext& renderer, LibKernel::EventQueue::KernelEqueue eq, int id,
