@@ -32,6 +32,17 @@ enum class Point {
 // A guest flip was recorded in command: the frame boundary the time scale stretches from.
 void OnGuestFlip(CommandBuffer& command);
 
+// KYTY_FRAME_PATH (common/framePath.h): GPU begin/end of every command buffer in host CLOCK_MONOTONIC
+// ns. Needs --gpu-timestamps gpu (the query ring and the calibration are shared). Debug only.
+// FramePathStamp records a timestamp at `point` in `command` and returns its slot (kNoSlot if the
+// ring is full or the mode is not available); FramePathCommit ties the two slots of a command buffer
+// to the timeline tick it signals; FramePathResolve logs a GpuExec event for every committed buffer
+// whose end timestamp is available.
+constexpr uint32_t kNoSlot = 0xffffffffu;
+[[nodiscard]] uint32_t FramePathStamp(CommandBuffer& command, Point point);
+void                   FramePathCommit(uint64_t tick, uint32_t begin_slot, uint32_t end_slot);
+void                   FramePathResolve();
+
 } // namespace GpuTimestamps
 } // namespace Libs::Graphics
 

@@ -97,6 +97,7 @@ private:
 	std::atomic<uint64_t>               m_item_dwords {0};
 	std::atomic<uint32_t>               m_item_kind {0};
 	std::atomic<uint64_t>               m_queued_dwords {0};
+	uint64_t                            m_fp_queue_depth = 0; // lookahead thread only (KYTY_FRAME_PATH)
 	Stats                               m_stats;
 	std::thread                         m_thread;
 };

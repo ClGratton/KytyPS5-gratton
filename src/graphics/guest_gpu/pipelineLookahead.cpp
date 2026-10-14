@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
+#include "common/framePath.h"
 #include "common/hangWatchdog.h"
 #include "common/guestRetirement.h"
 #include "common/speculation.h"
@@ -154,6 +155,7 @@ void PipelineLookahead::Run() {
 			if (m_stopping) {
 				break;
 			}
+			m_fp_queue_depth = m_queue.size();
 			item = std::move(m_queue.front());
 			m_queue.pop_front();
 			m_queued_dwords.fetch_sub(ItemDwords(item), std::memory_order_relaxed);
@@ -190,6 +192,7 @@ void PipelineLookahead::RunStream(CommandProcessor& cp, std::span<const uint32_t
 
 void PipelineLookahead::Process(Item& item) {
 	const auto t0 = Bench::NowNs();
+	Common::FramePath::Scope frame_path(Common::FramePath::Lookahead, item.seq);
 	m_stats.items.fetch_add(1, std::memory_order_relaxed);
 	m_current_seq  = item.seq;
 	m_current_late = item.seq != 0 && item.seq <= m_started_seq.load(std::memory_order_acquire);
@@ -227,6 +230,9 @@ void PipelineLookahead::Process(Item& item) {
 		// Everything of this submission has been looked at (also when it was dropped as late).
 		SrtPlan::GetStore().NoteProgress({item.seq, UINT32_MAX});
 	}
+	frame_path.SetB((m_current_late ? 1u : 0u) | static_cast<uint64_t>(item.kind) << 8 |
+	                std::min<uint64_t>(m_fp_queue_depth, 0xffffu) << 16 |
+	                static_cast<uint64_t>(ItemDwords(item)) << 32);
 	Common::Speculation::ClearItemWatch();
 	m_item_start_ns.store(0, std::memory_order_relaxed);
 	m_stats.busy_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);

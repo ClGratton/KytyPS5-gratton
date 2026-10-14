@@ -22,29 +22,34 @@
 namespace Common::FramePath {
 
 enum Kind : uint16_t {
-	// guest side
-	Hle = 1,         // a = HLE record (name), b = result (rax); dur = time inside the call
-	// emulator locks and waits
-	MutexWait = 2,   // a = caller return address, b = mutex address; contended Common::Mutex::Lock
-	CondWait = 3,    // a = caller return address, b = condvar address; Common::CondVar::Wait/WaitFor
+	// emulator locks and waits of any thread. `a` is the name of the HLE call the thread was serving
+	// (a pointer to a string that lives for the whole run, 0 if none), `b` = object address (47 bits),
+	// bit 47 = timed wait, bits 48..63 = microseconds between the start of that HLE call and this wait.
+	MutexWait = 2,   // contended Common::Mutex::Lock
+	CondWait = 3,    // Common::CondVar::Wait / WaitFor
+	Sleep = 4,       // Common::Thread::SleepMicro/SleepNano; b = requested ns
 	// guest -> GPU thread
-	Submit = 10,     // a = sequence, b = type | queue << 8 | pending << 16 | dwords << 32
-	GpuSlice = 11,   // a = sequence, b = complete | draws << 8 | dispatches << 32; one Process() call
-	VkSubmit = 12,   // a = timeline tick; dur = vkQueueSubmit incl. queue mutex
-	GpuWait = 13,    // a = timeline tick waited for; dur = blocked in vkWaitSemaphores (any thread)
-	GpuExec = 14,    // t = GPU begin (ns), dur = GPU execution, a = tick; from timestamp queries
-	PrioOp = 15,     // a = tick the operation waited for, b = 1 flip complete, 2 interrupt, 0 other
+	Submit = 10,     // GuestGpu::Enqueue, dur = lock + lookahead copy; a = HLE name, b = Seq()
+	GpuSlice = 11,   // one GuestGpu::Process() call on kyGpu; a = sequence, b = complete | type << 8 | queue << 16
+	VkSubmit = 12,   // vkQueueSubmit incl. queue mutex; a = timeline tick
+	GpuWait = 13,    // blocked in vkWaitSemaphores (any thread); a = tick waited for
+	GpuExec = 14,    // t = GPU begin of a command buffer (ns, CLOCK_MONOTONIC), dur = GPU execution, a = tick
+	PrioWait = 15,   // kyPrioOps waited for the tick of its next operation; a = tick
 	FlipSlotWait = 16, // kyGpu waited for a free flip-queue slot
+	PrioRun = 17,    // kyPrioOps ran the operation of tick a (flip complete, interrupt, timestamp, ...)
+	Lookahead = 18,  // kyty-lookahead processed one submission; a = sequence, b = late | kind << 8 | queue depth << 16 | dwords << 32
+	Phase = 19,      // kyGpu phase span >= 30 us (or any drain / idle); a = GpuPhase::Phase, b = drain cause | full << 8
 	// presentation
 	FlipReserve = 20,  // a = request id, b = source (0 gpu eop, 1 cpu)
 	FlipReady = 21,    // a = request id (FlipQueue::Complete)
-	FlipPresent = 22,  // dur = Present(), a = request id of the owner, b = due
-	Vblank = 23,       // t = VblankBegin, dur = until VblankEnd, a = vblank count, b = presented
-	Interrupt = 24,    // a = event id; guest interrupt equeue event triggered
-	FlipEvent = 25,    // a = flip arg; VideoOut flip equeue event triggered
-	GuestFlipCmd = 26, // kyGpu parsed a flip packet; a = submit id
-	// mutex/cond wait of a named site
-	Mark = 30,         // a = site id, b = value
+	FlipPresent = 22,  // dur = Present(); a = request id of the owner, b = due
+	Vblank = 23,       // t = VblankBegin, dur until VblankEnd; a = vblank number, b = presented
+	Interrupt = 24,    // RenderContext::TriggerInterrupt; a = event id
+	FlipEvent = 25,    // VideoOut flip equeue trigger; a = flip arg
+	GuestFlipCmd = 26, // kyGpu parsed a flip packet (SubmitFlipFromGpu); a = request id
+	SuspendWait = 27,  // guest thread blocked at GuestGpu::SuspendPoint; a = HLE name
+	CmdSyncWait = 28,  // guest thread blocked in SendCommandSync; a = HLE name
+	WaitIdle = 29,     // guest thread blocked in GuestGpu::WaitForIdle; a = HLE name
 };
 
 namespace detail {
@@ -64,8 +69,16 @@ void Start();
 
 void Log(Kind kind, uint64_t t_ns, uint64_t dur_ns, uint64_t a = 0, uint64_t b = 0) noexcept;
 
-// Names for the HLE record pointers in `Hle` events (the dump writes a table).
-void RegisterName(const void* key, const char* name) noexcept;
+// Nanoseconds per rdtsc tick (calibrated once in Start()); 0 when logging is off.
+[[nodiscard]] double NsPerTsc() noexcept;
+
+// The HLE call the current thread is serving, for MutexWait / CondWait / Sleep / Submit events:
+// the name pointer (0 if none) and `b` bits 48..63 (age of the call in microseconds, saturated).
+struct Blame {
+	uint64_t name;
+	uint64_t age_bits;
+};
+[[nodiscard]] Blame CurrentBlame(uint64_t now_ns) noexcept;
 
 class Scope {
 public:
@@ -76,6 +89,7 @@ public:
 			Log(m_kind, m_t, NowNs() - m_t, m_a, m_b);
 		}
 	}
+	void SetA(uint64_t a) noexcept { m_a = a; }
 	void SetB(uint64_t b) noexcept { m_b = b; }
 	Scope(const Scope&)            = delete;
 	Scope& operator=(const Scope&) = delete;
@@ -84,6 +98,30 @@ private:
 	bool     m_on;
 	Kind     m_kind;
 	uint64_t m_a, m_b, m_t;
+};
+
+// A blocking call of the current thread that is blamed on the HLE call it serves (see Kind::CondWait).
+// Logged only when it lasted at least `min_ns`.
+class BlameScope {
+public:
+	BlameScope(Kind kind, uint64_t object_bits, uint64_t min_ns = 0) noexcept
+	    : m_on(On()), m_kind(kind), m_bits(object_bits), m_min(min_ns), m_t(m_on ? NowNs() : 0) {}
+	~BlameScope() {
+		if (m_on) {
+			const uint64_t now = NowNs();
+			if (now - m_t >= m_min) {
+				const Blame blame = CurrentBlame(m_t);
+				Log(m_kind, m_t, now - m_t, blame.name, m_bits | blame.age_bits);
+			}
+		}
+	}
+	BlameScope(const BlameScope&)            = delete;
+	BlameScope& operator=(const BlameScope&) = delete;
+
+private:
+	bool     m_on;
+	Kind     m_kind;
+	uint64_t m_bits, m_min, m_t;
 };
 
 } // namespace Common::FramePath

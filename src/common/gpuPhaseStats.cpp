@@ -1,5 +1,7 @@
 #include "common/gpuPhaseStats.h"
 
+#include "common/framePath.h"
+
 #include "common/logging/log.h"
 #include "common/phaseTimers.h"
 
@@ -150,6 +152,16 @@ void Enter(ThreadState* state, Phase phase) noexcept {
 void Exit(ThreadState* state, Phase phase, uint64_t start) noexcept {
 	const auto now = Now();
 	state->clock.Exit(now);
+	if (FramePath::On() && now > start) {
+		// KYTY_FRAME_PATH: spans of 30 us or more (and every drain / idle), inclusive of nested scopes.
+		const double ns = static_cast<double>(now - start) * FramePath::NsPerTsc();
+		if (ns >= 30000.0 || IsDrain(phase) || phase == Phase::Idle) {
+			const uint64_t end_ns = FramePath::NowNs();
+			FramePath::Log(FramePath::Phase, end_ns - static_cast<uint64_t>(ns), static_cast<uint64_t>(ns),
+			               static_cast<uint64_t>(phase),
+			               static_cast<uint64_t>(t_drain_cause) | (t_drain_full ? 0x100u : 0u));
+		}
+	}
 	if (state->zone_depth != 0) {
 		--state->zone_depth;
 		if (state->zones && state->zone_depth < kMaxZoneDepth) {

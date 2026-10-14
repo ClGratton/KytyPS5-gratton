@@ -92,6 +92,7 @@ private:
 	GraphicContext&              m_graphics;
 	CommandPool                  m_command_pool;
 	CommandBuffer                m_command;
+	uint32_t                     m_fp_begin_slot = 0xffffffffu; // KYTY_FRAME_PATH: GPU begin timestamp slot of m_command
 	DynamicState                 m_dynamic_state;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;

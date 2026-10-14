@@ -1,9 +1,11 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include "common/framePath.h"
 #include "common/gpuPhaseStats.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
+#include "graphics/host_gpu/renderer/gpuTimestamps.h"
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 
 #include "common/assert.h"
@@ -299,8 +301,12 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_active      = true;
 			m_priority_active_tick = operation.tick;
 		}
-		m_master.Wait(operation.tick);
+		{
+			Common::FramePath::Scope fp_wait(Common::FramePath::PrioWait, operation.tick);
+			m_master.Wait(operation.tick);
+		}
 		if (!stop.stop_requested()) {
+			Common::FramePath::Scope fp_run(Common::FramePath::PrioRun, operation.tick);
 			RunOperation(std::move(operation.callback));
 		}
 		{
@@ -358,6 +364,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+	m_fp_begin_slot = GpuTimestamps::FramePathStamp(m_command, GpuTimestamps::Point::TopOfPipe);
 	m_dynamic_state.Invalidate();
 	return m_command;
 }
@@ -369,6 +376,8 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
+	GpuTimestamps::FramePathResolve();
+	const auto fp_end_slot = GpuTimestamps::FramePathStamp(m_command, GpuTimestamps::Point::BottomOfPipe);
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
@@ -376,9 +385,11 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 
 	vk::Result result;
 	uint64_t   tick;
+	Common::FramePath::Scope fp_submit(Common::FramePath::VkSubmit);
 	{
 		Common::LockGuard lock(graphics.queue_mutex);
 		tick = m_master.NextTick();
+		fp_submit.SetA(tick);
 		submit.AddSignal(m_master.Handle(), tick);
 
 		vk::TimelineSemaphoreSubmitInfo timeline_info {};
@@ -399,6 +410,8 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 
 		result = graphics.queue.submit(1, &submit_info, nullptr);
 	}
+	GpuTimestamps::FramePathCommit(tick, m_fp_begin_slot, fp_end_slot);
+	m_fp_begin_slot = GpuTimestamps::kNoSlot;
 
 	if (result != vk::Result::eSuccess) {
 		ReportVulkanFatal("vkQueueSubmit", result, tick, m_command.m_debug_op,

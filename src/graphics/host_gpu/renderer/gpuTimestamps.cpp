@@ -2,6 +2,7 @@
 
 #include "common/common.h"
 #include "common/emulatorConfig.h"
+#include "common/framePath.h"
 #include "common/logging/log.h"
 #include "common/timer.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -173,6 +174,46 @@ public:
 		return ok;
 	}
 
+	// KYTY_FRAME_PATH: reads a slot without waiting; the GPU time as host CLOCK_MONOTONIC ns.
+	// Returns 0 = not available yet (slot kept), 1 = ok (slot released), 2 = failed (slot released).
+	int ResolveHostNs(uint32_t slot, uint64_t& host_ns) {
+		uint64_t   ticks  = 0;
+		const auto result = m_device.getQueryPoolResults(
+		    m_pool, slot, 1, sizeof(ticks), &ticks, sizeof(ticks), vk::QueryResultFlagBits::e64);
+		if (result == vk::Result::eNotReady) {
+			return 0;
+		}
+		int status = 2;
+		if (result == vk::Result::eSuccess) {
+			std::lock_guard lock(m_fp_mutex);
+			const uint64_t  now = Common::FramePath::NowNs();
+			if (m_fp_host_ns == 0 || now - m_fp_calibrated_ns > 500'000'000ull) {
+				VkCalibratedTimestampInfoEXT infos[2] {};
+				infos[0].sType      = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
+				infos[0].timeDomain = VK_TIME_DOMAIN_DEVICE_EXT;
+				infos[1].sType      = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT;
+				infos[1].timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT;
+				uint64_t stamps[2]  = {};
+				uint64_t deviation  = 0;
+				if (m_get_calibrated(m_device, 2, infos, stamps, &deviation) == VK_SUCCESS) {
+					m_fp_device_ticks  = stamps[0];
+					m_fp_host_ns       = stamps[1];
+					m_fp_calibrated_ns = now;
+				}
+			}
+			if (m_fp_host_ns != 0) {
+				const double delta = static_cast<double>(static_cast<int64_t>(ticks - m_fp_device_ticks)) *
+				                     m_ns_per_tick;
+				host_ns = static_cast<uint64_t>(static_cast<int64_t>(m_fp_host_ns) +
+				                                static_cast<int64_t>(delta));
+				status  = 1;
+			}
+		}
+		m_device.resetQueryPool(m_pool, slot, 1);
+		m_busy[slot].store(0u, std::memory_order_release);
+		return status;
+	}
+
 	void NoteLag(int64_t ticks) {
 		m_lag_sum.fetch_add(ticks, std::memory_order_relaxed);
 		const auto n = m_lag_count.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -260,6 +301,10 @@ private:
 	std::atomic<uint64_t>                       m_lag_count {0};
 	std::atomic<uint64_t>                       m_ring_full {0};
 	std::atomic<uint64_t>                       m_unavailable {0};
+	std::mutex                                  m_fp_mutex;
+	uint64_t                                    m_fp_device_ticks  = 0;
+	uint64_t                                    m_fp_host_ns       = 0;
+	uint64_t                                    m_fp_calibrated_ns = 0;
 };
 
 HostTimestamps& Host() {
@@ -323,6 +368,52 @@ void OnGuestFlip(CommandBuffer& command) {
 			GpuTimeScaler().AddBoundary(reference);
 		}
 	});
+}
+
+namespace {
+struct FpPending {
+	uint64_t tick;
+	uint32_t begin_slot;
+	uint32_t end_slot;
+};
+std::mutex            g_fp_mutex;
+std::vector<FpPending> g_fp_pending;
+} // namespace
+
+uint32_t FramePathStamp(CommandBuffer& command, Point point) {
+	uint32_t slot = 0;
+	if (!Common::FramePath::On() || !GpuModeAvailable(command) || !Host().Acquire(slot)) {
+		return kNoSlot;
+	}
+	Host().Record(command, point, slot);
+	return slot;
+}
+
+void FramePathCommit(uint64_t tick, uint32_t begin_slot, uint32_t end_slot) {
+	if (begin_slot == kNoSlot || end_slot == kNoSlot) {
+		// A half-recorded pair cannot be read: leave the other slot to the ring (it is reset when reused).
+		return;
+	}
+	std::lock_guard lock(g_fp_mutex);
+	g_fp_pending.push_back({tick, begin_slot, end_slot});
+}
+
+void FramePathResolve() {
+	std::lock_guard lock(g_fp_mutex);
+	size_t          done = 0;
+	for (; done < g_fp_pending.size(); done++) {
+		const auto& p = g_fp_pending[done];
+		uint64_t    end_ns = 0, begin_ns = 0;
+		const int   end = Host().ResolveHostNs(p.end_slot, end_ns);
+		if (end == 0) {
+			break; // the GPU has not got there; later buffers are not ready either
+		}
+		const int begin = Host().ResolveHostNs(p.begin_slot, begin_ns);
+		if (end == 1 && begin == 1 && end_ns >= begin_ns) {
+			Common::FramePath::Log(Common::FramePath::GpuExec, begin_ns, end_ns - begin_ns, p.tick, 0);
+		}
+	}
+	g_fp_pending.erase(g_fp_pending.begin(), g_fp_pending.begin() + static_cast<ptrdiff_t>(done));
 }
 
 } // namespace Libs::Graphics::GpuTimestamps

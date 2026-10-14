@@ -1,6 +1,7 @@
 #include "common/threads.h"
 
 #include "common/assert.h"
+#include "common/framePath.h"
 
 #include <atomic>
 #include <cerrno>
@@ -216,6 +217,7 @@ void Thread::Detach() {
 }
 
 void Thread::SleepMicro(uint32_t micros) {
+	FramePath::BlameScope frame_path(FramePath::Sleep, static_cast<uint64_t>(micros) * 1000);
 #ifdef KYTY_WIN_CS
 	SleepHighResolution100ns(static_cast<uint64_t>(micros) * 10);
 #elif defined(KYTY_POSIX_HIGH_RES_SLEEP)
@@ -226,6 +228,7 @@ void Thread::SleepMicro(uint32_t micros) {
 }
 
 void Thread::SleepNano(uint64_t nanos) {
+	FramePath::BlameScope frame_path(FramePath::Sleep, nanos & 0xffffffffffffull);
 #ifdef KYTY_WIN_CS
 	SleepHighResolution100ns((nanos + 99) / 100);
 #elif defined(KYTY_POSIX_HIGH_RES_SLEEP)
@@ -265,6 +268,15 @@ void Mutex::Lock() {
 #ifdef KYTY_WIN_CS
 	EnterCriticalSection(&m_mutex->m_cs);
 #else
+	if (FramePath::On()) {
+		if (m_mutex->m_mutex.try_lock()) {
+			return;
+		}
+		FramePath::BlameScope frame_path(FramePath::MutexWait,
+		                                 reinterpret_cast<uintptr_t>(this) & 0x7fffffffffffull, 2000);
+		m_mutex->m_mutex.lock();
+		return;
+	}
 	m_mutex->m_mutex.lock();
 #endif
 }
@@ -292,6 +304,8 @@ CondVar::~CondVar() {
 }
 
 void CondVar::Wait(Mutex* mutex) {
+	FramePath::BlameScope frame_path(FramePath::CondWait,
+	                                 reinterpret_cast<uintptr_t>(this) & 0x7fffffffffffull);
 #ifndef KYTY_WIN_CS
 	std::unique_lock<std::recursive_mutex> cpp_lock(mutex->m_mutex->m_mutex, std::adopt_lock_t());
 #endif
@@ -339,6 +353,9 @@ void CondVar::SetWaitPollCallback(wait_poll_func_t callback) {
 }
 
 bool CondVar::WaitFor(Mutex* mutex, uint32_t micros) {
+	FramePath::BlameScope frame_path(FramePath::CondWait,
+	                                 (reinterpret_cast<uintptr_t>(this) & 0x7fffffffffffull) |
+	                                     (uint64_t {1} << 47));
 	bool ok = false;
 #ifndef KYTY_WIN_CS
 	std::unique_lock<std::recursive_mutex> cpp_lock(mutex->m_mutex->m_mutex, std::adopt_lock_t());

@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include "common/assert.h"
+#include "common/framePath.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 
@@ -54,6 +55,7 @@ void MasterSemaphore::Wait(uint64_t tick) {
 		return;
 	}
 
+	Common::FramePath::Scope frame_path(Common::FramePath::GpuWait, tick);
 	vk::SemaphoreWaitInfo wait_info {};
 	wait_info.semaphoreCount = 1;
 	wait_info.pSemaphores    = &m_semaphore;

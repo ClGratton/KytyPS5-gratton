@@ -71,6 +71,15 @@ inline T Ret(T value) noexcept {
 	return value;
 }
 
+// The HLE call the current thread entered last (name pointer valid for the whole run, nullptr if none)
+// and the CLOCK_MONOTONIC time it was entered. Used by the frame critical-path log (KYTY_FRAME_PATH)
+// to say which guest call a wait belongs to.
+struct CallInfo {
+	const char* name;
+	uint64_t    ns;
+};
+[[nodiscard]] CallInfo CurrentCall() noexcept;
+
 // Returns a function address that records the call under `name` and then runs `target`; or
 // `target` itself when tracing is off or unsupported on this host.
 [[nodiscard]] uint64_t Wrap(const char* name, uint64_t target);

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/framePath.h"
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -144,6 +145,10 @@ uint64_t PrepareVideoOutFlip(CommandBuffer& buffer, int handle, int index, int f
 		const auto result =
 		    video_out.SubmitFlipFromGpu(buffer, handle, index, flip_mode, flip_arg, request_id);
 		if (result == OK) {
+			if (Common::FramePath::On()) {
+				Common::FramePath::Log(Common::FramePath::GuestFlipCmd, Common::FramePath::NowNs(), 0,
+				                       request_id, 0);
+			}
 			EXIT_IF(request_id == 0);
 			return request_id;
 		}

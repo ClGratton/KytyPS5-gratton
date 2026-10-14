@@ -207,6 +207,13 @@ void CopyNote(Entry* e, const char* text) noexcept {
 
 } // namespace
 
+HleTrace::CallInfo CurrentCall() noexcept {
+	if (const Entry* e = CurrentEntry(); e != nullptr && e->record != nullptr) {
+		return {e->record->name, e->ns};
+	}
+	return {nullptr, 0};
+}
+
 void detail::NoteStringSlow(const char* text) noexcept {
 	if (auto* e = CurrentEntry()) {
 		CopyNote(e, text);
@@ -379,6 +386,10 @@ void Dump(FILE* out, unsigned own_entries, unsigned merged_entries, LocateFn loc
 }
 
 #else // !KYTY_HLE_TRACE_SUPPORTED
+
+CallInfo CurrentCall() noexcept {
+	return {nullptr, 0};
+}
 
 void detail::NoteStringSlow(const char*) noexcept {}
 void detail::NoteResultSlow(int64_t) noexcept {}

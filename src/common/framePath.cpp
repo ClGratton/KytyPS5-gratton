@@ -1,5 +1,7 @@
 #include "common/framePath.h"
 
+#include "common/hleTrace.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -58,8 +60,7 @@ std::string                                     g_path;
 std::atomic<bool>                               g_requested {false};
 std::once_flag                                  g_started;
 double                                          g_window_s = 8.0;
-std::mutex                                      g_names_mutex;
-std::unordered_map<const void*, std::string>*   g_names = nullptr;
+double                                          g_ns_per_tsc = 0.0;
 
 Ring* GetRing() noexcept {
 	if (t_ring != nullptr) {
@@ -164,29 +165,22 @@ void Dump(unsigned seq) {
 	}
 	std::string names;
 	{
-		std::lock_guard lock(g_names_mutex);
-		if (g_names != nullptr) {
-			std::unordered_map<const void*, bool> mark;
-			for (const auto& e: out) {
-				if (e.kind == Hle) {
-					mark[reinterpret_cast<const void*>(e.a)] = true;
-				}
+		// `a` of these events points at a name that lives for the whole run (HleTrace record).
+		std::unordered_map<uint64_t, bool> mark;
+		for (const auto& e: out) {
+			if ((e.kind == MutexWait || e.kind == CondWait || e.kind == Sleep || e.kind == Submit ||
+			     e.kind == SuspendWait || e.kind == CmdSyncWait || e.kind == WaitIdle) &&
+			    e.a != 0) {
+				mark[e.a] = true;
 			}
-			for (const auto& [key, flag]: mark) {
-				auto it = g_names->find(key);
-				if (it == g_names->end()) {
-					continue;
-				}
-				if (!names.empty()) {
-					names += ',';
-				}
-				char key_text[32];
-				std::snprintf(key_text, sizeof(key_text), "\"%llu\":\"",
-				              static_cast<unsigned long long>(reinterpret_cast<uint64_t>(key)));
-				names += key_text;
-				JsonEscape(names, it->second);
-				names += '"';
+		}
+		for (const auto& [key, flag]: mark) {
+			if (!names.empty()) {
+				names += ',';
 			}
+			names += "\"" + std::to_string(key) + "\":\"";
+			JsonEscape(names, reinterpret_cast<const char*>(key));
+			names += '"';
 		}
 	}
 	char file[1024];
@@ -243,6 +237,16 @@ void Start() {
 			g_window_s = std::max(0.5, std::atof(w));
 		}
 		g_requested.store(true);
+#if defined(__x86_64__)
+		{
+			const uint64_t t0 = NowNs();
+			const uint64_t c0 = __builtin_ia32_rdtsc();
+			std::this_thread::sleep_for(std::chrono::milliseconds(40));
+			const uint64_t t1 = NowNs();
+			const uint64_t c1 = __builtin_ia32_rdtsc();
+			g_ns_per_tsc      = c1 > c0 ? static_cast<double>(t1 - t0) / static_cast<double>(c1 - c0) : 0.0;
+		}
+#endif
 		detail::g_on.store(true, std::memory_order_relaxed);
 		std::thread(DumpThread).detach();
 		std::fprintf(stderr, "FramePath: logging to %s.<n>.kfp on %s.go, window %.1f s\n",
@@ -272,12 +276,17 @@ void Log(Kind kind, uint64_t t_ns, uint64_t dur_ns, uint64_t a, uint64_t b) noex
 	ring->head.store(head + 1, std::memory_order_release);
 }
 
-void RegisterName(const void* key, const char* name) noexcept {
-	std::lock_guard lock(g_names_mutex);
-	if (g_names == nullptr) {
-		g_names = new std::unordered_map<const void*, std::string>;
+double NsPerTsc() noexcept {
+	return g_ns_per_tsc;
+}
+
+Blame CurrentBlame(uint64_t now_ns) noexcept {
+	const auto call = HleTrace::CurrentCall();
+	if (call.name == nullptr) {
+		return {0, 0};
 	}
-	(*g_names)[key] = name;
+	const uint64_t age_us = call.ns <= now_ns ? (now_ns - call.ns) / 1000 : 0;
+	return {reinterpret_cast<uint64_t>(call.name), std::min<uint64_t>(age_us, 0xffffu) << 48};
 }
 
 #else // !__linux__
@@ -290,7 +299,12 @@ bool Requested() noexcept {
 }
 void Start() {}
 void Log(Kind, uint64_t, uint64_t, uint64_t, uint64_t) noexcept {}
-void RegisterName(const void*, const char*) noexcept {}
+double NsPerTsc() noexcept {
+	return 0.0;
+}
+Blame CurrentBlame(uint64_t) noexcept {
+	return {0, 0};
+}
 
 #endif
 

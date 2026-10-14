@@ -7,6 +7,7 @@
 #include "common/speculation.h"
 #include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
+#include "common/framePath.h"
 #include "common/gpuPhaseStats.h"
 #include "common/indirectDrawPolicy.h"
 #include "common/logging/log.h"
@@ -158,6 +159,7 @@ void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
 		operation();
 		done.release();
 	});
+	Common::FramePath::BlameScope frame_path(Common::FramePath::CmdSyncWait, 0, 1000);
 	done.acquire();
 }
 
@@ -199,7 +201,10 @@ void GuestGpu::SuspendPoint() {
 	EXIT_IF(IsGpuThread() || CommandScheduler::InDeferredOperation());
 	// Do not hold a queue lock while waiting: asynchronous work may be needed to
 	// finish the preceding graphics frame. The first point returns immediately.
-	m_suspend_point_ready->acquire();
+	{
+		Common::FramePath::BlameScope frame_path(Common::FramePath::SuspendWait, 0, 1000);
+		m_suspend_point_ready->acquire();
+	}
 	Submission submission;
 	submission.type = SubmissionType::SuspendPoint;
 	Enqueue(std::move(submission));
@@ -563,6 +568,11 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 
 void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
+	// KYTY_FRAME_PATH: guest-side cost of a submission (queue lock + lookahead copy), blamed on the HLE call.
+	const bool     frame_path = Common::FramePath::On();
+	const uint64_t fp_t0      = frame_path ? Common::FramePath::NowNs() : 0;
+	const auto     fp_type    = static_cast<uint64_t>(submission.type);
+	const auto     fp_queue   = static_cast<uint64_t>(submission.queue_id);
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	if (m_lookahead != nullptr && (submission.type == SubmissionType::Graphics ||
@@ -597,6 +607,16 @@ void GuestGpu::Enqueue(Submission submission) {
 		                 fmt::format("type={};queue={};dw={};cdw={};pending={}", type,
 		                             submission.queue_id, submission.commands.size(),
 		                             submission.constant_commands.size(), m_submission_count));
+	}
+	if (frame_path) {
+		// Seq(): the sequence number (0 when the lookahead and the trace are both off), type, queue,
+		// submissions waiting after this one.
+		const uint64_t pending = std::min<uint64_t>(m_submission_count + 1, 255);
+		const auto     blame   = Common::FramePath::CurrentBlame(fp_t0);
+		const uint64_t now     = Common::FramePath::NowNs();
+		Common::FramePath::Log(Common::FramePath::Submit, fp_t0, now - fp_t0, blame.name,
+		                       (submission.trace_seq & 0xffffffffffull) | fp_type << 40 |
+		                           fp_queue << 44 | pending << 48);
 	}
 	m_queues[submission.queue_id].push_back(std::move(submission));
 	m_submission_count++;
@@ -715,6 +735,14 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
+	Common::FramePath::Scope frame_path(Common::FramePath::GpuSlice, submission.trace_seq);
+	const bool               complete = ProcessTraced(submission);
+	frame_path.SetB((complete ? 1u : 0u) | static_cast<uint64_t>(submission.type) << 8 |
+	                static_cast<uint64_t>(submission.queue_id) << 16);
+	return complete;
+}
+
+bool GuestGpu::ProcessTraced(Submission& submission) {
 	if (!Bench::TraceEnabled()) {
 		return ProcessImpl(submission);
 	}

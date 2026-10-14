@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
+#include "common/framePath.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -887,6 +888,7 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			continue;
 		}
 
+		const uint64_t fp_vblank_t = Common::FramePath::On() ? Common::FramePath::NowNs() : 0;
 		VblankBegin();
 		bool presented = false;
 		if (pacer.OnVblank()) {
@@ -929,6 +931,12 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			}
 		}
 		VblankEnd();
+		if (fp_vblank_t != 0) {
+			static uint64_t vblank_number = 0;
+			Common::FramePath::Log(Common::FramePath::Vblank, fp_vblank_t,
+			                       Common::FramePath::NowNs() - fp_vblank_t, ++vblank_number,
+			                       presented ? 1 : 0);
+		}
 
 		const auto frame_end = Common::Timer::QueryPerformanceCounter();
 		total_wait += static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
@@ -988,6 +996,11 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 
 	pending.push_back(r);
 	request_id = r.id;
+	if (Common::FramePath::On()) {
+		const uint64_t now = Common::FramePath::NowNs();
+		Common::FramePath::Log(Common::FramePath::FlipReserve, now, 0, r.id,
+		                       source == FlipRequestSource::GpuEop ? 0 : 1);
+	}
 
 	cfg.flip_status.flipPendingNum++;
 	cfg.flip_status.submitProcessTimeCounter = r.submit_ptc;
@@ -1166,6 +1179,9 @@ void FlipQueue::Complete(uint64_t request_id) {
 		request->state = RequestState::Ready;
 		m_submit_cond_var.Signal();
 		m_mutex.Unlock();
+		if (Common::FramePath::On()) {
+			Common::FramePath::Log(Common::FramePath::FlipReady, Common::FramePath::NowNs(), 0, request_id, 0);
+		}
 		return;
 	}
 	auto cancelled = std::find_if(m_cancelled_requests.begin(), m_cancelled_requests.end(),
@@ -1184,6 +1200,7 @@ void FlipQueue::Complete(uint64_t request_id) {
 }
 
 void FlipQueue::WaitForSubmitSlot(VideoOutConfig& cfg) {
+	Common::FramePath::Scope frame_path(Common::FramePath::FlipSlotWait);
 	Common::LockGuard lock(m_mutex);
 	auto belongs_to_port = [&cfg](const auto& request) { return request.cfg == &cfg; };
 	while (std::count_if(m_requests.begin(), m_requests.end(), belongs_to_port) +
@@ -1259,6 +1276,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 		layers[i] = {r.frame, r.cfg->bus, r.premultiplied_alpha};
 	}
 	if (due) {
+		Common::FramePath::Scope frame_path(Common::FramePath::FlipPresent, group, 1);
 		m_presenter.Present(std::span(layers.data(), count));
 	}
 
@@ -1281,7 +1299,11 @@ bool FlipQueue::Flip(uint32_t micros) {
 		r.cfg->flip_status.currentBuffer            = r.index;
 		r.cfg->flip_status.flipPendingNum--;
 		r.cfg->flip_status.gcQueueNum -= r.source == FlipRequestSource::GpuEop;
-		TriggerVideoOutEvents(*r.cfg, VideoOutEventKind::Flip, reinterpret_cast<void*>(r.flip_arg));
+		{
+			Common::FramePath::Scope frame_path(Common::FramePath::FlipEvent,
+			                                    static_cast<uint64_t>(r.flip_arg));
+			TriggerVideoOutEvents(*r.cfg, VideoOutEventKind::Flip, reinterpret_cast<void*>(r.flip_arg));
+		}
 		it = m_requests.erase(it);
 	}
 	m_processing = false;
