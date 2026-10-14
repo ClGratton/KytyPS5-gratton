@@ -761,6 +761,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 	}
 	// A game thread's read fault (not the GPU thread's own, which an eager copy would only delay).
 	const bool guest_read_fault = cause == Common::GpuPhase::DrainCause::ReadbackFault;
+	if (guest_read_fault && !is_write && Config::ReadbackFuturesEnabled() && ReadMemoryFuture(vaddr, size)) {
+		return;
+	}
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cause,
 	                                                guest_read_fault] {
 		Common::GpuPhase::DrainCauseScope drain_cause(cause);
@@ -908,26 +911,32 @@ void BufferCache::WriteBackHotPages() {
 		return;
 	}
 	m_hot_pages.ForEachInRange(0, UINT64_MAX, [&](uint64_t page, HotPageSet::Entry& entry) {
-		if (entry.in_flight_tick != 0 || !m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
-			return;
-		}
-		auto* buffer = FindExistingBuffer(page);
-		if (buffer == nullptr) {
-			return;
-		}
-		const auto begin = std::max(page, buffer->CpuAddress());
-		const auto end   = std::min(page + TRACKER_PAGE_SIZE, buffer->CpuAddress() + buffer->Size());
-		if (begin < end && EagerDownload(*buffer, begin, end - begin)) {
-			// The copy and its deferred write-back belong to the command buffer about to be
-			// submitted as this tick.
-			entry.in_flight_tick = m_scheduler.CurrentTick();
-			Common::GpuPhase::NoteEager(Common::GpuPhase::Eager::Scheduled);
-		}
+		(void)ScheduleEagerPage(page, entry);
 	});
 }
 
+bool BufferCache::ScheduleEagerPage(uint64_t page, HotPageSet::Entry& entry) {
+	if (entry.in_flight_tick != 0 || !m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+		return false;
+	}
+	auto* buffer = FindExistingBuffer(page);
+	if (buffer == nullptr) {
+		return false;
+	}
+	const auto begin = std::max(page, buffer->CpuAddress());
+	const auto end   = std::min(page + TRACKER_PAGE_SIZE, buffer->CpuAddress() + buffer->Size());
+	if (begin < end && EagerDownload(*buffer, begin, end - begin)) {
+		// The copy and its deferred write-back belong to the command buffer about to be
+		// submitted as this tick.
+		entry.in_flight_tick = m_scheduler.CurrentTick();
+		Common::GpuPhase::NoteEager(Common::GpuPhase::Eager::Scheduled);
+		return true;
+	}
+	return false;
+}
+
 void BufferCache::RetireHotPages(uint64_t vaddr, uint64_t size, bool wait) {
-	if (m_hot_pages.Empty()) {
+	if (!m_hot_pages.HasInFlight()) {
 		return;
 	}
 	auto&      master = m_scheduler.GetMasterSemaphore();
@@ -1019,6 +1028,90 @@ bool BufferCache::VerifyWrittenBack(uint64_t page) {
 	            m_scheduler.GetMasterSemaphore().KnownGpuTick());
 	std::fflush(stdout);
 	return false;
+}
+
+// ---- --readback-futures ---------------------------------------------------------------------------
+// A game thread's read of GPU-written memory used to stop the GPU thread: it copied, submitted and
+// waited for the whole queue of submitted work before it published the bytes. Nothing the GPU
+// thread does next depends on the copy, so only the reading thread waits now (the three steps are
+// described in readbackFuture.h and notes/frame-pipelining.md section 3). The copy reuses the eager
+// write-back bookkeeping: the bytes stay in m_eager_pending_ranges until they have landed, and the
+// page stays protected until then.
+
+bool BufferCache::ReadMemoryFuture(uint64_t vaddr, uint64_t size) {
+	auto& gpu = m_scheduler.Context().GetGpu();
+	for (uint32_t round = 0;; ++round) {
+		auto        release = std::make_shared<FutureRelease>();
+		FutureStart start   = FutureStart::Sync;
+		gpu.SendCommandSync([&] { start = StartReadFuture(vaddr, size, release); });
+		if (start == FutureStart::Sync) {
+			Common::GpuPhase::NoteFuture(Common::GpuPhase::Future::Sync);
+			return false;
+		}
+		Common::GpuPhase::NoteFuture(round == 0 ? Common::GpuPhase::Future::Started
+		                                        : Common::GpuPhase::Future::Retried);
+		const auto wait_begin = std::chrono::steady_clock::now();
+		release->Wait();
+		Common::GpuPhase::NoteFuture(
+		    Common::GpuPhase::Future::Waited,
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                              std::chrono::steady_clock::now() - wait_begin)
+		                              .count()));
+		bool readable = false;
+		gpu.SendCommandSync([&] { readable = FinishReadFuture(vaddr, size); });
+		switch (NextFutureRound(round, readable)) {
+			case FutureRound::Done: return true;
+			case FutureRound::Retry: break;
+			case FutureRound::Fallback:
+				Common::GpuPhase::NoteFuture(Common::GpuPhase::Future::Sync);
+				return false;
+		}
+	}
+}
+
+FutureStart BufferCache::StartReadFuture(uint64_t vaddr, uint64_t size,
+                                         const std::shared_ptr<FutureRelease>& release) {
+	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	// What completed since the last submit lands first (never waits).
+	RetireHotPages(first, last - first, false);
+	uint32_t scheduled = 0;
+	bool     in_flight = false;
+	for (auto page = first; page < last; page += TRACKER_PAGE_SIZE) {
+		if (m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+			// A page with a copy in flight and newer bytes cannot take a second copy yet: the
+			// thread waits for the first, finds the page still protected and runs another round.
+			m_hot_pages.NoteFault(page);
+			if (m_hot_pages.Contains(page) && m_hot_pages.InFlight(page) == 0) {
+				m_hot_pages.ForEachInRange(page, page + TRACKER_PAGE_SIZE,
+				                           [&](uint64_t hot_page, HotPageSet::Entry& entry) {
+					                           if (ScheduleEagerPage(hot_page, entry)) {
+						                           ++scheduled;
+					                           }
+				                           });
+			}
+		}
+		if (m_hot_pages.InFlight(page) != 0) {
+			in_flight = true;
+		}
+	}
+	if (DecideFutureStart(scheduled, in_flight) == FutureStart::Sync) {
+		return FutureStart::Sync;
+	}
+	// The release runs behind the write-back (priority operations are served in order), after the
+	// tick that holds the copy has completed. The open command buffer must be submitted for that.
+	m_scheduler.DeferPriorityOperation([release] { release->Signal(); });
+	m_scheduler.Flush();
+	return FutureStart::Wait;
+}
+
+bool BufferCache::FinishReadFuture(uint64_t vaddr, uint64_t size) {
+	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	// The tick has completed and the write-back has run: this unprotects the pages, except those a
+	// newer GPU write reached.
+	RetireHotPages(first, last - first, true);
+	return !m_memory_tracker.IsRegionGpuModified(first, last - first);
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {

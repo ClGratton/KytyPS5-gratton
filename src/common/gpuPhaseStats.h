@@ -114,8 +114,9 @@ enum class Eager : uint8_t { Scheduled, Retired, SkippedNoSpace, VerifyChecks, V
 void NoteEager(Eager kind) noexcept;
 // --readback-futures: game-thread read faults served without stopping the GPU thread ("readback
 // futures (total)" in the report). `wait_ns` is the time the faulting thread waited for the copy.
-enum class Future : uint8_t { Started, Retried, Sync, Immediate, Count };
+enum class Future : uint8_t { Started, Retried, Sync, Waited, Count };
 void NoteFuture(Future kind, uint64_t wait_ns = 0) noexcept;
+[[nodiscard]] uint64_t FutureCount(Future kind) noexcept;
 void NoteFrame() noexcept;
 [[nodiscard]] uint64_t Submits() noexcept;
 [[nodiscard]] uint64_t Frames() noexcept;

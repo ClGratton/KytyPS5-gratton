@@ -66,6 +66,15 @@ public:
 	}
 
 	[[nodiscard]] bool   Empty() const { return m_pages.empty(); }
+	// True when some page has an eager copy in flight (a scan of at most `capacity` entries).
+	[[nodiscard]] bool HasInFlight() const {
+		for (const auto& [page, entry]: m_pages) {
+			if (entry.in_flight_tick != 0) {
+				return true;
+			}
+		}
+		return false;
+	}
 	[[nodiscard]] size_t Size() const { return m_pages.size(); }
 	[[nodiscard]] bool   Contains(uint64_t page) const { return m_pages.find(page) != m_pages.end(); }
 	[[nodiscard]] uint64_t InFlight(uint64_t page) const {
