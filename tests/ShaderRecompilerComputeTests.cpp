@@ -4506,7 +4506,8 @@ public:
                                            cache.HasUnknownGpuDirtyBytes(Dword(header + 0x18), 8),
               "unknown-dirty accounting is wrong");
       // The guest copy still holds the stale bytes; the overlay puts the known values in.
-      std::memcpy(words.data(), memory + header, 32);
+      Require(name, "read guest backing", Libs::LibKernel::Memory::TryReadBacking(Dword(header), words.data(), 32),
+              "the guest backing was not readable");
       Require(name, "stale guest copy", words[6] == 0xeeeeeeeeu, "guest bytes were not stale");
       cache.OverlayKnownDirtyDwords(Dword(header), 32, words.data());
       Require(name, "overlay", words[0] == 0xc0 && words[6] == 0 && words[7] == 0xeeeeeeeeu && words[1] == 0xeeeeeeeeu,
