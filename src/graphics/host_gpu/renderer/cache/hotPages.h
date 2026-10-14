@@ -65,6 +65,15 @@ public:
 		m_pages.emplace(page, Entry {m_clock, 0});
 	}
 
+	// Drops a page that has no copy in flight (a page the CPU wrote does not belong in the set: its
+	// next GPU write would be copied out only for the CPU to overwrite it).
+	void Forget(uint64_t page) {
+		const auto found = m_pages.find(page);
+		if (found != m_pages.end() && found->second.in_flight_tick == 0) {
+			m_pages.erase(found);
+		}
+	}
+
 	[[nodiscard]] bool   Empty() const { return m_pages.empty(); }
 	// True when some page has an eager copy in flight (a scan of at most `capacity` entries).
 	[[nodiscard]] bool HasInFlight() const {

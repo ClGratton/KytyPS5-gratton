@@ -166,10 +166,13 @@ public:
 	// copies the GPU-written bytes of the range out, queues `release` behind their write-back and
 	// submits; FinishReadFuture, once `release` fired, unprotects the pages (true) unless a newer GPU
 	// write kept one protected (false).
-	[[nodiscard]] bool        ReadMemoryFuture(uint64_t vaddr, uint64_t size);
+	// `is_write`: the thread writes (a CPU write over GPU-written pages): the pages are claimed for
+	// the CPU once the bytes landed, as the synchronous path does.
+	[[nodiscard]] bool        ReadMemoryFuture(uint64_t vaddr, uint64_t size, bool is_write = false);
 	[[nodiscard]] FutureStart StartReadFuture(uint64_t vaddr, uint64_t size,
-	                                          const std::shared_ptr<FutureRelease>& release);
-	[[nodiscard]] bool        FinishReadFuture(uint64_t vaddr, uint64_t size);
+	                                          const std::shared_ptr<FutureRelease>& release,
+	                                          bool is_write = false);
+	[[nodiscard]] bool        FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write = false);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();

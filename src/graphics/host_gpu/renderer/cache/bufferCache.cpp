@@ -761,7 +761,12 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 	}
 	// A game thread's read fault (not the GPU thread's own, which an eager copy would only delay).
 	const bool guest_read_fault = cause == Common::GpuPhase::DrainCause::ReadbackFault;
-	if (guest_read_fault && !is_write && Config::ReadbackFuturesEnabled() && ReadMemoryFuture(vaddr, size)) {
+	// ... and a game thread's write over GPU-written pages: it needs the GPU's bytes in guest memory
+	// first (the rest of the page must survive), but the GPU thread need not wait for them.
+	const bool guest_write_fault =
+	    is_write && cause == Common::GpuPhase::DrainCause::ReadbackCpuWrite && !GuestGpu::IsGpuThread();
+	if ((guest_read_fault || guest_write_fault) && Config::ReadbackFuturesEnabled() &&
+	    ReadMemoryFuture(vaddr, size, is_write)) {
 		return;
 	}
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cause,
@@ -1038,12 +1043,12 @@ bool BufferCache::VerifyWrittenBack(uint64_t page) {
 // write-back bookkeeping: the bytes stay in m_eager_pending_ranges until they have landed, and the
 // page stays protected until then.
 
-bool BufferCache::ReadMemoryFuture(uint64_t vaddr, uint64_t size) {
+bool BufferCache::ReadMemoryFuture(uint64_t vaddr, uint64_t size, bool is_write) {
 	auto& gpu = m_scheduler.Context().GetGpu();
 	for (uint32_t round = 0;; ++round) {
 		auto        release = std::make_shared<FutureRelease>();
 		FutureStart start   = FutureStart::Sync;
-		gpu.SendCommandSync([&] { start = StartReadFuture(vaddr, size, release); });
+		gpu.SendCommandSync([&] { start = StartReadFuture(vaddr, size, release, is_write); });
 		if (start == FutureStart::Sync) {
 			Common::GpuPhase::NoteFuture(Common::GpuPhase::Future::Sync);
 			return false;
@@ -1058,7 +1063,7 @@ bool BufferCache::ReadMemoryFuture(uint64_t vaddr, uint64_t size) {
 		                              std::chrono::steady_clock::now() - wait_begin)
 		                              .count()));
 		bool readable = false;
-		gpu.SendCommandSync([&] { readable = FinishReadFuture(vaddr, size); });
+		gpu.SendCommandSync([&] { readable = FinishReadFuture(vaddr, size, is_write); });
 		switch (NextFutureRound(round, readable)) {
 			case FutureRound::Done: return true;
 			case FutureRound::Retry: break;
@@ -1070,7 +1075,11 @@ bool BufferCache::ReadMemoryFuture(uint64_t vaddr, uint64_t size) {
 }
 
 FutureStart BufferCache::StartReadFuture(uint64_t vaddr, uint64_t size,
-                                         const std::shared_ptr<FutureRelease>& release) {
+                                         const std::shared_ptr<FutureRelease>& release,
+                                         bool is_write) {
+	if (is_write && !IsRegionRegistered(vaddr, size)) {
+		return FutureStart::Sync; // the synchronous path returns at once for such a write
+	}
 	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
 	// What completed since the last submit lands first (never waits).
@@ -1105,13 +1114,25 @@ FutureStart BufferCache::StartReadFuture(uint64_t vaddr, uint64_t size,
 	return FutureStart::Wait;
 }
 
-bool BufferCache::FinishReadFuture(uint64_t vaddr, uint64_t size) {
+bool BufferCache::FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write) {
 	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
 	// The tick has completed and the write-back has run: this unprotects the pages, except those a
 	// newer GPU write reached.
 	RetireHotPages(first, last - first, true);
-	return !m_memory_tracker.IsRegionGpuModified(first, last - first);
+	if (m_memory_tracker.IsRegionGpuModified(first, last - first)) {
+		return false;
+	}
+	if (is_write) {
+		// Nothing newer is on the GPU: give the pages to the CPU in one critical section, as the
+		// synchronous path does after its download. This runs on the GPU thread, so no GPU write
+		// can be recorded between the check above and the claim.
+		m_memory_tracker.TakeGpuPagesForCpu(vaddr, size);
+		for (auto page = first; page < last; page += TRACKER_PAGE_SIZE) {
+			m_hot_pages.Forget(page);
+		}
+	}
+	return true;
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {

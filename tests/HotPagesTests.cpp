@@ -70,6 +70,21 @@ void TestRangeIterationIsOrderedAndBounded() {
 	set.ForEachInRange(Page(8), Page(9), [&](uint64_t, HotPageSet::Entry&) { Check(false, "empty range"); });
 }
 
+void TestForgetDropsOnlyPagesWithoutACopyInFlight() {
+	HotPageSet set(4);
+	set.NoteFault(Page(1));
+	set.NoteFault(Page(2));
+	set.SetInFlight(Page(2), 7);
+	set.Forget(Page(1));
+	set.Forget(Page(2));
+	set.Forget(Page(9));
+	Check(!set.Contains(Page(1)), "a page without a copy in flight is forgotten");
+	Check(set.Contains(Page(2)) && set.InFlight(Page(2)) == 7, "a page with a copy in flight stays");
+	Check(set.HasInFlight(), "HasInFlight sees the remaining copy");
+	set.SetInFlight(Page(2), 0);
+	Check(!set.HasInFlight(), "HasInFlight is false once the copy retired");
+}
+
 void TestZeroCapacityTracksNothing() {
 	HotPageSet set(0);
 	set.NoteFault(Page(1));
@@ -93,6 +108,7 @@ int main() {
 	TestLeastRecentlyFaultedIsReplaced();
 	TestInFlightPagesAreNotReplaced();
 	TestRangeIterationIsOrderedAndBounded();
+	TestForgetDropsOnlyPagesWithoutACopyInFlight();
 	TestZeroCapacityTracksNothing();
 	TestRetireDecision();
 	std::printf("HotPagesTests: ok\n");

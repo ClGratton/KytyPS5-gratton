@@ -5946,6 +5946,16 @@ public:
                   cache.FinishReadFuture(base + offset, 1),
               "a reader of a copy in flight did not get the bytes");
 
+      // 4b. A CPU write over a GPU-written page: the GPU's bytes land in guest memory first, then the
+      // page is claimed for the CPU (the write can proceed without a second fault).
+      GpuWrite(offset, second_value);
+      cache.InvalidateMemory(base + offset, 1);
+      Require(name, "cpu write: bytes landed, page claimed for the CPU",
+              Backing(offset) == second_value && !cache.HasGpuDirtyBytes(base + offset, 4) &&
+                  !cache.IsRegionGpuModified(base + offset, 4) &&
+                  cache.IsRegionCpuModified(base + offset, 4),
+              "a CPU write over GPU data did not get the GPU's bytes and the page");
+
       // 5. Flag off at run time: a fault takes the synchronous path.
       Config::Load(Config::ConfigOptions{});
       GpuWrite(offset, first_value);
