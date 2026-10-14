@@ -155,6 +155,13 @@ QList<Option> BuildTable() {
 	             "Remembers ranges last written by a uniform GPU fill so clear discovery needs no "
 	             "GPU to CPU readback for them.",
 	             EMU_BOOL(known_fills)});
+	defs.append({"known_stores", "--known-stores", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
+	             "Know the dwords a compute dispatch stores",
+	             "When a compute shader stores an immediate to an address its descriptor decides "
+	             "(queue headers, flags), the GPU thread knows the value and does not drain the GPU "
+	             "to read it back. Exact; only pays together with GPU-built indirect draws and "
+	             "known clear codes.",
+	             EMU_BOOL(known_stores)});
 	defs.append({"image_lookup_memo", "--image-lookup-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Remember texture lookups",
 	             "A texture lookup remembers which cached image it found until an image is added "

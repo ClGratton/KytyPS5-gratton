@@ -65,6 +65,7 @@ std::atomic<uint64_t> g_qr_lag {0};
 std::atomic<uint64_t> g_clean_reads {0};
 std::atomic<uint64_t> g_direct_reads {0};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownStore::Count)> g_known_stores {};
 std::array<std::atomic<uint64_t>, kCoalesce> g_coalesce {};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(IndirectDraw::Route::Count)>
     g_indirect_routes {};
@@ -279,6 +280,10 @@ void NoteKnownFill(KnownFill kind) noexcept {
 	g_known_fills[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 }
 
+void NoteKnownStore(KnownStore kind, uint64_t n) noexcept {
+	g_known_stores[static_cast<size_t>(kind)].fetch_add(n, std::memory_order_relaxed);
+}
+
 void NoteIndirectDraw(IndirectDraw::Route route, uint32_t draws) noexcept {
 	const auto index = static_cast<size_t>(route);
 	g_indirect_routes[index].fetch_add(draws, std::memory_order_relaxed);
@@ -409,6 +414,19 @@ void Report(detail::ThreadState& s, bool final_report) {
 			line += fmt::format(
 			    "known fills (total): hit={} readback={} discarded={} discard_refused={}\n", now[0],
 			    now[1], now[2], now[3]);
+		}
+	}
+	{
+		std::array<uint64_t, static_cast<size_t>(KnownStore::Count)> now {};
+		bool                                                          any = false;
+		for (size_t i = 0; i < now.size(); ++i) {
+			now[i] = g_known_stores[i].load(std::memory_order_relaxed);
+			any    = any || now[i] != 0;
+		}
+		if (any) {
+			line += fmt::format("known stores (total): recorded={} hit={} partial={} verified={} "
+			                    "mismatch={}\n",
+			                    now[0], now[1], now[2], now[3], now[4]);
 		}
 	}
 	{

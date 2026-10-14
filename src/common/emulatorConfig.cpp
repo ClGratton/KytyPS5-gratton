@@ -72,6 +72,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("readback-queue", &g_config->readback_queue, true);
 	// The trim thread starts only when the flag was on at start-up and skips its pass while off.
 	registry.Register("heap-trim", &g_config->heap_trim, true);
+	// Read per dependent read and per recorded dispatch; knowledge recorded while on is forgotten by
+	// the same write tracking whether or not the flag is on, and is only consulted while on.
+	registry.Register("known-stores", &g_config->known_stores, false);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -132,6 +135,14 @@ bool ElideBarriersEnabled() {
 
 bool KnownFillsEnabled() {
 	return g_config->known_fills;
+}
+
+bool KnownStoresEnabled() {
+	return Common::RuntimeToggles::Read(g_config->known_stores);
+}
+
+uint32_t DebugKnownVerifySeconds() {
+	return g_config->debug_known_verify_s;
 }
 
 bool ImageLookupMemoEnabled() {

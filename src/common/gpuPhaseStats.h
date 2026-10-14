@@ -88,6 +88,11 @@ void NoteBarrier(bool elided) noexcept;
 // --known-fills: color-metadata clear discovery outcomes (see TextureCache::MaterializeColorClear).
 enum class KnownFill : uint8_t { Hit, Readback, Discarded, DiscardRefused, Count };
 void NoteKnownFill(KnownFill kind) noexcept;
+// --known-stores: dwords recorded after a dispatch (`Recorded`), dependent reads of GPU-dirty bytes
+// answered from them (`Hit`) or not fully covered and drained as before (`Partial`), and the
+// --debug-known-verify drains that compared a known value with the GPU's (`Verified`, `Mismatch`).
+enum class KnownStore : uint8_t { Recorded, Hit, Partial, Verified, Mismatch, Count };
+void NoteKnownStore(KnownStore kind, uint64_t n = 1) noexcept;
 // --gpu-indirect-draws: how `draws` indirect draws of one packet were routed. The first time each
 // fallback reason is seen it is printed once.
 void NoteIndirectDraw(IndirectDraw::Route route, uint32_t draws) noexcept;

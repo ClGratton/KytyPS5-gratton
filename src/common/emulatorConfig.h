@@ -267,6 +267,15 @@ struct ConfigOptions {
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
 	// clear discovery needs no GPU->CPU readback for them. Default off.
 	bool                   known_fills                 = false;
+	// --known-stores (performance, exact): the GPU thread takes the value of a dword a dispatch
+	// stored as an immediate (queue headers, flags) from what the dispatch is proven to write
+	// (renderer/cache/knownStores.h) instead of draining the GPU when it has to read that dword
+	// itself (the SRT walk). Runtime toggle. Default off until measured.
+	bool                   known_stores                = false;
+	// --debug-known-verify <seconds>: with --known-stores, once per this many seconds per kind a
+	// known value is not used: the GPU is drained, the real bytes are read and compared (loud log and
+	// the knowledge dropped on a mismatch; counters in --gpu-phase-stats). 0 = off.
+	uint32_t               debug_known_verify_s        = 0;
 	// --image-lookup-memo: FindImage remembers unique matches until the set of registered images
 	// changes (renderer/cache/imageLookupMemo.h). Exact; default off until measured.
 	bool                   image_lookup_memo           = false;
@@ -388,6 +397,8 @@ uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
+bool              KnownStoresEnabled();
+uint32_t          DebugKnownVerifySeconds();
 bool              ImageLookupMemoEnabled();
 bool              TextureBindingReuseEnabled();
 bool              CleanGuestReadsEnabled();
