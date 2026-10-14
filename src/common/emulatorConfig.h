@@ -267,6 +267,12 @@ struct ConfigOptions {
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
 	// clear discovery needs no GPU->CPU readback for them. Default off.
 	bool                   known_fills                 = false;
+	// --image-lookup-memo: FindImage remembers unique matches until the set of registered images
+	// changes (renderer/cache/imageLookupMemo.h). Exact; default off until measured.
+	bool                   image_lookup_memo           = false;
+	// --texture-binding-reuse: a draw keeps a slot's image binding while the descriptor, the shader's
+	// image resource and the set of cached images are unchanged. Exact; default off until measured.
+	bool                   texture_binding_reuse       = false;
 	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
 	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.
@@ -370,6 +376,8 @@ uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
+bool              ImageLookupMemoEnabled();
+bool              TextureBindingReuseEnabled();
 bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();
 bool              SrtPlanShadowEnabled();

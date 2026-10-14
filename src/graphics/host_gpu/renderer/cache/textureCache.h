@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
+#include "graphics/host_gpu/renderer/cache/imageLookupMemo.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
@@ -45,7 +46,17 @@ public:
 	~TextureCache();
 	KYTY_CLASS_NO_COPY(TextureCache);
 
-	[[nodiscard]] ImageId       FindImage(ImageDesc& desc, bool exact_format = false);
+	// When `unique_generation` is given it receives the image-set generation if the result was
+	// decided by exactly one SameBacking match (the same request finds the same image until the
+	// generation moves, see imageLookupMemo.h), else 0. RefindImage does the rest of FindImage for
+	// such a result.
+	[[nodiscard]] ImageId       FindImage(ImageDesc& desc, bool exact_format = false,
+	                                      uint64_t* unique_generation = nullptr);
+	// FindImage's bookkeeping (access tick, LRU touch, colour-clear materialization) for a request
+	// that FindImage resolved to `id` under `generation`. Returns false and does nothing when the
+	// image set changed since.
+	[[nodiscard]] bool          RefindImage(ImageId id, uint64_t generation, const ImageDesc& desc,
+	                                        uint32_t metadata_base_layer);
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
@@ -151,6 +162,9 @@ private:
 	[[nodiscard]] ImageId       ExpandImage(const ImageInfo& info, ImageId source);
 	void                        RefreshImage(ImageId id);
 	void MaterializeColorClear(ImageId id, const ImageDesc& binding, uint32_t metadata_base_layer);
+	// The part of FindImage after the lookup that runs without the lock.
+	void                        FinishFind(ImageId id, const ImageDesc& desc,
+	                                       uint32_t metadata_base_layer);
 	void                        InitializeImage(ImageId id);
 	[[nodiscard]] bool          CanDownload(const Image& image) const;
 	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
@@ -198,6 +212,11 @@ private:
 	bool             m_vram_audit_done        = false;
 	mutable uint32_t m_image_query_epoch      = 0;
 	bool             m_readback_linear_images = false;
+	// --image-lookup-memo (imageLookupMemo.h): unique SameBacking matches of FindImage, valid while
+	// m_image_set_generation is unchanged. The generation moves whenever an image is registered or
+	// unregistered and whenever AssociateStencil rewrites a registered image's info. Under m_lock.
+	ImageLookupMemo  m_image_lookup_memo;
+	uint64_t         m_image_set_generation   = 1;
 
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;

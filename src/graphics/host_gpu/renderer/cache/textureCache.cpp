@@ -26,6 +26,7 @@
 #include <bit>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <limits>
@@ -42,6 +43,27 @@ namespace Libs::Graphics {
 namespace {
 
 constexpr uint64_t NumFramesBeforeRemoval = 32;
+
+// KYTY_IMAGE_LOOKUP_VERIFY=1: every hit of the --image-lookup-memo runs the full lookup too and
+// aborts on a disagreement; a line with the counts goes to stdout every 2^20 verified hits.
+[[nodiscard]] bool ImageLookupVerifyEnabled() {
+	static const bool enabled = [] {
+		const char* text = std::getenv("KYTY_IMAGE_LOOKUP_VERIFY");
+		return text != nullptr && text[0] != '\0' && text[0] != '0';
+	}();
+	return enabled;
+}
+
+void ImageLookupNoteVerified(const ImageLookupMemo::Stats& stats) {
+	static std::atomic<uint64_t> verified {0};
+	const auto                   n = verified.fetch_add(1, std::memory_order_relaxed) + 1;
+	if ((n & ((1u << 20) - 1u)) == 0) {
+		std::printf("ImageLookupMemo verify: %" PRIu64 " hits agree with the full lookup, 0 mismatches "
+		            "(memo hits %" PRIu64 " misses %" PRIu64 " records %" PRIu64 ")\n",
+		            n, stats.hits, stats.misses, stats.records);
+		std::fflush(stdout);
+	}
+}
 
 [[nodiscard]] bool DecodeColorClear(const TextureCache::ImageDesc& desc, uint8_t code,
                                   vk::ClearColorValue& clear) {
@@ -241,6 +263,7 @@ void TextureCache::RegisterImage(ImageId id) {
 		m_image_page_table[page].push_back(id);
 	});
 	image.registered = true;
+	++m_image_set_generation;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_total_used_memory += image.AccountedSize();
 }
@@ -268,6 +291,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 	}
 	m_total_used_memory -= accounted;
 	image.registered = false;
+	++m_image_set_generation;
 }
 
 void TextureCache::DeleteImage(ImageId id) {
@@ -1324,12 +1348,17 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		record.info                 = plane;
 		record.depth_id             = depth_id;
 		record.stencil_subresources = depth.stencil_subresources;
+		// FindImage reads the info and the depth association of registered images.
+		++m_image_set_generation;
 	}
 
 	return association;
 }
 
-ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
+ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format, uint64_t* unique_generation) {
+	if (unique_generation != nullptr) {
+		*unique_generation = 0;
+	}
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {
 		EXIT("TextureCache: image lookup requires a valid command buffer\n");
@@ -1344,44 +1373,91 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	ImageId result {};
 	{
 		std::scoped_lock lock {m_lock};
-		const auto       candidates =
-		    FindImagesInRegion(desc.info.data.address, desc.info.data.size, false);
+		int32_t          view_mip   = -1;
+		int32_t          view_layer = -1;
+		// The lookup proper: every registered image that overlaps the request is tested with
+		// SameBacking; `unique` tells whether the answer came from exactly one SameBacking match and
+		// nothing else (see imageLookupMemo.h).
+		bool       unique = false;
+		const auto lookup = [&]() {
+			ImageId      found {};
+			bool         stencil_shortcut = false;
+			uint32_t     backing_matches  = 0;
+			int32_t      mip              = -1;
+			int32_t      layer            = -1;
+			const auto candidates =
+			    FindImagesInRegion(desc.info.data.address, desc.info.data.size, false);
 
-		for (const auto id: candidates) {
-			const auto& image = m_slot_images[id];
-			// Stencil descriptors name the associated plane; its depth owner supplies
-			// the native image and the canonical guest tiling.
-			if ((desc.type == BindingType::Texture || desc.type == BindingType::Storage) &&
-			    image.depth_id && image.info.data == desc.info.data &&
-			    m_slot_images[image.depth_id].info.samples == desc.info.samples &&
-			    image.info.extent == desc.info.extent && image.info.type == desc.info.type &&
-			    image.info.resources.levels >= desc.info.resources.levels &&
-			    image.info.resources.layers >= desc.info.resources.layers &&
-			    desc.info.bytes_per_block == 1 &&
-			    desc.info.guest_format == Prospero::BufferFormat::k8UInt) {
-				result = id;
-				break;
-			}
-			if (SameBacking(image.info, desc.info, exact_format)) {
-				result = id;
-			}
-		}
-
-		int32_t view_mip   = -1;
-		int32_t view_layer = -1;
-		if (!result) {
-			for (const auto candidate: candidates) {
-				view_mip                = -1;
-				view_layer              = -1;
-				const auto& merged_info = result ? m_slot_images[result].info : desc.info;
-				const auto  overlap     = ResolveOverlap(merged_info, desc.type, candidate, result);
-				if (overlap.image) {
-					result     = overlap.image;
-					view_mip   = overlap.mip;
-					view_layer = overlap.layer;
+			for (const auto id: candidates) {
+				const auto& image = m_slot_images[id];
+				// Stencil descriptors name the associated plane; its depth owner supplies
+				// the native image and the canonical guest tiling.
+				if ((desc.type == BindingType::Texture || desc.type == BindingType::Storage) &&
+				    image.depth_id && image.info.data == desc.info.data &&
+				    m_slot_images[image.depth_id].info.samples == desc.info.samples &&
+				    image.info.extent == desc.info.extent && image.info.type == desc.info.type &&
+				    image.info.resources.levels >= desc.info.resources.levels &&
+				    image.info.resources.layers >= desc.info.resources.layers &&
+				    desc.info.bytes_per_block == 1 &&
+				    desc.info.guest_format == Prospero::BufferFormat::k8UInt) {
+					found            = id;
+					stencil_shortcut = true;
+					break;
+				}
+				if (SameBacking(image.info, desc.info, exact_format)) {
+					found = id;
+					++backing_matches;
 				}
 			}
+
+			if (!found) {
+				for (const auto candidate: candidates) {
+					mip                     = -1;
+					layer                   = -1;
+					const auto& merged_info = found ? m_slot_images[found].info : desc.info;
+					const auto  overlap     = ResolveOverlap(merged_info, desc.type, candidate, found);
+					if (overlap.image) {
+						found = overlap.image;
+						mip   = overlap.mip;
+						layer = overlap.layer;
+					}
+				}
+			}
+			unique     = found && !stencil_shortcut && backing_matches == 1 && mip < 0 && layer < 0;
+			view_mip   = mip;
+			view_layer = layer;
+			return found;
+		};
+
+		const bool memo_enabled = Config::ImageLookupMemoEnabled();
+		const auto memo_key = ImageLookupKey::Make(desc.info, exact_format,
+		                                           static_cast<uint8_t>(desc.type));
+		bool       memo_hit = false;
+		if (memo_enabled) {
+			Common::SlotId remembered;
+			if (m_image_lookup_memo.Find(memo_key, m_image_set_generation, remembered)) {
+				if (ImageLookupVerifyEnabled()) {
+					const auto full = lookup();
+					if (!(full == remembered) || !unique) {
+						EXIT("TextureCache: image lookup memo disagrees with the full lookup: "
+						     "memo=%u/%u full=%u/%u unique=%d address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+						     remembered.index, remembered.generation, full.index, full.generation,
+						     unique ? 1 : 0, desc.info.data.address, desc.info.data.size);
+					}
+					ImageLookupNoteVerified(m_image_lookup_memo.GetStats());
+				}
+				result     = remembered;
+				memo_hit   = true;
+				view_mip   = -1;
+				view_layer = -1;
+			}
 		}
+		if (!memo_hit) {
+			result = lookup();
+		}
+		const bool recordable = memo_enabled && !memo_hit && unique;
+		const bool by_unique  = memo_hit || unique;
+		const auto looked_up  = result;
 
 		if (result && !m_slot_images[result].depth_id) {
 			auto& resolved = m_slot_images[result];
@@ -1392,6 +1468,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 				result = {};
 			}
 		}
+		if (recordable && result && !m_slot_images[result].depth_id) {
+			m_image_lookup_memo.Record(memo_key, m_image_set_generation, result);
+		}
 		if (!result) {
 			result         = InsertImage(desc.info);
 			auto& inserted = m_slot_images[result];
@@ -1399,6 +1478,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			                                    inserted.info.data.size)) {
 				inserted.MarkBufferModified();
 			}
+		}
+		if (unique_generation != nullptr && by_unique && result == looked_up) {
+			*unique_generation = m_image_set_generation;
 		}
 		auto& image = m_slot_images[result];
 		if (view_mip >= 0) {
@@ -1410,11 +1492,31 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);
 	}
-	MaterializeColorClear(result, desc, metadata_base_layer);
+	FinishFind(result, desc, metadata_base_layer);
+	return result;
+}
+
+bool TextureCache::RefindImage(ImageId id, uint64_t generation, const ImageDesc& desc,
+                               uint32_t metadata_base_layer) {
+	{
+		std::scoped_lock lock {m_lock};
+		if (generation == 0 || generation != m_image_set_generation) {
+			return false;
+		}
+		auto& image              = m_slot_images[id];
+		image.tick_accessed_last = m_scheduler.CurrentTick();
+		TouchImage(image);
+	}
+	FinishFind(id, desc, metadata_base_layer);
+	return true;
+}
+
+void TextureCache::FinishFind(ImageId id, const ImageDesc& desc, uint32_t metadata_base_layer) {
+	MaterializeColorClear(id, desc, metadata_base_layer);
 	if (desc.type == BindingType::VideoOut &&
 	    desc.info.metadata.compression != VideoOutCompression::Uncompressed) {
 		std::scoped_lock lock {m_lock};
-		const auto& image = m_slot_images[result];
+		const auto& image = m_slot_images[id];
 		const bool guest_dirty = image.IsBufferModified() || image.IsCpuDirty();
 		const bool native_current =
 		    (image.usage.render_target || image.IsGpuModified()) && !guest_dirty;
@@ -1423,7 +1525,6 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			     "contents\n");
 		}
 	}
-	return result;
 }
 
 void TextureCache::UpdateImage(ImageId id) {

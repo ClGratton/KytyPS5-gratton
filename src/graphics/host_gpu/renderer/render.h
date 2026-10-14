@@ -203,8 +203,11 @@ private:
 		std::optional<PreparedBindings> pixel;
 	};
 
+	// `source`, when given, records what the binding was resolved from for --texture-binding-reuse
+	// (generation 0 when the binding cannot be kept).
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
-	                                            const ShaderRecompiler::IR::DescriptorValue& value);
+	                                            const ShaderRecompiler::IR::DescriptorValue& value,
+	                                            PreparedBindings::ImageSource* source = nullptr);
 	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                             std::span<RenderColorInfo> colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
