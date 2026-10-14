@@ -1744,6 +1744,7 @@ void TestUniformStores() {
     bool subdword = false;
     bool indexed_by_lane = false;
     bool loop = false;
+    uint32_t index_guard = 0; // 1: LocalInvocationIndex < 4, 2: LocalInvocationIndex < 0
   };
   const auto Run = [](Options options) {
     Fixture fixture;
@@ -1761,10 +1762,17 @@ void TestUniformStores() {
     store.data_dwords = 4;
     store.offset = 16;
     const auto flags = fixture.AddMemory(store, 16);
-    const auto predicate =
+    Value predicate =
         options.conditional
             ? fixture.Emit(ValueOpcode::ULessThan32, {local, Value(32u)})
             : Value(true);
+    if (options.index_guard != 0) {
+      const auto index = fixture.Emit(
+          ValueOpcode::GetBuiltin,
+          {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationIndex)), Value(0u)});
+      predicate = fixture.Emit(ValueOpcode::ULessThan32,
+                               {index, Value(options.index_guard == 1 ? 4u : 0u)});
+    }
     // {0xc0, lane, 0, 7}: three immediates and a lane-dependent dword.
     const auto data = fixture.Emit(ValueOpcode::CompositeConstructU32x4,
                                    {Value(0xc0u), local, Value(0u), Value(7u)});
@@ -1861,6 +1869,17 @@ void TestUniformStores() {
   { auto [plan, eligible] = Run({.conditional = true});
     Check(plan.uniform_stores != nullptr && !plan.uniform_stores->sites[0].executes,
           "a conditional store was taken to run"); (void)eligible; }
+  {
+    // The translator's initial exec of a workgroup that does not fill its last wave.
+    auto [plan, eligible] = Run({.index_guard = 1});
+    Check(plan.uniform_stores != nullptr && plan.uniform_stores->sites[0].executes,
+          "a bound the first invocation satisfies was not accepted");
+    (void)eligible;
+    auto [plan0, eligible0] = Run({.index_guard = 2});
+    Check(plan0.uniform_stores != nullptr && !plan0.uniform_stores->sites[0].executes,
+          "a bound of zero was accepted");
+    (void)eligible0;
+  }
   { auto [plan, eligible] = Run({.shared_write = true});
     Check(plan.uniform_stores != nullptr, "a GDS write made the shader ineligible"); (void)eligible; }
   { auto [plan, eligible] = Run({.second_buffer_store = true});

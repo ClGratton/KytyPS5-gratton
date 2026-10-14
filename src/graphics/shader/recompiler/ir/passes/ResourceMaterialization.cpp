@@ -783,6 +783,28 @@ static bool IsFullDispatchPredicate(Value value, uint32_t depth = 0) {
 	return axis.IsImmediate() && axis.U32() < 3 && extent->Arg(0).Resolve() == axis;
 }
 
+// True when a lane exec guard holds for the first invocation of a dispatch (local index 0, global id
+// 0): the guard is `true`, a bound the first invocation satisfies (the translator's initial exec of
+// a workgroup that does not fill its last wave is `LocalInvocationIndex < threads`), or an `and` of
+// such. A store behind it runs on at least one lane of every non-empty dispatch.
+static bool HoldsForFirstInvocation(Value value, uint32_t depth = 0) {
+	value = value.Resolve();
+	if (value == Value(true)) return true;
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr || depth > 32) return false;
+	if (inst->GetOpcode() == ValueOpcode::LogicalAnd) {
+		return HoldsForFirstInvocation(inst->Arg(0), depth + 1) && HoldsForFirstInvocation(inst->Arg(1), depth + 1);
+	}
+	if (inst->GetOpcode() != ValueOpcode::ULessThan32) return false;
+	const auto* lhs = inst->Arg(0).Resolve().TryInstruction();
+	if (lhs == nullptr || lhs->GetOpcode() != ValueOpcode::GetBuiltin) return false;
+	if (lhs->Arg(0).Resolve() == Value(static_cast<uint32_t>(StageInputKind::LocalInvocationIndex))) {
+		const auto bound = inst->Arg(1).Resolve();
+		return bound.IsImmediate() && bound.GetType() == Type::U32 && bound.U32() >= 1u;
+	}
+	return IsFullDispatchPredicate(value);
+}
+
 // Nonnegative affine coefficients for constant, local and workgroup coordinates. Reject modular
 // arithmetic that could wrap; runtime coverage also bounds the largest invocation index.
 static std::optional<std::array<uint64_t, 3>> FillIndex(Value value, uint32_t axis, Value guard,
@@ -1062,7 +1084,7 @@ private:
 			site.block       = index;
 			site.dwords      = dwords;
 			const auto guard = inst.Arg(5).Resolve();
-			site.executes    = guard == Value(true) || IsFullDispatchPredicate(guard);
+			site.executes    = HoldsForFirstInvocation(guard);
 			const auto  data   = inst.Arg(4).Resolve();
 			const auto* vector = data.TryInstruction();
 			constexpr std::array composites {ValueOpcode::CompositeConstructU32x2,
