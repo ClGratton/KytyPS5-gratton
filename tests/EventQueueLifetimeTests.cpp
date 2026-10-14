@@ -131,13 +131,13 @@ void TestPeriodicTimerEvents() {
 	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete timer queue");
 }
 
-// The filter of a GPU interrupt event: edge triggered, the occurrence count in fflags.
-void CoalescingTrigger(EventQueue::KernelEqueueEvent* event, void* trigger_data) {
-	EventQueue::KernelCoalesceTrigger(event, reinterpret_cast<intptr_t>(trigger_data));
+// The filter of a GPU interrupt event: every trigger is its own event with its own payload.
+void QueuingTrigger(EventQueue::KernelEqueueEvent* event, void* trigger_data) {
+	EventQueue::KernelQueueTrigger(event, reinterpret_cast<intptr_t>(trigger_data));
 }
 
-void SaturatingTrigger(EventQueue::KernelEqueueEvent* event, void* trigger_data) {
-	EventQueue::KernelCoalesceTrigger(event, reinterpret_cast<intptr_t>(trigger_data), 0xfu);
+void SmallQueueTrigger(EventQueue::KernelEqueueEvent* event, void* trigger_data) {
+	EventQueue::KernelQueueTrigger(event, reinterpret_cast<intptr_t>(trigger_data), 4);
 }
 
 void ResetCountedEvent(EventQueue::KernelEqueueEvent* event) {
@@ -146,10 +146,14 @@ void ResetCountedEvent(EventQueue::KernelEqueueEvent* event) {
 	event->event.data   = 0;
 }
 
-void TestRetriggeredEventIsCoalesced() {
+// A GPU interrupt carries a context id and a guest that waits for one id must still see it when other
+// interrupts arrived before it waited. Folding them into one pending event (the latest id wins) made
+// such a guest miss most completions (98 % of one id in a measured title run) and its fixed-size
+// command buffers filled until the title aborted; each trigger is delivered with its own payload.
+void TestGraphicsTriggersAreQueuedInOrder() {
 	using Libs::LibKernel::KERNEL_ERROR_ETIMEDOUT;
 	EventQueue::KernelEqueue queue = EventQueue::KERNEL_EQUEUE_INVALID;
-	Check(EventQueue::KernelCreateEqueue(&queue, "coalesce") == OK, "create coalescing queue");
+	Check(EventQueue::KernelCreateEqueue(&queue, "queued") == OK, "create queue");
 	const auto add = [&](uintptr_t ident, EventQueue::trigger_func_t trigger) {
 		EventQueue::KernelEqueueEvent event {};
 		event.event.ident         = ident;
@@ -158,43 +162,41 @@ void TestRetriggeredEventIsCoalesced() {
 		event.filter.reset_func   = ResetCountedEvent;
 		return EventQueue::KernelAddEvent(queue, event);
 	};
-	Check(add(0x40, CoalescingTrigger) == OK && add(0x41, SaturatingTrigger) == OK, "add events");
+	Check(add(0x40, QueuingTrigger) == OK && add(0x41, SmallQueueTrigger) == OK, "add events");
 
-	const auto before = EventQueue::KernelCoalescedTriggerCount();
-	constexpr uintptr_t kTriggers = 100000;
-	for (uintptr_t i = 1; i <= kTriggers; ++i) {
+	// Two payloads alternate before the guest waits: both are delivered, in order.
+	constexpr intptr_t kA = 43981, kB = 0;
+	for (int i = 0; i < 3; ++i) {
 		Check(EventQueue::KernelTriggerEvent(queue, 0x40, EventQueue::KERNEL_EVFILT_GRAPHICS,
-		                                     reinterpret_cast<void*>(i)) == OK, "trigger");
-		Check(EventQueue::KernelTriggerEvent(queue, 0x41, EventQueue::KERNEL_EVFILT_GRAPHICS,
-		                                     reinterpret_cast<void*>(i)) == OK, "trigger saturating");
+		                                     reinterpret_cast<void*>(kA)) == OK, "trigger a");
+		Check(EventQueue::KernelTriggerEvent(queue, 0x40, EventQueue::KERNEL_EVFILT_GRAPHICS,
+		                                     reinterpret_cast<void*>(kB)) == OK, "trigger b");
 	}
-	Check(EventQueue::KernelCoalescedTriggerCount() - before == 2 * (kTriggers - 1),
-	      "all but the first trigger of each event were folded into the pending one");
-
 	EventQueue::KernelEvent events[16] {};
 	int                     out     = 0;
 	Libs::LibKernel::KernelUseconds timeout = 0;
-	Check(EventQueue::KernelWaitEqueue(queue, events, 16, &out, &timeout) == OK && out == 2,
-	      "one entry per event, not one per trigger");
+	Check(EventQueue::KernelWaitEqueue(queue, events, 16, &out, &timeout) == OK && out == 6,
+	      "one delivered event per trigger");
 	for (int i = 0; i < out; ++i) {
-		Check(events[i].filter == EventQueue::KERNEL_EVFILT_GRAPHICS &&
-		          events[i].data == static_cast<intptr_t>(kTriggers), "latest payload wins");
-		if (events[i].ident == 0x40) {
-			Check(events[i].fflags == kTriggers, "fflags counts the occurrences");
-		} else {
-			Check(events[i].ident == 0x41 && events[i].fflags == 0xfu,
-			      "fflags saturates at the filter maximum");
-		}
+		Check(events[i].ident == 0x40 && events[i].data == (i % 2 == 0 ? kA : kB),
+		      "payloads arrive in trigger order, none lost");
 	}
 	Check(EventQueue::KernelWaitEqueue(queue, events, 16, &out, &timeout) == KERNEL_ERROR_ETIMEDOUT,
 	      "nothing is left queued after the delivery");
 
-	// Consumed, so the next trigger starts a fresh occurrence (count 1, new payload).
-	Check(EventQueue::KernelTriggerEvent(queue, 0x40, EventQueue::KERNEL_EVFILT_GRAPHICS,
-	                                     reinterpret_cast<void*>(7)) == OK, "retrigger");
-	Check(EventQueue::KernelWaitEqueue(queue, events, 16, &out, &timeout) == OK && out == 1 &&
-	          events[0].fflags == 1 && events[0].data == 7, "a consumed event starts a fresh count");
-	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete coalescing queue");
+	// A guest that never waits cannot grow the queue without bound: the oldest are dropped, loudly.
+	const auto dropped_before = EventQueue::KernelDroppedPendingCount();
+	for (intptr_t i = 1; i <= 100; ++i) {
+		Check(EventQueue::KernelTriggerEvent(queue, 0x41, EventQueue::KERNEL_EVFILT_GRAPHICS,
+		                                     reinterpret_cast<void*>(i)) == OK, "trigger small queue");
+	}
+	Check(EventQueue::KernelDroppedPendingCount() - dropped_before == 100 - 5,
+	      "the current event plus 4 pending are kept, the rest dropped and counted");
+	Check(EventQueue::KernelWaitEqueue(queue, events, 16, &out, &timeout) == OK && out == 5,
+	      "the current event and the newest triggers are delivered");
+	Check(events[0].data == 1 && events[1].data == 97 && events[4].data == 100,
+	      "the current event and the newest pending ones survive, in order");
+	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete queue");
 }
 
 void CountDeletedEvent(EventQueue::KernelEqueue, EventQueue::KernelEqueueEvent* event) {
@@ -609,7 +611,7 @@ void TestConcurrentDelete() {
 int main() {
 	TestLevelUserEventDelivery();
 	TestPeriodicTimerEvents();
-	TestRetriggeredEventIsCoalesced();
+	TestGraphicsTriggersAreQueuedInOrder();
 	TestDuplicateAddPreservesEventState();
 	TestCallbackStateOutlivesPort();
 	TestCallbackOwnsPayload();

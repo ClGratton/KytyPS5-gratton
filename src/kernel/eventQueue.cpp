@@ -262,39 +262,36 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
 	return KERNEL_ERROR_ENOENT;
 }
 
-static std::atomic<uint64_t> g_coalesced_triggers {0};
+static std::atomic<uint64_t> g_dropped_pending {0};
 
-static std::atomic<uint64_t> g_coalesced_distinct {0};
-
-void KernelCoalesceTrigger(KernelEqueueEvent* event, intptr_t data, uint32_t fflags_max) {
+void KernelQueueTrigger(KernelEqueueEvent* event, intptr_t data, size_t max_pending) {
 	EXIT_IF(event == nullptr);
-	if (event->triggered) {
-		g_coalesced_triggers.fetch_add(1, std::memory_order_relaxed);
-		if (event->event.data != data) {
-			// The pending trigger carried another payload (a GPU interrupt context id); it is replaced.
-			const auto n = g_coalesced_distinct.fetch_add(1, std::memory_order_relaxed);
-			if (n < 8) {
-				std::printf("EventQueue: a pending event (ident %llu) with data %lld was replaced by data %lld "
-				            "(%u triggers folded so far)\n",
-				            static_cast<unsigned long long>(event->event.ident),
-				            static_cast<long long>(event->event.data), static_cast<long long>(data),
-				            static_cast<unsigned>(event->event.fflags));
-			}
+	// Every trigger is delivered with its own payload: a GPU interrupt carries a context id, and a
+	// guest that waits for a particular id loses the completions of the others when they are folded.
+	auto next   = event->event;
+	next.fflags = next.fflags + 1;
+	next.data   = data;
+	if (!event->triggered) {
+		event->event     = next;
+		event->triggered = true;
+		return;
+	}
+	if (event->pending_events.size() >= max_pending) {
+		// Nobody has waited for a very long time: keep the newest, loudly.
+		event->pending_events.pop_front();
+		const auto dropped = g_dropped_pending.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (dropped == 1 || dropped % 100000 == 0) {
+			std::printf("WARNING: EventQueue: %llu pending events dropped (ident %llu): the guest is not waiting "
+			            "for this queue (limit %zu per event)\n",
+			            static_cast<unsigned long long>(dropped),
+			            static_cast<unsigned long long>(event->event.ident), max_pending);
 		}
 	}
-	if (event->event.fflags < fflags_max) {
-		event->event.fflags++;
-	}
-	event->event.data = data;
-	event->triggered  = true;
+	event->pending_events.push_back(next);
 }
 
-uint64_t KernelCoalescedDistinctCount() {
-	return g_coalesced_distinct.load(std::memory_order_relaxed);
-}
-
-uint64_t KernelCoalescedTriggerCount() {
-	return g_coalesced_triggers.load(std::memory_order_relaxed);
+uint64_t KernelDroppedPendingCount() {
+	return g_dropped_pending.load(std::memory_order_relaxed);
 }
 
 static void UserEventTriggerFunc(KernelEqueueEvent* event, void* trigger_data) {

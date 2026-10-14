@@ -1,7 +1,5 @@
 #include "graphics/host_gpu/renderer/sync.h"
 
-#include <cstdlib>
-
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/logging/log.h"
@@ -228,27 +226,8 @@ static void InterruptEventTriggerFunc(LibKernel::EventQueue::KernelEqueueEvent* 
                                       void*                                     trigger_data) {
 	EXIT_IF(event == nullptr);
 
-	// A GPU interrupt that the guest has not waited for yet is folded into the pending event,
-	// as the FreeBSD kqueue does for a re-triggered event: one entry per (ident, filter), the
-	// occurrence count in fflags, the latest context id in data.
-	// Debug experiment: KYTY_EQUEUE_COALESCE=0 queues every trigger as before 4ad50a2ef.
-	static const bool coalesce = [] {
-		const char* text = std::getenv("KYTY_EQUEUE_COALESCE");
-		return text == nullptr || text[0] != '0';
-	}();
-	if (!coalesce) {
-		auto triggered_event = event->event;
-		triggered_event.fflags++;
-		triggered_event.data = reinterpret_cast<intptr_t>(trigger_data);
-		if (event->triggered) {
-			event->pending_events.push_back(triggered_event);
-		} else {
-			event->event     = triggered_event;
-			event->triggered = true;
-		}
-		return;
-	}
-	LibKernel::EventQueue::KernelCoalesceTrigger(event, reinterpret_cast<intptr_t>(trigger_data));
+	// Every interrupt is delivered with its own context id (the guest tells them apart by it).
+	LibKernel::EventQueue::KernelQueueTrigger(event, reinterpret_cast<intptr_t>(trigger_data));
 }
 
 int AddEqEvent(RenderContext& renderer, LibKernel::EventQueue::KernelEqueue eq, int id,
