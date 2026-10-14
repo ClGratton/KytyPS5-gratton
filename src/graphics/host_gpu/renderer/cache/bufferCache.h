@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/knownCopies.h"
+#include "graphics/host_gpu/renderer/cache/hotPages.h"
 #include "graphics/host_gpu/renderer/cache/knownFills.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -154,6 +155,10 @@ public:
 	// A shader that may store through raw addresses into any buffer was recorded in the current
 	// command buffer (so a second-queue readback must wait for it).
 	void NoteAddressWrites() noexcept;
+	// --eager-readback: before a submit, copies the pending GPU writes of the hot pages (pages a
+	// game thread read-faulted on) out in the open command buffer; the bytes are written to guest
+	// memory when it completes, after which the page is unprotected. GPU thread only.
+	void               WriteBackHotPages();
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
@@ -200,6 +205,18 @@ private:
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// --eager-readback. Only the GPU thread touches these.
+	[[nodiscard]] Buffer* FindExistingBuffer(uint64_t vaddr);
+	[[nodiscard]] bool    EagerDownload(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// Finishes the eager copies of hot pages in [vaddr, vaddr + size): those that completed are
+	// unprotected; with `wait` the others are waited for first.
+	void                  RetireHotPages(uint64_t vaddr, uint64_t size, bool wait);
+	[[nodiscard]] bool    VerifyWrittenBack(uint64_t page);
+	// True while an eager copy has taken bytes of the range out of m_gpu_modified_ranges and has not
+	// written them to guest memory yet (the guest copy of those bytes is stale).
+	[[nodiscard]] bool    HasEagerPending(uint64_t vaddr, uint64_t size);
+	void CollectDownloadCopies(uint64_t buffer_address, uint64_t vaddr, uint64_t size,
+	                           std::vector<vk::BufferCopy>& copies, uint64_t& total_size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
@@ -215,6 +232,8 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	HotPageSet                                        m_hot_pages;
+	RangeSet                                          m_eager_pending_ranges;
 	// --readback-queue: copy on the second queue after a timeline wait on the producer's tick.
 	[[nodiscard]] bool ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,
 	                                         const std::vector<vk::BufferCopy>& copies,

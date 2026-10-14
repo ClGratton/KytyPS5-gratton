@@ -5637,6 +5637,178 @@ public:
     std::printf("[host]    %-32s ok\n", name);
   }
 
+  // --eager-readback: a page a game thread read-faulted on is written back to guest memory right after
+  // the GPU wrote it, so the next guest read needs no fault and no drain. The guest copy of bytes an
+  // eager copy has taken out of the GPU-modified ranges is stale until the write-back has run, and every
+  // "is guest memory authoritative" test must know that.
+  void CheckBufferCacheEagerReadback() {
+    constexpr const char *name = "BufferCacheEagerReadback";
+    constexpr uintptr_t base = 0x0000000208400000ull;
+    constexpr uint64_t allocation_size = 0x100000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t hot_offset = 0x1100;
+    constexpr uint64_t cold_offset = 0x5100;
+    constexpr uint32_t stale = 0x0badf00du;
+    constexpr uint32_t first_value = 0x11223344u;
+    constexpr uint32_t second_value = 0x55667788u;
+    constexpr uint32_t third_value = 0x99aabbccu;
+    constexpr uint32_t newer_value = 0xddeeff00u;
+    constexpr uint32_t fourth_value = 0x0f1e2d3cu;
+
+    EnsureRuntimeContext();
+    Config::ConfigOptions eager;
+    eager.eager_readback = true;
+    Config::Load(eager);
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "eager-readback direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "eager-readback fixed direct-memory mapping failed");
+    auto *memory = static_cast<uint8_t *>(mapped);
+    std::memcpy(memory + hot_offset, &stale, sizeof(stale));
+    std::memcpy(memory + cold_offset, &stale, sizeof(stale));
+
+    {
+      auto &cache = context.GetBufferCache();
+      context.MapMemory(base, allocation_size);
+      const auto GpuWrite = [&](uint64_t offset, uint32_t value) {
+        auto allocation = cache.ObtainBuffer(base + offset, sizeof(value), true, false);
+        Require(name, "dirty allocation", allocation.first != nullptr,
+                "eager-readback buffer allocation failed");
+        cache.FillBuffer(base + offset, sizeof(value), value, false);
+      };
+      const auto Backing = [&](uint64_t offset) {
+        uint32_t value = 0;
+        Libs::LibKernel::Memory::TryReadBacking(base + offset, &value, sizeof(value));
+        return value;
+      };
+      const auto Settle = [&] {
+        scheduler.Flush();
+        scheduler.Finish();
+        scheduler.DrainPriorityOperations();
+      };
+      const auto GameThreadFault = [&](uint64_t offset) {
+        cache.ReadMemory(base + offset, 1, false, Common::GpuPhase::DrainCause::ReadbackFault);
+      };
+      const auto CleanRead = [&](uint64_t offset) {
+        uint32_t value = 0;
+        return cache.TryReadCleanBytes(base + offset, &value, sizeof(value));
+      };
+
+      // 1. The first read of a page is an ordinary fault; it makes the page hot.
+      GpuWrite(hot_offset, first_value);
+      GpuWrite(cold_offset, first_value);
+      Require(name, "stale before the first read",
+              Backing(hot_offset) == stale && cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "the GPU write reached guest memory before any read");
+      GameThreadFault(hot_offset);
+      Require(name, "first fault reads back",
+              Backing(hot_offset) == first_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  Backing(cold_offset) == stale,
+              "the first fault did not behave like an ordinary readback");
+
+      // 2. A later GPU write to the hot page is copied out before the guest reads it. Until the copy
+      // has landed the guest copy is stale, and nothing may treat it as authoritative.
+      GpuWrite(hot_offset, second_value);
+      GpuWrite(cold_offset, second_value);
+      cache.WriteBackHotPages();
+      Require(name, "pending eager copy is not authoritative",
+              Backing(hot_offset) == first_value && cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  !CleanRead(hot_offset),
+              "bytes an eager copy took out of the GPU-modified ranges looked clean before they landed");
+      Settle();
+      Require(name, "eager copy lands and the page is released",
+              Backing(hot_offset) == second_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  !cache.IsRegionGpuModified(base + hot_offset, 4) && CleanRead(hot_offset),
+              "the eager write-back did not leave the hot page readable without a fault");
+      Require(name, "cold page is left alone",
+              Backing(cold_offset) == stale && cache.HasGpuDirtyBytes(base + cold_offset, 4),
+              "a page nobody faulted on was written back eagerly");
+
+      // 3. A GPU write that reaches the page after the copy was recorded keeps it protected, and its
+      // bytes are read back on demand.
+      GpuWrite(hot_offset, third_value);
+      cache.WriteBackHotPages();
+      GpuWrite(hot_offset, newer_value);
+      Settle();
+      Require(name, "newer write keeps the page protected",
+              Backing(hot_offset) == third_value && cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  cache.IsRegionGpuModified(base + hot_offset, 4),
+              "a page with a newer GPU write was unprotected by an older eager copy");
+      GameThreadFault(hot_offset);
+      Require(name, "newer write is read back on demand",
+              Backing(hot_offset) == newer_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "the newer GPU write was lost");
+
+      // 4. A guest read that arrives while the copy is in flight waits for it.
+      GpuWrite(hot_offset, fourth_value);
+      cache.WriteBackHotPages();
+      GameThreadFault(hot_offset);
+      Require(name, "read waits for the copy in flight",
+              Backing(hot_offset) == fourth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "a guest read saw the stale copy while an eager write-back was in flight");
+
+      // 5. --eager-readback can be switched off at run time (--toggle-control): a copy already in
+      // flight is still retired (by the next submit, or by a read fault), and no new copy is scheduled.
+      constexpr uint32_t fifth_value = 0x13572468u;
+      constexpr uint32_t sixth_value = 0x2468ace0u;
+      GpuWrite(hot_offset, fifth_value);
+      cache.WriteBackHotPages();
+      Config::Load(Config::ConfigOptions{});
+      Settle();
+      cache.WriteBackHotPages();
+      Require(name, "copy in flight is retired after the flag went off",
+              Backing(hot_offset) == fifth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  !cache.IsRegionGpuModified(base + hot_offset, 4),
+              "an eager copy in flight when the flag was switched off was never retired");
+      GpuWrite(hot_offset, sixth_value);
+      cache.WriteBackHotPages();
+      Settle();
+      Require(name, "no new copy with the flag off",
+              Backing(hot_offset) == fifth_value && cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "an eager copy was scheduled with the flag off");
+      GameThreadFault(hot_offset);
+      Require(name, "fault reads back on demand with the flag off",
+              Backing(hot_offset) == sixth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "the GPU write was lost with the flag off");
+      Config::Load(eager);
+
+      cache.ReadMemory(base + cold_offset, sizeof(uint32_t));
+      Require(name, "cold page reads back on demand",
+              Backing(cold_offset) == second_value,
+              "the cold page lost its GPU write");
+
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+    context.ShutdownGpu();
+    Config::Load(Config::ConfigOptions{});
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "eager-readback direct-memory mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "eager-readback direct-memory allocation release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
   // A zero BDA page-table entry means "unmapped" to shaders, and device memory is not
   // zero-initialized, so the production table must be cleared before its first use. The
   // whole table is poisoned before the first production use, which comes either from a
@@ -46420,6 +46592,11 @@ int main(int argc, char **argv) {
     vulkan.CheckBufferCacheDirtyGarbageCollection();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-eager-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBufferCacheEagerReadback();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-prt-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBufferCachePrtHoleUpload();
@@ -46646,6 +46823,7 @@ int main(int argc, char **argv) {
     vulkan.CheckRasterization(false, Prospero::BufferFormat::k11_11_10Float);
     vulkan.CheckRasterization(false, Prospero::BufferFormat::k10_10_10_2UScaled);
     vulkan.CheckBufferCacheDirtyGarbageCollection();
+    vulkan.CheckBufferCacheEagerReadback();
   } else {
     skipped_device_checks = true;
   }

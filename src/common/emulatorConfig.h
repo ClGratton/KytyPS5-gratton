@@ -332,6 +332,18 @@ struct ConfigOptions {
 	// --readback-queue (K20): synchronous GPU->guest buffer readbacks copy on a second queue of the
 	// rendering family and wait only for the work that wrote the data. Default off.
 	bool                   readback_queue              = false;
+	// --eager-readback: pages a game thread read-faulted on are written back to guest memory right
+	// after the GPU writes them (copied in the command buffer about to be submitted), so the next
+	// read needs no fault and no GPU drain. Default off. --debug-eager-readback-verify re-reads
+	// every page from the GPU before it is unprotected (slow) and reports differences.
+	bool                   eager_readback              = false;
+	// --poll-before-wait <us>: poll the timeline semaphore for up to this long before blocking in
+	// vkWaitSemaphores. 0 (default) blocks at once.
+	uint32_t               poll_before_wait_us         = 0;
+	// Runtime state of --poll-before-wait (set from poll_before_wait_us != 0 when the configuration
+	// is loaded; --toggle-control flips it, common/runtimeToggles.h). Not a command-line option.
+	bool                   poll_before_wait_on         = false;
+	bool                   eager_readback_verify       = false;
 	std::filesystem::path  bench_render_csv;
 	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
 	// names at the next presented frame (common/runtimeToggles.h). Default off.
@@ -428,6 +440,9 @@ bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
 void              LatchGpuIndirectDraws();
 bool              ReadbackQueueEnabled();
+bool              EagerReadbackEnabled();
+uint32_t          PollBeforeWaitUs();
+bool              EagerReadbackVerifyEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

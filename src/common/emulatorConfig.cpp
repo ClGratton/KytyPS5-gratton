@@ -35,6 +35,7 @@ void Load(const ConfigOptions& cfg) {
 
 	*g_config = cfg;
 	g_config->gpu_indirect_draws_request = cfg.gpu_indirect_draws;
+	g_config->poll_before_wait_on = cfg.poll_before_wait_us != 0;
 
 	Common::Hang::Start(cfg.hang_watchdog_seconds);
 	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s != 0 ? cfg.gpu_phase_stats_s
@@ -83,6 +84,13 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read when a copy dispatch is recorded and when a color-metadata range is looked up; what it
 	// recorded is forgotten by the same write tracking as known fills, whether or not it is on.
 	registry.Register("known-copies", &g_config->known_copies, false);
+	// Polled per wait (MasterSemaphore::Wait), no state: on only when --poll-before-wait <us> != 0
+	// was given at start-up (the budget stays the configured one).
+	registry.Register("poll-before-wait", &g_config->poll_before_wait_on, true);
+	// Hot pages and copies in flight are retired whether or not the flag is on (a page whose eager
+	// copy is in flight when the flag goes off is finished by the next submit or read fault), so
+	// the flag only decides whether new pages are marked hot and new copies scheduled.
+	registry.Register("eager-readback", &g_config->eager_readback, false);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -212,6 +220,20 @@ bool GpuIndirectDrawsEnabled() {
 void LatchGpuIndirectDraws() {
 	Common::RuntimeToggles::Write(g_config->gpu_indirect_draws,
 	                              Common::RuntimeToggles::Read(g_config->gpu_indirect_draws_request));
+}
+
+uint32_t PollBeforeWaitUs() {
+	return g_config != nullptr && Common::RuntimeToggles::Read(g_config->poll_before_wait_on)
+	           ? g_config->poll_before_wait_us
+	           : 0u;
+}
+
+bool EagerReadbackEnabled() {
+	return Common::RuntimeToggles::Read(g_config->eager_readback);
+}
+
+bool EagerReadbackVerifyEnabled() {
+	return Common::RuntimeToggles::Read(g_config->eager_readback) && g_config->eager_readback_verify;
 }
 
 bool ReadbackQueueEnabled() {

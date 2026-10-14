@@ -109,6 +109,7 @@ public:
 
 	void            BufferInit();
 	void            BufferFlush();
+	void            FlushScheduler();
 	// Flush for a RELEASE_MEM end-of-pipe event. With --submit-coalesce the submit may be held
 	// back (submitCoalescer.h); every other flush, drain and the end of a submission slice still
 	// submits, so a held event is never stuck behind a wait.

@@ -109,6 +109,9 @@ void NoteCleanRead(bool clean) noexcept;
 // --readback-queue: one second-queue readback; `flushed` the producer was still in the open
 // command buffer, `lag_ticks` how many submitted ticks lie between the producer and now.
 void NoteQueueReadback(bool flushed, uint64_t lag_ticks) noexcept;
+// --eager-readback: eager write-backs of hot pages (the report prints them as "eager readback (total)").
+enum class Eager : uint8_t { Scheduled, Retired, SkippedNoSpace, VerifyChecks, VerifyMismatches, Count };
+void NoteEager(Eager kind) noexcept;
 void NoteFrame() noexcept;
 [[nodiscard]] uint64_t Submits() noexcept;
 [[nodiscard]] uint64_t Frames() noexcept;

@@ -586,6 +586,16 @@ add_executable(readback_plan_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(readback_plan_tests PRIVATE ${inc_headers})
 
+add_executable(poll_wait_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PollWaitTests.cpp"
+)
+target_include_directories(poll_wait_tests PRIVATE ${inc_headers})
+
+add_executable(hot_pages_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HotPagesTests.cpp"
+)
+target_include_directories(hot_pages_tests PRIVATE ${inc_headers})
+
 add_executable(loop_guard_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LoopGuardTests.cpp"
 )
@@ -956,6 +966,8 @@ if(BUILD_TESTING)
 	add_test(NAME indirect_draw_args COMMAND $<TARGET_FILE:indirect_draw_args_tests>)
 	add_test(NAME indirect_draw_policy COMMAND $<TARGET_FILE:indirect_draw_policy_tests>)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
+	add_test(NAME hot_pages COMMAND $<TARGET_FILE:hot_pages_tests>)
+	add_test(NAME poll_wait COMMAND $<TARGET_FILE:poll_wait_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME gpu_op_ring COMMAND $<TARGET_FILE:gpu_op_ring_tests>)
 	add_test(NAME loop_guard COMMAND $<TARGET_FILE:loop_guard_tests>)
@@ -1124,6 +1136,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --buffer-cache-gc-only)
 	add_test(NAME buffer_cache_known_stores
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --known-stores-only)
+	add_test(NAME buffer_cache_eager_readback
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --buffer-cache-eager-only)
 	add_test(NAME bda_page_table_initialization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bda-page-table-init-only)
 	add_test(NAME color_render_target_1d
@@ -1173,6 +1187,8 @@ if(BUILD_TESTING)
 		indirect_draw_args_tests
 		indirect_draw_policy_tests
 		readback_plan_tests
+		hot_pages_tests
+		poll_wait_tests
 		gc_clock_tests
 		gpu_op_ring_tests
 		loop_guard_tests

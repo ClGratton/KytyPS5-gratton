@@ -2,11 +2,16 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "common/emulatorConfig.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
+#include "graphics/host_gpu/renderer/pollWait.h"
 
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace Libs::Graphics {
 
@@ -52,6 +57,29 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	Refresh();
 	if (IsFree(tick)) {
 		return;
+	}
+	// --poll-before-wait: a small readback finishes within tens of microseconds; polling the
+	// timeline value saves the kernel sleep and wake-up of a blocking wait.
+	if (const auto budget_us = Config::PollBeforeWaitUs(); budget_us != 0) {
+		const bool seen = PollUntil(
+		    [&] {
+			    Refresh();
+			    return IsFree(tick);
+		    },
+		    [] {
+			    return static_cast<uint64_t>(
+			        std::chrono::duration_cast<std::chrono::nanoseconds>(
+			            std::chrono::steady_clock::now().time_since_epoch()).count());
+		    },
+		    [] {
+#if defined(__x86_64__)
+			    _mm_pause();
+#endif
+		    },
+		    uint64_t {budget_us} * 1000u);
+		if (seen) {
+			return;
+		}
 	}
 
 	vk::SemaphoreWaitInfo wait_info {};

@@ -169,11 +169,11 @@ void BufferCache::DeleteBuffer(BufferId id) {
 	}
 }
 
-template <bool async>
-bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
-	std::vector<vk::BufferCopy> copies;
-	uint64_t                    total_size     = 0;
-	const auto                  buffer_address = buffer.CpuAddress();
+// Takes the GPU-modified ranges of [vaddr, vaddr + size) out of the cache's bookkeeping and lists
+// the copies that read them back; dstOffset is the offset in a staging area of `total_size` bytes.
+void BufferCache::CollectDownloadCopies(uint64_t buffer_address, uint64_t vaddr, uint64_t size,
+                                        std::vector<vk::BufferCopy>& copies,
+                                        uint64_t&                    total_size) {
 	m_memory_tracker.ForEachDownloadRange<false>(
 	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
 		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
@@ -185,6 +185,14 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
 	    });
+}
+
+template <bool async>
+bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	std::vector<vk::BufferCopy> copies;
+	uint64_t                    total_size     = 0;
+	const auto                  buffer_address = buffer.CpuAddress();
+	CollectDownloadCopies(buffer_address, vaddr, size, copies, total_size);
 	if (copies.empty()) {
 		return false;
 	}
@@ -693,6 +701,9 @@ bool BufferCache::TryGetKnownFill(uint64_t vaddr, uint64_t size, uint32_t* value
 bool BufferCache::TryDiscardGpuModified(uint64_t vaddr, uint64_t size) {
 	const uint64_t page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const uint64_t page_end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	if (HasEagerPending(page_begin, page_end - page_begin)) {
+		return false; // an eager copy would still write its bytes over what the caller is about to write
+	}
 	if ((page_begin < vaddr && m_gpu_modified_ranges.Intersects(page_begin, vaddr - page_begin)) ||
 	    (vaddr + size < page_end &&
 	     m_gpu_modified_ranges.Intersects(vaddr + size, page_end - (vaddr + size)))) {
@@ -705,7 +716,8 @@ bool BufferCache::TryDiscardGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::TryReadCleanBytes(uint64_t vaddr, void* data, uint64_t size) {
-	if (size == 0 || size > UINT64_MAX - vaddr || m_gpu_modified_ranges.Intersects(vaddr, size)) {
+	if (size == 0 || size > UINT64_MAX - vaddr || m_gpu_modified_ranges.Intersects(vaddr, size) ||
+	    HasEagerPending(vaddr, size)) {
 		return false;
 	}
 	if (m_texture_cache.HasGpuModifiedImage(vaddr, size)) {
@@ -747,10 +759,25 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 	if (cause == Common::GpuPhase::DrainCause::ReadbackFault && GuestGpu::IsGpuThread()) {
 		cause = Common::GpuPhase::DrainCause::ReadbackFaultGpu;
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cause] {
+	// A game thread's read fault (not the GPU thread's own, which an eager copy would only delay).
+	const bool guest_read_fault = cause == Common::GpuPhase::DrainCause::ReadbackFault;
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, cause,
+	                                                guest_read_fault] {
 		Common::GpuPhase::DrainCauseScope drain_cause(cause);
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
+		}
+		if (guest_read_fault && Config::EagerReadbackEnabled()) {
+			m_hot_pages.NoteFault(Common::AlignDown(vaddr, TRACKER_PAGE_SIZE));
+		}
+		// An eager write-back in flight has already taken its bytes out of the GPU-modified
+		// ranges, so finish it (and unprotect what it covered) before looking for anything left to
+		// read. This runs whether or not --eager-readback is on right now: the flag can be switched
+		// off at run time (--toggle-control) while copies are in flight.
+		{
+			const auto first_page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+			RetireHotPages(first_page, Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE) - first_page,
+			               true);
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
@@ -772,6 +799,226 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
 			m_memory_tracker.TakeGpuPagesForCpu(vaddr, size);
 		}
 	});
+}
+
+// ---- --eager-readback ----------------------------------------------------------------------------
+// Ported from ogeidexe/KytyPS5@76af431df and 663a8d887 (GPL-2.0, same licence as this fork), adapted
+// to this tree; the bounded hot set follows BryanKAdams/BryKytyPS5@2fe8f1961 (see hotPages.h).
+
+Buffer* BufferCache::FindExistingBuffer(uint64_t vaddr) {
+	const auto* owner = m_page_table.Find(vaddr >> PageTable::kPageBits);
+	if (owner == nullptr || !*owner) {
+		return nullptr;
+	}
+	auto& buffer = m_slot_buffers[*owner];
+	return buffer.is_deleted || !buffer.IsInBounds(vaddr, 1) ? nullptr : &buffer;
+}
+
+bool BufferCache::HasEagerPending(uint64_t vaddr, uint64_t size) {
+	if (m_eager_pending_ranges.Empty() || !m_eager_pending_ranges.Intersects(vaddr, size)) {
+		return false;
+	}
+	// The write-back may have landed since: finish what completed (never blocks), then look again.
+	RetireHotPages(vaddr, size, false);
+	return m_eager_pending_ranges.Intersects(vaddr, size);
+}
+
+// DownloadBufferMemory for an eager write-back, which is only an optimization and so must never
+// block: staging space is reserved without waiting before any dirty range is taken, and when none
+// is free the page is simply left for the next submit (or an on-demand read) to handle.
+bool BufferCache::EagerDownload(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	uint64_t needed = 0;
+	m_gpu_modified_ranges.ForEachInRange(vaddr, size, [&](uint64_t start, uint64_t end) {
+		needed += Common::AlignUp(end - start, 64);
+	});
+	if (needed == 0) {
+		return false;
+	}
+	const auto [mapped, offset] = m_download_buffer.Map(needed, 64, false);
+	if (mapped == nullptr) {
+		Common::GpuPhase::NoteEager(Common::GpuPhase::Eager::SkippedNoSpace);
+		return false;
+	}
+	std::vector<vk::BufferCopy> copies;
+	uint64_t                    total          = 0;
+	const auto                  buffer_address = buffer.CpuAddress();
+	CollectDownloadCopies(buffer_address, vaddr, size, copies, total);
+	if (copies.empty()) {
+		return false;
+	}
+	EXIT_IF(total > needed);
+	m_download_buffer.Commit();
+	for (auto& copy: copies) {
+		copy.dstOffset += offset;
+	}
+
+	auto& command = m_scheduler.Current();
+	command.EndRendering();
+	const auto              native = command.Handle();
+	vk::BufferMemoryBarrier before {};
+	before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+	before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before.buffer              = buffer.Handle();
+	before.offset              = 0;
+	before.size                = buffer.Size();
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
+	                       nullptr);
+	native.copyBuffer(buffer.Handle(), m_download_buffer.Handle(),
+	                  static_cast<uint32_t>(copies.size()), copies.data());
+	auto after          = before;
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eHostRead;
+	after.buffer        = m_download_buffer.Handle();
+	after.offset        = offset;
+	after.size          = needed;
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                       vk::PipelineStageFlagBits::eAllCommands |
+	                           vk::PipelineStageFlagBits::eHost,
+	                       {}, 0, nullptr, 1, &after, 0, nullptr);
+	// The guest copy of these bytes is stale until the write-back below has run.
+	for (const auto& copy: copies) {
+		m_eager_pending_ranges.Add(buffer_address + copy.srcOffset, copy.size);
+	}
+	m_scheduler.DeferPriorityOperation([this, mapped, offset, needed, buffer_address,
+	                                    copies = std::move(copies)] {
+		m_download_buffer.Invalidate(offset, needed);
+		for (const auto& copy: copies) {
+			Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
+			                                      mapped + (copy.dstOffset - offset), copy.size);
+		}
+	});
+	return true;
+}
+
+void BufferCache::WriteBackHotPages() {
+	if (m_hot_pages.Empty()) {
+		return;
+	}
+	auto& command = m_scheduler.Current();
+	if (command.IsInvalid()) {
+		return;
+	}
+	RetireHotPages(0, UINT64_MAX, false);
+	// With the flag off (it can be switched off at run time) copies already in flight are still
+	// retired above, but no new ones are scheduled.
+	if (!Config::EagerReadbackEnabled()) {
+		return;
+	}
+	m_hot_pages.ForEachInRange(0, UINT64_MAX, [&](uint64_t page, HotPageSet::Entry& entry) {
+		if (entry.in_flight_tick != 0 || !m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+			return;
+		}
+		auto* buffer = FindExistingBuffer(page);
+		if (buffer == nullptr) {
+			return;
+		}
+		const auto begin = std::max(page, buffer->CpuAddress());
+		const auto end   = std::min(page + TRACKER_PAGE_SIZE, buffer->CpuAddress() + buffer->Size());
+		if (begin < end && EagerDownload(*buffer, begin, end - begin)) {
+			// The copy and its deferred write-back belong to the command buffer about to be
+			// submitted as this tick.
+			entry.in_flight_tick = m_scheduler.CurrentTick();
+			Common::GpuPhase::NoteEager(Common::GpuPhase::Eager::Scheduled);
+		}
+	});
+}
+
+void BufferCache::RetireHotPages(uint64_t vaddr, uint64_t size, bool wait) {
+	if (m_hot_pages.Empty()) {
+		return;
+	}
+	auto&      master = m_scheduler.GetMasterSemaphore();
+	const auto end    = size > UINT64_MAX - vaddr ? UINT64_MAX : vaddr + size;
+	master.Refresh();
+	m_hot_pages.ForEachInRange(
+	    Common::AlignDown(vaddr, TRACKER_PAGE_SIZE), end,
+	    [&](uint64_t page, HotPageSet::Entry& entry) {
+		    const auto tick = entry.in_flight_tick;
+		    if (tick == 0) {
+			    return;
+		    }
+		    if (!master.IsFree(tick) || !m_scheduler.PriorityOperationsDone(tick)) {
+			    if (DecideRetire(false, wait, false) == HotRetire::Wait) {
+				    return;
+			    }
+			    m_scheduler.Wait(tick);
+			    m_scheduler.WaitPriorityOperations(tick);
+		    }
+		    entry.in_flight_tick = 0;
+		    // The bytes are in guest memory now.
+		    m_eager_pending_ranges.Subtract(page, TRACKER_PAGE_SIZE);
+		    // A newer GPU write landed after the copy was recorded: stay protected; its bytes are
+		    // written back by a later pass or read back on demand.
+		    const bool newer = m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE);
+		    if (DecideRetire(true, wait, newer) == HotRetire::StayProtected) {
+			    return;
+		    }
+		    // The garbage collector may have downloaded and released the page meanwhile.
+		    if (!m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE)) {
+			    return;
+		    }
+		    if (Config::EagerReadbackVerifyEnabled() && !VerifyWrittenBack(page)) {
+			    return;
+		    }
+		    m_memory_tracker.UnmarkRegionAsGpuModified(page, TRACKER_PAGE_SIZE);
+		    Common::GpuPhase::NoteEager(Common::GpuPhase::Eager::Retired);
+	    });
+}
+
+// --debug-eager-readback-verify: before unprotecting a written-back page, read the same bytes
+// straight from the GPU buffer (a full synchronous readback, the old conservative path) and compare.
+bool BufferCache::VerifyWrittenBack(uint64_t page) {
+	m_scheduler.Finish();
+	auto* buffer = FindExistingBuffer(page);
+	if (buffer == nullptr) {
+		return true;
+	}
+	const auto begin = std::max(page, buffer->CpuAddress());
+	const auto end   = std::min(page + TRACKER_PAGE_SIZE, buffer->CpuAddress() + buffer->Size());
+	const auto size  = end - begin;
+	const auto [mapped, offset] = m_download_buffer.Map(size, 64);
+	EXIT_IF(mapped == nullptr);
+	m_download_buffer.Commit();
+	auto&                   command = m_scheduler.Current();
+	vk::BufferCopy          copy {begin - buffer->CpuAddress(), offset, size};
+	command.EndRendering();
+	const auto              native = command.Handle();
+	vk::BufferMemoryBarrier barrier {};
+	barrier.srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
+	barrier.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer              = buffer->Handle();
+	barrier.offset              = 0;
+	barrier.size                = buffer->Size();
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &barrier, 0,
+	                       nullptr);
+	native.copyBuffer(buffer->Handle(), m_download_buffer.Handle(), 1, &copy);
+	m_scheduler.Finish();
+	m_download_buffer.Invalidate(offset, size);
+	Common::GpuPhase::NoteEager(Common::GpuPhase::Eager::VerifyChecks);
+	std::vector<uint8_t> backing(size);
+	if (!Libs::LibKernel::Memory::TryReadBacking(begin, backing.data(), size)) {
+		return true;
+	}
+	if (std::memcmp(backing.data(), mapped, size) == 0) {
+		return true;
+	}
+	size_t first = 0;
+	while (first < size && backing[first] == mapped[first]) {
+		++first;
+	}
+	Common::GpuPhase::NoteEager(Common::GpuPhase::Eager::VerifyMismatches);
+	std::printf("EAGER READBACK MISMATCH: page=0x%016" PRIx64 " first_diff=+0x%zx written_back=0x%02x "
+	            "gpu=0x%02x last_gpu_write_tick=%" PRIu64 " gpu_done_tick=%" PRIu64 "\n",
+	            page, first, backing[first], mapped[first], buffer->last_gpu_write_tick,
+	            m_scheduler.GetMasterSemaphore().KnownGpuTick());
+	std::fflush(stdout);
+	return false;
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
@@ -1142,7 +1389,7 @@ bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
-	return m_gpu_modified_ranges.Intersects(vaddr, size);
+	return m_gpu_modified_ranges.Intersects(vaddr, size) || HasEagerPending(vaddr, size);
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
