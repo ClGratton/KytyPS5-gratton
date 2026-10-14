@@ -46,6 +46,21 @@ void TestGpuTimestampsDefault() {
 	Check(Config::GetGpuTimeScale() == 1.0, "the time scale stays off by default");
 }
 
+// Correctness: the guest's ZPASS_DONE occlusion counters follow host occlusion queries, so a title that
+// culls with them sees what is hidden (--occlusion-queries false is the opt-out: every query reads
+// visible and such a title draws everything).
+void TestOcclusionQueriesDefault() {
+	const Config::ConfigOptions options;
+	Check(options.occlusion_queries, "occlusion_queries defaults to on");
+	Apply(options);
+	Check(Config::OcclusionQueriesEnabled(), "an unconfigured emulator counts occlusion samples");
+
+	Config::ConfigOptions off;
+	off.occlusion_queries = false;
+	Apply(off);
+	Check(!Config::OcclusionQueriesEnabled(), "--occlusion-queries false reaches the config");
+}
+
 // K42: the buffer GC goes aggressive (dirty-buffer downloads, a full GPU drain per batch) only when
 // the buffer cache itself holds a share of the critical budget. Measured and left opt-in: with
 // --vram-paging (the default) it keeps more buffers resident and Astro Bot under a forced 5.7 GB
@@ -244,6 +259,7 @@ int main() {
 
 	TestSkipGuardDefaults();
 	TestGpuTimestampsDefault();
+	TestOcclusionQueriesDefault();
 	TestBufferGcOwnShare();
 	TestReadbackLinearImagesStaysOff();
 	TestPipelineCacheKeyDefault();
