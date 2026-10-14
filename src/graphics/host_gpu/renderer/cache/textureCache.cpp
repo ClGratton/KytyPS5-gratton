@@ -1355,7 +1355,10 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 	return association;
 }
 
-ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
+ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format, uint64_t* unique_generation) {
+	if (unique_generation != nullptr) {
+		*unique_generation = 0;
+	}
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {
 		EXIT("TextureCache: image lookup requires a valid command buffer\n");
@@ -1453,6 +1456,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			result = lookup();
 		}
 		const bool recordable = memo_enabled && !memo_hit && unique;
+		const bool by_unique  = memo_hit || unique;
+		const auto looked_up  = result;
 
 		if (result && !m_slot_images[result].depth_id) {
 			auto& resolved = m_slot_images[result];
@@ -1474,6 +1479,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 				inserted.MarkBufferModified();
 			}
 		}
+		if (unique_generation != nullptr && by_unique && result == looked_up) {
+			*unique_generation = m_image_set_generation;
+		}
 		auto& image = m_slot_images[result];
 		if (view_mip >= 0) {
 			desc.view_info.base_level = static_cast<uint32_t>(view_mip);
@@ -1484,11 +1492,31 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);
 	}
-	MaterializeColorClear(result, desc, metadata_base_layer);
+	FinishFind(result, desc, metadata_base_layer);
+	return result;
+}
+
+bool TextureCache::RefindImage(ImageId id, uint64_t generation, const ImageDesc& desc,
+                               uint32_t metadata_base_layer) {
+	{
+		std::scoped_lock lock {m_lock};
+		if (generation == 0 || generation != m_image_set_generation) {
+			return false;
+		}
+		auto& image              = m_slot_images[id];
+		image.tick_accessed_last = m_scheduler.CurrentTick();
+		TouchImage(image);
+	}
+	FinishFind(id, desc, metadata_base_layer);
+	return true;
+}
+
+void TextureCache::FinishFind(ImageId id, const ImageDesc& desc, uint32_t metadata_base_layer) {
+	MaterializeColorClear(id, desc, metadata_base_layer);
 	if (desc.type == BindingType::VideoOut &&
 	    desc.info.metadata.compression != VideoOutCompression::Uncompressed) {
 		std::scoped_lock lock {m_lock};
-		const auto& image = m_slot_images[result];
+		const auto& image = m_slot_images[id];
 		const bool guest_dirty = image.IsBufferModified() || image.IsCpuDirty();
 		const bool native_current =
 		    (image.usage.render_target || image.IsGpuModified()) && !guest_dirty;
@@ -1497,7 +1525,6 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			     "contents\n");
 		}
 	}
-	return result;
 }
 
 void TextureCache::UpdateImage(ImageId id) {
