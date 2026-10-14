@@ -783,7 +783,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		if (const char* own = std::getenv("KYTY_HLE_TRACE_OWN"); own != nullptr) {
 			own_entries = static_cast<unsigned>(std::strtoul(own, nullptr, 10));
 		}
-		Common::HleTrace::Dump(stdout, own_entries, 400, &LocateAddressText);
+		unsigned merged_entries = 400;
+		if (const char* merged = std::getenv("KYTY_HLE_TRACE_MERGED"); merged != nullptr) {
+			merged_entries = static_cast<unsigned>(std::strtoul(merged, nullptr, 10));
+		}
+		Common::HleTrace::Dump(stdout, own_entries, merged_entries, &LocateAddressText);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",
