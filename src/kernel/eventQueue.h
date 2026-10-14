@@ -71,6 +71,8 @@ void KernelCoalesceTrigger(KernelEqueueEvent* event, intptr_t data,
 
 // Number of triggers that were folded into an already pending event (diagnostics, --mem-stats).
 uint64_t KernelCoalescedTriggerCount();
+// ... of which replaced a pending trigger that carried a different payload (a lost context id).
+uint64_t KernelCoalescedDistinctCount();
 
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event);
 int KYTY_SYSV_ABI KernelTriggerEvent(KernelEqueue eq, uintptr_t ident, int16_t filter,

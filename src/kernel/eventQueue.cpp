@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <chrono>
 #include <fmt/format.h>
 #include <limits>
@@ -262,16 +263,33 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
 
 static std::atomic<uint64_t> g_coalesced_triggers {0};
 
+static std::atomic<uint64_t> g_coalesced_distinct {0};
+
 void KernelCoalesceTrigger(KernelEqueueEvent* event, intptr_t data, uint32_t fflags_max) {
 	EXIT_IF(event == nullptr);
 	if (event->triggered) {
 		g_coalesced_triggers.fetch_add(1, std::memory_order_relaxed);
+		if (event->event.data != data) {
+			// The pending trigger carried another payload (a GPU interrupt context id); it is replaced.
+			const auto n = g_coalesced_distinct.fetch_add(1, std::memory_order_relaxed);
+			if (n < 8) {
+				std::printf("EventQueue: a pending event (ident %llu) with data %lld was replaced by data %lld "
+				            "(%u triggers folded so far)\n",
+				            static_cast<unsigned long long>(event->event.ident),
+				            static_cast<long long>(event->event.data), static_cast<long long>(data),
+				            static_cast<unsigned>(event->event.fflags));
+			}
+		}
 	}
 	if (event->event.fflags < fflags_max) {
 		event->event.fflags++;
 	}
 	event->event.data = data;
 	event->triggered  = true;
+}
+
+uint64_t KernelCoalescedDistinctCount() {
+	return g_coalesced_distinct.load(std::memory_order_relaxed);
 }
 
 uint64_t KernelCoalescedTriggerCount() {
