@@ -35,7 +35,7 @@ constexpr std::array<const char*, kPhases> kNames = {
     "pipe_permsearch", "desc_buffers", "desc_upload", "desc_images", "desc_resolve", "desc_findtex",
     "desc_commit", "desc_hazard", "desc_writes", "desc_transit", "desc_push", "srt_shadow", "srt_adopt",
     "draw_checks", "draw_targets", "draw_vertex", "draw_dynamic", "srt_reuse", "srt_resolve", "srt_samplers",
-    "srt_buffers"};
+    "srt_buffers", "draw_pop", "draw_describe", "draw_record"};
 
 // Tracy zone per phase (--profile): named "gpu:<phase>" and emitted only on the GPU thread, so
 // `tracy-csvexport -e -f gpu:` yields the exclusive time per phase of that thread alone.

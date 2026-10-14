@@ -74,6 +74,9 @@ enum class Phase : uint8_t {
 	SrtResolve,      // PrepareBindings: ResolveTexture (decode plus image lookup)
 	SrtSamplers,     // PrepareBindings: sampler decode and cache lookup
 	SrtBuffers,      // FindBuffers: V# decode, clamp, buffer lookup
+	DrawPop,         // DrawIndex/DrawAuto entry: completed-operation poll (timeline query), debug info, render lock
+	DrawDescribe,    // render and depth target descriptions (registers to ImageDesc), inside draw_targets
+	DrawRecord,      // ExecutePreparedDraw tail: BeginRendering, pipeline bind, draw emission, write barriers
 	Count
 };
 

@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 
 #include "common/assert.h"
+#include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
@@ -263,10 +264,12 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
                                               uint32_t rt_slot, bool ignore_target_mask,
                                               bool exact_format) {
 	KYTY_PROFILER_FUNCTION();
+	Common::GpuPhase::Scope gpu_phase_describe(Common::GpuPhase::Phase::DrawDescribe);
 	if (!DescribeRenderColorTarget(buffer.GetRegisters(), r, render_target_slice_offset, rt_slot,
 	                               ignore_target_mask)) {
 		return;
 	}
+	gpu_phase_describe.End();
 	auto& texture_cache = m_context.GetTextureCache();
 	r.image_id          = texture_cache.FindImage(r.desc, exact_format);
 	BindRenderTarget(r.image_id);

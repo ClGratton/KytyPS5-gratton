@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 
 #include "common/assert.h"
+#include "common/gpuPhaseStats.h"
 #include "common/common.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -357,9 +358,11 @@ bool DescribeRenderDepthTarget(GraphicContext& graphics, const HW::Context& hw,
 
 void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
 	KYTY_PROFILER_FUNCTION();
+	Common::GpuPhase::Scope gpu_phase_describe(Common::GpuPhase::Phase::DrawDescribe);
 	if (!DescribeRenderDepthTarget(buffer.GetGraphics(), buffer.GetRegisters(), r)) {
 		return;
 	}
+	gpu_phase_describe.End();
 	auto& cache = m_context.GetTextureCache();
 	r.image_id  = cache.FindImage(r.desc);
 	BindRenderTarget(r.image_id);
