@@ -122,6 +122,9 @@ struct ConfigOptions {
 	bool                   profiler_enabled            = false;
 	bool                   spirv_debug_printf_enabled  = false;
 	bool                   gpu_assisted_validation_enabled = false;
+	// --debug-sync-validation: the validation layer's synchronization validation (needs the layer,
+	// implies --vulkan-validation); hazards are logged, never fatal. Very slow.
+	bool                   debug_sync_validation_enabled = false;
 	bool                   renderdoc_enabled           = false;
 	// Stays false: downloading every GPU-written linear image on submit makes a game that renders
 	// into linear memory a GPU drain per frame (Astro Bot: 49 -> 19 fps, 16.7 -> 50 ms frames, same
@@ -442,6 +445,7 @@ bool ProfilerEnabled();
 bool SpirvDebugPrintfEnabled();
 
 bool GpuAssistedValidationEnabled();
+bool SyncValidationEnabled();
 
 bool RenderDocEnabled();
 bool ReadbackLinearImagesEnabled();

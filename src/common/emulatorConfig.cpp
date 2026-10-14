@@ -390,6 +390,10 @@ bool SpirvDebugPrintfEnabled() {
 	return g_config->spirv_debug_printf_enabled;
 }
 
+bool SyncValidationEnabled() {
+	return g_config->debug_sync_validation_enabled && g_config->vulkan_validation_enabled;
+}
+
 bool GpuAssistedValidationEnabled() {
 	return g_config->gpu_assisted_validation_enabled && g_config->vulkan_validation_enabled;
 }
