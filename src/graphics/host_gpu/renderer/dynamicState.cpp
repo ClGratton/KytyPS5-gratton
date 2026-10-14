@@ -24,7 +24,9 @@ void DynamicState::Commit(const GraphicContext& graphics, vk::CommandBuffer cmdb
 		// Note that this must be set in a command buffer even if depth test is disabled.
 		cmdbuf.setDepthWriteEnable(depth_write_enabled);
 	}
-	if (depth_test_enabled && dirty_state.depth_compare_op) {
+	// Declared dynamic by every graphics pipeline: set even while the depth test is disabled
+	// (VUID-vkCmdDraw-None-07845).
+	if (dirty_state.depth_compare_op) {
 		dirty_state.depth_compare_op = false;
 		cmdbuf.setDepthCompareOp(depth_compare_op);
 	}
