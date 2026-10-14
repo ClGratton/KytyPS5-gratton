@@ -654,6 +654,7 @@ struct ResourcePlan {
 	// Compute shaders whose every memory write is a store to an address the descriptor alone decides
 	// (AnalyzeUniformStores); empty otherwise. Copied into each snapshot.
 	std::shared_ptr<const UniformStoreProgram> uniform_stores;
+	UniformCopy                         uniform_copy;
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
 	SrtTable                              srt_table; // empty unless the plan is native-eligible
 	std::vector<SrtFastRead>              fast_reads; // per srt_reads slot; see BuildFastReads

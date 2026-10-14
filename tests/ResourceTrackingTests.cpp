@@ -1898,6 +1898,94 @@ void TestUniformStores() {
   }
 }
 
+void TestUniformCopy() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  struct Options {
+    bool other_index = false;
+    bool extra_store = false;
+    bool same_resource = false;
+    bool conditional = false;
+    bool permuted = false;
+    bool offset = false;
+    bool branch = false;
+  };
+  const auto Run = [](Options options) {
+    Fixture fixture;
+    fixture.program.blocks[0]->terminator.kind = CFG::TerminatorKind::Return;
+    const auto source = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                                        fixture.UserData(2), fixture.UserData(3)});
+    const auto target = options.same_resource
+                            ? source
+                            : fixture.Buffer({fixture.UserData(4), fixture.UserData(5),
+                                              fixture.UserData(6), fixture.UserData(7)}, 8);
+    const auto local = fixture.Emit(
+        ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    const auto group = fixture.Emit(
+        ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::WorkgroupId)), Value(0u)});
+    const auto index = fixture.Emit(
+        ValueOpcode::IAdd32,
+        {local, fixture.Emit(ValueOpcode::ShiftLeftLogical32, {group, Value(6u)})});
+    MemoryInfo load;
+    load.kind = ResourceKind::Buffer;
+    load.formatted = true;
+    load.idxen = true;
+    load.data_dwords = 4;
+    const auto loaded = fixture.Emit(
+        ValueOpcode::LoadBufferU32x4,
+        {source, index, Value(0u), Value(0u), options.conditional ? fixture.Emit(ValueOpcode::ULessThan32, {local, Value(8u)}) : Value(true)},
+        fixture.AddMemory(load, 4));
+    std::array<Value, 4> components;
+    for (uint32_t i = 0; i < 4; ++i) {
+      components[i] = fixture.Emit(ValueOpcode::CompositeExtractU32x4,
+                                   {loaded, Value(options.permuted && i < 2 ? 1u - i : i)});
+    }
+    const auto data = fixture.Emit(ValueOpcode::CompositeConstructU32x4,
+                                   {components[0], components[1], components[2], components[3]});
+    MemoryInfo store = load;
+    store.offset = options.offset ? 16 : 0;
+    const auto store_index =
+        options.other_index ? fixture.Emit(ValueOpcode::IAdd32, {index, Value(1u)}) : index;
+    const auto store_flags = fixture.AddMemory(store, 12);
+    fixture.Emit(ValueOpcode::StoreBufferU32x4,
+                 {target, store_index, Value(0u), Value(0u), data, Value(true)}, store_flags);
+    if (options.extra_store) {
+      fixture.Emit(ValueOpcode::StoreBufferU32x4,
+                   {target, store_index, Value(0u), Value(0u), data, Value(true)}, store_flags);
+    }
+    if (options.branch) {
+      auto *b1 = fixture.AddBlock();
+      b1->terminator.kind = CFG::TerminatorKind::Return;
+      fixture.program.blocks[0]->terminator.kind = CFG::TerminatorKind::ConditionalBranch;
+      fixture.program.blocks[0]->terminator.true_block = b1;
+      fixture.program.blocks[0]->terminator.false_block = b1;
+      fixture.program.blocks[0]->condition = Value(true);
+    }
+    fixture.PlanAndTrack();
+    return ExtractResourcePlan(fixture.program);
+  };
+  {
+    const auto plan = Run({});
+    Check(plan.uniform_copy.valid && plan.uniform_copy.group_stride == 64 &&
+              plan.uniform_copy.src_resource != plan.uniform_copy.dst_resource,
+          "the copy shader was not found");
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    std::array<uint32_t, 8> userdata{0x200000u, 4u << 16, 0x4000u, 0x14204u,
+                                     0x300000u, 4u << 16, 0x4000u, 0x14204u};
+    Check(MaterializeResources(plan, {.user_data = userdata}, snapshot, specialization) &&
+              snapshot.uniform_copy == plan.uniform_copy,
+          "the snapshot does not carry the copy");
+  }
+  for (const auto &options :
+       {Options {.other_index = true}, Options {.extra_store = true}, Options {.same_resource = true},
+        Options {.conditional = true}, Options {.permuted = true}, Options {.offset = true},
+        Options {.branch = true}}) {
+    Check(!Run(options).uniform_copy.valid, "a shader that is not a plain record copy was accepted");
+  }
+}
+
 void TestDenseBufferTracking() {
   Fixture fixture;
   std::array<Value, 8> userdata;
@@ -3882,6 +3970,7 @@ int main() {
     Run("dense buffers", TestDenseBufferTracking);
     Run("compute buffer fill", TestComputeBufferFill);
     Run("uniform stores", TestUniformStores);
+    Run("uniform copy", TestUniformCopy);
     Run("scalar/vector alias", TestScalarAndVectorBufferAlias);
     Run("runtime unsigned min", TestRuntimeUnsignedMinDescriptor);
     Run("images and samplers", TestImagesSamplersAndAliases);

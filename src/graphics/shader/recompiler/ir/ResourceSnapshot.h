@@ -90,6 +90,19 @@ struct UniformStoreProgram {
 	bool operator==(const UniformStoreProgram&) const = default;
 };
 
+// A compute shader that copies records from one buffer to another: one formatted store of the four
+// components of one formatted load, both at the same index (local id + group stride * workgroup id),
+// nothing else written. Whether it is an exact dword copy depends on the descriptors (formats,
+// strides, extent); the renderer checks them (graphics/host_gpu/renderer/renderCompute.cpp).
+struct UniformCopy {
+	bool     valid        = false;
+	uint32_t src_resource = 0;
+	uint32_t dst_resource = 0;
+	uint32_t group_stride = 0;
+
+	bool operator==(const UniformCopy&) const = default;
+};
+
 struct ResourceSnapshot {
 	std::vector<DescriptorValue> buffers;
 	std::vector<DescriptorValue> images;
@@ -98,6 +111,7 @@ struct ResourceSnapshot {
 	std::vector<uint32_t>        user_data;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
+	UniformCopy                 uniform_copy;
 	// Null unless every memory write of the (compute) shader is a UniformStoreSite.
 	std::shared_ptr<const UniformStoreProgram> uniform_stores;
 };

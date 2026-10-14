@@ -1227,6 +1227,85 @@ static std::shared_ptr<const UniformStoreProgram> AnalyzeUniformStores(const Pro
 	return UniformStoreBuilder(program).Build();
 }
 
+// A compute shader whose only write is the copy of a record: store_format(dst, i, load_format(src, i))
+// for the same index i = local id + stride * workgroup id (UniformCopy). Anything else that writes, a
+// condition, a second load or a different index makes it ineligible.
+static UniformCopy AnalyzeUniformCopy(const Program& program) {
+	if (program.stage != ShaderType::Compute || program.blocks.empty() || program.info.uses_dma ||
+	    !program.info.samplers.empty() || !program.info.images.empty()) {
+		return {};
+	}
+	std::unordered_set<const Block*> visited;
+	const auto*                      block = program.blocks.front();
+	const Inst*                      store = nullptr;
+	const Inst*                      load  = nullptr;
+	for (;;) {
+		if (block == nullptr || !visited.insert(block).second) return {};
+		for (const auto& inst: *block) {
+			const auto op = inst.GetOpcode();
+			if (op == ValueOpcode::LoadBufferU32x4) {
+				if (load != nullptr) return {};
+				load = &inst;
+				continue;
+			}
+			if (BufferAccessOf(op) == BufferAccess::Read) return {}; // any other read: not a pure copy
+			if (!inst.MayHaveSideEffects()) continue;
+			if (op == ValueOpcode::Reference || op == ValueOpcode::ReferenceU32) continue;
+			if (store != nullptr || op != ValueOpcode::StoreBufferU32x4) return {};
+			store = &inst;
+		}
+		const auto& term = block->terminator;
+		if (term.kind == CFG::TerminatorKind::Return) break;
+		if (term.kind != CFG::TerminatorKind::Branch) return {};
+		block = term.true_block;
+	}
+	if (store == nullptr || load == nullptr || visited.size() != program.blocks.size()) return {};
+	const auto check = [&](const Inst& inst, bool is_store) -> const MemoryInfo* {
+		const auto& memory = program.memory_info.at(inst.Flags<MemoryFlags>().index);
+		if (memory.kind != ResourceKind::Buffer || memory.planning_only || !memory.formatted || memory.typed ||
+		    !memory.idxen || memory.offen || memory.offset != 0 || memory.data_bits != 32 ||
+		    memory.data_dwords != 4 || memory.resource >= program.info.buffers.size()) {
+			return nullptr;
+		}
+		const auto& buffer = program.info.buffers[memory.resource];
+		if (buffer.indirect_root == memory.resource || !buffer.indirect_resources.empty() ||
+		    buffer.image_alias != BufferResource::NoImageAlias ||
+		    program.descriptor_sources.at(buffer.source).indirect_descriptor.has_value() ||
+		    (is_store ? buffer.read : buffer.written)) {
+			return nullptr;
+		}
+		const auto guard = inst.Arg(is_store ? 5 : 4).Resolve();
+		if (guard != Value(true) || inst.Arg(2).Resolve() != Value(0u) || inst.Arg(3).Resolve() != Value(0u)) {
+			return nullptr;
+		}
+		return &memory;
+	};
+	const auto* load_memory  = check(*load, false);
+	const auto* store_memory = check(*store, true);
+	if (load_memory == nullptr || store_memory == nullptr || load_memory->resource == store_memory->resource ||
+	    load->Arg(1).Resolve() != store->Arg(1).Resolve()) {
+		return {};
+	}
+	// The stored value is exactly the loaded one: component i of the load is component i of the store.
+	const auto* data = store->Arg(4).ResolveInstruction();
+	if (data == nullptr || data->GetOpcode() != ValueOpcode::CompositeConstructU32x4) return {};
+	for (uint32_t i = 0; i < 4; ++i) {
+		const auto* extract = data->Arg(i).ResolveInstruction();
+		if (extract == nullptr || extract->GetOpcode() != ValueOpcode::CompositeExtractU32x4 ||
+		    extract->Arg(0).ResolveInstruction() != load || extract->Arg(1).Resolve() != Value(i)) {
+			return {};
+		}
+	}
+	const auto index = FillIndex(store->Arg(1), 0, Value(true));
+	if (!index || (*index)[0] != 0 || (*index)[1] != 1 || (*index)[2] == 0) return {};
+	UniformCopy copy;
+	copy.valid        = true;
+	copy.src_resource = load_memory->resource;
+	copy.dst_resource = store_memory->resource;
+	copy.group_stride = static_cast<uint32_t>((*index)[2]);
+	return copy;
+}
+
 ResourcePlan ExtractResourcePlan(const Program& program) {
 	ResourcePlan plan;
 	plan.stage                      = program.stage;
@@ -1358,6 +1437,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	plan.control_flow = ResourceControlFlow(program, ClonePredicate);
 	plan.uniform_fill = AnalyzeUniformFill(program);
 	plan.uniform_stores = AnalyzeUniformStores(program);
+	plan.uniform_copy   = AnalyzeUniformCopy(program);
 	for (uint32_t i = 0; i < plan.uniform_fill.fill.words; ++i) {
 		plan.uniform_fill.values[i] = Clone(plan.uniform_fill.values[i]);
 	}
@@ -1429,6 +1509,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	snapshot.uniform_fill = {};
 	snapshot.uniform_stores = program.uniform_stores;
+	snapshot.uniform_copy   = program.uniform_copy;
 	const auto& fill = program.uniform_fill;
 	const auto words = fill.fill.words;
 	std::array<uint32_t, 4> stored {};
