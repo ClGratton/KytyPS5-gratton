@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
+#include "common/measureHack.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/vramPolicy.h"
@@ -1196,8 +1197,19 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& binding,
 			if (Config::KnownFillsEnabled()) {
 				Common::GpuPhase::NoteKnownFill(Common::GpuPhase::KnownFill::Readback);
 			}
-			m_buffer_cache.ReadMemory(range.address, range.size, false,
-			                          Common::GpuPhase::DrainCause::ReadbackTextureMeta);
+			// MEASUREMENT HACK (readback-ceiling): --debug-skip-meta-drain reads the stale clear codes
+			// instead of draining; every Nth such read drains as usual and compares the first byte.
+			const bool hack = Config::DebugSkipMetaDrain();
+			if (!hack || !Common::MeasureHack::SkipNow(Common::MeasureHack::Kind::Meta)) {
+				uint8_t stale = 0, now = 0;
+				const bool have_stale = hack && LibKernel::Memory::TryReadBacking(range.address, &stale, 1);
+				m_buffer_cache.ReadMemory(range.address, range.size, false,
+				                          Common::GpuPhase::DrainCause::ReadbackTextureMeta);
+				if (have_stale && LibKernel::Memory::TryReadBacking(range.address, &now, 1)) {
+					Common::MeasureHack::NoteVerify(Common::MeasureHack::Kind::Meta, range.address, &stale,
+					                                &now, 1);
+				}
+			}
 		}
 	}
 	const auto slice_size = range.size / layers;

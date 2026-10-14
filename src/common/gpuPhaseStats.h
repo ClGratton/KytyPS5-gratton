@@ -78,6 +78,9 @@ void Configure(uint32_t interval_seconds, bool phases = true);
 void AttachGpuThread();
 // Prints a report when the interval has elapsed (call between scopes, on the attached thread).
 void Poll();
+// Ends the current report window at the next Poll() whatever the interval (a runtime toggle was
+// just applied: every window then lies inside one toggle state). Any thread, relaxed.
+void RequestCut() noexcept;
 // Final report for the time since the last one (on the attached thread, at shutdown).
 void Finish();
 

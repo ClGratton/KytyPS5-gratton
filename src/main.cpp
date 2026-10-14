@@ -284,6 +284,12 @@ static void PrintUsage() {
 	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback, re-read every page from the\n"
 	         "                                       GPU (a full drain) before it is unprotected and report\n"
 	         "                                       any difference. Slow. Default: false.\n");
+	::printf("  --debug-skip-srt-drain <true|false>   MEASUREMENT HACK, never a fix (readback-ceiling): the SRT walk reads\n"
+	         "                                       GPU-dirty guest bytes without draining the GPU.\n"
+	         "  --debug-skip-meta-drain <true|false>  MEASUREMENT HACK: render-target clear codes without draining.\n"
+	         "  --debug-skip-drain-verify <N>        With the two above, every Nth such read drains and compares (_skip_drain.log).\n"
+	         "  (runtime toggle debug-gpu-indirect-draws, --toggle-control only: --gpu-indirect-draws flipped by the GPU\n"
+	         "   thread at a guest flip; MEASUREMENT, not a supported mode.)\n");
 	::printf("  --poll-before-wait <0-1000>          Microseconds to poll the GPU timeline before blocking in\n"
 	         "                                       vkWaitSemaphores (small readbacks finish in tens of\n"
 	         "                                       microseconds; a blocking wait adds the kernel sleep and\n"
@@ -969,6 +975,23 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.poll_before_wait_us = static_cast<uint32_t>(us);
+		} else if (arg == "--debug-skip-srt-drain") {
+			if (!ParseBool(value, options.config.debug_skip_srt_drain)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-skip-meta-drain") {
+			if (!ParseBool(value, options.config.debug_skip_meta_drain)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-skip-drain-verify") {
+			uint64_t n = 0;
+			if (!ParseUint64(value, n) || n == 0 || n > 1000000) {
+				::printf("invalid skip-drain-verify (expected 1-1000000): %s\n", value.c_str());
+				return false;
+			}
+			options.config.debug_skip_drain_verify = static_cast<uint32_t>(n);
 		} else if (arg == "--eager-readback") {
 			if (!ParseBool(value, options.config.eager_readback)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

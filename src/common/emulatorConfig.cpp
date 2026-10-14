@@ -35,6 +35,7 @@ void Load(const ConfigOptions& cfg) {
 
 	*g_config = cfg;
 	g_config->poll_before_wait_on = cfg.poll_before_wait_us != 0;
+	g_config->debug_gpu_indirect_request = cfg.gpu_indirect_draws;
 
 	Common::Hang::Start(cfg.hang_watchdog_seconds);
 	Common::GpuPhase::Configure(cfg.gpu_phase_stats_s != 0 ? cfg.gpu_phase_stats_s
@@ -73,6 +74,10 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// copy is in flight when the flag goes off is finished by the next submit or read fault), so
 	// the flag only decides whether new pages are marked hot and new copies scheduled.
 	registry.Register("eager-readback", &g_config->eager_readback, false);
+	// MEASUREMENT HACKS (readback-ceiling): stale values for the GPU-dependent readbacks.
+	registry.Register("debug-skip-srt-drain", &g_config->debug_skip_srt_drain, false);
+	registry.Register("debug-gpu-indirect-draws", &g_config->debug_gpu_indirect_request, false);
+	registry.Register("debug-skip-meta-drain", &g_config->debug_skip_meta_drain, false);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -160,7 +165,12 @@ bool CleanGuestReadsEnabled() {
 }
 
 bool GpuIndirectDrawsEnabled() {
-	return g_config->gpu_indirect_draws;
+	return Common::RuntimeToggles::Read(g_config->gpu_indirect_draws);
+}
+
+void LatchGpuIndirectDraws() {
+	Common::RuntimeToggles::Write(g_config->gpu_indirect_draws,
+	                              Common::RuntimeToggles::Read(g_config->debug_gpu_indirect_request));
 }
 
 uint32_t PollBeforeWaitUs() {
@@ -175,6 +185,18 @@ bool EagerReadbackEnabled() {
 
 bool EagerReadbackVerifyEnabled() {
 	return Common::RuntimeToggles::Read(g_config->eager_readback) && g_config->eager_readback_verify;
+}
+
+bool DebugSkipSrtDrain() {
+	return Common::RuntimeToggles::Read(g_config->debug_skip_srt_drain);
+}
+
+bool DebugSkipMetaDrain() {
+	return Common::RuntimeToggles::Read(g_config->debug_skip_meta_drain);
+}
+
+uint32_t DebugSkipDrainVerify() {
+	return g_config->debug_skip_drain_verify;
 }
 
 bool ReadbackQueueEnabled() {

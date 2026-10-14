@@ -306,6 +306,14 @@ struct ConfigOptions {
 	// is loaded; --toggle-control flips it, common/runtimeToggles.h). Not a command-line option.
 	bool                   poll_before_wait_on         = false;
 	bool                   eager_readback_verify       = false;
+	// MEASUREMENT HACKS (branch readback-ceiling, local, never merged; src/common/measureHack.h).
+	bool                   debug_skip_srt_drain        = false;
+	// MEASUREMENT (readback-gate): runtime request for --gpu-indirect-draws. The GPU thread copies it
+	// into gpu_indirect_draws at a guest flip (LatchGpuIndirectDraws), so the route decision of a draw
+	// packet and the mesh-shader variant it builds can never disagree. Starts equal to the flag.
+	bool                   debug_gpu_indirect_request  = false;
+	bool                   debug_skip_meta_drain       = false;
+	uint32_t               debug_skip_drain_verify     = 64;
 	std::filesystem::path  bench_render_csv;
 	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
 	// names at the next presented frame (common/runtimeToggles.h). Default off.
@@ -389,10 +397,14 @@ bool              SrtPlansEnabled();
 bool              SrtTableWalkEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
+void              LatchGpuIndirectDraws();
 bool              ReadbackQueueEnabled();
 bool              EagerReadbackEnabled();
 uint32_t          PollBeforeWaitUs();
 bool              EagerReadbackVerifyEnabled();
+bool              DebugSkipSrtDrain();
+bool              DebugSkipMetaDrain();
+uint32_t          DebugSkipDrainVerify();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

@@ -6,6 +6,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
+#include "common/measureHack.h"
 #include "common/enomemTrace.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -1108,6 +1109,24 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 		}
 		auto& buffers = GetGpuResources().GetBufferCache();
 		if (buffers.HasGpuDirtyBytes(vaddr, size)) {
+			// MEASUREMENT HACK (readback-ceiling): --debug-skip-srt-drain uses the stale guest bytes; every
+			// Nth such read drains as usual and compares them with the real ones.
+			if (Config::DebugSkipSrtDrain() && size <= 4096) {
+				uint8_t stale[4096];
+				const bool have_stale = TryReadBacking(vaddr, stale, size);
+				if (have_stale && Common::MeasureHack::SkipNow(Common::MeasureHack::Kind::Srt)) {
+					return TryReadBacking(vaddr, data, size);
+				}
+				Common::GpuPhase::NoteGpuThreadFault();
+				buffers.ReadMemory(vaddr, size);
+				if (have_stale) {
+					uint8_t now[4096];
+					if (TryReadBacking(vaddr, now, size)) {
+						Common::MeasureHack::NoteVerify(Common::MeasureHack::Kind::Srt, vaddr, stale, now, size);
+					}
+				}
+				return TryReadBacking(vaddr, data, size);
+			}
 			Common::GpuPhase::NoteGpuThreadFault(); // stack of the emulator's own dependent read
 			buffers.ReadMemory(vaddr, size);
 		}
