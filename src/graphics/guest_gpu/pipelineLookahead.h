@@ -77,6 +77,10 @@ public:
 		std::atomic<int64_t>  sequencer_stall_ns {0};
 		std::atomic<uint64_t> max_ring {0};
 		std::atomic<uint64_t> tasks_stale {0}; // dropped by a worker: the guest retired the item meanwhile
+		// KYTY_LOOKAHEAD_REPLAY=K (debug, needs workers): each submission is decoded K-1 more times
+		// and its tasks are run with the plans discarded, to measure what the workers can do.
+		std::atomic<uint64_t> replay_tasks {0};
+		std::atomic<int64_t>  replay_ns {0};
 		std::atomic<uint64_t> items_abandoned {0}; // decode budget / unreadable condition hit
 		std::atomic<uint64_t> items_stale {0};     // the guest observed a completion covering the item while it was scanned
 		std::atomic<uint64_t> items_dropped {0};   // queue full: oldest item dropped
@@ -105,6 +109,7 @@ private:
 	// Valid only on the lookahead thread while an item is processed.
 	uint64_t                            m_current_seq  = 0;
 	uint32_t                            m_current_queue = 0;
+	bool                                m_replaying = false; // sequencer: running a KYTY_LOOKAHEAD_REPLAY pass
 	bool                                m_current_late = false;
 	std::atomic<int64_t>                m_item_start_ns {0};  // 0 = idle
 	std::atomic<uint64_t>               m_item_dwords {0};

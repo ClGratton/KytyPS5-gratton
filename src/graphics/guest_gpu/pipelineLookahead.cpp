@@ -13,6 +13,7 @@
 #include <chrono>
 #include <fmt/format.h>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 #if defined(__linux__)
@@ -63,6 +64,7 @@ public:
 		HW::UserConfig                              ucfg;
 		HW::Shader                                  sh;
 		std::vector<std::unique_ptr<SrtPlan::Plan>> plans;
+		bool                                        discard = false; // replay pass: plans are dropped
 		std::atomic<bool>                           done {false};
 	};
 
@@ -118,7 +120,7 @@ public:
 			if (!task.done.load(std::memory_order_acquire)) {
 				break;
 			}
-			if (SrtPlan::Enabled()) {
+			if (SrtPlan::Enabled() && !task.discard) {
 				for (auto& plan: task.plans) {
 					store.Put(std::move(plan));
 				}
@@ -128,6 +130,14 @@ public:
 			task.plans.clear();
 			++head;
 			m_head.store(head, std::memory_order_release);
+		}
+	}
+
+	// Sequencer: blocks until every published slot has been collected.
+	void Drain() {
+		while (Pending() && !Common::Speculation::Aborted() && !m_stopping.load(std::memory_order_acquire)) {
+			Collect();
+			std::this_thread::sleep_for(std::chrono::microseconds(50));
 		}
 	}
 
@@ -331,7 +341,7 @@ std::string PipelineLookahead::SummaryText() const {
 	return fmt::format(
 	    "items={};items_late={};draws={};dispatches={};max_queue={};busy_ms={};draw_ms={};dispatch_ms={};"
 	    "aborted={};abandoned={};stale={};retire_signals={};dropped={};workers={};tasks={};worker_busy_ms={};"
-	    "sequencer_stall_ms={};max_ring={};tasks_stale={};sizeof_ctx={};sizeof_ucfg={};"
+	    "sequencer_stall_ms={};max_ring={};tasks_stale={};replay_tasks={};replay_ms={};sizeof_ctx={};sizeof_ucfg={};"
 	    "sizeof_sh={};sizeof_vsinfo={};sizeof_psinfo={}",
 	    m_stats.items.load(), m_stats.items_late.load(), m_stats.draws.load(),
 	    m_stats.dispatches.load(), m_stats.max_queue.load(), m_stats.busy_ns.load() / 1000000,
@@ -340,7 +350,8 @@ std::string PipelineLookahead::SummaryText() const {
 	    m_stats.items_stale.load(), Common::GuestRetirement::Global().SignalCalls(),
 	    m_stats.items_dropped.load(), Config::GetLookaheadWorkers(), m_stats.tasks.load(),
 	    m_stats.worker_busy_ns.load() / 1000000, m_stats.sequencer_stall_ns.load() / 1000000,
-	    m_stats.max_ring.load(), m_stats.tasks_stale.load(), sizeof(HW::Context), sizeof(HW::UserConfig), sizeof(HW::Shader),
+	    m_stats.max_ring.load(), m_stats.tasks_stale.load(), m_stats.replay_tasks.load(),
+	    m_stats.replay_ns.load() / 1000000, sizeof(HW::Context), sizeof(HW::UserConfig), sizeof(HW::Shader),
 	    sizeof(ShaderVertexInputInfo), sizeof(ShaderPixelInputInfo));
 }
 
@@ -449,14 +460,41 @@ void PipelineLookahead::Process(Item& item) {
 			break;
 		}
 	}
+	if (m_pool != nullptr && plan_shadow) {
+		// KYTY_LOOKAHEAD_REPLAY: decode the stream again and let the workers run its tasks with the
+		// plans thrown away, timing how fast they get through them.
+		static const uint32_t replays = [] {
+			const char* text = std::getenv("KYTY_LOOKAHEAD_REPLAY");
+			return text != nullptr ? static_cast<uint32_t>(std::strtoul(text, nullptr, 10)) : 0u;
+		}();
+		if (replays > 1 && item.kind != Kind::Reset && !m_current_late) {
+			m_pool->Drain();
+			const auto tasks_before = m_stats.tasks.load(std::memory_order_relaxed);
+			const auto t_replay     = Bench::NowNs();
+			m_replaying             = true;
+			for (uint32_t r = 1; r < replays && !Common::Speculation::Aborted(); ++r) {
+				cp.SetPlanSequence(item.seq);
+				cp.ResetDeCe();
+				if (!item.constant_commands.empty()) RunStream(cp, item.constant_commands);
+				if (!item.commands.empty()) RunStream(cp, item.commands);
+			}
+			m_pool->Drain();
+			m_replaying = false;
+			m_stats.replay_tasks.fetch_add(m_stats.tasks.load(std::memory_order_relaxed) - tasks_before,
+			                               std::memory_order_relaxed);
+			m_stats.replay_ns.fetch_add(Bench::NowNs() - t_replay, std::memory_order_relaxed);
+		}
+	}
 	if (plan_shadow && m_pool == nullptr) {
 		// Everything of this submission has been looked at (also when it was dropped as late).
 		SrtPlan::GetStore().NoteProgress({item.seq, UINT32_MAX});
 	} else if (plan_shadow) {
 		// With workers the position moves when the submission's last task is collected.
 		if (auto* end = m_pool->Acquire(); end != nullptr) {
-			end->kind = Pool::Task::Kind::EndItem;
-			end->seq  = item.seq;
+			end->kind    = Pool::Task::Kind::EndItem;
+			end->seq     = item.seq;
+			end->discard = false;
+			end->plans.clear();
 			m_pool->Publish();
 		}
 		m_pool->Collect();
@@ -505,6 +543,7 @@ void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 			task->ucfg          = cp.GetUcfg();
 			task->sh            = cp.GetShCtx();
 			task->plans.clear();
+			task->discard = m_replaying;
 			m_pool->Publish();
 		}
 		if ((m_stats.draws.load(std::memory_order_relaxed) & 15u) == 0) m_pool->Collect();
@@ -545,6 +584,7 @@ void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& d
 			task->ucfg          = cp.GetUcfg();
 			task->sh            = cp.GetShCtx();
 			task->plans.clear();
+			task->discard       = m_replaying;
 			m_pool->Publish();
 		}
 		m_stats.dispatch_ns.fetch_add(Bench::NowNs() - call_start, std::memory_order_relaxed);
