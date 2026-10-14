@@ -331,6 +331,9 @@ struct ConfigOptions {
 	bool                   resolved_draw               = false;
 	bool                   resolved_draw_verify        = false;
 	bool                   mapping_memo                = false;
+	// --tracker-lockfree: the buffer cache asks the memory tracker whether a range is CPU- or GPU-modified
+	// through lock-free mirrors of the dirty bits instead of the region locks. Exact; default off until measured.
+	bool                   tracker_lockfree = false;
 	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
 	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.
@@ -484,6 +487,7 @@ bool              ImageLookupMemoEnabled();
 bool              TextureBindingReuseEnabled();
 bool              ResolvedDrawEnabled();
 bool              ResolvedDrawVerify();
+bool              TrackerLockfreeEnabled();
 bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();
 bool              SrtPlanShadowEnabled();

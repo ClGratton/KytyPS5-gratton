@@ -36,6 +36,7 @@ public:
 	// atomic mirror of its dirty bits that every change publishes under the lock (see
 	// common/atomicBitMirror.h for why the answer is that of the locked query). With
 	// KYTY_TRACKER_LOCKFREE_VERIFY=1 each call also takes the lock and compares.
+	[[nodiscard]] DirtyState QueryDirtyLockFree(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModifiedLockFree(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModifiedLockFree(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);

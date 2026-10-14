@@ -169,6 +169,16 @@ bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	});
 }
 
+MemoryTracker::DirtyState MemoryTracker::QueryDirtyLockFree(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	DirtyState state;
+	Iterate<true>(vaddr, size, [&state](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		state.cpu = state.cpu || CpuModifiedLockFree(manager, offset, bytes);
+		state.gpu = state.gpu || GpuModifiedLockFree(manager, offset, bytes);
+	});
+	return state;
+}
+
 bool MemoryTracker::IsRegionCpuModifiedLockFree(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	return Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {

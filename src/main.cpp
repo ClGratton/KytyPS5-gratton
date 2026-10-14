@@ -188,7 +188,7 @@ static void PrintUsage() {
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
 	         "                                       known-copies, gpu-indirect-draws, eager-readback,\n"
 	         "                                       readback-futures, resolved-draw, mapping-memo,\n"
-	         "                                       srt-table-walk,\n"
+	         "                                       srt-table-walk, tracker-lockfree,\n"
 	         "                                       poll-before-wait) at the next\n"
 	         "                                       presented frame; applied changes are logged and appended\n"
 	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
@@ -390,6 +390,9 @@ static void PrintUsage() {
 	         "                                       fully mapped until the mapping changes, instead of\n"
 	         "                                       taking the memory-map lock per query (exact).\n"
 	         "                                       Default: false.\n");
+	::printf("  --tracker-lockfree <true|false>      Answer dirty-page queries\n"
+	         "                                       without the region locks (exact, less GPU-thread CPU per\n"
+	         "                                       buffer binding). Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -1196,6 +1199,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--resolved-draw-verify") {
 			if (!ParseBool(value, options.config.resolved_draw_verify)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--tracker-lockfree") {
+			if (!ParseBool(value, options.config.tracker_lockfree)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

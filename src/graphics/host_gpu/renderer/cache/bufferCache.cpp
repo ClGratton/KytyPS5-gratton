@@ -1346,7 +1346,8 @@ void BufferCache::UploadDirtyRanges(Buffer& buffer, uint64_t vaddr, uint64_t siz
 			    m_upload_capture->emplace_back(address, bytes);
 		    }
 	    },
-	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
+	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); },
+	    Config::TrackerLockfreeEnabled());
 	if (source) {
 		auto& command = m_scheduler.Current();
 		command.EndRendering();
@@ -1467,7 +1468,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	MemoryTracker::DirtyState dirty {true, true};
 	bool                      dirty_known = false;
 	if (!is_written && (size <= CACHING_PAGESIZE || (memo != nullptr && memo->seen))) {
-		dirty       = m_memory_tracker.QueryDirty(vaddr, size);
+		// --tracker-lockfree: the same two answers from the regions' atomic mirrors, without the region locks.
+		dirty       = Config::TrackerLockfreeEnabled() ? m_memory_tracker.QueryDirtyLockFree(vaddr, size)
+		                                              : m_memory_tracker.QueryDirty(vaddr, size);
 		dirty_known = true;
 	}
 	if (!is_written && size <= CACHING_PAGESIZE && !dirty.gpu && dirty.cpu) {
@@ -1632,6 +1635,9 @@ bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
+	if (Config::TrackerLockfreeEnabled()) {
+		return m_memory_tracker.IsRegionGpuModifiedLockFree(vaddr, size);
+	}
 	return m_memory_tracker.IsRegionGpuModified(vaddr, size);
 }
 
@@ -1640,6 +1646,9 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
+	if (Config::TrackerLockfreeEnabled()) {
+		return m_memory_tracker.IsRegionCpuModifiedLockFree(vaddr, size);
+	}
 	return m_memory_tracker.IsRegionCpuModified(vaddr, size);
 }
 

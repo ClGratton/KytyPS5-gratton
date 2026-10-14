@@ -93,6 +93,7 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per refresh; the tables it uses are built with the program whatever the flag says, and a
 	// table refresh equals the graph walk (--debug-draw-key-verify), so a toggle only picks the path.
 	registry.Register("srt-table-walk", &g_config->srt_table_walk, false);
+	registry.Register("tracker-lockfree", &g_config->tracker_lockfree, false);
 	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
 	// the middle of a submission costs plans (misses), never a wrong draw.
 	registry.Register("srt-plans", &g_config->srt_plans, true);
@@ -244,6 +245,10 @@ bool MappingMemoEnabled() {
 
 bool ResolvedDrawVerify() {
 	return g_config->resolved_draw_verify;
+}
+
+bool TrackerLockfreeEnabled() {
+	return Common::RuntimeToggles::Read(g_config->tracker_lockfree);
 }
 
 bool SrtPlanShadowEnabled() {
