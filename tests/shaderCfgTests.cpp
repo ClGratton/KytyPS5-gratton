@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
 #include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
+#include "graphics/host_gpu/renderer/cache/knownCopies.h"
 #include "graphics/host_gpu/renderer/cache/storeExtents.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
@@ -16418,6 +16419,67 @@ void TestKnownStoresOnTranslatedProducers() {
   }
 }
 
+
+// --known-copies on translated GCN: the color-metadata copy of fast-cleared targets (a formatted load
+// of the four components at the global index and a formatted store of them to another buffer) is a
+// UniformCopy, resolves to an exact dword copy for 32-bit unsigned integer records, and the source's
+// content becomes runs of equal dwords.
+void TestKnownCopyOnTranslatedShader() {
+  const uint32_t copy_shader[] = {0xd7460004u, 0x04010c08u, 0xe00c2000u, 0x80000004u,
+                                  0xbf8c3f70u, 0xe01c2000u, 0x80010004u, 0xbf810000u};
+  std::array<uint32_t, 8> user_data{};
+  user_data[1] = 4u << 16; // source: stride 4
+  user_data[2] = 1024;
+  user_data[3] = 3u << 28 | 20u << 12 | (4u | 5u << 3 | 6u << 6 | 7u << 9); // k32UInt, identity select
+  user_data[0] = 0x100000;
+  user_data[5] = 4u << 16;
+  user_data[6] = 1024;
+  user_data[7] = user_data[3];
+  user_data[4] = 0x200000;
+  ShaderComputeInputInfo input_info = RegressionComputeInputInfo();
+  input_info.thread_ids_num = 1;
+  input_info.workgroup_register = 8;
+  input_info.group_id[0] = true;
+  input_info.threads_num[0] = 64;
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.user_data = user_data;
+  options.input_info.compute = &input_info;
+  auto translated = ShaderRecompiler::TranslateProgram(copy_shader, options);
+  auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+  Check(plan.uniform_copy.valid && plan.uniform_copy.group_stride == 64,
+        "the translated metadata copy is not a UniformCopy");
+  ShaderRecompiler::IR::ResourceSnapshot snapshot;
+  ShaderRecompiler::IR::ResourceSpecialization specialization;
+  Check(ShaderRecompiler::IR::MaterializeResources(plan, {.user_data = user_data}, snapshot, specialization),
+        "copy resources did not materialize");
+  const auto Describe = [&](const ShaderRecompiler::IR::DescriptorValue &value) {
+    const auto d = DecodeNativeDescriptor<ShaderBufferResource>(value);
+    CopyDescriptor result;
+    result.base = d.Base48();
+    result.num_records = d.NumRecords();
+    result.stride = d.Stride();
+    result.dst_sel = d.DstSelXYZW();
+    result.words = d.Format() == Prospero::BufferFormat::k32UInt ? 1u : 0u;
+    result.mapped = true;
+    return result;
+  };
+  CopyLaunch launch;
+  launch.groups[0] = 4;
+  launch.groups[1] = launch.groups[2] = 1;
+  launch.threads[0] = 64;
+  launch.threads[1] = launch.threads[2] = 1;
+  launch.use_plain_mode = true;
+  KnownCopy copy;
+  Check(ResolveKnownCopy(snapshot.uniform_copy, Describe(snapshot.buffers[plan.uniform_copy.src_resource]),
+                         Describe(snapshot.buffers[plan.uniform_copy.dst_resource]), launch, copy) &&
+            copy.src == 0x100000 && copy.dst == 0x200000 && copy.bytes == 1024,
+        "the metadata copy is not resolved to an exact copy of 256 of 1024 records");
+  launch.groups[0] = 17;
+  Check(!ResolveKnownCopy(snapshot.uniform_copy, Describe(snapshot.buffers[plan.uniform_copy.src_resource]),
+                          Describe(snapshot.buffers[plan.uniform_copy.dst_resource]), launch, copy),
+        "1088 invocations over 1024 records are not a copy");
+}
+
 } // namespace
 } // namespace Libs::Graphics
 
@@ -16426,6 +16488,7 @@ int main() {
 
   EnsureConfigInitialized();
   TestKnownStoresOnTranslatedProducers();
+  TestKnownCopyOnTranslatedShader();
   TestRobustBufferPolicy();
   TestDrawSkipSafety();
   TestRobustBufferBoundsEmission();

@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/knownCopies.h"
 #include "graphics/host_gpu/renderer/cache/knownStores.h"
 #include "graphics/host_gpu/renderer/cache/storeExtents.h"
 #include "kernel/memory.h"
@@ -95,6 +96,58 @@ static void FinishUniformStores(RenderContext& context, const ShaderComputeInput
 	auto& buffers = context.GetBufferCache();
 	buffers.RecordKnownStores(scope.kept);
 	buffers.RecordKnownStores(scope.claims);
+}
+
+// --known-copies: a dispatch of a copy shader (UniformCopy) that is an exact dword copy leaves the
+// destination holding the source's content; the buffer cache records it when the source can be read
+// without waiting for the GPU (knownCopies.h). Called after the dispatch was recorded.
+static CopyDescriptor MakeCopyDescriptor(const ShaderBufferResource& d) {
+	constexpr std::array formats {Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32_32UInt,
+	                              Prospero::BufferFormat::k32_32_32UInt,
+	                              Prospero::BufferFormat::k32_32_32_32UInt};
+	CopyDescriptor result;
+	result.base         = d.Base48();
+	result.num_records  = d.NumRecords();
+	result.stride       = d.Stride();
+	result.dst_sel      = d.DstSelXYZW();
+	result.swizzle      = d.SwizzleEnabled();
+	result.add_tid      = d.AddTid();
+	result.index_stride = d.IndexStride();
+	for (uint32_t i = 0; i < formats.size(); ++i) {
+		if (d.Format() == formats[i]) {
+			result.words = i + 1;
+		}
+	}
+	result.mapped = result.base != 0 && LibKernel::Memory::IsFullyMapped(result.base, d.GetSize());
+	return result;
+}
+
+static void RecordUniformCopy(RenderContext& context, const ShaderComputeInputInfo& input, uint32_t group_x,
+                              uint32_t group_y, uint32_t group_z, uint32_t mode) {
+	if (!Config::KnownCopiesEnabled() || input.async_compute || input.stage.resources == nullptr) {
+		return;
+	}
+	const auto& resources = *input.stage.resources;
+	const auto& copy      = resources.uniform_copy;
+	if (!copy.valid || copy.src_resource >= resources.buffers.size() || copy.dst_resource >= resources.buffers.size()) {
+		return;
+	}
+	CopyLaunch launch;
+	launch.groups[0]         = group_x;
+	launch.groups[1]         = group_y;
+	launch.groups[2]         = group_z;
+	launch.threads[0]        = input.threads_num[0];
+	launch.threads[1]        = input.threads_num[1];
+	launch.threads[2]        = input.threads_num[2];
+	launch.thread_dimensions = input.dispatch_thread_dimensions;
+	launch.use_plain_mode    = mode == 0x41u;
+	KnownCopy resolved;
+	if (ResolveKnownCopy(copy,
+	                     MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.src_resource])),
+	                     MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.dst_resource])),
+	                     launch, resolved)) {
+		context.GetBufferCache().RecordKnownCopy(resolved);
+	}
 }
 
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
@@ -598,6 +651,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		m_context.GetBufferCache().RecordKnownFill(fill_descriptor.Base48(), fill_size, fill_value);
 	}
 	FinishUniformStores(m_context, input_info, store_scope);
+	RecordUniformCopy(m_context, input_info, thread_group_x, thread_group_y, thread_group_z, mode);
 	TrackMetaFills(input_info, buffer);
 	ResetBindings();
 }
