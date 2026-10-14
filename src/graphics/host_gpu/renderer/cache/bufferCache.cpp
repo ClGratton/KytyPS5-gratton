@@ -830,7 +830,14 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 				auto& buffer = m_slot_buffers[use];
 				if (Config::ResolvedDrawVerify()) {
 					const auto q = m_memory_tracker.QueryDirty(vaddr, size);
-					if (q.cpu || q.gpu) {
+					// A guest write can land between the epoch check and this query: that is a legal
+					// order of the two events, and the epochs have moved by then. Only a range that is
+					// dirty while its epochs still equal the remembered ones is a wrong memo.
+					uint32_t after[2] = {};
+					const auto after_count = m_memory_tracker.RangeEpochs(vaddr, size, after);
+					const bool unchanged = after_count == memo->epoch_count && after[0] == memo->epochs[0] &&
+					                       (after_count < 2 || after[1] == memo->epochs[1]);
+					if (unchanged && (q.cpu || q.gpu)) {
 						EXIT("resolved draw: a remembered clean range is dirty (cpu=%d gpu=%d) addr=0x%016" PRIx64
 						     " size=%" PRIu64 "\n",
 						     q.cpu ? 1 : 0, q.gpu ? 1 : 0, vaddr, size);
