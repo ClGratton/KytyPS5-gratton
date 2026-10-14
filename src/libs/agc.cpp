@@ -28,6 +28,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -310,7 +313,91 @@ struct CommandBuffer {
 		}
 		auto* ret_ptr = cursor_up;
 		cursor_up += size_dw;
+		NoteFillLevel(size_dw, __builtin_return_address(0));
 		return ret_ptr;
+	}
+
+	// Debug aid (KYTY_AGC_CB_LOW=<percent>): once per second per buffer slot, print the fullest a command
+	// buffer got in that second when less than that share of its capacity was left at that point. Shows
+	// how close a title runs to the limit of a fixed-size command buffer (one whose grow callback cannot
+	// supply more memory). mono_ns is the steady-clock time of the peak (the clock of --bench-frames-csv).
+	KYTY_SYSV_ABI void NoteFillLevel(uint32_t size_dw, const void* caller) const {
+		static const uint32_t low_percent = [] {
+			const char* text = std::getenv("KYTY_AGC_CB_LOW");
+			return text != nullptr ? static_cast<uint32_t>(std::strtoul(text, nullptr, 10)) : 0u;
+		}();
+		if (low_percent == 0) {
+			return;
+		}
+		const auto capacity = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(top) -
+		                                            reinterpret_cast<uintptr_t>(bottom)) >> 2;
+		if (capacity == 0) {
+			return;
+		}
+		const auto available = GetAvailableSizeDW();
+		if (available < capacity / 64) {
+			static std::atomic<uint32_t> low_prints {0};
+			if (low_prints.fetch_add(1, std::memory_order_relaxed) < 24) {
+				std::printf("AGC command buffer %p nearly exhausted: %" PRIu64 " of %" PRIu64
+				            " dwords free after allocating %" PRIu32 " (caller %p): bottom %p top %p up %p down %p"
+				            " reserved %" PRIu32 "\n",
+				            static_cast<const void*>(this), available, capacity, size_dw, caller,
+				            static_cast<void*>(bottom), static_cast<void*>(top),
+				            static_cast<void*>(cursor_up), static_cast<void*>(cursor_down), reserved_dw);
+				std::fflush(stdout);
+			}
+		}
+		// One record per buffer: the fullest state seen since the buffer was last rewound. A rewind is
+		// seen as the used size (cursor distance) dropping; the record of the previous round is printed
+		// then if it was fuller than the threshold.
+		struct Slot {
+			std::atomic<const void*> key {nullptr};
+			std::atomic<uint64_t>    round_peak_used {0};
+			std::atomic<uint64_t>    round_peak_up {0};
+			std::atomic<uint64_t>    round_peak_down {0};
+			std::atomic<uint64_t>    round_peak_ns {0};
+			std::atomic<uint64_t>    last_used {0};
+		};
+		static Slot slots[1024];
+		Slot*       found = nullptr;
+		for (size_t probe = 0, index = (reinterpret_cast<uintptr_t>(this) >> 6u) & 1023u; probe < 1024;
+		     probe++, index = (index + 1) & 1023u) {
+			const void* expected = nullptr;
+			if (slots[index].key.load(std::memory_order_relaxed) == this ||
+			    slots[index].key.compare_exchange_strong(expected, this, std::memory_order_relaxed) ||
+			    expected == this) {
+				found = &slots[index];
+				break;
+			}
+		}
+		if (found == nullptr) {
+			return;
+		}
+		auto&      slot = *found;
+		const auto used = capacity - std::min<uint64_t>(available, capacity);
+		const auto now  = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch()).count());
+		if (used + 64 < slot.last_used.load(std::memory_order_relaxed)) {
+			const auto peak = slot.round_peak_used.exchange(0, std::memory_order_relaxed);
+			if (peak * 100 > capacity * (100 - low_percent)) {
+				std::printf("AGC command buffer mono_ns=%" PRIu64 " %p round peak fill %" PRIu64 " of %" PRIu64
+				            " dwords (%" PRIu64 " %%), commands up %" PRIu64 ", payload down %" PRIu64
+				            ", callback %p\n",
+				            slot.round_peak_ns.load(std::memory_order_relaxed), static_cast<const void*>(this),
+				            peak, capacity, peak * 100 / capacity, slot.round_peak_up.load(std::memory_order_relaxed),
+				            slot.round_peak_down.load(std::memory_order_relaxed),
+				            reinterpret_cast<const void*>(callback));
+				std::fflush(stdout);
+			}
+			slot.round_peak_used.store(0, std::memory_order_relaxed);
+		}
+		slot.last_used.store(used, std::memory_order_relaxed);
+		if (used > slot.round_peak_used.load(std::memory_order_relaxed)) {
+			slot.round_peak_used.store(used, std::memory_order_relaxed);
+			slot.round_peak_up.store(static_cast<uint64_t>(cursor_up - bottom), std::memory_order_relaxed);
+			slot.round_peak_down.store(static_cast<uint64_t>(top - cursor_down), std::memory_order_relaxed);
+			slot.round_peak_ns.store(now, std::memory_order_relaxed);
+		}
 	}
 };
 
