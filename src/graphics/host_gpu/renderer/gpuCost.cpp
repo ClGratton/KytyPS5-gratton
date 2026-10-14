@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -116,6 +117,8 @@ struct State {
 	FILE*           cb_file = nullptr;
 	FILE*           ops_file = nullptr;
 	FILE*           shaders_file = nullptr;
+	std::mutex      pending_mutex;
+	std::deque<std::shared_ptr<Record>> pending;
 	std::unordered_set<uint64_t> described;
 	std::mutex      described_mutex;
 };
@@ -680,7 +683,23 @@ void OnSubmit(vk::CommandBuffer buffer, uint64_t tick, CommandScheduler& schedul
 		s.records.erase(it);
 	}
 	record->tick = tick;
-	scheduler.DeferOperation([record] { Resolve(*record); });
+	{
+		std::lock_guard lock(s.pending_mutex);
+		s.pending.push_back(std::move(record));
+	}
+	// Completed command buffers are resolved here (ticks complete in order).
+	for (;;) {
+		std::shared_ptr<Record> done;
+		{
+			std::lock_guard lock(s.pending_mutex);
+			if (s.pending.empty() || !scheduler.IsFree(s.pending.front()->tick)) {
+				return;
+			}
+			done = std::move(s.pending.front());
+			s.pending.pop_front();
+		}
+		Resolve(*done);
+	}
 }
 
 } // namespace Libs::Graphics::GpuCost
