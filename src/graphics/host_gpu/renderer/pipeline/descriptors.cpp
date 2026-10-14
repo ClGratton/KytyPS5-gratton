@@ -108,6 +108,10 @@ vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 }
 
 vk::DescriptorImageInfo MakeImageInfo(const TextureBinding& texture, uint32_t element) {
+	if (!texture.image_id) {
+		EXIT_IF(texture.image_view != nullptr || !texture.mip_views.empty());
+		return {nullptr, nullptr, vk::ImageLayout::eGeneral};
+	}
 	vk::ImageView view = nullptr;
 	if (texture.mip_views.empty()) {
 		if (element == 0u) {
@@ -116,7 +120,7 @@ vk::DescriptorImageInfo MakeImageInfo(const TextureBinding& texture, uint32_t el
 	} else if (element < texture.mip_views.size()) {
 		view = texture.mip_views[element];
 	}
-	EXIT_IF(!texture.image_id || view == nullptr || texture.layout == vk::ImageLayout::eUndefined);
+	EXIT_IF(view == nullptr || texture.layout == vk::ImageLayout::eUndefined);
 	return {nullptr, view, texture.layout};
 }
 
@@ -382,45 +386,6 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	     descriptor.fields[5], descriptor.fields[6], descriptor.fields[7]);
 }
 
-TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::ImageResource& resource,
-                                        TextureCache::BindingType                  binding) {
-	TextureCache::ImageDesc desc {};
-	switch (resource.numeric_class) {
-		case Prospero::TextureNumericClass::Float:
-			desc.info.guest_format = Prospero::BufferFormat::k32Float;
-			break;
-		case Prospero::TextureNumericClass::Uint:
-			desc.info.guest_format = resource.atomic64 ? Prospero::BufferFormat::k32_32UInt
-			                                         : Prospero::BufferFormat::k32UInt;
-			break;
-		case Prospero::TextureNumericClass::Sint:
-			desc.info.guest_format = Prospero::BufferFormat::k32SInt;
-			break;
-		default: EXIT("null image has unsupported numeric class\n");
-	}
-	desc.info.pixel_format = VulkanFormat(desc.info.guest_format);
-	if (resource.depth_compare) {
-		if (const auto* depth_format = FindGuestDepthFormatPolicy(desc.info.guest_format)) {
-			desc.info.pixel_format = depth_format->depth_attachment_format;
-		}
-	}
-	desc.info.type            = Prospero::ImageType::kColor2D;
-	desc.info.extent          = {1, 1, 1};
-	desc.info.resources       = {1, 1};
-	desc.info.bytes_per_block = Prospero::NumBytesPerElement(desc.info.guest_format);
-	desc.info.samples         = 1;
-	desc.info.mip_layout[0]   = {0, 0, 1, 1};
-	desc.view_info.format     = resource.atomic64 ? vk::Format::eR64Uint : desc.info.pixel_format;
-	desc.view_info.type       = vk::ImageViewType::e2D;
-	desc.view_info.aspect     = resource.depth_compare ? vk::ImageAspectFlagBits::eDepth
-	                                                   : vk::ImageAspectFlagBits::eColor;
-	desc.view_info.usage      = binding == TextureCache::BindingType::Storage
-	                                ? vk::ImageUsageFlagBits::eStorage
-	                                : vk::ImageUsageFlagBits::eSampled;
-	desc.type                 = binding;
-	return desc;
-}
-
 static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& resource,
                                      const ShaderTextureResource& descriptor, vk::Format format,
                                      const SurfaceFormatInfo& surface_format, bool storage,
@@ -560,10 +525,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 
 	auto& texture_cache = m_context.GetTextureCache();
 	if (descriptor.IsNull()) {
-		auto       desc = NullTextureDesc(resource, storage ? TextureCache::BindingType::Storage
-		                                                    : TextureCache::BindingType::Texture);
-		const auto id   = texture_cache.FindImage(desc);
-		return {id, nullptr, std::move(desc)};
+		return {.layout = vk::ImageLayout::eGeneral};
 	}
 
 	// Binding resolves every texture a shader references, and while a level loads some slots still
@@ -595,9 +557,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 				            descriptor.fields[7], count);
 				std::fflush(stdout);
 			}
-			auto       desc = NullTextureDesc(resource, TextureCache::BindingType::Texture);
-			const auto id   = texture_cache.FindImage(desc);
-			return {id, nullptr, std::move(desc)};
+			return {.layout = vk::ImageLayout::eGeneral};
 		}
 	}
 
@@ -776,10 +736,10 @@ static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
 }
 
 void RenderExecutor::BindImage(ImageId id, bool storage) {
-	auto& image = m_context.GetTextureCache().GetImage(id);
-	if (image.info.data.Empty()) {
+	if (!id) {
 		return;
 	}
+	auto& image = m_context.GetTextureCache().GetImage(id);
 	if (image.binding.is_bound) {
 		image.binding.force_general |= image.binding.shader_write != storage;
 	}
@@ -1021,8 +981,9 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	auto& texture_cache = m_context.GetTextureCache();
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+		if (!images[i].image_id) continue;
 		const auto old_image = texture_cache.m_slot_images.try_get(images[i].image_id);
-		if (old_image == nullptr || (!old_image->registered && !old_image->info.data.Empty()) ||
+		if (old_image == nullptr || !old_image->registered ||
 		    old_image->binding.needs_rebind) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
@@ -1082,7 +1043,7 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	for (auto& target: colors) {
 		EXIT_IF(!target.image_id);
 		const auto old_image = cache.m_slot_images.try_get(target.image_id);
-		if (old_image == nullptr || (!old_image->registered && !old_image->info.data.Empty()) ||
+		if (old_image == nullptr || !old_image->registered ||
 		    old_image->binding.needs_rebind) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
@@ -1298,8 +1259,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 
 		for (uint32_t i = 0; i < program.info.images.size(); i++) {
-			auto& image   = m_context.GetTextureCache().GetImage(descriptors.images[i].image_id);
 			auto& binding = descriptors.images[i];
+			if (!binding.image_id) continue;
+			auto& image = m_context.GetTextureCache().GetImage(binding.image_id);
 			const auto&                 view = binding.desc.view_info;
 			const ImageSubresourceRange range {view.base_level, view.level_count, view.base_layer,
 			                                   view.layer_count};
@@ -1308,7 +1270,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			// image flagged as a target without one is not written through the framebuffer here, so
 			// it is bound like any other sampled image (reported) instead of aborting.
 			const bool target_without_attachment =
-			    !image.info.data.Empty() && image.binding.is_target &&
+			    image.binding.is_target &&
 			    image.binding.attachment_layout == vk::ImageLayout::eUndefined;
 			if (target_without_attachment) {
 				const auto count = g_target_fallback_count.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1326,13 +1288,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				}
 			}
 			Common::GpuPhase::Scope gpu_phase_transit(Common::GpuPhase::Phase::DescTransit);
-			if (image.info.data.Empty()) {
-				image.Transit(vk::ImageLayout::eGeneral,
-				              storage ? vk::AccessFlagBits2::eShaderRead |
-				                            vk::AccessFlagBits2::eShaderWrite
-				                      : vk::AccessFlagBits2::eShaderRead,
-				              range, vk_buffer);
-			} else if (image.binding.is_target && !target_without_attachment) {
+			if (image.binding.is_target && !target_without_attachment) {
 				const auto layout = image.binding.attachment_layout;
 				if (image.info.IsDepth()) {
 					const auto host_view =
@@ -1433,7 +1389,8 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		for (uint32_t i = 0; i < program.info.images.size(); ++i) {
 			const auto& resource = program.info.images[i];
 			const auto& texture = descriptors.images[i];
-			EXIT_IF(resource.mip_count != (texture.mip_views.empty() ? 1u : texture.mip_views.size()));
+			EXIT_IF(texture.image_id &&
+			        resource.mip_count != (texture.mip_views.empty() ? 1u : texture.mip_views.size()));
 			const auto kind = *ShaderRecompiler::IR::DescriptorBindingForImage(resource);
 			const auto start = image_starts[ShaderRecompiler::IR::ImageBindingIndex(kind)] +
 			                   resource.descriptor_index;

@@ -373,10 +373,6 @@ struct TextureCacheTestAccess {
     return cache.m_download_images.contains(id);
   }
 
-  static size_t NullImageCount(const TextureCache &cache) {
-    return cache.m_null_images.size();
-  }
-
   static void TrackDownload(TextureCache &cache, ImageId id) {
     std::lock_guard lock(cache.m_lock);
     cache.TrackImageDownload(id, cache.m_slot_images[id]);
@@ -5641,43 +5637,6 @@ public:
   // zero-initialized, so the production table must be cleared before its first use. The
   // whole table is poisoned before the first production use, which comes either from a
   // buffer registration or from a consumer asking for the table.
-  // A null T# is bound to a 1x1 dummy. Sampled with a comparison sampler the dummy's view must
-  // support depth comparison; R32_SFLOAT does not on NVIDIA (VUID-*-None-06479, DEVICE_LOST in
-  // upstream #1476/#1458/#1498), so the dummy of a depth-compare resource is a depth format.
-  void CheckNullTextureDepthCompare() {
-    constexpr const char *name = "NullTextureDepthCompare";
-    const auto supports_compare = [&](vk::Format format) {
-      vk::FormatProperties3 props3{};
-      vk::FormatProperties2 props2{};
-      props2.pNext = &props3;
-      m_physical_device.getFormatProperties2(format, &props2);
-      return static_cast<bool>(props3.optimalTilingFeatures &
-                               vk::FormatFeatureFlagBits2::eSampledImageDepthComparison);
-    };
-    ShaderRecompiler::IR::ImageResource resource{};
-    resource.resource_class = ShaderRecompiler::IR::ImageResourceClass::Sampled;
-    resource.numeric_class = Prospero::TextureNumericClass::Float;
-    resource.read = true;
-
-    resource.depth_compare = true;
-    const auto compare = NullTextureDesc(resource, TextureCache::BindingType::Texture);
-    Require(name, "depth-compare null image view format",
-            supports_compare(compare.view_info.format),
-            "the null image sampled with depth compare has a view format without "
-            "SAMPLED_IMAGE_DEPTH_COMPARISON");
-    Require(name, "depth-compare null image aspect",
-            compare.view_info.aspect == vk::ImageAspectFlagBits::eDepth &&
-                compare.info.IsDepth() && compare.info.pixel_format == compare.view_info.format,
-            "the depth-compare null image is not a depth image with a depth view");
-
-    resource.depth_compare = false;
-    const auto plain = NullTextureDesc(resource, TextureCache::BindingType::Texture);
-    Require(name, "plain null image stays a float colour image",
-            plain.view_info.aspect == vk::ImageAspectFlagBits::eColor && !plain.info.IsDepth() &&
-                plain.view_info.format == vk::Format::eR32Sfloat,
-            "a null image that is not compared changed format");
-  }
-
   void CheckBdaPageTableInitialization() {
     constexpr const char *name = "BdaPageTableInitialization";
     constexpr uint64_t page = BufferCache::CACHING_PAGESIZE;
@@ -6231,15 +6190,6 @@ public:
               compatible_after_exact == exact,
               "non-exact lookup did not retain the last compatible "
               "registration");
-
-      auto null_desc = sampled;
-      null_desc.info.data = {};
-      auto null_repeat_desc = null_desc;
-      const auto null_image = texture_cache.FindImage(null_desc);
-      const auto null_repeat = texture_cache.FindImage(null_repeat_desc);
-      Require(name, "null image",
-              null_image && null_repeat == null_image && null_image != exact,
-              "typed null-image lookup was not stable");
 
       constexpr uint64_t extent_alias_offset = 0x2400000;
       auto narrow_target = sampled;
@@ -10707,6 +10657,110 @@ public:
     return result;
   }
 
+  void CheckNullTextureDescriptors() {
+    constexpr const char *name = "NullTextureDescriptors";
+    constexpr uintptr_t base = 0x0000000204900000ull;
+    constexpr uint64_t size = 0x10000;
+    std::vector<u32> reader{
+        EncodeVop2(0x1a, 20, InlineU32(5), 0),
+        EncodeVop1(0x01, 21, InlineU32(0)),
+        EncodeVop1(0x01, 22, InlineU32(0)),
+        EncodeMimg0(0x00, 0xf), EncodeMimg1(1, 21)};
+    AppendVMovLiteral(&reader, 23, std::bit_cast<u32>(0.5f));
+    AppendVMovLiteral(&reader, 24, std::bit_cast<u32>(0.5f));
+    reader.insert(reader.end(), {
+        EncodeMimg0(0x27, 0xf), EncodeMimg1(5, 23, 0, 2),
+        0xbf8c3f70u,
+        EncodeMubuf0(0x1e), EncodeMubuf1(1, 3, 20),
+        EncodeMubuf0(0x1e, 16), EncodeMubuf1(5, 3, 20)});
+    AppendEnd(&reader);
+    std::vector<u32> writer{
+        EncodeVopc(0xd2, InlineU32(0), 0),
+        EncodeVop1(0x01, 21, InlineU32(0)),
+        EncodeVop1(0x01, 22, InlineU32(0))};
+    for (u32 i = 1; i <= 4; ++i)
+      AppendVMovLiteral(&writer, i, std::bit_cast<u32>(-1000000.0f));
+    writer.insert(writer.end(), {EncodeMimg0(0x08, 0xf), EncodeMimg1(1, 21)});
+    AppendEnd(&writer);
+    for (const auto *code : {&reader, &writer})
+      ShaderMapUserData(reinterpret_cast<uint64_t>(code->data()),
+          {.type = Prospero::ShaderBinaryType::kCs,
+           .code_size_bytes = static_cast<u32>(code->size() * sizeof(u32))});
+
+    EnsureRuntimeContext();
+    int64_t physical = -1;
+    Require(name, "allocate", LibKernel::Memory::KernelAllocateDirectMemory(
+        0, LibKernel::Memory::KernelGetDirectMemorySize(), size, size, 0, &physical) == 0,
+        "null texture output allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "map", LibKernel::Memory::KernelMapDirectMemory(
+        &mapped, size, 0x3, 0x10, physical, size) == 0 && mapped == reinterpret_cast<void *>(base),
+        "null texture output mapping failed");
+    std::memset(mapped, 0xa5, size);
+    RenderContext context(m_runtime_context);
+    context.InitializeGpu(nullptr);
+    LibKernel::Memory::InstallGpuResources(&context);
+    context.GetGpu().SendCommandSync([&] {
+      CommandProcessor processor(context, 0);
+      processor.BufferInit();
+      context.MapMemory(base, size);
+      auto &shaders = processor.GetShCtx();
+      auto &executor = context.GetRenderExecutor();
+      for (u32 wave_size : {32u, 64u}) {
+        const auto output_address = [&](u32 phase) {
+          return base + (wave_size == 64 ? 0x8000u : 0u) + 0x100u + phase * 0x2000u;
+        };
+        for (u32 sgpr = 0; sgpr < 16; ++sgpr)
+          shaders.SetCsUserSgpr(sgpr, 0, HW::UserSgprType::Unknown);
+        shaders.SetCsUserSgpr(8, 0x92u, HW::UserSgprType::Unknown);
+        for (u32 phase = 0; phase < 3; ++phase) {
+          const auto &code = phase == 1 ? writer : reader;
+          shaders.SetCsShader({.data_addr = reinterpret_cast<uint64_t>(code.data()),
+                               .num_thread_x = wave_size, .num_thread_y = 1, .num_thread_z = 1,
+                               .wave_size = static_cast<uint8_t>(wave_size), .user_sgpr = 16});
+          ShaderBufferResource output{};
+          output.UpdateAddress48(output_address(phase));
+          output.fields[2] = wave_size * 8u * sizeof(u32);
+          output.fields[3] = DstSel(4, 5, 6, 7) |
+              (static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u);
+          for (u32 i = 0; i < 4; ++i)
+            shaders.SetCsUserSgpr(12 + i, output.fields[i], HW::UserSgprType::Unknown);
+          ShaderComputeInputInfo input{};
+          (void)context.GetPipelineCache().GetComputeProgram(
+              shaders.GetCs(), processor.GetCtx().GetShaderRegisters(), input);
+          PreparedBindings bindings;
+          executor.PrepareBindings(input.stage, bindings);
+          executor.RebindImages(bindings);
+          Require(name, "native null image bindings", !bindings.images.empty() &&
+              std::ranges::all_of(bindings.images, [](const auto &binding) {
+                return !binding.image_id && binding.image_view == nullptr &&
+                    binding.mip_views.empty() &&
+                    MakeImageInfo(binding).imageView == nullptr &&
+                    binding.layout == vk::ImageLayout::eGeneral;
+              }), "an all-zero guest descriptor allocated or bound a backing image");
+          processor.DispatchDirect(1, 1, 1, 0x41u);
+        }
+        for (u32 phase : {0u, 2u}) {
+          const auto address = output_address(phase);
+          std::vector<u32> actual(wave_size * 8u);
+          context.GetBufferCache().ReadMemory(address, actual.size() * sizeof(u32));
+          Require(name, "null RGBA before and after storage write",
+              LibKernel::Memory::TryReadBacking(address, actual.data(), actual.size() * sizeof(u32)) &&
+                  std::ranges::all_of(actual, [](u32 value) { return value == 0; }),
+              "wave" + std::to_string(wave_size) + " phase" + std::to_string(phase) +
+                  " returned nonzero load/sample components from an unbound texture");
+        }
+      }
+      context.UnmapMemory(base, size);
+      context.GetCommandScheduler().Finish();
+    });
+    LibKernel::Memory::InstallGpuResources(nullptr);
+    context.ShutdownGpu();
+    Require(name, "release", LibKernel::Memory::KernelCheckedReleaseDirectMemory(physical, size) == 0,
+            "null texture output release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
   void CheckScalarLeafCall() {
     constexpr const char* name = "ScalarLeafCall";
     constexpr uintptr_t base = 0x0000000204800000ull;
@@ -13531,6 +13585,8 @@ public:
       }
       ShaderRecompiler::IR::ApplyResourceSpecialization(
           null_program, null_specialization);
+      null_program.info.images.back().mip_mode = ShaderRecompiler::IR::ImageMipMode::Dynamic;
+      null_program.info.images.back().mip_count = 3;
       set_image_bindings(null_program);
       ShaderRecompiler::IR::CompiledShaderInfo null_info{};
       null_info.stage = null_program.stage;
@@ -13543,38 +13599,27 @@ public:
       Require(name, "null descriptor count",
               null_bindings.images.size() == 3,
               "null descriptor preparation lost an image binding");
-      const auto null_image_id = null_bindings.images[0].image_id;
-      const auto &null_image = texture_cache.GetImage(null_image_id);
-      Require(name, "one null image per format",
-              null_bindings.images[1].image_id == null_image_id &&
-                  null_bindings.images[2].image_id == null_image_id &&
-                  TextureCacheTestAccess::NullImageCount(texture_cache) == 1,
-              "null view dimension or usage created another image allocation");
-      Require(name, "null descriptors share final cache acquisition",
-              null_image.info.data.Empty() && !null_image.binding.is_bound &&
-                  !null_image.binding.is_target &&
-                  !null_image.binding.needs_rebind &&
-                  null_image.usage.texture && null_image.usage.storage &&
-                  null_image.IsGpuModified() &&
-                  !TextureCacheTestAccess::PendingDownload(texture_cache,
-                                                           null_image_id),
-              "the shared null image did not preserve texture/storage "
-              "acquisition without guest readback or RenderExecutor ownership");
       descriptor_pipelines.push_back(RenderExecutorTestAccess::CommitBindings(
           executor, scheduler.Current(), null_bindings));
-      Require(name, "null descriptor general layouts",
+      Require(name, "null descriptors have no cache image or native view",
               std::ranges::all_of(null_bindings.images,
                                   [](const auto &binding) {
                                     const auto info = MakeImageInfo(binding);
-                                    return binding.layout ==
+                                    return !binding.image_id &&
+                                           binding.image_view == nullptr &&
+                                           binding.mip_views.empty() &&
+                                           binding.layout ==
                                                vk::ImageLayout::eGeneral &&
-                                           info.imageView ==
-                                               binding.image_view &&
+                                           info.imageView == nullptr &&
                                            info.imageLayout == binding.layout;
-                                  }) &&
-                  null_image.backing.state.layout == vk::ImageLayout::eGeneral,
-              "shared sampled/storage null descriptors did not retain "
-              "the general layout through descriptor generation");
+                                  }),
+              "sampled/storage null descriptors acquired a backing image or lost their general layout");
+      for (u32 mip = 0; mip < 3; ++mip) {
+        const auto info = MakeImageInfo(null_bindings.images.back(), mip);
+        Require(name, "null storage mip descriptors",
+                info.imageView == nullptr && info.imageLayout == vk::ImageLayout::eGeneral,
+                "a null storage mip acquired a backing image");
+      }
 
       constexpr uint64_t target_mip_size = 0x10000;
       const auto make_target_desc = [&](uint64_t address, uint64_t size,
@@ -20024,10 +20069,14 @@ private:
     available_provoking_vertex.pNext = &available_feedback_dynamic;
     vk::PhysicalDeviceImageViewMinLodFeaturesEXT available_min_lod{};
     available_min_lod.pNext = &available_provoking_vertex;
+    vk::PhysicalDeviceRobustness2FeaturesEXT available_robustness2{};
+    available_robustness2.pNext = &available_min_lod;
     vk::PhysicalDeviceFeatures2 available_features2{};
     available_features2.sType = vk::StructureType::ePhysicalDeviceFeatures2;
-    available_features2.pNext = &available_min_lod;
+    available_features2.pNext = &available_robustness2;
     m_physical_device.getFeatures2(&available_features2);
+    Require("VulkanHarness", "dispatch", available_robustness2.nullDescriptor == true,
+            "null descriptors are not supported");
     Require("VulkanHarness", "dispatch",
             available_features.shaderStorageImageWriteWithoutFormat == true,
             "shaderStorageImageWriteWithoutFormat is not supported");
@@ -20153,7 +20202,10 @@ private:
     min_lod.pNext = m_rasterization_supported
                         ? static_cast<void *>(&provoking_vertex)
                         : static_cast<void *>(&derivatives);
-    device_info.pNext = &min_lod;
+    vk::PhysicalDeviceRobustness2FeaturesEXT robustness2{};
+    robustness2.nullDescriptor = true;
+    robustness2.pNext = &min_lod;
+    device_info.pNext = &robustness2;
     vk::PhysicalDeviceFeatures device_features{};
     device_features.shaderStorageImageWriteWithoutFormat = true;
     device_features.shaderImageGatherExtended = true;
@@ -20170,6 +20222,7 @@ private:
         VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
         VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
         VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,
+        VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,
         VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME};
     if (m_timestamps_supported) {
       device_extensions.push_back(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
@@ -20184,8 +20237,8 @@ private:
       device_extensions.push_back(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
     }
     // KYTY_TEST_ROBUST_BOUNDS=1: create the device like the emulator does (robustBufferAccess +
-    // robustBufferAccess2) and give the compiler the matching policy.
-    vk::PhysicalDeviceRobustness2FeaturesEXT robustness2{};
+    // robustBufferAccess2) and give the compiler the matching policy. nullDescriptor is always on
+    // (the renderer binds unbound textures as native null descriptors).
     vk::PhysicalDeviceRobustness2PropertiesEXT robustness2_properties{};
     if (RobustBoundsRequested()) {
       vk::PhysicalDeviceRobustness2FeaturesEXT available_robustness2{};
@@ -20200,10 +20253,7 @@ private:
       robust_properties.pNext = &robustness2_properties;
       m_physical_device.getProperties2(&robust_properties);
       robustness2.robustBufferAccess2 = true;
-      robustness2.pNext = const_cast<void *>(device_info.pNext);
-      device_info.pNext = &robustness2;
       device_features.robustBufferAccess = true;
-      device_extensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
       m_robust_buffer_access2 = true;
       m_robust_storage_alignment =
           static_cast<u32>(robustness2_properties.robustStorageBufferAccessSizeAlignment);
@@ -46474,14 +46524,14 @@ int main(int argc, char **argv) {
     vulkan.CheckUnifiedTextureCacheFlow();
     return 0;
   }
-  if (argc == 2 && std::strcmp(argv[1], "--null-depth-compare-only") == 0) {
-    VulkanHarness vulkan;
-    vulkan.CheckNullTextureDepthCompare();
-    return 0;
-  }
   if (argc == 2 && std::strcmp(argv[1], "--bda-page-table-init-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBdaPageTableInitialization();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--null-descriptors-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckNullTextureDescriptors();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--known-stores-only") == 0) {
@@ -46517,6 +46567,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--indirect-image-only") == 0) {
     CheckImageSamplerSpecialization();
     VulkanHarness vulkan;
+    vulkan.CheckNullTextureDescriptors();
     CheckIndirectImageKeySwitch(vulkan);
     CheckFiniteInlineSamplerPhi(vulkan);
     RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
@@ -46695,11 +46746,11 @@ int main(int argc, char **argv) {
   vulkan.CheckGpuMappedRangeLifecycle();
   vulkan.CheckStreamBufferRing();
   vulkan.CheckBdaPageTableInitialization();
-  vulkan.CheckNullTextureDepthCompare();
   vulkan.CheckGpuTilerCpuParity();
   vulkan.CheckNativeIndirectDispatch();
   vulkan.CheckMeshIndirectArgs();
   CheckComputeLdsLimit(vulkan);
+  vulkan.CheckNullTextureDescriptors();
   vulkan.CheckBdaPageTableUploads();
   vulkan.CheckUnifiedTextureCacheFlow();
   vulkan.CheckUnifiedImageViewCache();
