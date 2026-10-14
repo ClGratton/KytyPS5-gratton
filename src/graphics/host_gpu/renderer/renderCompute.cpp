@@ -13,6 +13,7 @@
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/knownStores.h"
+#include "graphics/host_gpu/renderer/cache/storeExtents.h"
 #include "kernel/memory.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
@@ -69,18 +70,7 @@ static void PrepareUniformStores(RenderContext& context, const ShaderComputeInpu
 	}
 	const auto& resources = *input.stage.resources;
 	const auto& program   = *input.stage.program;
-	scope.extents.assign(resources.buffers.size(), {});
-	for (uint32_t i = 0; i < resources.buffers.size(); i++) {
-		const auto d    = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
-		const auto base = d.Base48();
-		const auto size = static_cast<uint64_t>(d.GetSize());
-		auto&      e    = scope.extents[i];
-		e.base          = base;
-		e.size          = size;
-		e.stride        = d.Stride();
-		e.direct        = base != 0 && size != 0 && !d.AddTid() && (d.Stride() == 0 || !d.SwizzleEnabled()) &&
-		                  LibKernel::Memory::IsFullyMapped(base, size);
-	}
+	MakeStoreExtents(resources, scope.extents);
 	auto& buffers = context.GetBufferCache();
 	EvaluateStoreFlow(*resources.uniform_stores, scope.extents, invocations <= 32,
 	                  [&](uint64_t address, uint32_t& value) { return buffers.TryReadCurrentDword(address, &value); },
