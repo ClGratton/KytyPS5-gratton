@@ -273,6 +273,9 @@ struct ConfigOptions {
 	// --texture-binding-reuse: a draw keeps a slot's image binding while the descriptor, the shader's
 	// image resource and the set of cached images are unchanged. Exact; default off until measured.
 	bool                   texture_binding_reuse       = false;
+	// --permutation-hint: the search for an already-compiled shader permutation tries the last hit first.
+	// Exact (a shader's permutations are pairwise distinct); default off until measured.
+	bool                   permutation_hint = false;
 	// --tracker-lockfree: the buffer cache asks the memory tracker whether a range is CPU- or GPU-modified
 	// through lock-free mirrors of the dirty bits instead of the region locks. Exact; default off until measured.
 	bool                   tracker_lockfree = false;
@@ -393,6 +396,7 @@ bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
 bool              ImageLookupMemoEnabled();
 bool              TextureBindingReuseEnabled();
+bool              PermutationHintEnabled();
 bool              TrackerLockfreeEnabled();
 bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();

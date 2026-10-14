@@ -25,6 +25,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
+#include "graphics/host_gpu/renderer/pipeline/hintedSearch.h"
 #include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -65,6 +66,33 @@
 #include <xxhash.h>
 
 namespace Libs::Graphics {
+
+namespace {
+
+// KYTY_PERMUTATION_HINT_VERIFY=1: every hinted search also runs the plain scan and compares.
+bool PermutationHintVerifyEnabled() {
+	static const bool enabled = std::getenv("KYTY_PERMUTATION_HINT_VERIFY") != nullptr;
+	return enabled;
+}
+
+void PermutationHintNoteVerified(bool same) {
+	static std::atomic<uint64_t> checked {0};
+	static std::atomic<uint64_t> mismatches {0};
+	const auto                   n = checked.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (!same) {
+		mismatches.fetch_add(1, std::memory_order_relaxed);
+		std::printf("PermutationHint verify: MISMATCH at search %" PRIu64 "\n", n);
+		std::fflush(stdout);
+	}
+	if ((n & ((1u << 20) - 1u)) == 0) {
+		std::printf("PermutationHint verify: %" PRIu64 " hinted searches compared with the plain scan, %" PRIu64
+		            " mismatches\n",
+		            n, mismatches.load(std::memory_order_relaxed));
+		std::fflush(stdout);
+	}
+}
+
+} // namespace
 
 namespace {
 
@@ -738,6 +766,11 @@ struct PipelineCache::ProgramCache {
 			if (duplicate) {
 				return existing;
 			}
+			// A permutation published with calls may equal another in everything FindExistingLocked<false>
+			// compares: from now on the permutation hint cannot tell which one the plain scan returns.
+			if (has_calls) {
+				published_with_calls.store(true, std::memory_order_relaxed);
+			}
 			return &permutations.emplace_back(std::move(compiled));
 		}
 
@@ -755,6 +788,10 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::deque<Permutation>                      permutations;
 		mutable std::shared_mutex                    mutex;
+		// --permutation-hint: the index of the last permutation FindExistingLocked<false> returned, and
+		// whether a permutation was ever published with calls (see Publish).
+		std::atomic<size_t>                          permutation_hint {0};
+		std::atomic<bool>                            published_with_calls {false};
 
 	private:
 		// Takes the entry lock, publishing "waiting for the entry lock" for the hang watchdog.
@@ -778,19 +815,38 @@ struct PipelineCache::ProgramCache {
 		                                const ShaderRecompiler::IR::ResourceSpecialization& wanted,
 		                                std::span<const uint32_t> function_code) {
 			Common::GpuPhase::Scope gpu_phase_search(Common::GpuPhase::Phase::PipePermSearch);
-			for (auto& candidate: permutations) {
+			const auto matches = [&](const Permutation& candidate) {
 				const auto& layout = candidate.program.bindings;
 				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
 				        push_data_cursor, layout.ShaderDataDwords()) ||
 				    candidate.specialization != wanted) {
-					continue;
+					return false;
 				}
 				if constexpr (HasCalls) {
-					if (!std::ranges::equal(candidate.function_code, function_code)) continue;
+					if (!std::ranges::equal(candidate.function_code, function_code)) return false;
 				}
-				return &candidate;
+				return true;
+			};
+			if constexpr (!HasCalls) {
+				// --permutation-hint: Publish rejects a permutation equal to a published one, so without
+				// permutations published with calls at most one matches and the hinted one is the scan's.
+				const bool use_hint = Config::PermutationHintEnabled() &&
+				                      !published_with_calls.load(std::memory_order_relaxed);
+				auto* found = FindWithHint(permutations, permutation_hint, use_hint, matches);
+				if (use_hint && PermutationHintVerifyEnabled()) {
+					Permutation* plain = nullptr;
+					for (auto& candidate: permutations) {
+						if (matches(candidate)) {
+							plain = &candidate;
+							break;
+						}
+					}
+					PermutationHintNoteVerified(plain == found);
+				}
+				return found;
+			} else {
+				return FindWithHint(permutations, permutation_hint, false, matches);
 			}
-			return nullptr;
 		}
 	};
 

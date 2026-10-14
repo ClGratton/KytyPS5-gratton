@@ -170,6 +170,9 @@ QList<Option> BuildTable() {
 	defs.append({"tracker_lockfree", "--tracker-lockfree", Tab::Gpu, "CPU cost per draw", Kind::Bool, "Answer tracker queries without locks",
 	             "The buffer cache asks whether a guest range is CPU- or GPU-modified through lock-free copies of the dirty bits instead of taking the tracker's region locks. Exact; lowers the GPU thread's CPU time per buffer binding.",
 	             EMU_BOOL(tracker_lockfree)});
+	defs.append({"permutation_hint", "--permutation-hint", Tab::Gpu, "CPU cost per draw", Kind::Bool, "Try the last shader permutation first",
+	             "A draw looks for its shader permutation among those already compiled for the shader; this tries the one found last time before scanning them all. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(permutation_hint)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

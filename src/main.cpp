@@ -178,6 +178,7 @@ static void PrintUsage() {
 	         "                                       safe performance flags it names (submit-coalesce,\n"
 	         "                                       elide-barriers, bda-sync-skip, clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
+	         "                                       permutation-hint,\n"
 	         "                                       tracker-lockfree,\n"
 	         "                                       srt-plans, readback-queue,\n"
 	         "                                       heap-trim) at the next presented frame; applied changes\n"
@@ -301,6 +302,8 @@ static void PrintUsage() {
 	::printf("  --tracker-lockfree <true|false>      Answer dirty-page queries\n"
 	         "                                       without the region locks (exact, less GPU-thread CPU per\n"
 	         "                                       buffer binding). Default: false.\n");
+	::printf("  --permutation-hint <true|false>      Try the last shader permutation first\n"
+	         "                                       (exact, less GPU-thread CPU per draw). Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -1008,6 +1011,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--tracker-lockfree") {
 			if (!ParseBool(value, options.config.tracker_lockfree)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--permutation-hint") {
+			if (!ParseBool(value, options.config.permutation_hint)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

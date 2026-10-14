@@ -65,6 +65,7 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// A slot's kept binding is checked against the image-set generation on every use, and
 	// ResolveTexture stops recording sources while off, so a toggle never leaves a stale source.
 	registry.Register("texture-binding-reuse", &g_config->texture_binding_reuse, false);
+	registry.Register("permutation-hint", &g_config->permutation_hint, false);
 	registry.Register("tracker-lockfree", &g_config->tracker_lockfree, false);
 	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
 	// the middle of a submission costs plans (misses), never a wrong draw.
@@ -145,6 +146,10 @@ bool TextureBindingReuseEnabled() {
 
 bool TrackerLockfreeEnabled() {
 	return Common::RuntimeToggles::Read(g_config->tracker_lockfree);
+}
+
+bool PermutationHintEnabled() {
+	return Common::RuntimeToggles::Read(g_config->permutation_hint);
 }
 
 bool SrtPlanShadowEnabled() {
