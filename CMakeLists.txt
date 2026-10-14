@@ -539,6 +539,11 @@ add_executable(barrier_elision_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(barrier_elision_tests PRIVATE ${inc_headers})
 
+add_executable(pending_writes_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PendingWritesTests.cpp"
+)
+target_include_directories(pending_writes_tests PRIVATE ${inc_headers})
+
 add_executable(known_fills_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/KnownFillsTests.cpp"
 )
@@ -931,6 +936,7 @@ if(BUILD_TESTING)
 	add_test(NAME submit_coalescer COMMAND $<TARGET_FILE:submit_coalescer_tests>)
 	add_test(NAME drain_causes COMMAND $<TARGET_FILE:drain_causes_tests>)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
+	add_test(NAME pending_writes COMMAND $<TARGET_FILE:pending_writes_tests>)
 	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
 	add_test(NAME known_stores COMMAND $<TARGET_FILE:known_stores_tests>)
 	add_test(NAME known_copies COMMAND $<TARGET_FILE:known_copies_tests>)
@@ -1163,6 +1169,7 @@ if(BUILD_TESTING)
 		submit_coalescer_tests
 		drain_causes_tests
 		barrier_elision_tests
+		pending_writes_tests
 		known_fills_tests
 		known_stores_tests
 		known_copies_tests

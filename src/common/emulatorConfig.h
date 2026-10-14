@@ -264,6 +264,10 @@ struct ConfigOptions {
 	// --elide-barriers (K14): leave out a guest global barrier when nothing was recorded since the
 	// previous one in the same command buffer. Default off.
 	bool                   elide_barriers              = false;
+	// --defer-draw-write-barriers: a draw whose shaders write buffers leaves the barrier that makes
+	// the writes visible pending (and keeps the render pass open) until something may read them
+	// (renderer/pendingWrites.h). Default off.
+	bool                   defer_draw_write_barriers   = false;
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
 	// clear discovery needs no GPU->CPU readback for them. Default off.
 	bool                   known_fills                 = false;
@@ -409,6 +413,7 @@ bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
+bool              DeferDrawWriteBarriers();
 bool              KnownFillsEnabled();
 bool              KnownStoresEnabled();
 bool              KnownCopiesEnabled();

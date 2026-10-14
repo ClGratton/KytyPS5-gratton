@@ -58,6 +58,9 @@ void Load(const ConfigOptions& cfg) {
 void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("submit-coalesce", &g_config->submit_coalesce, false);
 	registry.Register("elide-barriers", &g_config->elide_barriers, false);
+	// Read per draw; a pending barrier stays correct whichever way the flag flips (the next
+	// EndRendering records it, and the draws re-check the overlap while rendering continues).
+	registry.Register("defer-draw-write-barriers", &g_config->defer_draw_write_barriers, false);
 	registry.Register("bda-sync-skip", &g_config->bda_sync_skip, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
 	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
@@ -139,6 +142,10 @@ bool GetPipelineVariantsReplay() {
 
 bool ElideBarriersEnabled() {
 	return Common::RuntimeToggles::Read(g_config->elide_barriers);
+}
+
+bool DeferDrawWriteBarriers() {
+	return Common::RuntimeToggles::Read(g_config->defer_draw_write_barriers);
 }
 
 bool KnownFillsEnabled() {
