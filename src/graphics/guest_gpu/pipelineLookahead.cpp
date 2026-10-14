@@ -265,10 +265,6 @@ uint64_t UserWords(const HW::UserSgprInfo& sgpr, uint64_t h) {
 	return DR::HashBytes(sgpr.value, std::min<uint32_t>(sgpr.count, HW::UserSgprInfo::SGPRS_MAX) * 4u, h);
 }
 
-void ClearUserSgprValues(HW::UserSgprInfo& sgpr) {
-	std::memset(sgpr.value, 0, sizeof(sgpr.value));
-}
-
 void DrawSignature(CommandProcessor& cp, const ShadowDraw& draw) {
 	const auto& ctx = cp.GetCtx();
 	const auto& sh  = cp.GetShCtx();
@@ -283,22 +279,32 @@ void DrawSignature(CommandProcessor& cp, const ShadowDraw& draw) {
 		rt = DR::HashObject(ctx.GetRenderTarget(slot), rt);
 	}
 	in.h[DR::CtxRt] = rt;
-	HW::Shader stat = sh; // copy: pointers and user SGPR values removed
-	auto&      vs   = const_cast<HW::VertexShaderInfo&>(stat.GetVs());
-	auto&      ps   = const_cast<HW::PixelShaderInfo&>(stat.GetPs());
-	vs.hs_regs.user_data_addr = vs.gs_regs.user_data_addr = 0;
-	ps.ps_regs.user_data_addr = ps.ps_regs.auxiliary_table_addr = 0;
-	ClearUserSgprValues(vs.hs_user_sgpr);
-	ClearUserSgprValues(vs.gs_user_sgpr);
-	ClearUserSgprValues(ps.ps_user_sgpr);
-	in.h[DR::ShStatic] = DR::HashObject(stat);
-	uint64_t user = DR::Mix(sh.GetVs().hs_regs.user_data_addr, sh.GetVs().gs_regs.user_data_addr);
-	user          = DR::Mix(DR::Mix(user, sh.GetPs().ps_regs.user_data_addr), sh.GetPs().ps_regs.auxiliary_table_addr);
-	user          = UserWords(sh.GetVs().hs_user_sgpr, user);
-	user          = UserWords(sh.GetVs().gs_user_sgpr, user);
-	user          = UserWords(sh.GetPs().ps_user_sgpr, user);
-	in.h[DR::ShUser] = user;
-	in.h[DR::Args]   = DR::HashObject(cp.GetUcfg(), DR::HashObject(draw));
+	const auto& vsr = sh.GetVs();
+	const auto& psr = sh.GetPs();
+	in.h[DR::ShVsBase] = DR::Mix(DR::Mix(DR::Mix(vsr.es_regs.data_addr, vsr.ls_regs.data_addr), vsr.hs_regs.data_addr),
+	                             vsr.gs_regs.data_addr);
+	{
+		HW::PsStageRegisters ps = psr.ps_regs;
+		ps.user_data_addr = ps.auxiliary_table_addr = 0;
+		in.h[DR::ShPsRegs] = DR::HashObject(ps);
+	}
+	in.h[DR::ShRsrcVs] = DR::HashObject(vsr.gs_regs.rsrc2, DR::HashObject(vsr.gs_regs.rsrc1,
+	                         DR::HashObject(vsr.hs_regs.rsrc2, DR::HashObject(vsr.hs_regs.rsrc1))));
+	{
+		uint64_t meta = 0;
+		for (const auto* info: {&vsr.hs_user_sgpr, &vsr.gs_user_sgpr, &psr.ps_user_sgpr}) {
+			meta = DR::HashBytes(info->type, sizeof(info->type), DR::Mix(meta, info->count));
+		}
+		in.h[DR::ShSgprMeta] = meta;
+	}
+	uint64_t user = DR::Mix(vsr.hs_regs.user_data_addr, vsr.gs_regs.user_data_addr);
+	user          = DR::Mix(DR::Mix(user, psr.ps_regs.user_data_addr), psr.ps_regs.auxiliary_table_addr);
+	user          = UserWords(vsr.hs_user_sgpr, user);
+	user          = UserWords(vsr.gs_user_sgpr, user);
+	user          = UserWords(psr.ps_user_sgpr, user);
+	in.h[DR::ShUser]   = user;
+	in.h[DR::DrawArgs] = DR::HashObject(draw);
+	in.h[DR::Ucfg]     = DR::HashObject(cp.GetUcfg());
 	DR::NoteDraw(in);
 }
 
@@ -308,11 +314,14 @@ void DispatchSignature(CommandProcessor& cp, const ShadowDispatch& dispatch) {
 	in.kind          = DR::Dispatch;
 	in.program       = cs.cs_regs.data_addr;
 	in.h[DR::CtxAll] = DR::HashObject(cp.GetCtx().GetShaderRegisters());
-	HW::ComputeShaderInfo stat = cs;
-	ClearUserSgprValues(stat.cs_user_sgpr);
-	in.h[DR::ShStatic] = DR::HashObject(stat);
-	in.h[DR::ShUser]   = UserWords(cs.cs_user_sgpr, 0);
-	in.h[DR::Args]     = DR::HashObject(dispatch);
+	{
+		HW::CsStageRegisters regs = cs.cs_regs;
+		in.h[DR::ShPsRegs]        = DR::HashObject(regs);
+	}
+	in.h[DR::ShVsBase]   = cs.cs_regs.data_addr;
+	in.h[DR::ShSgprMeta] = DR::HashBytes(cs.cs_user_sgpr.type, sizeof(cs.cs_user_sgpr.type), cs.cs_user_sgpr.count);
+	in.h[DR::ShUser]     = UserWords(cs.cs_user_sgpr, 0);
+	in.h[DR::DrawArgs] = DR::HashObject(dispatch);
 	DR::NoteDraw(in);
 }
 } // namespace

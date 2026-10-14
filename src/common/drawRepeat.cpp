@@ -17,9 +17,9 @@ struct Sig {
 
 // Joint equalities that matter (see the notes): bit i of `equal` = component i equal.
 constexpr unsigned kJoint = 5;
-// J0 = state equal (ctx, args); J1 = content equal (static shader regs, reads values);
+// J0 = state equal (ctx, user config, draw args); J1 = content equal (shader regs without pointers, reads values);
 // J2 = J0 & J1; J3 = J2 with the pointer-carrying components too (strictly identical);
-// J4 = ctx + static shader regs + args (everything but the reads and the pointers)
+// J4 = state + shader regs (everything but the reads and the pointers)
 const char* const kJointNames[kJoint] = {"state", "content", "state_content", "strict", "no_reads"};
 
 struct State {
@@ -47,7 +47,7 @@ State& S() {
 				std::fprintf(s.csv, "frame,items");
 				for (const char* k: {"d", "c"}) {
 					std::fprintf(s.csv, ",%s_n,%s_matched", k, k);
-					for (const char* c: {"ctx_all", "ctx_rt", "sh_static", "sh_user", "args", "reads_values", "reads_inputs"}) {
+					for (const char* c: kComponentNames) {
 						std::fprintf(s.csv, ",%s_eq_%s", k, c);
 					}
 					for (const char* j: kJointNames) {
@@ -173,14 +173,15 @@ void NoteDraw(const Inputs& in) noexcept {
 			s.equal[in.kind][c] += eq[c] ? 1 : 0;
 		}
 		const bool plan_same = p.has_plan == sig.has_plan;
-		const bool state     = eq[CtxAll] && eq[Args];
-		const bool content   = eq[ShStatic] && eq[ReadsValues] && plan_same;
+		const bool state     = eq[CtxAll] && eq[Ucfg] && eq[DrawArgs];
+		const bool shaders   = eq[ShVsBase] && eq[ShPsRegs] && eq[ShRsrcVs] && eq[ShSgprMeta];
+		const bool content   = shaders && eq[ReadsValues] && plan_same;
 		s.matched[in.kind]++;
 		s.joint[in.kind][0] += state ? 1 : 0;
 		s.joint[in.kind][1] += content ? 1 : 0;
 		s.joint[in.kind][2] += (state && content) ? 1 : 0;
 		s.joint[in.kind][3] += (state && content && eq[ShUser] && eq[ReadsInputs]) ? 1 : 0;
-		s.joint[in.kind][4] += (state && eq[ShStatic]) ? 1 : 0;
+		s.joint[in.kind][4] += (state && shaders) ? 1 : 0;
 	}
 	s.cur[key] = sig;
 }

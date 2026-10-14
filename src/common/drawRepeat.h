@@ -31,13 +31,20 @@ enum Kind : uint32_t { Draw = 0, Dispatch = 1 };
 enum Component : unsigned {
 	CtxAll = 0,   // all context registers
 	CtxRt,        // the render targets and the depth target (addresses move when the swap chain rotates)
-	ShStatic,     // shader stage registers without user-data pointers / user SGPR values
+	ShVsBase,     // code addresses of the ES/LS/HS/GS stages
+	ShPsRegs,     // the pixel stage registers (code address, resource words) without pointers
+	ShRsrcVs,     // HS/GS resource words
+	ShSgprMeta,   // user SGPR counts and types (no values)
 	ShUser,       // user-data address words and user SGPR values (root-table pointers, immediates)
-	Args,         // user config registers and the draw arguments
+	DrawArgs,     // the draw arguments (counts, index type)
+	Ucfg,         // user config registers (primitive type, index offsets, GE control, ...)
 	ReadsValues,  // the dwords the scalar-read walk read (values only)
 	ReadsInputs,  // the walk's inputs (user data dwords, shader base, workgroup counts)
 	ComponentCount
 };
+static constexpr const char* kComponentNames[ComponentCount] = {
+    "ctx_all", "ctx_rt", "sh_vs_base", "sh_ps_regs", "sh_rsrc_vs", "sh_sgpr_meta", "sh_user", "draw_args", "ucfg",
+    "reads_values", "reads_inputs"};
 
 struct Inputs {
 	Kind     kind    = Draw;
