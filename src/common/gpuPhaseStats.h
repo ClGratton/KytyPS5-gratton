@@ -65,6 +65,15 @@ enum class Phase : uint8_t {
 	DescPush,        // CommitBindings: push constants and the push-descriptor / descriptor-set update
 	SrtPlanShadow,   // --srt-plan-shadow: lookup, validity check and comparison of a plan on kyGpu
 	SrtPlanAdopt,    // --srt-plans: lookup and validity check of a plan on kyGpu (inside pipe_materialize)
+	// Sub-phases of the draw and SRT work (carved out of Draw and Srt, which keep the remainder).
+	DrawChecks,      // DrawIndex/DrawAuto front matter: metadata/depth-copy/resolve checks, topology, restart
+	DrawTargets,     // render-target and depth-target description and lookup, AcquireRenderTargets
+	DrawVertex,      // AcquireVertexBuffers and PrepareIndexBuffer (buffer-cache acquisition)
+	DrawDynamic,     // UpdateGraphicsDynamicState and the dynamic-state commit
+	SrtReuse,        // PrepareBindings: the kept-binding check of --texture-binding-reuse
+	SrtResolve,      // PrepareBindings: ResolveTexture (decode plus image lookup)
+	SrtSamplers,     // PrepareBindings: sampler decode and cache lookup
+	SrtBuffers,      // FindBuffers: V# decode, clamp, buffer lookup
 	Count
 };
 
