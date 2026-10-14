@@ -4,6 +4,7 @@
 #include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
 #include "common/hangWatchdog.h"
+#include "common/guestRetirement.h"
 #include "common/speculation.h"
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -121,11 +122,12 @@ void PipelineLookahead::Stop() {
 std::string PipelineLookahead::SummaryText() const {
 	return fmt::format(
 	    "items={};items_late={};draws={};dispatches={};max_queue={};busy_ms={};aborted={};"
-	    "abandoned={};stale={};dropped={}",
+	    "abandoned={};stale={};retire_signals={};dropped={}",
 	    m_stats.items.load(), m_stats.items_late.load(), m_stats.draws.load(),
 	    m_stats.dispatches.load(), m_stats.max_queue.load(), m_stats.busy_ns.load() / 1000000,
 	    Common::Speculation::Aborted() ? 1 : 0, m_stats.items_abandoned.load(),
-	    m_stats.items_stale.load(), m_stats.items_dropped.load());
+	    m_stats.items_stale.load(), Common::GuestRetirement::Global().SignalCalls(),
+	    m_stats.items_dropped.load());
 }
 
 CommandProcessor& PipelineLookahead::Shadow(uint32_t queue_id) {
@@ -170,8 +172,9 @@ void PipelineLookahead::RunStream(CommandProcessor& cp, std::span<const uint32_t
 		}
 	}
 	if (execution.Abandoned() && execution.AbandonReason() == Pm4Execution::kStaleAbandonReason) {
-		// The GPU thread started this submission while it was scanned: nothing more to learn from it,
-		// and its memory may be recycled. Routine under --async-pipelines skip, so no log line.
+		// The guest has observed a completion that covers this submission while it was scanned: its
+		// memory may be recycled, nothing more to trust in it. Routine under --async-pipelines skip,
+		// so no log line.
 		m_stats.items_stale.fetch_add(1, std::memory_order_relaxed);
 		cp.Reset();
 	} else if (execution.Abandoned()) {
@@ -193,7 +196,7 @@ void PipelineLookahead::Process(Item& item) {
 	if (m_current_late) {
 		m_stats.items_late.fetch_add(1, std::memory_order_relaxed);
 	}
-	Common::Speculation::SetItemWatch(&m_started_seq, item.seq);
+	Common::Speculation::SetItemWatch(&Common::GuestRetirement::Global(), item.queue_id, item.seq);
 	m_item_dwords.store(ItemDwords(item), std::memory_order_relaxed);
 	m_item_kind.store(static_cast<uint32_t>(item.kind), std::memory_order_relaxed);
 	m_item_start_ns.store(t0, std::memory_order_relaxed);

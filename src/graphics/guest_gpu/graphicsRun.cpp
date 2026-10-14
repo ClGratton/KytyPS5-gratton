@@ -2,6 +2,7 @@
 #include "graphics/host_gpu/renderer/gpuOps.h"
 
 #include "common/assert.h"
+#include "common/guestRetirement.h"
 #include "common/speculation.h"
 #include "common/benchInstrument.h"
 #include "common/emulatorConfig.h"
@@ -13,6 +14,7 @@
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
+#include "graphics/guest_gpu/command_processor/completionSignals.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pipelineLookahead.h"
@@ -49,6 +51,9 @@ static thread_local CommandProcessor* g_current_processor = nullptr;
 static thread_local Pm4Execution*     g_current_execution = nullptr;
 static thread_local bool              g_gpu_thread        = false;
 static thread_local GuestGpu*         g_gpu_state         = nullptr;
+// The guest queue whose submission the GPU thread is processing (retirement signals, see
+// common/guestRetirement.h).
+static thread_local uint32_t          g_signal_queue      = 0;
 
 struct DrawIndirectArgs {
 	uint32_t vertex_count_per_instance;
@@ -712,8 +717,10 @@ bool GuestGpu::Process(Submission& submission) {
 bool GuestGpu::ProcessImpl(Submission& submission) {
 	const bool first_slice = !submission.started;
 	auto&      cp          = GetProcessor(submission.queue_id);
+	g_signal_queue         = submission.queue_id;
 	if (first_slice && m_lookahead != nullptr && submission.trace_seq != 0) {
 		m_lookahead->NoteStarted(submission.trace_seq);
+		Common::GuestRetirement::Global().NoteStarted(submission.queue_id, submission.trace_seq);
 	}
 
 	if (first_slice) {
@@ -789,10 +796,14 @@ bool GuestGpu::ProcessImpl(Submission& submission) {
 			break;
 		}
 		case SubmissionType::FlipPreparation:
+			// The flip becomes visible to the guest: its earlier submissions count as retired.
+			Common::GuestRetirement::Global().NoteSignal(submission.queue_id);
 			m_renderer.RunGarbageCollector();
 			cp.PrepareCpuFlip(submission.flip_request_id);
 			break;
 		case SubmissionType::SuspendPoint:
+			// The suspend point releases the guest thread that waits for the earlier frame.
+			Common::GuestRetirement::Global().NoteSignal(submission.queue_id);
 			cp.EmitGlobalBarrier();
 			m_renderer.GetCommandScheduler().DeferPriorityOperation(
 			    [ready = m_suspend_point_ready] { ready->release(); });
@@ -801,6 +812,9 @@ bool GuestGpu::ProcessImpl(Submission& submission) {
 			break;
 	}
 
+	if (complete && m_lookahead != nullptr && submission.trace_seq != 0) {
+		Common::GuestRetirement::Global().NoteCompleted(submission.queue_id, submission.trace_seq);
+	}
 	return complete;
 }
 
@@ -981,6 +995,11 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			     total_dw - remaining_dw, packet_header);
 		}
 
+		if (!IsShadow() && PacketCanCompleteForGuest(packet_header)) {
+			// Before the label, interrupt or flip becomes visible: from here on the guest may
+			// recycle the memory of everything this queue has started (guestRetirement.h).
+			Common::GuestRetirement::Global().NoteSignal(g_signal_queue);
+		}
 		Common::GpuPhase::PacketScope gpu_phase_packet(opcode);
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;

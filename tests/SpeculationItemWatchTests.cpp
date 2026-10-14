@@ -1,9 +1,10 @@
 // Item watch of the PM4 lookahead (src/common/speculation.*): the item being scanned is stale once
-// the GPU thread has started it; the watch is per thread.
+// the guest can have reused its memory (a guest-visible completion covers it); starting the item
+// is not enough. The watch is per thread.
 
+#include "common/guestRetirement.h"
 #include "common/speculation.h"
 
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,36 +23,47 @@ void Check(bool value, const char* message) {
 
 int main() {
 	using namespace Common::Speculation;
-	std::atomic<uint64_t> started {0};
+	Common::GuestRetirement r;
 
 	Check(!ItemStale(), "no watch is never stale");
 
-	SetItemWatch(&started, 10);
+	SetItemWatch(&r, 0, 10);
 	Check(!ItemStale(), "nothing started yet");
-	started.store(9);
-	Check(!ItemStale(), "an earlier submission started: the item is still ahead of the GPU thread");
-	started.store(10);
-	Check(ItemStale(), "the GPU thread started the item");
-	started.store(500);
-	Check(ItemStale(), "and went on: still stale");
-
-	// The sequence is a maximum over all queues: an item the GPU thread may not have reached yet can
-	// look started. That direction is the safe one, so it is the documented answer.
-	SetItemWatch(&started, 499);
-	Check(ItemStale(), "conservative for items below the maximum");
+	r.NoteStarted(0, 9);
+	r.NoteSignal(0);
+	Check(!ItemStale(), "an earlier submission retired: the item is still held by the guest");
+	r.NoteStarted(0, 10);
+	Check(!ItemStale(), "the GPU thread started the item: still not stale (stall mode keeps scanning)");
+	r.NoteCompleted(0, 10);
+	Check(!ItemStale(), "even finished, until the guest can have seen it");
+	r.NoteSignal(0);
+	Check(ItemStale(), "a guest-visible completion covers the item");
+	r.NoteStarted(0, 500);
+	r.NoteSignal(0);
+	Check(ItemStale(), "and later ones keep it stale");
 
 	// A new item resets the verdict.
-	SetItemWatch(&started, 501);
-	Check(!ItemStale(), "the next item is not started");
-	started.store(501);
-	Check(ItemStale(), "until the GPU thread gets to it");
+	SetItemWatch(&r, 0, 501);
+	Check(!ItemStale(), "the next item is not retired");
+	r.NoteStarted(0, 501);
+	Check(!ItemStale(), "started is not retired");
+	r.NoteSignal(0);
+	Check(ItemStale(), "until a signal covers it");
+
+	// Another queue's item is judged by its own queue.
+	SetItemWatch(&r, 1, 400);
+	Check(!ItemStale(), "compute item 400 started by nobody: a graphics signal does not retire it");
+	r.NoteStarted(1, 400);
+	Check(!ItemStale(), "started compute item");
+	r.NoteCompleted(1, 400);
+	Check(ItemStale(), "finished and covered by a later graphics signal");
 
 	// Item sequence 0 means "unnumbered": never stale.
-	SetItemWatch(&started, 0);
+	SetItemWatch(&r, 0, 0);
 	Check(!ItemStale(), "sequence 0 is never stale");
 
 	// The watch belongs to its thread.
-	SetItemWatch(&started, 1);
+	SetItemWatch(&r, 0, 1);
 	Check(ItemStale(), "this thread watches item 1");
 	bool other_stale = true;
 	std::thread other([&] { other_stale = ItemStale(); });

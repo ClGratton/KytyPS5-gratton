@@ -28,22 +28,25 @@ uint32_t IsolatedAborts() noexcept {
 	return g_isolated_aborts.load(std::memory_order_acquire);
 }
 
-thread_local const std::atomic<uint64_t>* t_gpu_started = nullptr;
-thread_local uint64_t                      t_item_seq    = 0;
+thread_local const GuestRetirement* t_retirement = nullptr;
+thread_local uint32_t               t_item_queue = 0;
+thread_local uint64_t               t_item_seq   = 0;
 
-void SetItemWatch(const std::atomic<uint64_t>* gpu_started, uint64_t item_seq) noexcept {
-	t_gpu_started = gpu_started;
-	t_item_seq    = item_seq;
+void SetItemWatch(const GuestRetirement* retirement, uint32_t queue, uint64_t item_seq) noexcept {
+	t_retirement = retirement;
+	t_item_queue = queue;
+	t_item_seq   = item_seq;
 }
 
 void ClearItemWatch() noexcept {
-	t_gpu_started = nullptr;
-	t_item_seq    = 0;
+	t_retirement = nullptr;
+	t_item_queue = 0;
+	t_item_seq   = 0;
 }
 
 bool ItemStale() noexcept {
-	return t_gpu_started != nullptr && t_item_seq != 0 &&
-	       t_item_seq <= t_gpu_started->load(std::memory_order_acquire);
+	return t_retirement != nullptr && t_item_seq != 0 &&
+	       t_retirement->IsRetired(t_item_queue, t_item_seq);
 }
 
 bool Active() noexcept {
