@@ -218,6 +218,10 @@ uint32_t GetPipelineLookaheadKinds() {
 	return g_config->pipeline_lookahead_kinds;
 }
 
+uint32_t GetLookaheadWorkers() {
+	return std::min(g_config->lookahead_workers, 16u);
+}
+
 uint32_t GetPipelineWorkerCount() {
 	if (g_config->pipeline_workers != 0) {
 		return g_config->pipeline_workers;

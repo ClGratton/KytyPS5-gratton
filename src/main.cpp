@@ -323,6 +323,11 @@ static void PrintUsage() {
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
 	         "                                       Debug: restrict --pipeline-lookahead to draws or\n"
 	         "                                       dispatches. Default: all.\n");
+	::printf("  --lookahead-workers <0-16>           With --pipeline-lookahead: N prefetch workers run the\n"
+	         "                                       per-draw work (programs, SRT plans, pipeline requests)\n"
+	         "                                       from copies of the registers, while the lookahead\n"
+	         "                                       thread only decodes the PM4 stream. 0 keeps everything\n"
+	         "                                       on the lookahead thread. Default: 0.\n");
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
@@ -1071,6 +1076,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--lookahead-workers") {
+			uint64_t workers = 0;
+			if (!ParseUint64(value, workers) || workers > 16) {
+				::printf("invalid lookahead worker count (expected 0-16): %s\n", value.c_str());
+				return false;
+			}
+			options.config.lookahead_workers = static_cast<uint32_t>(workers);
 		} else if (arg == "--pipeline-lookahead-kinds") {
 			if (Common::EqualNoCase(value, "all")) {
 				options.config.pipeline_lookahead_kinds = 3;

@@ -12,6 +12,7 @@
 // lookahead cannot answer exactly is dropped, and a wrong request only costs worker time.
 
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
+#include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 
 #include <atomic>
@@ -67,6 +68,15 @@ public:
 		std::atomic<uint64_t> draws {0};
 		std::atomic<uint64_t> max_queue {0};
 		std::atomic<int64_t>  busy_ns {0};
+		std::atomic<int64_t>  draw_ns {0};      // inside OnDraw (prefetch of a draw, plan included)
+		std::atomic<int64_t>  dispatch_ns {0};  // inside OnDispatch
+		// --lookahead-workers: tasks handed to workers, time workers spent in them, time the sequencer
+		// waited for ring space, deepest ring.
+		std::atomic<uint64_t> tasks {0};
+		std::atomic<int64_t>  worker_busy_ns {0};
+		std::atomic<int64_t>  sequencer_stall_ns {0};
+		std::atomic<uint64_t> max_ring {0};
+		std::atomic<uint64_t> tasks_stale {0}; // dropped by a worker: the guest retired the item meanwhile
 		std::atomic<uint64_t> items_abandoned {0}; // decode budget / unreadable condition hit
 		std::atomic<uint64_t> items_stale {0};     // the guest observed a completion covering the item while it was scanned
 		std::atomic<uint64_t> items_dropped {0};   // queue full: oldest item dropped
@@ -77,6 +87,8 @@ public:
 private:
 	void Run();
 	void Process(Item& item);
+	// --lookahead-workers: the prefetch workers and their ring (pipelineLookahead.cpp).
+	class Pool;
 	CommandProcessor& Shadow(uint32_t queue_id);
 	// --debug-hang-watchdog provider: queue depth and what the thread is doing right now.
 	std::string DebugState();
@@ -92,6 +104,7 @@ private:
 	std::map<uint32_t, std::unique_ptr<CommandProcessor>> m_shadows;
 	// Valid only on the lookahead thread while an item is processed.
 	uint64_t                            m_current_seq  = 0;
+	uint32_t                            m_current_queue = 0;
 	bool                                m_current_late = false;
 	std::atomic<int64_t>                m_item_start_ns {0};  // 0 = idle
 	std::atomic<uint64_t>               m_item_dwords {0};
@@ -99,6 +112,7 @@ private:
 	std::atomic<uint64_t>               m_queued_dwords {0};
 	Stats                               m_stats;
 	std::thread                         m_thread;
+	std::unique_ptr<Pool>               m_pool;
 };
 
 } // namespace Libs::Graphics

@@ -77,6 +77,12 @@ QList<Option> BuildTable() {
 	             "compiles in the measurements and removes most first-play stutter."
 	             "\n\nNeeds Async pipelines = stall or skip.",
 	             EMU_BOOL(pipeline_lookahead), {}, 0, 0, "", "", true});
+	defs.append({"lookahead_workers", "--lookahead-workers", Tab::Shaders, "Pipeline compilation",
+	             Kind::Int, "Look-ahead workers:",
+	             "Worker threads that do the per-draw look-ahead work (shader programs, SRT plans, "
+	             "pipeline requests) while the look-ahead thread only decodes the command stream. "
+	             "0 keeps all of it on the look-ahead thread.\n\nNeeds Look-ahead.",
+	             EMU_INT(lookahead_workers), {}, 0, 16, "Off", ""});
 	defs.append({"pipeline_variants_replay", "--pipeline-variants-replay", Tab::Shaders,
 	             "Pipeline compilation", Kind::Bool, "Replay recorded shader variants",
 	             "Records the compute shader variants the game uses in _PipelineCache/<title>.variants "

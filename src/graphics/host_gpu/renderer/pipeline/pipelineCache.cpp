@@ -1516,7 +1516,7 @@ struct PipelineCache::ProgramCache {
 						const auto bytes      = plan->Bytes();
 						SrtPlan::NoteProduceCost(SrtPlan::NowNs() - t_plan);
 						plan->produced_ns = SrtPlan::NowNs();
-						SrtPlan::GetStore().Put(std::move(plan));
+						SrtPlan::PutPlan(std::move(plan));
 						SrtPlan::NoteProduced(bytes);
 					} else {
 						SrtPlan::NoteProduceFailed();
