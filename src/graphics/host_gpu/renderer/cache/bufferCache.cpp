@@ -279,6 +279,11 @@ void BufferCache::NoteAddressWrites() noexcept {
 		m_known_stores.Clear();
 		m_known_stores_count.store(0, std::memory_order_relaxed);
 	}
+	if (m_known_copies_count.load(std::memory_order_relaxed) != 0) {
+		std::lock_guard lock(m_known_copies_mutex);
+		m_known_copies.Clear();
+		m_known_copies_count.store(0, std::memory_order_relaxed);
+	}
 }
 
 bool BufferCache::ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,
@@ -495,11 +500,57 @@ void BufferCache::ForgetKnownFills(uint64_t vaddr, uint64_t size) {
 	// Whatever the flag says: knowledge recorded while --known-stores was on must not survive a
 	// write that happens while it is off (it is a runtime toggle).
 	ForgetKnownStores(vaddr, size);
+	ForgetKnownCopies(vaddr, size);
 	if (!Config::KnownFillsEnabled()) {
 		return;
 	}
 	std::lock_guard lock(m_known_fills_mutex);
 	m_known_fills.Forget(vaddr, size);
+}
+
+void BufferCache::ForgetKnownCopies(uint64_t vaddr, uint64_t size) {
+	if (m_known_copies_count.load(std::memory_order_relaxed) == 0) {
+		return;
+	}
+	std::lock_guard lock(m_known_copies_mutex);
+	m_known_copies.Forget(vaddr, size);
+	m_known_copies_count.store(m_known_copies.Count(), std::memory_order_relaxed);
+}
+
+void BufferCache::RecordKnownCopy(const KnownCopy& copy) {
+	// A source this big is a bulk copy, not a table of keys: not worth scanning.
+	constexpr uint64_t kMaxCopyBytes = 4u << 20;
+	if (!Config::KnownCopiesEnabled() || copy.bytes == 0 || copy.bytes > kMaxCopyBytes || (copy.bytes & 3u) != 0 ||
+	    HasGpuDirtyBytes(copy.src, copy.bytes) || m_texture_cache.HasGpuModifiedImage(copy.src, copy.bytes)) {
+		return;
+	}
+	m_known_copy_scratch.resize(copy.bytes / 4);
+	if (!Libs::LibKernel::Memory::TryReadBacking(copy.src, m_known_copy_scratch.data(), copy.bytes)) {
+		return;
+	}
+	constexpr size_t kMaxRuns = 64;
+	std::vector<DwordRun> runs;
+	if (!CollectRuns(m_known_copy_scratch, kMaxRuns, runs)) {
+		return;
+	}
+	std::lock_guard lock(m_known_copies_mutex);
+	constexpr size_t kMaxKnownCopies = 1024;
+	if (m_known_copies.Count() + runs.size() > kMaxKnownCopies) {
+		m_known_copies.Clear();
+	}
+	for (const auto& run: runs) {
+		m_known_copies.Record(copy.dst + run.offset, run.bytes, run.value);
+	}
+	m_known_copies_count.store(m_known_copies.Count(), std::memory_order_relaxed);
+	Common::GpuPhase::NoteKnownCopy(Common::GpuPhase::KnownCopy::Recorded, runs.size());
+}
+
+bool BufferCache::TryGetKnownCopy(uint64_t vaddr, uint64_t size, uint32_t* value) {
+	if (m_known_copies_count.load(std::memory_order_relaxed) == 0 || !Config::KnownCopiesEnabled()) {
+		return false;
+	}
+	std::lock_guard lock(m_known_copies_mutex);
+	return m_known_copies.TryGet(vaddr, size, value);
 }
 
 void BufferCache::ForgetKnownStores(uint64_t vaddr, uint64_t size) {

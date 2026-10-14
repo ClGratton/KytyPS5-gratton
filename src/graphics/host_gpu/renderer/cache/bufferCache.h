@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/knownCopies.h"
 #include "graphics/host_gpu/renderer/cache/knownFills.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -120,6 +121,14 @@ public:
 	// not counted: its value is available without waiting for the GPU.
 	[[nodiscard]] bool HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	void               ForgetKnownStores(uint64_t vaddr, uint64_t size);
+	// --known-copies: the GPU work recorded last copied `bytes` of dwords from `src` to `dst`
+	// (knownCopies.h). When the source is readable without waiting for the GPU, the destination's
+	// content is recorded as runs of equal dwords (at most 64; a source with more is not tracked).
+	void RecordKnownCopy(const KnownCopy& copy);
+	// True when [vaddr, vaddr + size) was last written by a proven copy whose source was one run of
+	// equal dwords; *value is that dword. False when the flag is off or the range is not known.
+	[[nodiscard]] bool TryGetKnownCopy(uint64_t vaddr, uint64_t size, uint32_t* value);
+	void               ForgetKnownCopies(uint64_t vaddr, uint64_t size);
 	// The current value of the dword at `vaddr` when the GPU thread has it without waiting for the
 	// GPU: guest memory no GPU work has written, or a known store. GPU thread only.
 	[[nodiscard]] bool TryReadCurrentDword(uint64_t vaddr, uint32_t* value);
@@ -214,6 +223,10 @@ private:
 	std::mutex                                        m_known_stores_mutex;
 	KnownFills                                        m_known_stores;
 	std::atomic<size_t>                               m_known_stores_count {0};
+	std::mutex                                        m_known_copies_mutex;
+	KnownFills                                        m_known_copies;
+	std::atomic<size_t>                               m_known_copies_count {0};
+	std::vector<uint32_t>                             m_known_copy_scratch; // GPU thread only
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;
