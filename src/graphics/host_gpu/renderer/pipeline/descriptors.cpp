@@ -719,6 +719,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	auto       id = texture_cache.FindImage(desc, shader_conversion, record_source ? &generation : nullptr);
 	if (record_source && generation != 0) {
 		source->resource            = resource;
+		source->resource_address    = &resource;
 		source->value               = value;
 		source->found               = id;
 		source->generation          = generation;
@@ -844,7 +845,8 @@ static bool ReuseTexture(TextureCache& cache, const PreparedBindings::ImageSourc
                          const TextureBinding&                        binding,
                          const ShaderRecompiler::IR::ImageResource&   resource,
                          const ShaderRecompiler::IR::DescriptorValue& value) {
-	if (source.generation == 0 || !(source.value == value) || !(source.resource == resource) ||
+	if (source.generation == 0 || !(source.value == value) ||
+	    (source.resource_address != &resource && !(source.resource == resource)) ||
 	    !cache.RefindImage(source.found, source.generation, binding.desc,
 	                       source.metadata_base_layer)) {
 		return false;

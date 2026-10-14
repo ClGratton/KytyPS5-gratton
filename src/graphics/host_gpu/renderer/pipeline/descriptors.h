@@ -37,6 +37,9 @@ struct PreparedBindings {
 	// in the same slot can keep it (--texture-binding-reuse, TextureCache::RefindImage).
 	struct ImageSource {
 		ShaderRecompiler::IR::ImageResource   resource;
+		// The shader's own resource record, when it was recorded from one: a compiled program is never
+		// freed or changed, so the same address is the same resource and needs no field-by-field compare.
+		const ShaderRecompiler::IR::ImageResource* resource_address = nullptr;
 		ShaderRecompiler::IR::DescriptorValue value;
 		ImageId                               found;              // FindImage's result
 		uint64_t                              generation = 0;     // 0: not reusable
