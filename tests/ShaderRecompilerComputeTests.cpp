@@ -6004,6 +6004,121 @@ public:
     std::printf("[host]    %-32s ok\n", name);
   }
 
+  // --readback-futures under load: three game threads fault on two hot pages while the GPU thread
+  // keeps rewriting them (and submitting). Every thread must get through (a hang here is a deadlock
+  // of the protocol), and the values a thread reads never go backwards.
+  void CheckBufferCacheReadbackFutureStress() {
+    constexpr const char *name = "BufferCacheReadbackFutureStress";
+    constexpr uintptr_t base = 0x0000000208a00000ull;
+    constexpr uint64_t allocation_size = 0x100000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t page_a = 0x1100;
+    constexpr uint64_t page_b = 0x5100;
+
+    EnsureRuntimeContext();
+    Config::ConfigOptions futures;
+    futures.readback_futures = true;
+    Config::Load(futures);
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+    auto &gpu = context.GetGpu();
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "stress direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "stress fixed direct-memory mapping failed");
+
+    {
+      auto &cache = context.GetBufferCache();
+      context.MapMemory(base, allocation_size);
+      std::atomic<uint32_t> counter{0};
+      std::atomic<bool> stop{false};
+      std::atomic<uint64_t> reads{0};
+      std::atomic<bool> backwards{false};
+      const auto GpuWrite = [&](uint64_t at, uint32_t value) {
+        auto allocation = cache.ObtainBuffer(base + at, sizeof(value), true, false);
+        Require(name, "dirty allocation", allocation.first != nullptr,
+                "stress buffer allocation failed");
+        cache.FillBuffer(base + at, sizeof(value), value, false);
+      };
+      std::thread writer([&] {
+        while (!stop.load()) {
+          gpu.SendCommandSync([&] {
+            const uint32_t value = counter.fetch_add(1) + 1;
+            GpuWrite(page_a, value);
+            GpuWrite(page_b, value);
+            if (value % 3 == 0) {
+              scheduler.Flush();
+            }
+          });
+        }
+      });
+      std::vector<std::thread> readers;
+      for (int index = 0; index < 3; index++) {
+        readers.emplace_back([&, index] {
+          const uint64_t at = index == 2 ? page_b : page_a;
+          uint32_t last = 0;
+          while (!stop.load()) {
+            cache.ReadMemory(base + at, 1, false, Common::GpuPhase::DrainCause::ReadbackFault);
+            uint32_t value = 0;
+            Libs::LibKernel::Memory::TryReadBacking(base + at, &value, sizeof(value));
+            if (value < last) {
+              backwards.store(true);
+            }
+            last = value;
+            reads.fetch_add(1);
+          }
+        });
+      }
+      // A deadlock shows as reads that stop advancing.
+      uint64_t last_reads = 0;
+      for (int second = 0; second < 4; second++) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const auto now = reads.load();
+        Require(name, "reads advance", now > last_reads,
+                "the readback future stopped making progress (deadlock)");
+        last_reads = now;
+      }
+      stop.store(true);
+      writer.join();
+      for (auto &reader: readers) {
+        reader.join();
+      }
+      Require(name, "values never go backwards", !backwards.load(),
+              "a reader saw an older GPU value after a newer one");
+      std::printf("[host]    %-32s %llu reads, %u GPU writes\n", name,
+                  static_cast<unsigned long long>(reads.load()), counter.load());
+      scheduler.Finish();
+      scheduler.DrainPriorityOperations();
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+    context.ShutdownGpu();
+    Config::Load(Config::ConfigOptions{});
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "stress direct-memory mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "stress direct-memory allocation release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
   // A zero BDA page-table entry means "unmapped" to shaders, and device memory is not
   // zero-initialized, so the production table must be cleared before its first use. The
   // whole table is poisoned before the first production use, which comes either from a
@@ -46795,6 +46910,11 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-future-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBufferCacheReadbackFuture();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-future-stress-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBufferCacheReadbackFutureStress();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-prt-only") == 0) {

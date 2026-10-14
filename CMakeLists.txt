@@ -1146,6 +1146,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --buffer-cache-eager-only)
 	add_test(NAME buffer_cache_readback_future
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --buffer-cache-future-only)
+	add_test(NAME buffer_cache_readback_future_stress
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --buffer-cache-future-stress-only)
 	add_test(NAME bda_page_table_initialization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bda-page-table-init-only)
 	add_test(NAME color_render_target_1d
