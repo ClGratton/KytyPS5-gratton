@@ -23,6 +23,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <array>
 #include <fmt/format.h>
 #include <cinttypes>
 #include <cstring>
@@ -271,6 +272,13 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 
 void BufferCache::NoteAddressWrites() noexcept {
 	m_address_write_tick = m_scheduler.CurrentTick();
+	// A shader that writes through raw addresses can overwrite any dword the tracking above does not
+	// see: everything recorded by --known-stores is unknown from here on.
+	if (m_known_stores_count.load(std::memory_order_relaxed) != 0) {
+		std::lock_guard lock(m_known_stores_mutex);
+		m_known_stores.Clear();
+		m_known_stores_count.store(0, std::memory_order_relaxed);
+	}
 }
 
 bool BufferCache::ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,
@@ -484,11 +492,95 @@ BufferCache::~BufferCache() {
 }
 
 void BufferCache::ForgetKnownFills(uint64_t vaddr, uint64_t size) {
+	// Whatever the flag says: knowledge recorded while --known-stores was on must not survive a
+	// write that happens while it is off (it is a runtime toggle).
+	ForgetKnownStores(vaddr, size);
 	if (!Config::KnownFillsEnabled()) {
 		return;
 	}
 	std::lock_guard lock(m_known_fills_mutex);
 	m_known_fills.Forget(vaddr, size);
+}
+
+void BufferCache::ForgetKnownStores(uint64_t vaddr, uint64_t size) {
+	if (m_known_stores_count.load(std::memory_order_relaxed) == 0) {
+		return;
+	}
+	std::lock_guard lock(m_known_stores_mutex);
+	m_known_stores.Forget(vaddr, size);
+	m_known_stores_count.store(m_known_stores.Count(), std::memory_order_relaxed);
+}
+
+void BufferCache::RecordKnownStores(std::span<const std::pair<uint64_t, uint32_t>> dwords) {
+	if (dwords.empty()) {
+		return;
+	}
+	// Bounded: a table that outgrows this is dropped whole (knowledge is only ever lost, never wrong).
+	constexpr size_t kMaxKnownStores = 4096;
+	std::lock_guard  lock(m_known_stores_mutex);
+	if (m_known_stores.Count() + dwords.size() > kMaxKnownStores) {
+		m_known_stores.Clear();
+	}
+	for (const auto& [address, value]: dwords) {
+		m_known_stores.Record(address, 4, value);
+	}
+	m_known_stores_count.store(m_known_stores.Count(), std::memory_order_relaxed);
+	Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Recorded, dwords.size());
+}
+
+bool BufferCache::TryReadKnownStores(uint64_t vaddr, uint64_t size, uint32_t* data) {
+	if (size == 0 || size > 1024 || m_known_stores_count.load(std::memory_order_relaxed) == 0 ||
+	    !Config::KnownStoresEnabled()) {
+		return false;
+	}
+	std::lock_guard lock(m_known_stores_mutex);
+	return m_known_stores.TryReadDwords(vaddr, size, data);
+}
+
+void BufferCache::OverlayKnownDirtyDwords(uint64_t vaddr, uint64_t bytes, uint32_t* data) {
+	if (bytes == 0 || (bytes & 3u) != 0 || (vaddr & 3u) != 0 ||
+	    m_known_stores_count.load(std::memory_order_relaxed) == 0 || !Config::KnownStoresEnabled() ||
+	    !HasGpuDirtyBytes(vaddr, bytes)) {
+		return;
+	}
+	std::lock_guard lock(m_known_stores_mutex);
+	for (uint64_t i = 0; i < bytes / 4; ++i) {
+		const uint64_t address = vaddr + i * 4;
+		uint32_t       value   = 0;
+		if (m_gpu_modified_ranges.Intersects(address, 4) && m_known_stores.TryReadDwords(address, 4, &value)) {
+			data[i] = value;
+		}
+	}
+}
+
+bool BufferCache::TryReadCurrentDword(uint64_t vaddr, uint32_t* value) {
+	if ((vaddr & 3u) != 0) {
+		return false;
+	}
+	if (HasGpuDirtyBytes(vaddr, 4)) {
+		return TryReadKnownStores(vaddr, 4, value);
+	}
+	if (m_texture_cache.HasGpuModifiedImage(vaddr, 4)) {
+		return false;
+	}
+	return Libs::LibKernel::Memory::TryReadBacking(vaddr, value, 4);
+}
+
+void BufferCache::CollectKnownStores(uint64_t vaddr, uint64_t size,
+                                     std::vector<std::pair<uint64_t, uint32_t>>& out, size_t limit) {
+	if (m_known_stores_count.load(std::memory_order_relaxed) == 0) {
+		return;
+	}
+	std::lock_guard lock(m_known_stores_mutex);
+	m_known_stores.CollectDwords(vaddr, size, out, limit);
+}
+
+bool BufferCache::HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
+	if (!HasGpuDirtyBytes(vaddr, size)) {
+		return false;
+	}
+	std::array<uint32_t, 256> scratch;
+	return !TryReadKnownStores(vaddr, size, scratch.data());
 }
 
 void BufferCache::RecordKnownFill(uint64_t vaddr, uint64_t size, uint32_t value) {

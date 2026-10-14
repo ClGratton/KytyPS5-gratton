@@ -7,6 +7,7 @@
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
 #include "common/enomemTrace.h"
+#include "common/verifyRation.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -1101,6 +1102,52 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+// --known-stores: the GPU thread needs [vaddr, vaddr + size) itself and the GPU holds bytes the guest
+// backing lacks. When a dispatch recorded earlier is proven to have stored every dword of it as a
+// constant, that is the value; no drain. With --debug-known-verify, once per interval the drain is
+// done anyway and the real bytes are compared with the known ones (a mismatch is logged loudly, the
+// knowledge dropped, and the real bytes returned). False: not (fully) known, the caller drains.
+static bool TryReadKnownDirty(Graphics::BufferCache& buffers, uint64_t vaddr, void* data, uint64_t size) {
+	if (!Config::KnownStoresEnabled()) {
+		return false;
+	}
+	std::array<uint32_t, 256> known;
+	if (!buffers.TryReadKnownStores(vaddr, size, known.data())) {
+		Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Partial);
+		return false;
+	}
+	static Common::VerifyRation ration;
+	const auto                  seconds = Config::DebugKnownVerifySeconds();
+	const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count();
+	if (seconds != 0 && ration.Due(now_ns, seconds)) {
+		Common::GpuPhase::NoteGpuThreadFault();
+		buffers.ReadMemory(vaddr, size);
+		std::array<uint32_t, 256> real;
+		if (!TryReadBacking(vaddr, real.data(), size)) {
+			return false;
+		}
+		Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Verified);
+		if (std::memcmp(real.data(), known.data(), size) != 0) {
+			Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Mismatch);
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+				std::printf("KNOWN-STORES MISMATCH addr=0x%016" PRIx64 " size=%" PRIu64 " known0=0x%08x real0=0x%08x: "
+				            "the recorded store knowledge was wrong, dropped\n",
+				            vaddr, size, known[0], real[0]);
+				std::fflush(stdout);
+			}
+			buffers.ForgetKnownStores(vaddr, size);
+		}
+		std::memcpy(data, real.data(), size);
+		return true;
+	}
+	std::memcpy(data, known.data(), size);
+	Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Hit);
+	return true;
+}
+
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (!Graphics::GuestGpu::IsGpuThread()) {
@@ -1108,6 +1155,10 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 		}
 		auto& buffers = GetGpuResources().GetBufferCache();
 		if (buffers.HasGpuDirtyBytes(vaddr, size)) {
+			if (size <= 1024 && (size & 3u) == 0 && (vaddr & 3u) == 0 &&
+			    TryReadKnownDirty(buffers, vaddr, data, size)) {
+				return true;
+			}
 			Common::GpuPhase::NoteGpuThreadFault(); // stack of the emulator's own dependent read
 			buffers.ReadMemory(vaddr, size);
 		}
@@ -1118,6 +1169,17 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
 	       GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size);
+}
+
+bool HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
+	return g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
+	       GetGpuResources().GetBufferCache().HasUnknownGpuDirtyBytes(vaddr, size);
+}
+
+void OverlayKnownGpuBytes(uint64_t vaddr, uint32_t* data, uint64_t bytes) {
+	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, bytes)) {
+		GetGpuResources().GetBufferCache().OverlayKnownDirtyDwords(vaddr, bytes, data);
+	}
 }
 
 bool TryReadCleanBacking(uint64_t vaddr, void* data, uint64_t size) {

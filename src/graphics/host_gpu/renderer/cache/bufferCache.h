@@ -105,6 +105,27 @@ public:
 	[[nodiscard]] bool TryGetKnownFill(uint64_t vaddr, uint64_t size, uint32_t* value);
 	// Records that the GPU work recorded last filled [vaddr, vaddr + size) with `value`.
 	void RecordKnownFill(uint64_t vaddr, uint64_t size, uint32_t value);
+	// --known-stores: dwords a dispatch just recorded is proven to leave with a constant value
+	// (knownStores.h). Any later GPU or CPU write of a dword, and any recorded work with address
+	// writes, makes it unknown again. GPU thread records; any thread forgets.
+	void RecordKnownStores(std::span<const std::pair<uint64_t, uint32_t>> dwords);
+	// True, and `data` filled, when every dword of [vaddr, vaddr + size) is known (dword aligned
+	// range of at most 1 KiB) and the flag is on. The caller still decides whether it needs the
+	// range to be GPU-dirty.
+	[[nodiscard]] bool TryReadKnownStores(uint64_t vaddr, uint64_t size, uint32_t* data);
+	// Replaces, in `data` (a copy of [vaddr, vaddr + bytes) from the guest backing), every dword
+	// that is GPU-dirty and known by its known value. Unknown dirty dwords keep the backing bytes.
+	void OverlayKnownDirtyDwords(uint64_t vaddr, uint64_t bytes, uint32_t* data);
+	// HasGpuDirtyBytes, except that a dirty range whose every dword is known (--known-stores) is
+	// not counted: its value is available without waiting for the GPU.
+	[[nodiscard]] bool HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size);
+	void               ForgetKnownStores(uint64_t vaddr, uint64_t size);
+	// The current value of the dword at `vaddr` when the GPU thread has it without waiting for the
+	// GPU: guest memory no GPU work has written, or a known store. GPU thread only.
+	[[nodiscard]] bool TryReadCurrentDword(uint64_t vaddr, uint32_t* value);
+	// Appends the known stores inside [vaddr, vaddr + size), at most `limit` in all.
+	void CollectKnownStores(uint64_t vaddr, uint64_t size, std::vector<std::pair<uint64_t, uint32_t>>& out,
+	                        size_t limit);
 	// Drops the GPU-modified state of [vaddr, vaddr + size) without downloading it, for a range the
 	// caller is about to overwrite completely from the CPU. Refuses (false, nothing changed) when
 	// GPU-modified bytes outside the range share its tracking pages. GPU thread only.
@@ -190,6 +211,9 @@ private:
 	std::mutex                                        m_known_fills_mutex;
 	KnownFills                                        m_known_fills;
 	void ForgetKnownFills(uint64_t vaddr, uint64_t size);
+	std::mutex                                        m_known_stores_mutex;
+	KnownFills                                        m_known_stores;
+	std::atomic<size_t>                               m_known_stores_count {0};
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;
