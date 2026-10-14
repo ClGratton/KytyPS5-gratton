@@ -36,6 +36,7 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -52,6 +53,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <optional>
 #include <shared_mutex>
 #include <span>
@@ -498,6 +500,56 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 	return false;
 }
 
+
+// Contention and popularity figures of the lookahead, printed with its summary (observation only).
+struct LookaheadLockStats {
+	std::atomic<uint64_t> lookahead_locks {0};     // entry locks taken by the lookahead
+	std::atomic<uint64_t> lookahead_waits {0};     // of those, blocked behind another thread
+	std::atomic<int64_t>  lookahead_wait_ns {0};
+	std::atomic<uint64_t> gpu_locks {0};
+	std::atomic<uint64_t> gpu_waits {0};
+	std::atomic<int64_t>  gpu_wait_ns {0};
+	std::atomic<uint64_t> compile_waits {0};       // the lookahead blocked on a program/pipeline compile
+	std::atomic<int64_t>  compile_wait_ns {0};
+	std::mutex                                 popularity_mutex;
+	std::unordered_map<uint64_t, uint64_t>     popularity;     // lookahead materializations per shader hash
+};
+
+LookaheadLockStats& LockStats() {
+	static LookaheadLockStats stats;
+	return stats;
+}
+
+std::string LookaheadLockSummary() {
+	auto& stats = LockStats();
+	std::vector<std::pair<uint64_t, uint64_t>> top;
+	uint64_t total = 0;
+	{
+		std::lock_guard lock(stats.popularity_mutex);
+		for (const auto& [hash, count]: stats.popularity) {
+			top.emplace_back(count, hash);
+			total += count;
+		}
+	}
+	std::sort(top.begin(), top.end(), std::greater<>());
+	std::string text = fmt::format(
+	    "entry_locks lookahead={} waits={} wait_ms={:.1f}; gpu={} waits={} wait_ms={:.1f}; "
+	    "compile_waits={} compile_wait_ms={:.1f}; materializations={} distinct_shaders={} top:",
+	    stats.lookahead_locks.load(), stats.lookahead_waits.load(),
+	    static_cast<double>(stats.lookahead_wait_ns.load()) / 1e6, stats.gpu_locks.load(),
+	    stats.gpu_waits.load(), static_cast<double>(stats.gpu_wait_ns.load()) / 1e6,
+	    stats.compile_waits.load(), static_cast<double>(stats.compile_wait_ns.load()) / 1e6, total,
+	    top.size());
+	double cumulative = 0.0;
+	for (size_t i = 0; i < std::min<size_t>(top.size(), 12); ++i) {
+		cumulative += total != 0 ? 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total) : 0.0;
+		text += fmt::format(" {:016x}:{:.1f}%(cum {:.1f}%)", top[i].second,
+		                    total != 0 ? 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total) : 0.0,
+		                    cumulative);
+	}
+	return text;
+}
+
 } // namespace
 
 std::size_t PipelineCache::GraphicsPipelineKeyHash::operator()(const GraphicsPipelineKey& key) const {
@@ -702,6 +754,11 @@ struct PipelineCache::ProgramCache {
 			Common::Speculation::HeldLock held(&mutex);
 			Common::Hang::Phase phase("lookahead_materialize");
 			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead");
+			{
+				auto& stats = LockStats();
+				std::lock_guard pop_lock(stats.popularity_mutex);
+				++stats.popularity[resource_plan.shader_hash];
+			}
 			ShaderRecompiler::IR::ResourceSnapshot discarded;
 			auto& snapshot = keep != nullptr ? *keep : discarded; // --srt-plan-shadow keeps it
 			materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
@@ -761,7 +818,17 @@ struct PipelineCache::ProgramCache {
 		void LockEntry(std::unique_lock<std::shared_mutex>& lock, const char* what) {
 			Common::GpuPhase::Scope gpu_phase_lock(Common::GpuPhase::Phase::PipeEntryLock);
 			Common::Hang::Phase phase(what);
+			auto&      stats = LockStats();
+			const bool la    = Common::Speculation::Active();
+			(la ? stats.lookahead_locks : stats.gpu_locks).fetch_add(1, std::memory_order_relaxed);
+			if (lock.try_lock()) {
+				return;
+			}
+			const auto t0 = Bench::NowNs();
 			lock.lock();
+			(la ? stats.lookahead_waits : stats.gpu_waits).fetch_add(1, std::memory_order_relaxed);
+			(la ? stats.lookahead_wait_ns : stats.gpu_wait_ns)
+			    .fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
 		}
 
 		void MaterializeLocked(const ShaderRecompiler::IR::SrtRuntime& runtime,
@@ -1520,7 +1587,10 @@ struct PipelineCache::ProgramCache {
 			// skip the GPU thread does not wait with it, so the submission being scanned can be
 			// executed and its memory recycled meanwhile: what the lookahead reads after this wait
 			// (descriptor tables, indirect register tables) is not the draw's any more.
+			const auto t0   = Bench::NowNs();
 			const bool done = job.Wait();
+			LockStats().compile_waits.fetch_add(1, std::memory_order_relaxed);
+			LockStats().compile_wait_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
 			return done && !Common::Speculation::ItemStale();
 		};
 		const auto note_skip = [&] {
@@ -2259,6 +2329,7 @@ void PipelineCache::ShutdownAsync() {
 		if (m_lookahead_thread_summary) {
 			PipelineCacheLog("Pipeline lookahead thread: {}", m_lookahead_thread_summary());
 		}
+		PipelineCacheLog("Pipeline lookahead locks: {}", LookaheadLockSummary());
 		if (Bench::TimingEnabled()) {
 			Bench::LogTiming("summary_lookahead", 0, Bench::NowNs(), 0, false, summary + skips);
 			if (m_lookahead_thread_summary) {
