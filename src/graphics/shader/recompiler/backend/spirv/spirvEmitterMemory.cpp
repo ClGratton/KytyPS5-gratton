@@ -1082,7 +1082,44 @@ uint32_t LoadBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compon
 			    values[component] =
 			        LoadWordPrepared(ctx, inst, RebaseRawComponent(mem, component), resource);
 		    }
-		    return ConstructU32Composite(state, components, values);
+		    const auto split = ConstructU32Composite(state, components, values);
+		    if (components != 2u || !mem.coherent || mem.kind != IR::ResourceKind::Buffer ||
+		        resource.element_bits != 32u || !state.program.info.buffer_int64_atomics) {
+			    return split;
+		    }
+		    // A GLC dwordx2 load observes a 64-bit buffer atomic as one value on the GPU. Shaders
+		    // that publish a (flag, value) pair with BUFFER_ATOMIC_SWAP_X2 and poll it (decoupled
+		    // look-back scans) otherwise see the new flag with the old value and produce wrong
+		    // prefix sums.
+		    const auto byte_address = ByteAddress(ctx, inst, mem);
+		    const auto aligned      = Binary(
+		        state, spv::OpIEqual, TypeBool(state),
+		        Binary(state, spv::OpBitwiseAnd, TypeU32(state), byte_address, ConstantU32(state, 7u)),
+		        ConstantU32(state, 0u));
+		    return EmitValueOrDefaultIfCondition(
+		        state, aligned, TypeU32Composite(state, 2u), split, [&]() {
+			        const auto wide =
+			            PrepareStorageBufferResourceAccess(state, mem, state.storage_buffers[3]);
+			        const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state),
+			                                  byte_address, ConstantU32(state, 3u));
+			        return EmitValueOrDefaultIfCondition(
+			            state, EmitMemoryElementInBounds(state, wide, index),
+			            TypeU32Composite(state, 2u), split, [&]() {
+				            const auto pointer = EmitStorageBufferElementPointer(
+				                state, wide, index, TypeStorageBufferElementPointer(state, 64));
+				            const auto loaded = state.builder.AllocateId();
+				            state.builder.AddFunction(
+				                spv::OpAtomicLoad, TypeU64(state), loaded, pointer,
+				                ConstantU32(state, spv::ScopeDevice),
+				                ConstantU32(state, spv::MemorySemanticsMaskNone));
+				            const auto high = Binary(state, spv::OpShiftRightLogical, TypeU64(state),
+				                                     loaded, ConstantU64(state, 32u));
+				            return ConstructU32Composite(
+				                state, 2u,
+				                {Unary(state, spv::OpUConvert, TypeU32(state), loaded),
+				                 Unary(state, spv::OpUConvert, TypeU32(state), high), 0u, 0u});
+			            });
+		        });
 	    });
 }
 

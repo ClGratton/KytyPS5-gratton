@@ -20916,6 +20916,7 @@ CoverageClass ClassifyOpcode(ShaderOpcode opcode,
   case Opcode::BUFFER_ATOMIC_UMAX:
   case Opcode::BUFFER_ATOMIC_AND:
   case Opcode::BUFFER_ATOMIC_AND_X2:
+  case Opcode::BUFFER_ATOMIC_SWAP_X2:
   case Opcode::BUFFER_ATOMIC_OR:
   case Opcode::BUFFER_ATOMIC_XOR:
   case Opcode::BUFFER_ATOMIC_FMIN:
@@ -35276,6 +35277,43 @@ TestCase BufferAtomicAndX2GlcAndExec() {
   return test;
 }
 
+// A coherent (GLC) BUFFER_LOAD_DWORDX2 observes a 64-bit buffer atomic as one value on the GPU. In a
+// shader that already uses 64-bit buffer atomics the load must be one 64-bit atomic load, not two
+// 32-bit loads: decoupled look-back scans publish a (flag, value) pair with BUFFER_ATOMIC_SWAP_X2
+// and poll it with GLC dwordx2, and a torn read gives the new flag with the old value (prefix sums
+// that drop at block boundaries, then loops that never end). Ported from TheCruZ/KytyPS5-GTA@c29bcb321.
+TestCase BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(bool glc, bool int64_atomics) {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = glc ? (int64_atomics ? "BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad"
+                                   : "BufferLoadDwordx2GlcWithoutInt64AtomicsStaysPlain")
+                  : "BufferLoadDwordx2WithoutGlcStaysPlain";
+  auto &code = test.code;
+  AppendVMovU32(&code, 20, 0);
+  AppendVMovLiteral(&code, 2, 0xaaaa0001u);
+  AppendVMovLiteral(&code, 3, 0xbbbb0002u);
+  if (int64_atomics) {
+    AppendBufferStoreOpcode(&code, 0x50, 2, 20, false); // buffer_atomic_swap_x2, no return
+  } else {
+    AppendBufferStoreOpcode(&code, 0x1d, 2, 20, false); // buffer_store_dwordx2
+  }
+  code.push_back(EncodeMubuf0(0x0du, 0, false, true, glc));
+  code.push_back(EncodeMubuf1(4, 12, 20));
+  AppendStoreVgpr(&code, 4, 2);
+  AppendStoreVgpr(&code, 5, 3);
+  AppendEnd(&code);
+  test.initial = {0x12345678u, 0x87654321u, 0, 0};
+  test.expected = {0xaaaa0001u, 0xbbbb0002u, 0xaaaa0001u, 0xbbbb0002u};
+  test.opcodes = {O::V_MOV_B32, int64_atomics ? O::BUFFER_ATOMIC_SWAP_X2 : O::BUFFER_STORE_DWORDX2,
+                  O::BUFFER_LOAD_DWORDX2, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  if (glc && int64_atomics) {
+    test.required_spirv = {"OpAtomicLoad %ulong", "OpAtomicExchange %ulong"};
+  } else {
+    test.forbidden_spirv = {"OpAtomicLoad"};
+  }
+  return test;
+}
+
 TestCase BufferAtomicCmpSwapExactRaw() {
   using O = ShaderOpcode;
 
@@ -39506,6 +39544,9 @@ std::vector<TestCase> MakeCases() {
   cases.push_back(BufferSubwordStoresAtHostOffset(2));
   cases.push_back(BufferSubwordStoresAtHostOffset(1));
   AddCase(BufferLoadDwordx2SnapshotsOverlappingAddress);
+  cases.push_back(BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(true, true));
+  cases.push_back(BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(false, true));
+  cases.push_back(BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(true, false));
   AddCase(BufferLoadDwordx3SnapshotsOverlappingAddress);
   AddCase(BufferLoadDwordx4SnapshotsOverlappingAddress);
   AddCase(BufferLoadDwordx4ZeroesOnlyOutOfBoundsTail);
