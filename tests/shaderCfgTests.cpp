@@ -8279,14 +8279,19 @@ void TestShaderLoopLimitGuard() {
   const auto text = DisassembleSpirvBinary(guarded.spirv);
   Check(text.find("loop_budget") != std::string::npos, "a guarded loop has no loop budget variable");
   Check(text.find("OpConstant %uint 77") != std::string::npos, "the budget does not start at the limit");
-  // A guarded shader reports what it used through the host tail of the GDS buffer, so it binds GDS
-  // even if it never touched it, and records its use at the return.
-  Check(guarded.program.bindings.descriptor_counts[static_cast<size_t>(
-            ShaderRecompiler::IR::DescriptorBindingKind::Gds)] == 1u,
-        "a guarded shader does not bind the GDS buffer for its reports");
-  Check(plain.program.bindings.descriptor_counts[static_cast<size_t>(
-            ShaderRecompiler::IR::DescriptorBindingKind::Gds)] == 0u,
-        "an unguarded shader binds GDS");
+  // A guarded shader reports what it used into the loop guard buffer, and records its use at the
+  // return. It is not a GDS user: it must not bind GDS (the GDS binding costs a barrier and a render
+  // pass break per draw) and must not be marked as one.
+  using DescKind = ShaderRecompiler::IR::DescriptorBindingKind;
+  Check(guarded.program.bindings.descriptor_counts[static_cast<size_t>(DescKind::LoopGuard)] == 1u,
+        "a guarded shader does not bind the loop guard buffer for its reports");
+  Check(guarded.program.bindings.descriptor_counts[static_cast<size_t>(DescKind::Gds)] == 0u &&
+            !guarded.program.info.uses_gds && guarded.program.info.uses_loop_guard,
+        "a guarded shader without GDS use binds or is marked as a GDS user");
+  Check(plain.program.bindings.descriptor_counts[static_cast<size_t>(DescKind::LoopGuard)] == 0u &&
+            plain.program.bindings.descriptor_counts[static_cast<size_t>(DescKind::Gds)] == 0u &&
+            !plain.program.info.uses_loop_guard,
+        "an unguarded shader binds the loop guard buffer or GDS");
   Check(text.find("OpAtomicUMax") != std::string::npos, "a guarded shader does not report its use");
   Check(SpirvInstructionOpcodeCount(guarded.spirv, 246) == SpirvInstructionOpcodeCount(plain.spirv, 246),
         "the guard changed the number of loops");

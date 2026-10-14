@@ -2,6 +2,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/hostException.h"
+#include "common/loopGuard.h"
 #include "common/logging/log.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
@@ -1431,6 +1432,11 @@ struct TestCase {
   float expected_float_tolerance = 0.0f;
   std::vector<u32> gds_initial;
   std::vector<u32> expected_gds;
+  // --shader-loop-limit for this case (0: no guard). With a guard the shader binds the loop guard
+  // buffer (never GDS unless it uses GDS) and `expected_loop_guard` is what its slot must hold.
+  u32 loop_limit = 0;
+  std::optional<u32> expected_loop_guard;
+  std::optional<bool> expect_gds_binding;
   std::vector<std::pair<std::string, size_t>> decoded_counts;
   std::vector<std::pair<std::string, size_t>> ir_counts;
   u32 expected_mip_descriptors = 0;
@@ -1739,6 +1745,7 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   options.stage = ShaderType::Compute;
   options.dump_ir = true;
   options.robust_buffers = TestRobustBufferPolicy();
+  options.loop_limit = test.loop_limit;
   auto compute_info = test.compute_info;
   compute_info.host_subgroup_size = host_subgroup_size;
   options.input_info.compute = &compute_info;
@@ -16447,6 +16454,9 @@ public:
     return ret;
   }
 
+  // The loop guard buffer of the last Dispatch that bound one (read back after the submit).
+  std::vector<u32> m_last_loop_guard;
+
   void Dispatch(const TestCase &test, const CompiledShader &compiled,
                 const Buffer &buffer, const Buffer *gds_buffer = nullptr,
                 const Image *sampled_image = nullptr,
@@ -16716,6 +16726,21 @@ public:
       write.pBufferInfo = &gds_info;
       writes.push_back(write);
     }
+    Buffer loop_guard_buffer;
+    vk::DescriptorBufferInfo loop_guard_info{};
+    m_last_loop_guard.clear();
+    if (Count(Kind::LoopGuard) != 0) {
+      loop_guard_buffer = CreateStorageBuffer(test.name, {}, Common::LoopGuard::Slots);
+      loop_guard_info = {loop_guard_buffer.buffer, 0, loop_guard_buffer.size};
+      vk::WriteDescriptorSet write{};
+      write.sType = vk::StructureType::eWriteDescriptorSet;
+      write.dstSet = descriptor_set;
+      write.dstBinding = Native(Kind::LoopGuard);
+      write.descriptorCount = 1;
+      write.descriptorType = vk::DescriptorType::eStorageBuffer;
+      write.pBufferInfo = &loop_guard_info;
+      writes.push_back(write);
+    }
     Require(test.name, "dispatch", sampled_resources.empty() ||
                 sampled_resources.size() == compiled.program.info.images.size(),
             "sampled resources must match the logical images");
@@ -16889,6 +16914,21 @@ public:
                           vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1,
                           &barrier, 0, nullptr);
     }
+    if (loop_guard_buffer.buffer != nullptr) {
+      vk::BufferMemoryBarrier barrier{};
+      barrier.sType = vk::StructureType::eBufferMemoryBarrier;
+      barrier.srcAccessMask =
+          vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+      barrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
+      barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      barrier.buffer = loop_guard_buffer.buffer;
+      barrier.offset = 0;
+      barrier.size = loop_guard_buffer.size;
+      cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                          vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1,
+                          &barrier, 0, nullptr);
+    }
     Buffer fault_readback;
     if (!test.expected_fault_words.empty()) {
       fault_readback = CreateHostBuffer(
@@ -16918,6 +16958,10 @@ public:
                           1, &barrier, 0, nullptr);
     }
     EndSubmitAndFree(test.name, "dispatch", cmd);
+    if (loop_guard_buffer.buffer != nullptr) {
+      m_last_loop_guard = ReadBuffer(test.name, loop_guard_buffer, Common::LoopGuard::Slots);
+      DestroyBuffer(&loop_guard_buffer);
+    }
     if (!test.expected_fault_words.empty()) {
       Require(test.name, "fault bitmap readback",
               ReadBuffer(test.name, fault_readback,
@@ -20596,6 +20640,14 @@ void RunCase(VulkanHarness *vulkan, const TestCase &test) {
   }
   const bool needs_sampler = Has(Kind::Samplers);
   const bool needs_gds = Has(Kind::Gds);
+  if (test.expect_gds_binding.has_value()) {
+    Require(test.name, "descriptor topology", needs_gds == *test.expect_gds_binding,
+            needs_gds ? "the shader binds GDS but is not a GDS user"
+                      : "the shader uses GDS but does not bind it");
+  }
+  Require(test.name, "descriptor topology",
+          Has(Kind::LoopGuard) == (test.loop_limit != 0 && test.expected_loop_guard.has_value()),
+          "the loop guard buffer is bound iff the shader has a guardable loop under a limit");
   if (needs_gds) {
     const auto gds_dwords = std::max<size_t>(
         {test.gds_initial.size(), test.expected_gds.size(), 1u});
@@ -20649,6 +20701,20 @@ void RunCase(VulkanHarness *vulkan, const TestCase &test) {
                    needs_storage_image ? &storage_image_uint : nullptr,
                    sampler);
   auto actual = vulkan->ReadBuffer(test.name, buffer, test.expected.size());
+  if (test.expected_loop_guard.has_value()) {
+    const auto slot = Common::LoopGuard::SlotFor(compiled.program.shader_hash);
+    Require(test.name, "loop guard report", vulkan->m_last_loop_guard.size() == Common::LoopGuard::Slots,
+            "the loop guard buffer was not read back");
+    Require(test.name, "loop guard report",
+            vulkan->m_last_loop_guard[slot] == *test.expected_loop_guard,
+            "loop guard slot " + std::to_string(slot) + " holds " +
+                std::to_string(vulkan->m_last_loop_guard[slot]) + ", expected " +
+                std::to_string(*test.expected_loop_guard));
+    for (u32 i = 0; i < Common::LoopGuard::Slots; i++) {
+      Require(test.name, "loop guard report", i == slot || vulkan->m_last_loop_guard[i] == 0,
+              "a shader wrote another shader's loop guard slot");
+    }
+  }
   if (!test.expected_gds.empty()) {
     const auto gds_actual =
         vulkan->ReadBuffer(test.name, gds_buffer, test.expected_gds.size());
@@ -30247,6 +30313,48 @@ TestCase SimpleLoop() {
            O::S_BRANCH, O::V_MOV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
 }
 
+// --shader-loop-limit on a loop that never ends: s0 stays 0, so `s_cmp_lt_u32 s0, 4` is always true
+// and s1 counts the iterations. Without the guard this hangs the GPU, with it the loop is cut after
+// `limit` header executions (the body runs limit - 1 times: the last header execution spends the
+// final unit and takes the exit), the shader goes on to store the iteration count, and the loop guard
+// buffer (not GDS, which the shader does not use) holds the budget it used in its slot.
+TestCase RunawayLoopIsCutByGuard() {
+  using O = ShaderOpcode;
+  constexpr u32 limit = 77;
+
+  std::vector<u32> code = {
+      EncodeSMovB32(0, InlineU32(0)),
+      EncodeSMovB32(1, InlineU32(0)),
+      EncodeSopc(0x0a, 0, InlineU32(4)),
+      EncodeSopp(0x04, 2),
+      EncodeSop2(0x00, 1, 1, InlineU32(1)),
+      EncodeSopp(0x02, 0xfffcu),
+      EncodeVop1(0x01, 0, 1),
+  };
+  AppendBufferStoreDword(&code, 0, 30);
+  AppendEnd(&code);
+  TestCase test{"RunawayLoopIsCutByGuard",
+                code,
+                {},
+                {limit - 1},
+                {O::S_MOV_B32, O::S_CMP_LT_U32, O::S_CBRANCH_SCC0, O::S_ADD_U32, O::S_BRANCH,
+                 O::V_MOV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM}};
+  test.loop_limit = limit;
+  test.expected_loop_guard = limit;
+  test.expect_gds_binding = false;
+  return test;
+}
+
+// A guarded loop that ends by itself reports nothing below the threshold, still without GDS.
+TestCase GuardedLoopThatEndsReportsNothing() {
+  auto test = SimpleLoop();
+  test.name = "GuardedLoopThatEndsReportsNothing";
+  test.loop_limit = 1u << 20;
+  test.expected_loop_guard = 0;
+  test.expect_gds_binding = false;
+  return test;
+}
+
 TestCase SharedReturnKeepsSelectedValues() {
   using O = ShaderOpcode;
 
@@ -35849,6 +35957,28 @@ TestCase DsGdsSubdwordAndAtomicWrites() {
   return test;
 }
 
+// A shader that has both a guarded loop and real GDS accesses binds both buffers, and each one
+// holds only its own data (the guard report never lands in GDS, GDS writes never in the guard slots).
+TestCase GuardedLoopWithGdsBindsBoth() {
+  using O = ShaderOpcode;
+  auto test = DsGdsSubdwordAndAtomicWrites();
+  test.name = "GuardedLoopWithGdsBindsBoth";
+  const std::vector<u32> loop = {
+      EncodeSMovB32(0, InlineU32(0)),
+      EncodeSopc(0x0a, 0, InlineU32(4)),
+      EncodeSopp(0x04, 2),
+      EncodeSop2(0x00, 0, 0, InlineU32(1)),
+      EncodeSopp(0x02, 0xfffcu),
+  };
+  test.code.insert(test.code.begin(), loop.begin(), loop.end());
+  test.opcodes.insert(test.opcodes.begin(), {O::S_MOV_B32, O::S_CMP_LT_U32, O::S_CBRANCH_SCC0,
+                                             O::S_ADD_U32, O::S_BRANCH});
+  test.loop_limit = 1u << 20;
+  test.expected_loop_guard = 0;
+  test.expect_gds_binding = true;
+  return test;
+}
+
 TestCase ImageLoadR32UintUsesIntegerSampledImage() {
   using O = ShaderOpcode;
 
@@ -39469,6 +39599,9 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorCompareInvertedMaskSelect);
   AddCase(BranchSelect);
   AddCase(SimpleLoop);
+  AddCase(RunawayLoopIsCutByGuard);
+  AddCase(GuardedLoopThatEndsReportsNothing);
+  AddCase(GuardedLoopWithGdsBindsBoth);
   AddCase(SharedReturnKeepsSelectedValues);
   AddCase(SiblingSharedExitKeepsCapturedConditions);
   AddCase(BranchVccnzUsesWaveMask);
@@ -42682,6 +42815,8 @@ void CheckNativeImageDescriptorTypes() {
               NativeDescriptorType(DescriptorBindingKind::FaultBuffer) ==
                   vk::DescriptorType::eStorageBuffer &&
               NativeDescriptorType(DescriptorBindingKind::FlattenedSrt) ==
+                  vk::DescriptorType::eStorageBuffer &&
+              NativeDescriptorType(DescriptorBindingKind::LoopGuard) ==
                   vk::DescriptorType::eStorageBuffer &&
               NativeDescriptorType(DescriptorBindingKind::ShaderData) ==
                   vk::DescriptorType::eStorageBuffer,

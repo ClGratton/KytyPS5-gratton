@@ -165,8 +165,9 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage, bool lo
 		count += image.mip_count;
 	}
 	expected[static_cast<size_t>(Kind::Samplers)] = static_cast<uint32_t>(program.info.samplers.size());
-	// The loop guard reports through the host tail of the GDS buffer.
-	expected[static_cast<size_t>(Kind::Gds)] = uses_gds || loop_guard;
+	expected[static_cast<size_t>(Kind::Gds)] = uses_gds;
+	// The loop guard reports into its own buffer, never GDS (no GDS hazards for a guard alone).
+	expected[static_cast<size_t>(Kind::LoopGuard)] = loop_guard;
 	expected[static_cast<size_t>(Kind::SharedMemory)] = uses_lds && lds_storage;
 	expected[static_cast<size_t>(Kind::BdaPagetable)] = program.info.uses_dma;
 	expected[static_cast<size_t>(Kind::FaultBuffer)] = program.info.uses_dma;
@@ -221,9 +222,7 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	state.robust_buffers = robust_buffers;
 	state.loop_limit = loop_limit;
 	const bool loop_guard = loop_limit != 0 && ProgramHasGuardableLoop(program);
-	if (loop_guard) {
-		program.info.uses_gds = true;
-	}
+	program.info.uses_loop_guard = loop_guard;
 	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
 	state.lane_count =
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u

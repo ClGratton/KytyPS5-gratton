@@ -587,7 +587,7 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 	info.outputs.clear();
 	info.user_data_registers.clear();
 	info.live_buffers = 0;
-	info.has_bitwise_xor = info.uses_lds = info.uses_gds = info.uses_flattened_srt =
+	info.has_bitwise_xor = info.uses_lds = info.uses_gds = info.uses_loop_guard = info.uses_flattened_srt =
 	    info.uses_dispatch_threads = info.uses_swizzle = false;
 	info.bvh = info.subgroup_ballot = info.subgroup_barrier = info.subgroup_shuffle =
 	    info.subgroup_local_invocation_id = info.compute_derivatives = info.image_gather_extended =

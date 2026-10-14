@@ -230,6 +230,7 @@ void DefineDescriptors(EmitterState& state) {
 	}
 	counts[static_cast<size_t>(Kind::Samplers)] = static_cast<uint32_t>(info.samplers.size());
 	counts[static_cast<size_t>(Kind::Gds)] = info.uses_gds;
+	counts[static_cast<size_t>(Kind::LoopGuard)] = info.uses_loop_guard;
 	counts[static_cast<size_t>(Kind::SharedMemory)] =
 	    info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer;
 	counts[static_cast<size_t>(Kind::BdaPagetable)] = info.uses_dma;
@@ -315,6 +316,10 @@ void DefineDescriptors(EmitterState& state) {
 				break;
 			case IR::DescriptorBindingKind::Gds:
 				state.gds_variable = Define(StorageBufferType(state, state.storage_buffers[2]), "gds");
+				break;
+			case IR::DescriptorBindingKind::LoopGuard:
+				state.loop_guard_variable =
+				    Define(StorageBufferType(state, state.storage_buffers[2]), "loop_guard");
 				break;
 			case IR::DescriptorBindingKind::SharedMemory:
 				state.lds_variable = Define(StorageBufferType(state, state.storage_buffers[2]), "lds_dwords");

@@ -311,11 +311,14 @@ enum class DescriptorBindingKind : uint32_t {
 	FlattenedSrt,
 	ShaderData,
 	SharedMemory,
+	// The shader loop guard's own report buffer (common/loopGuard.h). Separate from Gds: a shader
+	// with only a guard has no GDS hazards, so it must not get the GDS barrier.
+	LoopGuard,
 	Count,
 };
 
 static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 49u);
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 56u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 57u);
 
 struct PushData {
 	static constexpr uint32_t DwordCount = 32;
@@ -478,6 +481,7 @@ struct ShaderInfo {
 	bool                            uses_swizzle                  = false;
 	bool                            uses_lds                      = false;
 	bool                            uses_gds                      = false;
+	bool                            uses_loop_guard               = false;
 	bool                            uses_flattened_srt            = false;
 	bool                            uses_dispatch_threads         = false;
 	bool                            bvh                           = false;

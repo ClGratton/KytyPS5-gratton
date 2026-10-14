@@ -86,11 +86,11 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 }
 
 // Loop guard report (see common/loopGuard.h): an invocation that used a large share of its budget
-// records how much into this shader's slot of the GDS host tail (atomic max), so the host can log
+// records how much into this shader's slot of the loop guard buffer (atomic max), so the host can log
 // the high-water mark and, loudly, a trip. Emitted at every return; a return has no successors, so
 // the extra blocks need no phi patching.
 void EmitLoopGuardReport(EmitterState& state) {
-	if (state.loop_budget_variable == 0 || state.gds_variable == 0) {
+	if (state.loop_budget_variable == 0 || state.loop_guard_variable == 0) {
 		return;
 	}
 	auto&      builder = state.builder;
@@ -110,9 +110,8 @@ void EmitLoopGuardReport(EmitterState& state) {
 	const auto slot_pointer = builder.AllocateId();
 	builder.AddFunction(spv::OpAccessChain,
 	                    TypePointer(state, spv::StorageClassStorageBuffer, TypeU32(state)),
-	                    slot_pointer, state.gds_variable, ConstantU32(state, 0),
-	                    ConstantU32(state, Common::LoopGuard::FirstDword +
-	                                           Common::LoopGuard::SlotFor(state.program.shader_hash)));
+	                    slot_pointer, state.loop_guard_variable, ConstantU32(state, 0),
+	                    ConstantU32(state, Common::LoopGuard::SlotFor(state.program.shader_hash)));
 	const auto old = builder.AllocateId();
 	builder.AddFunction(spv::OpAtomicUMax, TypeU32(state), old, slot_pointer,
 	                    ConstantU32(state, spv::ScopeDevice),
@@ -711,7 +710,7 @@ void EmitProgram(EmitterState& state) {
 		state.builder.AddName(state.pixel_valid_mask_variable, "pixel_valid_mask_active");
 	}
 	state.loop_merges.clear();
-	if (state.loop_limit != 0 && state.gds_variable != 0 && ProgramHasGuardableLoop(program)) {
+	if (state.loop_limit != 0 && state.loop_guard_variable != 0 && ProgramHasGuardableLoop(program)) {
 		state.loop_budget_variable = state.builder.AllocateId();
 		state.builder.AddName(state.loop_budget_variable, "loop_budget");
 	}

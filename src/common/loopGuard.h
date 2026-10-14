@@ -7,7 +7,7 @@
 // is used up the loops are left, so a loop that cannot end (a linked list with a cycle, a garbage trip
 // count) costs a bounded time instead of hanging the GPU (NVRM Xid 109). A trip always means an
 // emulation bug or corrupt guest data, so it is never silent: shaders report how much of the budget an
-// invocation used into a host-only tail of the GDS buffer (one dword per shader slot, atomic max), and
+// invocation used into a buffer of its own (one dword per shader slot, atomic max), and
 // Monitor turns that into log lines (a trip: loud, once per shader; high-water marks: informative).
 //
 // Pure logic, unit tested in tests/LoopGuardTests.cpp. The emitter side is in
@@ -28,11 +28,13 @@ namespace Common::LoopGuard {
 // Loop-header executions per invocation (all loops together) when --shader-loop-limit is not given.
 constexpr uint32_t DefaultLimit = 1u << 20;
 
-// The guest's GDS is 64 KiB; the host buffer has a tail after it that no guest address reaches.
+// The guest's GDS is 64 KiB. The reports do not live in it: a shader that only has a guard is not a
+// GDS user and must not get the GDS hazard barrier (a barrier and a render pass break per draw), so
+// they have a buffer of their own (descriptor kind LoopGuard), host-visible and written only with
+// atomics.
 constexpr uint32_t GuestGdsBytes = 64u * 1024u;
 constexpr uint32_t Slots         = 1024;
-constexpr uint32_t HostTailBytes = Slots * sizeof(uint32_t);
-constexpr uint32_t FirstDword    = GuestGdsBytes / sizeof(uint32_t);
+constexpr uint32_t BufferBytes   = Slots * sizeof(uint32_t);
 
 [[nodiscard]] constexpr uint32_t SlotFor(uint64_t shader_hash) {
 	return static_cast<uint32_t>((shader_hash ^ (shader_hash >> 29) ^ (shader_hash >> 47)) % Slots);
@@ -56,7 +58,7 @@ public:
 		slot.shaders.push_back({shader_hash, stage});
 	}
 
-	// `tail` is the host tail of the GDS buffer (Slots dwords). Returns the lines to print for what
+	// `tail` is the loop guard buffer (Slots dwords). Returns the lines to print for what
 	// is new since the last call.
 	[[nodiscard]] std::vector<std::string> Observe(std::span<const uint32_t> tail, uint32_t limit) {
 		std::vector<std::string> lines;
@@ -131,7 +133,7 @@ private:
 	std::map<uint32_t, Slot>    m_slots;
 };
 
-// The process-wide monitor (shaders register when compiled, the buffer cache observes the GDS tail).
+// The process-wide monitor (shaders register when compiled, the buffer cache observes the guard buffer).
 [[nodiscard]] inline Monitor& GetMonitor() {
 	static Monitor monitor;
 	return monitor;

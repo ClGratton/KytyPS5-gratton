@@ -97,6 +97,7 @@ vk::DescriptorType NativeDescriptorType(BindingKind kind) {
 		case BindingKind::Samplers: return vk::DescriptorType::eSampler;
 		case BindingKind::Buffers:
 		case BindingKind::Gds:
+		case BindingKind::LoopGuard:
 		case BindingKind::BdaPagetable:
 		case BindingKind::FaultBuffer:
 		case BindingKind::FlattenedSrt:
@@ -861,6 +862,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	const auto& snapshot = *runtime.resources;
 	prepared.runtime = &runtime;
 	prepared.gds = {nullptr, 0, VK_WHOLE_SIZE};
+	prepared.loop_guard = {nullptr, 0, VK_WHOLE_SIZE};
 	prepared.flattened_srt = {};
 	prepared.shader_data_buffer = {};
 	prepared.shared_memory = {};
@@ -905,6 +907,9 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.shader_data.resize(program.bindings.ShaderDataDwords());
 	if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::Gds)] != 0) {
 		prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
+	}
+	if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::LoopGuard)] != 0) {
+		prepared.loop_guard.buffer = m_context.GetBufferCache().GetLoopGuardBuffer()->Handle();
 	}
 }
 
@@ -1397,9 +1402,12 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					case BindingKind::FlattenedSrt:
 					case BindingKind::ShaderData:
 					case BindingKind::SharedMemory:
+					case BindingKind::LoopGuard:
 					case BindingKind::Gds: {
 						const vk::DescriptorBufferInfo* view = &descriptors.gds;
-						if (kind == BindingKind::FlattenedSrt) {
+						if (kind == BindingKind::LoopGuard) {
+							view = &descriptors.loop_guard;
+						} else if (kind == BindingKind::FlattenedSrt) {
 							view = &descriptors.flattened_srt;
 						} else if (kind == BindingKind::ShaderData) {
 							view = &descriptors.shader_data_buffer;

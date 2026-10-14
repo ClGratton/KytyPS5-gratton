@@ -120,6 +120,8 @@ struct EmitterState {
 	uint32_t                                         bvh_intersect_function  = 0;
 	uint32_t                                         gds_variable            = 0;
 	uint32_t                                         gds_length              = 0;
+	// --shader-loop-limit: the report buffer (one dword per shader slot, atomic max).
+	uint32_t                                         loop_guard_variable     = 0;
 	uint32_t                                         push_constant_variable  = 0;
 	uint32_t                                         shader_data_storage_variable = 0;
 	uint32_t                                         flattened_srt_variable  = 0;
