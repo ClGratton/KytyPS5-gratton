@@ -596,6 +596,11 @@ add_executable(hot_pages_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(hot_pages_tests PRIVATE ${inc_headers})
 
+add_executable(readback_future_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ReadbackFutureTests.cpp"
+)
+target_include_directories(readback_future_tests PRIVATE ${inc_headers})
+
 add_executable(loop_guard_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LoopGuardTests.cpp"
 )
@@ -968,6 +973,7 @@ if(BUILD_TESTING)
 	add_test(NAME readback_plan COMMAND $<TARGET_FILE:readback_plan_tests>)
 	add_test(NAME hot_pages COMMAND $<TARGET_FILE:hot_pages_tests>)
 	add_test(NAME poll_wait COMMAND $<TARGET_FILE:poll_wait_tests>)
+	add_test(NAME readback_future COMMAND $<TARGET_FILE:readback_future_tests>)
 	add_test(NAME gc_clock COMMAND $<TARGET_FILE:gc_clock_tests>)
 	add_test(NAME gpu_op_ring COMMAND $<TARGET_FILE:gpu_op_ring_tests>)
 	add_test(NAME loop_guard COMMAND $<TARGET_FILE:loop_guard_tests>)
@@ -1189,6 +1195,7 @@ if(BUILD_TESTING)
 		readback_plan_tests
 		hot_pages_tests
 		poll_wait_tests
+		readback_future_tests
 		gc_clock_tests
 		gpu_op_ring_tests
 		loop_guard_tests
