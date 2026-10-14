@@ -4436,6 +4436,152 @@ public:
     std::printf("[host]    %-32s ok\n", name);
   }
 
+  // --known-stores / --known-copies on the real buffer cache: what is recorded after a dispatch is
+  // read instead of draining the GPU, and every kind of later write forgets it.
+  void CheckBufferCacheKnownStores() {
+    constexpr const char *name = "BufferCacheKnownStores";
+    constexpr uintptr_t base = 0x0000000200900000ull;
+    constexpr uint64_t allocation_size = 0x200000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t header = 0x1100;       // a 32 byte header, flag dword at +0x18
+    constexpr uint64_t other = 0x5100;
+    constexpr uint64_t copy_source = 0x20000; // 16 KiB of equal dwords
+    constexpr uint64_t copy_destination = 0x30000;
+    constexpr uint64_t copy_bytes = 0x4000;
+
+    Config::ConfigOptions on;
+    on.known_stores = true;
+    on.known_copies = true;
+    Config::Load(on);
+
+    EnsureRuntimeContext();
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "known-stores direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "known-stores fixed direct-memory mapping failed");
+    auto *memory = static_cast<uint8_t *>(mapped);
+    std::memset(memory, 0xee, allocation_size);
+    std::memset(memory + copy_source, 0xff, copy_bytes);
+    {
+      auto &cache = context.GetBufferCache();
+      context.MapMemory(base, allocation_size);
+      const auto Dword = [&](uint64_t offset) -> uint64_t { return base + offset; };
+      uint32_t value = 0;
+      std::array<uint32_t, 8> words {};
+
+      // A dispatch wrote the header: GPU-dirty, the flag dword and the first dword are known.
+      Require(name, "header buffer", cache.ObtainBuffer(Dword(header), 32, true, false).first != nullptr,
+              "header buffer was not obtained");
+      Require(name, "header is GPU-dirty", cache.HasGpuDirtyBytes(Dword(header), 32),
+              "a written range is not GPU-dirty");
+      cache.RecordKnownStores(std::array<std::pair<uint64_t, uint32_t>, 2> {
+          std::pair<uint64_t, uint32_t> {Dword(header + 0x18), 0u}, {Dword(header), 0xc0u}});
+      Require(name, "known flag",
+              cache.TryReadKnownStores(Dword(header + 0x18), 4, &value) && value == 0 &&
+                  cache.TryReadKnownStores(Dword(header), 4, &value) && value == 0xc0,
+              "a recorded dword is not readable");
+      Require(name, "unknown neighbour",
+              !cache.TryReadKnownStores(Dword(header + 0x1c), 4, &value) &&
+                  !cache.TryReadKnownStores(Dword(header + 0x18), 8, words.data()),
+              "an unrecorded dword was reported known");
+      Require(name, "dirty but known", !cache.HasUnknownGpuDirtyBytes(Dword(header + 0x18), 4) &&
+                                           cache.HasUnknownGpuDirtyBytes(Dword(header + 0x1c), 4) &&
+                                           cache.HasUnknownGpuDirtyBytes(Dword(header + 0x18), 8),
+              "unknown-dirty accounting is wrong");
+      // The guest copy still holds the stale bytes; the overlay puts the known values in.
+      std::memcpy(words.data(), memory + header, 32);
+      Require(name, "stale guest copy", words[6] == 0xeeeeeeeeu, "guest bytes were not stale");
+      cache.OverlayKnownDirtyDwords(Dword(header), 32, words.data());
+      Require(name, "overlay", words[0] == 0xc0 && words[6] == 0 && words[7] == 0xeeeeeeeeu && words[1] == 0xeeeeeeeeu,
+              "overlay replaced the wrong dwords");
+
+      // Another GPU write over part of it forgets that part only.
+      Require(name, "second write", cache.ObtainBuffer(Dword(header + 0x10), 16, true, false).first != nullptr,
+              "second write was not obtained");
+      Require(name, "partial forget",
+              cache.TryReadKnownStores(Dword(header), 4, &value) && value == 0xc0 &&
+                  !cache.TryReadKnownStores(Dword(header + 0x18), 4, &value),
+              "a GPU write did not forget exactly its range");
+      // A CPU write forgets.
+      cache.InvalidateMemory(Dword(header), 4);
+      Require(name, "cpu write forgets", !cache.TryReadKnownStores(Dword(header), 4, &value),
+              "a CPU write did not forget");
+      // The flag is a runtime toggle: knowledge recorded while off is not used.
+      cache.RecordKnownStores(std::array<std::pair<uint64_t, uint32_t>, 1> {
+          std::pair<uint64_t, uint32_t> {Dword(header + 0x14), 7u}});
+      Require(name, "known before off", cache.TryReadKnownStores(Dword(header + 0x14), 4, &value) && value == 7,
+              "recorded dword is not readable");
+      Config::Load(Config::ConfigOptions {});
+      Require(name, "off: unused", !cache.TryReadKnownStores(Dword(header + 0x14), 4, &value),
+              "knowledge was used with the flag off");
+      Config::Load(on);
+      Require(name, "on again: still known", cache.TryReadKnownStores(Dword(header + 0x14), 4, &value) && value == 7,
+              "knowledge was lost over a toggle");
+      // A write while the flag is off still forgets.
+      Config::Load(Config::ConfigOptions {});
+      cache.InvalidateMemory(Dword(header + 0x14), 4);
+      Config::Load(on);
+      Require(name, "forgotten while off", !cache.TryReadKnownStores(Dword(header + 0x14), 4, &value),
+              "a write with the flag off did not forget");
+      // Address writes forget everything.
+      cache.RecordKnownStores(std::array<std::pair<uint64_t, uint32_t>, 1> {
+          std::pair<uint64_t, uint32_t> {Dword(other), 5u}});
+      cache.NoteAddressWrites();
+      Require(name, "address writes", !cache.TryReadKnownStores(Dword(other), 4, &value),
+              "a shader with address writes did not make the table unknown");
+
+      // Known copies: the destination of a proven copy is the runs of its clean source.
+      Require(name, "destination buffer", cache.ObtainBuffer(Dword(copy_destination), copy_bytes, true, false).first != nullptr,
+              "copy destination was not obtained");
+      cache.RecordKnownCopy({Dword(copy_destination), Dword(copy_source), copy_bytes});
+      Require(name, "known copy", cache.TryGetKnownCopy(Dword(copy_destination), copy_bytes, &value) && value == 0xffffffffu &&
+                                      cache.TryGetKnownCopy(Dword(copy_destination + 0x1000), 0x1000, &value),
+              "the copy destination is not known");
+      Require(name, "outside the copy", !cache.TryGetKnownCopy(Dword(copy_destination + copy_bytes), 4, &value) &&
+                                            !cache.TryGetKnownCopy(Dword(copy_destination - 4), 8, &value),
+              "a range outside the copy is known");
+      Require(name, "write forgets a copy",
+              cache.ObtainBuffer(Dword(copy_destination + 0x2000), 16, true, false).first != nullptr &&
+                  !cache.TryGetKnownCopy(Dword(copy_destination), copy_bytes, &value) &&
+                  cache.TryGetKnownCopy(Dword(copy_destination), 0x2000, &value),
+              "a GPU write did not cut the known copy");
+      // A source with GPU-written bytes is not read: nothing is recorded.
+      Require(name, "dirty source", cache.ObtainBuffer(Dword(copy_source), 16, true, false).first != nullptr,
+              "source write was not obtained");
+      cache.RecordKnownCopy({Dword(copy_destination + 0x8000), Dword(copy_source), copy_bytes});
+      Require(name, "dirty source records nothing", !cache.TryGetKnownCopy(Dword(copy_destination + 0x8000), 0x1000, &value),
+              "a copy from GPU-written bytes was recorded");
+      cache.ReadMemory(Dword(header), 32);
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+    context.ShutdownGpu();
+    Config::Load(Config::ConfigOptions {});
+    Require(name, "unmap direct backing", Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "known-stores direct-memory mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(direct_offset, allocation_size) == 0,
+            "known-stores direct-memory allocation release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
   void CheckBufferCacheDirtyGarbageCollection() {
     constexpr const char *name = "BufferCacheDirtyGarbageCollection";
     constexpr uintptr_t base = 0x0000000200700000ull;
@@ -46261,6 +46407,11 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--bda-page-table-init-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBdaPageTableInitialization();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--known-stores-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBufferCacheKnownStores();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-gc-only") == 0) {
