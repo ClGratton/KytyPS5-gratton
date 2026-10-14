@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstdio>
 #include <chrono>
 #include <fmt/format.h>
@@ -471,6 +472,33 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 
 	if (*out == KERNEL_ERROR_EBADF) {
 		return KERNEL_ERROR_EBADF;
+	}
+	// KYTY_EQUEUE_STATS=1: what the guest is handed from graphics queues, per payload, every 10 s.
+	{
+		static const bool stats = std::getenv("KYTY_EQUEUE_STATS") != nullptr;
+		if (stats && *out > 0) {
+			static std::atomic<uint64_t> abcd {0}, zero {0}, other {0}, waits {0}, fflags_sum {0};
+			static std::atomic<int64_t>  last_ms {0};
+			for (int i = 0; i < *out && i < num; i++) {
+				if (ev[i].filter != KERNEL_EVFILT_GRAPHICS) {
+					continue;
+				}
+				(ev[i].data == 43981 ? abcd : (ev[i].data == 0 ? zero : other)).fetch_add(1, std::memory_order_relaxed);
+				fflags_sum.fetch_add(ev[i].fflags, std::memory_order_relaxed);
+			}
+			waits.fetch_add(1, std::memory_order_relaxed);
+			const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			                        std::chrono::steady_clock::now().time_since_epoch()).count();
+			auto previous = last_ms.load(std::memory_order_relaxed);
+			if (now_ms - previous > 10000 && last_ms.compare_exchange_strong(previous, now_ms)) {
+				std::printf("EventQueue stats: graphics events delivered in 10 s: data 0xabcd %llu, data 0 %llu, other %llu, "
+				            "fflags sum %llu, waits %llu\n",
+				            static_cast<unsigned long long>(abcd.exchange(0)), static_cast<unsigned long long>(zero.exchange(0)),
+				            static_cast<unsigned long long>(other.exchange(0)), static_cast<unsigned long long>(fflags_sum.exchange(0)),
+				            static_cast<unsigned long long>(waits.exchange(0)));
+				std::fflush(stdout);
+			}
+		}
 	}
 	if (*out == 0) {
 		LOGF("\tEqueue wait timedout: %s\n", owner->GetName().c_str());
