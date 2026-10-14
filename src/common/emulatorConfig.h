@@ -273,6 +273,9 @@ struct ConfigOptions {
 	// --texture-binding-reuse: a draw keeps a slot's image binding while the descriptor, the shader's
 	// image resource and the set of cached images are unchanged. Exact; default off until measured.
 	bool                   texture_binding_reuse       = false;
+	// --tracker-lockfree: the buffer cache asks the memory tracker whether a range is CPU- or GPU-modified
+	// through lock-free mirrors of the dirty bits instead of the region locks. Exact; default off until measured.
+	bool                   tracker_lockfree = false;
 	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
 	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.
@@ -390,6 +393,7 @@ bool              ElideBarriersEnabled();
 bool              KnownFillsEnabled();
 bool              ImageLookupMemoEnabled();
 bool              TextureBindingReuseEnabled();
+bool              TrackerLockfreeEnabled();
 bool              CleanGuestReadsEnabled();
 bool              DrawKeyCacheEnabled();
 bool              SrtPlanShadowEnabled();

@@ -167,6 +167,9 @@ QList<Option> BuildTable() {
 	             "cached images are unchanged, instead of decoding and looking it up again. Exact; "
 	             "lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(texture_binding_reuse)});
+	defs.append({"tracker_lockfree", "--tracker-lockfree", Tab::Gpu, "CPU cost per draw", Kind::Bool, "Answer tracker queries without locks",
+	             "The buffer cache asks whether a guest range is CPU- or GPU-modified through lock-free copies of the dirty bits instead of taking the tracker's region locks. Exact; lowers the GPU thread's CPU time per buffer binding.",
+	             EMU_BOOL(tracker_lockfree)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

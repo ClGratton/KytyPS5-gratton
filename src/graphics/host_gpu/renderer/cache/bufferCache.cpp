@@ -731,7 +731,8 @@ void BufferCache::UploadDirtyRanges(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		    copies.emplace_back(total_size, buffer.Offset(address), bytes);
 		    total_size += bytes;
 	    },
-	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
+	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); },
+	    Config::TrackerLockfreeEnabled());
 	if (source) {
 		auto& command = m_scheduler.Current();
 		command.EndRendering();
@@ -805,9 +806,13 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		EXIT("BufferCache: buffer request requires a recording command buffer\n");
 	}
 
+	// --tracker-lockfree: the same two queries through the regions' lock-free mirrors.
+	const bool lock_free = Config::TrackerLockfreeEnabled();
 	if (!is_written && size <= CACHING_PAGESIZE &&
-	    !m_memory_tracker.IsRegionGpuModified(vaddr, size) &&
-	    m_memory_tracker.IsRegionCpuModified(vaddr, size)) {
+	    !(lock_free ? m_memory_tracker.IsRegionGpuModifiedLockFree(vaddr, size)
+	                : m_memory_tracker.IsRegionGpuModified(vaddr, size)) &&
+	    (lock_free ? m_memory_tracker.IsRegionCpuModifiedLockFree(vaddr, size)
+	               : m_memory_tracker.IsRegionCpuModified(vaddr, size))) {
 		const auto alignment = std::max<uint64_t>(
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
 		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
@@ -955,6 +960,9 @@ bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
+	if (Config::TrackerLockfreeEnabled()) {
+		return m_memory_tracker.IsRegionGpuModifiedLockFree(vaddr, size);
+	}
 	return m_memory_tracker.IsRegionGpuModified(vaddr, size);
 }
 
@@ -963,6 +971,9 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
+	if (Config::TrackerLockfreeEnabled()) {
+		return m_memory_tracker.IsRegionCpuModifiedLockFree(vaddr, size);
+	}
 	return m_memory_tracker.IsRegionCpuModified(vaddr, size);
 }
 
