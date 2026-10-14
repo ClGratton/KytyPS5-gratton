@@ -118,6 +118,12 @@ struct BufferResource {
 	bool                   read               = false;
 	bool                   written            = false;
 	bool                   atomic             = false;
+	bool                   stored             = false; // Plain (non-atomic) stores.
+	bool                   loaded             = false; // Plain (non-atomic) loads, scalar loads included.
+	// False if any atomic on the resource can make its result depend on the order of draws: an
+	// operation that is not commutative (swap, compare-swap) or one whose returned value is used.
+	// What --defer-draw-write-barriers needs to leave two draws' atomics on a range unordered.
+	bool                   ordered_atomic     = false;
 	bool                   formatted          = false;
 	bool                   scalar             = false;
 	uint32_t               indirect_root              = NoIndirectBuffer;
