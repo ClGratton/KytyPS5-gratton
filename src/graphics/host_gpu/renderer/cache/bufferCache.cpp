@@ -1074,8 +1074,8 @@ void BufferCache::LogRingStatsPeriodic() {
 	    "[obtain-buffer] total: calls={} memo_hits={} stored={} small_copies={} written={} texel={}\n", o.calls,
 	    o.memo_hits, o.stored, o.small_copies, o.written, o.texel));
 	const auto mapping = LibKernel::Memory::GetMappingMemoStats();
-	Log::WriteToConsoleAndLog(fmt::format("[mapping-memo] gpu thread: hits={} misses={}\n", mapping.hits,
-	                                      mapping.misses));
+	Log::WriteToConsoleAndLog(fmt::format("[mapping-memo] gpu thread: hits={} misses={} stale={}\n",
+	                                      mapping.hits, mapping.misses, mapping.stale));
 }
 
 void BufferCache::RunGarbageCollector() {

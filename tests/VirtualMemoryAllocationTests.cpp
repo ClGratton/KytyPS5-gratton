@@ -1329,6 +1329,42 @@ void TestRememberedClampFollowsEveryMappingChange() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestRememberedClampMatchesAModelUnderRandomChanges() {
+	const char*        test = "RememberedClampMatchesAModelUnderRandomChanges";
+	constexpr uint64_t page = SceKernelPageSize;
+	constexpr uint64_t pages = 700; // 11 MB: several 2 MiB epoch granules
+	const auto base = MapNamedFlexible(test, page * pages, SceKernelProtCpuRw, "clamp_model");
+	std::vector<bool> mapped(pages, true);
+	uint32_t rng = 12345;
+	const auto next = [&] { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
+	for (int step = 0; step < 6000; step++) {
+		const auto op = next() % 4;
+		const uint64_t index = next() % pages;
+		if (op == 0 && mapped[index]) {
+			CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + index * page, page), "KernelMunmap");
+			mapped[index] = false;
+		} else if (op == 1 && !mapped[index]) {
+			void* at = reinterpret_cast<void*>(base + index * page);
+			CheckOk(test,
+			        Libs::LibKernel::Memory::KernelMapNamedFlexibleMemory(
+			            &at, page, SceKernelProtCpuRw, SceKernelMapFixed, "clamp_model"),
+			        "KernelMapNamedFlexibleMemory(fixed)");
+			mapped[index] = true;
+		} else {
+			const uint64_t first = next() % pages;
+			const uint64_t count = 1 + next() % (pages - first);
+			uint64_t       expect = 0;
+			while (expect < count && mapped[first + expect]) expect++;
+			const auto got = Libs::LibKernel::Memory::ClampRangeSize(base + first * page, count * page);
+			Check(test, got == expect * page, "a remembered clamp differs from the model");
+		}
+	}
+	for (uint64_t i = 0; i < pages; i++) {
+		if (mapped[i]) CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + i * page, page), "KernelMunmap(end)");
+	}
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestRuntimeMemoryOwnerLifecycle() {
 	const char* test = "RuntimeMemoryOwnerLifecycle";
 	Check(test,
@@ -5138,6 +5174,7 @@ int main(int argc, char** argv) {
 	RunTest(TestWriteBackingToPartlyUnmappedAndPrivateMemory);
 	RunTest(TestClampRangeSizeOfUnmappedMemoryBindsNothing);
 	RunTest(TestRememberedClampFollowsEveryMappingChange);
+	RunTest(TestRememberedClampMatchesAModelUnderRandomChanges);
 	RunTest(TestFlexibleMapQueryAndWholeMunmap);
 	RunTest(TestPartialFlexibleMunmapAndFindNext);
 	RunTest(TestReserveMapFixedAndNoOverwrite);
