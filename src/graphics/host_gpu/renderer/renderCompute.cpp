@@ -12,6 +12,8 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/knownStores.h"
+#include "kernel/memory.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -43,6 +45,68 @@
 #include <vector>
 
 namespace Libs::Graphics {
+// --known-stores. Around one real (recorded) compute dispatch of a shader whose every memory write is
+// an analysed store (UniformStoreProgram): before its buffers are bound, decide which stores can run
+// (branch conditions are evaluated from memory the GPU thread has without waiting) and set aside the
+// known dwords of the ranges it binds for writing; after it is recorded, tell the buffer cache which
+// dwords it left with a constant value and which of the set-aside ones it provably did not touch
+// (binding forgot them, the cache cannot tell which bytes of a bound range a shader writes). Skipped
+// for async compute (another queue: its writes are not ordered with the stream the GPU thread
+// reasons about). See knownStores.h for the exactness argument.
+struct UniformStoreScope {
+	bool                                       active = false;
+	std::vector<StoreExtent>                   extents;
+	std::vector<SiteState>                     states;
+	std::vector<std::pair<uint64_t, uint32_t>> candidates, claims, kept;
+};
+
+static void PrepareUniformStores(RenderContext& context, const ShaderComputeInputInfo& input,
+                                 uint64_t invocations, UniformStoreScope& scope) {
+	scope.active = false;
+	if (!Config::KnownStoresEnabled() || input.async_compute || input.stage.resources == nullptr ||
+	    input.stage.resources->uniform_stores == nullptr) {
+		return;
+	}
+	const auto& resources = *input.stage.resources;
+	const auto& program   = *input.stage.program;
+	scope.extents.assign(resources.buffers.size(), {});
+	for (uint32_t i = 0; i < resources.buffers.size(); i++) {
+		const auto d    = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
+		const auto base = d.Base48();
+		const auto size = static_cast<uint64_t>(d.GetSize());
+		auto&      e    = scope.extents[i];
+		e.base          = base;
+		e.size          = size;
+		e.stride        = d.Stride();
+		e.direct        = base != 0 && size != 0 && !d.AddTid() && (d.Stride() == 0 || !d.SwizzleEnabled()) &&
+		                  LibKernel::Memory::IsFullyMapped(base, size);
+	}
+	auto& buffers = context.GetBufferCache();
+	EvaluateStoreFlow(*resources.uniform_stores, scope.extents, invocations <= 32,
+	                  [&](uint64_t address, uint32_t& value) { return buffers.TryReadCurrentDword(address, &value); },
+	                  scope.states);
+	scope.candidates.clear();
+	for (uint32_t i = 0; i < program.info.buffers.size() && i < scope.extents.size(); i++) {
+		if (program.info.buffers[i].written && scope.extents[i].base != 0) {
+			buffers.CollectKnownStores(scope.extents[i].base, scope.extents[i].size, scope.candidates, 256);
+		}
+	}
+	scope.active = true;
+}
+
+static void FinishUniformStores(RenderContext& context, const ShaderComputeInputInfo& input,
+                                UniformStoreScope& scope) {
+	if (!scope.active) {
+		return;
+	}
+	scope.active = false;
+	ResolveKnownStores(*input.stage.resources->uniform_stores, scope.states, scope.extents,
+	                   scope.candidates, scope.claims, scope.kept);
+	auto& buffers = context.GetBufferCache();
+	buffers.RecordKnownStores(scope.kept);
+	buffers.RecordKnownStores(scope.claims);
+}
+
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -418,6 +482,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		DebugLogDispatchInputs(m_context, input_info.stage, submit_id, thread_group_x,
 		                       thread_group_y, thread_group_z);
 	}
+	static thread_local UniformStoreScope store_scope;
+	PrepareUniformStores(m_context, input_info,
+	                     static_cast<uint64_t>(thread_group_x) * thread_group_y * thread_group_z *
+	                         input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2],
+	                     store_scope);
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
@@ -538,6 +607,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		// After binding, which registered this dispatch's writes and forgot older fills.
 		m_context.GetBufferCache().RecordKnownFill(fill_descriptor.Base48(), fill_size, fill_value);
 	}
+	FinishUniformStores(m_context, input_info, store_scope);
 	TrackMetaFills(input_info, buffer);
 	ResetBindings();
 }
@@ -616,6 +686,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;
+	// The group counts of an indirect dispatch are in GPU memory: more than one wave is assumed.
+	static thread_local UniformStoreScope store_scope;
+	PrepareUniformStores(m_context, input_info, UINT64_MAX, store_scope);
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
 	FindBuffers(std::span {&descriptor_stage, 1u});
@@ -673,6 +746,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	FinishUniformStores(m_context, input_info, store_scope);
 	TrackMetaFills(input_info, buffer);
 	ResetBindings();
 }
