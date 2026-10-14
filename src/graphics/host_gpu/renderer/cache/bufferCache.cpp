@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <chrono>
 #include <fmt/format.h>
 #include <cinttypes>
 #include <cstring>
@@ -626,12 +628,50 @@ void BufferCache::CollectKnownStores(uint64_t vaddr, uint64_t size,
 	m_known_stores.CollectDwords(vaddr, size, out, limit);
 }
 
+bool BufferCache::UseKnownStores(uint64_t vaddr, uint64_t size, uint32_t* data, bool count_hit) {
+	if (size == 0 || size > 1024 || ((vaddr | size) & 3u) != 0 || !TryReadKnownStores(vaddr, size, data)) {
+		return false;
+	}
+	const auto seconds = Config::DebugKnownVerifySeconds();
+	const auto now_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count();
+	if (!Config::DebugKnownVerifyAll() && (seconds == 0 || !m_known_stores_verify.Due(now_ns, seconds))) {
+		if (count_hit) {
+			Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Hit);
+		}
+		return true;
+	}
+	// Verify: drain, read the real bytes, compare. The known answer is not used.
+	std::array<uint32_t, 256> real;
+	Common::GpuPhase::NoteGpuThreadFault();
+	ReadMemory(vaddr, size);
+	if (!Libs::LibKernel::Memory::TryReadBacking(vaddr, real.data(), size)) {
+		return false;
+	}
+	Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Verified);
+	if (std::memcmp(real.data(), data, size) != 0) {
+		Common::GpuPhase::NoteKnownStore(Common::GpuPhase::KnownStore::Mismatch);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+			std::printf("KNOWN-STORES MISMATCH addr=0x%016" PRIx64 " size=%" PRIu64 " known0=0x%08x real0=0x%08x: "
+			            "the recorded store knowledge was wrong, dropped\n",
+			            vaddr, size, data[0], real[0]);
+			std::fflush(stdout);
+		}
+		ForgetKnownStores(vaddr, size);
+	}
+	std::memcpy(data, real.data(), size);
+	return true;
+}
+
 bool BufferCache::HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	if (!HasGpuDirtyBytes(vaddr, size)) {
 		return false;
 	}
 	std::array<uint32_t, 256> scratch;
-	return !TryReadKnownStores(vaddr, size, scratch.data());
+	// A verification drains and leaves the range clean (its real bytes are in the guest copy).
+	return !UseKnownStores(vaddr, size, scratch.data(), true);
 }
 
 void BufferCache::RecordKnownFill(uint64_t vaddr, uint64_t size, uint32_t value) {

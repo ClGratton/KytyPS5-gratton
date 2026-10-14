@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/gpuPhaseStats.h"
 #include "common/lruCache.h"
+#include "common/verifyRation.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memResidency.h"
 #include "graphics/host_gpu/memoryTracker.h"
@@ -118,8 +119,15 @@ public:
 	// that is GPU-dirty and known by its known value. Unknown dirty dwords keep the backing bytes.
 	void OverlayKnownDirtyDwords(uint64_t vaddr, uint64_t bytes, uint32_t* data);
 	// HasGpuDirtyBytes, except that a dirty range whose every dword is known (--known-stores) is
-	// not counted: its value is available without waiting for the GPU.
+	// not counted: its value is available without waiting for the GPU. With --debug-known-verify a
+	// known range is, once per interval, downloaded and compared instead (see UseKnownStores).
 	[[nodiscard]] bool HasUnknownGpuDirtyBytes(uint64_t vaddr, uint64_t size);
+	// The value of a GPU-dirty range of at most 1 KiB (dword aligned) from the known-store table:
+	// true and `data` filled when every dword is known. Once per --debug-known-verify interval (or on
+	// every call with --debug-known-verify-all) the GPU is drained instead, the real bytes are
+	// compared with the known ones (a mismatch is logged loudly and the knowledge dropped) and `data`
+	// holds the real bytes. GPU thread only.
+	[[nodiscard]] bool UseKnownStores(uint64_t vaddr, uint64_t size, uint32_t* data, bool count_hit);
 	void               ForgetKnownStores(uint64_t vaddr, uint64_t size);
 	// --known-copies: the GPU work recorded last copied `bytes` of dwords from `src` to `dst`
 	// (knownCopies.h). When the source is readable without waiting for the GPU, the destination's
@@ -223,6 +231,7 @@ private:
 	std::mutex                                        m_known_stores_mutex;
 	KnownFills                                        m_known_stores;
 	std::atomic<size_t>                               m_known_stores_count {0};
+	Common::VerifyRation                              m_known_stores_verify;
 	std::mutex                                        m_known_copies_mutex;
 	KnownFills                                        m_known_copies;
 	std::atomic<size_t>                               m_known_copies_count {0};
