@@ -16295,11 +16295,13 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
 // dword that the initialiser provably does not touch.
 void TestKnownStoresOnTranslatedProducers() {
   const uint32_t builder[] = {
-      0xd7660003u, 0x0001007fu, 0xbefc0308u, 0x7e020281u, 0xd8fa0000u, 0x00000000u,
-      0x7e040281u, 0xd7650005u, 0x0002067eu, 0x7e060280u, 0x7e0802ffu, 0x0000005au,
-      0x7e0c0280u, 0x7e0e0280u, 0xbf8cc07fu, 0x4a0a0b00u, 0x7e100280u, 0x7e120280u,
-      0x7e140280u, 0x7e160305u, 0xe0780000u, 0x80010400u, 0xe0780010u, 0x80010800u,
-      0xbbfd0000u, 0xbf810000u};
+      0xbfa00002u, 0xd7660003u, 0x0001007fu, 0xbefc0308u, 0x7e020281u, 0xd8fa0000u,
+      0x00000000u, 0x7e040281u, 0xd7650005u, 0x0002067eu, 0x7e060280u, 0x7e0802ffu,
+      0x0000005au, 0x7e0c0280u, 0x7e0e0280u, 0xbf8cc07fu, 0x4a0a0b00u, 0xbf8cff0fu,
+      0xd8f60000u, 0x00000000u, 0x7e100280u, 0x7e120280u, 0x7e140280u, 0xbf8cc00fu,
+      0x34000a86u, 0x7e160305u, 0xe0780000u, 0x80010400u, 0xd7460000u, 0x04010300u,
+      0xe0780010u, 0x80010800u, 0x2c000086u, 0xe0780000u, 0x80000000u, 0xbbfd0000u,
+      0xbf810000u};
   const uint32_t initialiser[] = {
       0xe0300000u, 0x80000000u, 0xf4201a86u, 0xfa000000u, 0xbf8cc07fu, 0x8f6a6a81u,
       0xbf8c3f70u, 0x3600006au, 0x7d8c0080u, 0xbf860004u, 0x7e000280u, 0xe0700000u,
@@ -16333,9 +16335,16 @@ void TestKnownStoresOnTranslatedProducers() {
     return true;
   };
 
+  // The producers are one-thread workgroups on a 64-wide wave and a 32-wide host subgroup: the
+  // translator's initial exec is then `LocalInvocationIndex < 1`, not `true`.
+  ShaderComputeInputInfo partial_wave = RegressionComputeInputInfo();
+  partial_wave.host_subgroup_size = 32;
+  partial_wave.wave_size = 64;
+  bool use_partial_wave = false;
   const auto Plan = [&](std::span<const uint32_t> code, Guest &guest, ShaderRecompiler::IR::ResourceSnapshot &snapshot) {
     auto options = MakeCompileOptions(ShaderType::Compute);
     options.user_data = user_data;
+    if (use_partial_wave) options.input_info.compute = &partial_wave;
     auto translated = ShaderRecompiler::TranslateProgram(code, options);
     auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
     ShaderRecompiler::IR::ResourceSpecialization specialization;
@@ -16366,16 +16375,22 @@ void TestKnownStoresOnTranslatedProducers() {
                           std::map<uint64_t, uint32_t>(kept.begin(), kept.end()));
   };
 
+  for (const bool partial : {false, true}) {
+    use_partial_wave = partial;
   {
     Guest guest;
     ShaderRecompiler::IR::ResourceSnapshot snapshot;
     const auto program = Plan(builder, guest, snapshot);
-    Check(program != nullptr && program->sites.size() == 2, "the header builder was not analysed");
+    Check(program != nullptr && program->sites.size() == 3, "the header builder was not analysed");
     std::vector<SiteState> states;
     const auto [claims, kept] = Resolve(*program, snapshot, guest, {}, true, states);
-    Check(claims.size() == 6 && claims.at(0x20000) == 0x5a && claims.at(0x20008) == 0 &&
+    Check(std::all_of(states.begin(), states.end(), [](SiteState s) { return s == SiteState::Definite; }),
+          "every store of a straight-line kernel surely runs");
+    // Header (s[4:7] at 0x20000): {0x5a, N, 0, 0} then {0, 0, 0, N}; arguments (s[0:3] at 0x10000): {3N, 1, 1, 0}.
+    Check(claims.size() == 9 && claims.at(0x20000) == 0x5a && claims.at(0x20008) == 0 &&
               claims.at(0x2000c) == 0 && claims.at(0x20010) == 0 && claims.at(0x20014) == 0 &&
-              claims.at(0x20018) == 0 && !claims.count(0x20004) && !claims.count(0x2001c),
+              claims.at(0x20018) == 0 && !claims.count(0x20004) && !claims.count(0x2001c) &&
+              claims.at(0x10004) == 1 && claims.at(0x10008) == 1 && claims.at(0x1000c) == 0 && !claims.count(0x10000),
           "the header builder's immediates are claimed, its counts are not");
   }
   {
@@ -16417,8 +16432,8 @@ void TestKnownStoresOnTranslatedProducers() {
     std::tie(claims, kept) = Resolve(*program, snapshot, guest, candidates, false, states);
     Check(claims.empty() && kept.empty(), "a multi-wave dispatch decides nothing from memory");
   }
+  }
 }
-
 
 // --known-copies on translated GCN: the color-metadata copy of fast-cleared targets (a formatted load
 // of the four components at the global index and a formatted store of them to another buffer) is a

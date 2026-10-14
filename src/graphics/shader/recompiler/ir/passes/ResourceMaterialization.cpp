@@ -805,6 +805,22 @@ static bool HoldsForFirstInvocation(Value value, uint32_t depth = 0) {
 	return IsFullDispatchPredicate(value);
 }
 
+// The value of `value` as the first invocation of the dispatch computes it: a lane-masked write
+// (`select(exec, new, old)`, how a vector move under a partial exec is lowered) is its new value when
+// the mask holds for the first invocation.
+static Value FirstInvocationValue(Value value) {
+	for (uint32_t depth = 0; depth < 32; ++depth) {
+		value = value.Resolve();
+		const auto* inst = value.TryInstruction();
+		if (inst == nullptr || (inst->GetOpcode() != ValueOpcode::SelectU32 && inst->GetOpcode() != ValueOpcode::SelectU1) ||
+		    !HoldsForFirstInvocation(inst->Arg(0))) {
+			return value;
+		}
+		value = inst->Arg(1);
+	}
+	return value;
+}
+
 // Nonnegative affine coefficients for constant, local and workgroup coordinates. Reject modular
 // arithmetic that could wrap; runtime coverage also bounds the largest invocation index.
 static std::optional<std::array<uint64_t, 3>> FillIndex(Value value, uint32_t axis, Value guard,
@@ -1085,7 +1101,7 @@ private:
 			site.dwords      = dwords;
 			const auto guard = inst.Arg(5).Resolve();
 			site.executes    = HoldsForFirstInvocation(guard);
-			const auto  data   = inst.Arg(4).Resolve();
+			const auto  data   = FirstInvocationValue(inst.Arg(4));
 			const auto* vector = data.TryInstruction();
 			constexpr std::array composites {ValueOpcode::CompositeConstructU32x2,
 			                                 ValueOpcode::CompositeConstructU32x3,
@@ -1094,7 +1110,7 @@ private:
 				return false;
 			}
 			for (uint32_t d = 0; d < dwords; ++d) {
-				const auto word = dwords == 1 ? data : vector->Arg(d).Resolve();
+				const auto word = dwords == 1 ? data : FirstInvocationValue(vector->Arg(d));
 				if (IsU32Imm(word)) {
 					site.known_mask |= static_cast<uint8_t>(1u << d);
 					site.value[d] = word.U32();
@@ -1144,6 +1160,15 @@ private:
 		const auto* inst = value.TryInstruction();
 		if (inst == nullptr || depth > 24) return Unknown();
 		if (const auto found = m_memo.find(inst); found != m_memo.end()) return found->second;
+		if (inst->GetType() == Type::U1 && HoldsForFirstInvocation(value)) {
+			// The initial exec of the dispatch (a partial wave's mask): true for every active lane.
+			StoreExpr e;
+			e.op  = StoreExpr::Op::Imm;
+			e.imm = 1;
+			const auto result = Node(e);
+			m_memo.emplace(inst, result);
+			return result;
+		}
 		const auto result = CompileInst(*inst, depth);
 		m_memo.emplace(inst, result);
 		return result;
@@ -1192,6 +1217,8 @@ private:
 			}
 			case ValueOpcode::SelectU32:
 			case ValueOpcode::SelectU1: {
+				// A write under the initial exec of a partial wave: the first invocation sees the new value.
+				if (HoldsForFirstInvocation(inst.Arg(0))) return Compile(inst.Arg(1), depth + 1);
 				const auto a = Compile(inst.Arg(0), depth + 1);
 				const auto b = Compile(inst.Arg(1), depth + 1);
 				const auto c = Compile(inst.Arg(2), depth + 1);
@@ -1206,7 +1233,7 @@ private:
 			case ValueOpcode::LoadBufferU32: {
 				const auto& memory = m_program.memory_info.at(inst.Flags<MemoryFlags>().index);
 				if (inst.NumArgs() != 5u || memory.kind != ResourceKind::Buffer || memory.data_dwords != 1u ||
-				    !DirectBuffer(memory) || inst.Arg(4).Resolve() != Value(true)) {
+				    !DirectBuffer(memory) || !HoldsForFirstInvocation(inst.Arg(4))) {
 					return Unknown();
 				}
 				const auto idx  = inst.Arg(1).Resolve();
