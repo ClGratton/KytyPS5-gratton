@@ -548,6 +548,11 @@ add_executable(draw_key_memo_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/DrawKeyMemoTests.cpp"
 )
 target_include_directories(draw_key_memo_tests PRIVATE ${inc_headers})
+add_executable(image_lookup_memo_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ImageLookupMemoTests.cpp"
+)
+target_include_directories(image_lookup_memo_tests PRIVATE ${inc_headers})
+target_link_libraries(image_lookup_memo_tests PRIVATE Vulkan::Headers)
 add_executable(srt_plan_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SrtPlanTests.cpp"
 )
@@ -898,6 +903,7 @@ if(BUILD_TESTING)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
 	add_test(NAME known_fills COMMAND $<TARGET_FILE:known_fills_tests>)
 	add_test(NAME draw_key_memo COMMAND $<TARGET_FILE:draw_key_memo_tests>)
+	add_test(NAME image_lookup_memo COMMAND $<TARGET_FILE:image_lookup_memo_tests>)
 	add_test(NAME srt_plan COMMAND $<TARGET_FILE:srt_plan_tests>)
 	add_test(NAME emulator_srt_plan_shadow_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plan-shadow true)
@@ -1116,6 +1122,7 @@ if(BUILD_TESTING)
 		barrier_elision_tests
 		known_fills_tests
 		draw_key_memo_tests
+		image_lookup_memo_tests
 		srt_plan_tests
 		scalar_read_hazard_tests
 		indirect_draw_args_tests
