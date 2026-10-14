@@ -383,7 +383,7 @@ public:
 
 	bool Add(uint64_t start, uint64_t size, uint64_t offset, int protection, int memory_type,
 	         VirtualRangeType type, const char* name, bool disallow_merge = false) {
-		MutatingLock lock(*this, start, size);
+		MutatingLock lock(*this);
 
 		if (start == 0 || size == 0) {
 			return false;
@@ -413,7 +413,7 @@ public:
 	}
 
 	bool Remove(uint64_t start, uint64_t size) {
-		MutatingLock lock(*this, start, size);
+		MutatingLock lock(*this);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -444,7 +444,7 @@ public:
 	}
 
 	bool ReleaseReserved(uint64_t start, uint64_t size) {
-		MutatingLock lock(*this, start, size);
+		MutatingLock lock(*this);
 
 		for (size_t index = 0; index < m_ranges.size(); index++) {
 			auto& r = m_ranges[index];
@@ -459,7 +459,7 @@ public:
 	bool ReplaceSpan(uint64_t start, uint64_t size, VirtualRangeType expected_type,
 	                 uint64_t offset, int protection, int memory_type, VirtualRangeType type,
 	                 const char* name, bool disallow_merge = false) {
-		MutatingLock lock(*this, start, size);
+		MutatingLock lock(*this);
 
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
@@ -506,7 +506,7 @@ public:
 	}
 
 	void Rename(uint64_t start, uint64_t size, const char* name) {
-		MutatingLock lock(*this, start, size);
+		MutatingLock lock(*this);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -518,7 +518,7 @@ public:
 	}
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
-		MutatingLock lock(*this, start, size);
+		MutatingLock lock(*this);
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
@@ -588,50 +588,64 @@ public:
 		return false;
 	}
 
-	// ClampRangeSize with the answer remembered per thread. The answer is a function of the ranges
-	// inside the queried span alone; an entry is used only while the epochs of the granules the span
-	// touches are the ones it was computed at, and a change moves them under the mutex, so a hit
-	// equals the locked answer. It saves the global mutex the GPU thread otherwise takes several
-	// times per draw.
+	// ClampRangeSize with the committed extents the thread has seen remembered. An extent is a run of
+	// contiguous committed ranges [lo, hi); the answer for any address inside it is
+	// min(size, hi - address) whatever the size, so the few extents that hold the guest's big
+	// mappings answer nearly every query without the global mutex. An extent is used only while the
+	// epoch it was computed at is the current one, and the epoch moves under the mutex on every
+	// change, so a hit equals the locked answer.
 	uint64_t ClampRangeSize(uint64_t virtual_addr, uint64_t size) {
-		if (!Config::MappingMemoEnabled()) {
+		if (!Config::MappingMemoEnabled() || virtual_addr == 0 || size == 0 ||
+		    size > UINT64_MAX - virtual_addr) {
 			Common::LockGuard lock(m_mutex);
 			return ClampRangeSizeUnlocked(virtual_addr, size);
 		}
-		struct Entry {
-			uint64_t serial = 0, epoch = 0, addr = 0, size = 0, result = 0;
+		struct Extent {
+			uint64_t serial = 0, epoch = 0, lo = 0, hi = 0;
 		};
-		// Allocated by the first thread that asks, not in every thread's static TLS.
-		constexpr size_t kMemoEntries = 4096;
-		thread_local std::unique_ptr<Entry[]> memo;
-		if (!memo) memo = std::make_unique<Entry[]>(kMemoEntries);
-		auto& entry = memo[((virtual_addr >> 4) ^ (size * 0x9E3779B97F4A7C15ull >> 40)) & (kMemoEntries - 1)];
-		bool       global = false;
-		const auto epoch  = QueryEpoch(virtual_addr, size, &global);
-		if (entry.serial == m_serial && entry.epoch == epoch && entry.addr == virtual_addr &&
-		    entry.size == size) {
-			g_mapping_memo_stats.hits++;
-			if (Config::ResolvedDrawVerify()) {
-				Common::LockGuard lock(m_mutex);
-				bool       global_now = false;
-				if (QueryEpoch(virtual_addr, size, &global_now) == epoch &&
-				    ClampRangeSizeUnlocked(virtual_addr, size) != entry.result) {
-					EXIT("VirtualRanges: remembered clamp of 0x%016" PRIx64 "+0x%" PRIx64
-					     " differs from the live answer\n",
-					     virtual_addr, size);
+		constexpr size_t kExtents = 16;
+		thread_local std::array<Extent, kExtents> extents {};
+		thread_local size_t                       next_slot = 0;
+		const auto epoch = m_epoch.load(std::memory_order_acquire);
+		for (const auto& e: extents) {
+			if (e.serial == m_serial && e.epoch == epoch && virtual_addr >= e.lo && virtual_addr < e.hi) {
+				const auto result = std::min(size, e.hi - virtual_addr);
+				g_mapping_memo_stats.hits++;
+				if (Config::ResolvedDrawVerify()) {
+					Common::LockGuard lock(m_mutex);
+					if (m_epoch.load(std::memory_order_relaxed) == epoch &&
+					    ClampRangeSizeUnlocked(virtual_addr, size) != result) {
+						EXIT("VirtualRanges: remembered clamp of 0x%016" PRIx64 "+0x%" PRIx64
+						     " differs from the live answer\n",
+						     virtual_addr, size);
+					}
 				}
+				return result;
 			}
-			return entry.result;
 		}
 		g_mapping_memo_stats.misses++;
-		if (entry.serial == m_serial && entry.addr == virtual_addr && entry.size == size) {
-			g_mapping_memo_stats.stale++; // the same query, remembered at an older epoch
-		}
 		Common::LockGuard lock(m_mutex);
 		const auto        result = ClampRangeSizeUnlocked(virtual_addr, size);
-		bool              global_now = false;
-		entry = {m_serial, QueryEpoch(virtual_addr, size, &global_now), virtual_addr, size, result};
+		if (result != 0) {
+			const auto [lo, hi] = CommittedExtentUnlocked(virtual_addr);
+			extents[next_slot]  = {m_serial, m_epoch.load(std::memory_order_relaxed), lo, hi};
+			next_slot           = (next_slot + 1) % kExtents;
+		}
 		return result;
+	}
+
+	// [lo, hi) of the run of contiguous committed ranges that holds `addr` (which is committed).
+	std::pair<uint64_t, uint64_t> CommittedExtentUnlocked(uint64_t addr) {
+		auto vma = std::upper_bound(
+		    m_ranges.begin(), m_ranges.end(), addr,
+		    [](uint64_t value, const Range& range) { return value < range.start; });
+		--vma;
+		const auto lo = vma->start;
+		auto       hi = End(vma->start, vma->size);
+		for (++vma; vma != m_ranges.end() && vma->start == hi && IsCommittedRangeType(vma->type); ++vma) {
+			hi = End(vma->start, vma->size);
+		}
+		return {lo, hi};
 	}
 
 	uint64_t ClampRangeSizeUnlocked(uint64_t virtual_addr, uint64_t size) {
@@ -897,60 +911,25 @@ private:
 
 	std::vector<Range> m_ranges;
 	Common::Mutex      m_mutex;
-	// Epochs of the mapping, bumped under m_mutex before it is released. The answer of ClampRangeSize
-	// for [a, a + n) depends only on the ranges inside that span, and a change of the ranges only
-	// changes coverage and type inside its own span, so a change bumps the epoch of every 2 MiB
-	// granule it touches (modulo kShards) and a query is remembered with the epochs of the
-	// granules it touches. A span of more than kMaxShardsPerQuery granules uses m_epoch, which every
-	// change bumps.
-	static constexpr uint64_t kShardShift         = 21;
-	static constexpr size_t   kShards             = 4096;
-	static constexpr uint64_t kMaxShardsPerQuery  = 4;
-	std::atomic<uint64_t>     m_epoch {1};
-	std::array<std::atomic<uint64_t>, kShards> m_shard_epoch {};
-	const uint64_t            m_serial = NextSerial();
+	// Counts every change of the ranges, bumped under m_mutex before it is released. An answer
+	// remembered together with the epoch it was computed at is still the answer while the epoch has
+	// not moved (ClampRangeSize).
+	std::atomic<uint64_t> m_epoch {1};
+	const uint64_t        m_serial = NextSerial();
 
 	static uint64_t NextSerial() {
 		static std::atomic<uint64_t> next {1};
 		return next.fetch_add(1, std::memory_order_relaxed);
 	}
-	// The epoch to remember a query of [addr, addr + size) with: the sum of the epochs of the
-	// granules it touches (all only grow, so an equal sum means none moved), or the global epoch
-	// for a long span. `global` says which.
-	uint64_t QueryEpoch(uint64_t addr, uint64_t size, bool* global) const {
-		const auto first = addr >> kShardShift;
-		const auto last  = (addr + size - 1) >> kShardShift;
-		if (size == 0 || last < first || last - first >= kMaxShardsPerQuery) {
-			*global = true;
-			return m_epoch.load(std::memory_order_acquire);
-		}
-		*global = false;
-		uint64_t sum = 0;
-		for (auto g = first; g <= last; g++) sum += m_shard_epoch[g % kShards].load(std::memory_order_acquire);
-		return sum;
-	}
-	// The lock of a mutator: the epochs of the span move before the mutex is released (members are
-	// destroyed in reverse order), so a reader that sees the old epochs ran before the change.
+	// The lock of a mutator: the epoch moves before the mutex is released (members are destroyed in
+	// reverse order), so a reader that sees the old epoch ran before the change.
 	struct MutatingLock {
-		MutatingLock(VirtualRanges& ranges, uint64_t start, uint64_t size)
-		    : lock(ranges.m_mutex), owner(ranges), start(start), size(size) {}
-		~MutatingLock() {
-			owner.m_epoch.fetch_add(1, std::memory_order_release);
-			const auto first = start >> kShardShift;
-			const auto last  = size == 0 || start + size - 1 < start ? first : (start + size - 1) >> kShardShift;
-			if (last - first >= kShards) {
-				for (auto& e: owner.m_shard_epoch) e.fetch_add(1, std::memory_order_release);
-			} else {
-				for (auto g = first; g <= last; g++)
-					owner.m_shard_epoch[g % kShards].fetch_add(1, std::memory_order_release);
-			}
-		}
+		explicit MutatingLock(VirtualRanges& ranges): lock(ranges.m_mutex), epoch(ranges.m_epoch) {}
+		~MutatingLock() { epoch.fetch_add(1, std::memory_order_release); }
 		MutatingLock(const MutatingLock&)            = delete;
 		MutatingLock& operator=(const MutatingLock&) = delete;
-		Common::LockGuard lock;
-		VirtualRanges&    owner;
-		uint64_t          start;
-		uint64_t          size;
+		Common::LockGuard      lock;
+		std::atomic<uint64_t>& epoch;
 	};
 };
 

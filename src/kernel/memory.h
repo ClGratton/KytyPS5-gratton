@@ -135,7 +135,6 @@ bool                   GuestRangeReadsAsZero(uint64_t vaddr, uint64_t size);
 struct MappingMemoStats {
 	uint64_t hits   = 0;
 	uint64_t misses = 0;
-	uint64_t stale  = 0; // misses whose slot held the same query at an older epoch
 };
 [[nodiscard]] MappingMemoStats GetMappingMemoStats();
 // Whether guest mappings cover all of [vaddr, vaddr + size), and the parts they cover (as
