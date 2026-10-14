@@ -18,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <tuple>
 #include <list>
 #include <unordered_map>
 #include <vector>
@@ -266,14 +267,25 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
 
 static std::atomic<uint64_t> g_dropped_pending {0};
 
-// Debug: KYTY_EQUEUE_STATS=1 prints, every 10 s, how many graphics interrupt triggers were raised
-// and how many the guest was handed, per payload (context id), and the deepest pending queue.
+// Debug: KYTY_EQUEUE_STATS=1 prints, every 10 s, per registered event (ident, udata) and payload (context id)
+// how many graphics interrupt triggers were raised and how many the guest was handed, plus per event the
+// triggers dropped by the bound and the deepest pending queue seen.
 namespace {
 struct EqueueStats {
-	std::mutex                                                                 mutex;
-	std::map<intptr_t, std::pair<uint64_t, uint64_t>>                          per_payload; // raised, delivered
-	uint64_t                                                                   max_pending = 0;
-	int64_t                                                                    last_ms     = 0;
+	struct Key {
+		uintptr_t ident;
+		void*     udata;
+		intptr_t  payload;
+		bool operator<(const Key& o) const {
+			return std::tie(ident, udata, payload) < std::tie(o.ident, o.udata, o.payload);
+		}
+	};
+	struct Counts {
+		uint64_t raised = 0, delivered = 0, dropped = 0, max_pending = 0;
+	};
+	std::mutex            mutex;
+	std::map<Key, Counts> counts;
+	int64_t               last_ms = 0;
 };
 
 bool EqueueStatsEnabled() {
@@ -291,20 +303,17 @@ void EqueueStatsPrint(EqueueStats& stats, int64_t now_ms) {
 		return;
 	}
 	stats.last_ms = now_ms;
-	std::printf("EventQueue stats (10 s), graphics interrupts raised/delivered per payload:");
-	size_t shown = 0;
-	for (auto& [payload, counts]: stats.per_payload) {
-		if (shown++ < 8) {
-			std::printf(" %#llx: %llu/%llu", static_cast<unsigned long long>(payload),
-			            static_cast<unsigned long long>(counts.first), static_cast<unsigned long long>(counts.second));
+	std::printf("EventQueue stats (10 s): ident/udata/payload raised delivered dropped deepest-pending\n");
+	for (auto& [key, c]: stats.counts) {
+		if (c.raised != 0 || c.delivered != 0) {
+			std::printf("EventQueue stats: ident %#llx udata %p payload %#llx: raised %llu delivered %llu dropped %llu pending<=%llu\n",
+			            static_cast<unsigned long long>(key.ident), key.udata, static_cast<unsigned long long>(key.payload),
+			            static_cast<unsigned long long>(c.raised), static_cast<unsigned long long>(c.delivered),
+			            static_cast<unsigned long long>(c.dropped), static_cast<unsigned long long>(c.max_pending));
 		}
-		counts = {0, 0};
+		c = {};
 	}
-	std::printf(" (%zu payloads), deepest pending queue %llu, dropped %llu\n", stats.per_payload.size(),
-	            static_cast<unsigned long long>(stats.max_pending),
-	            static_cast<unsigned long long>(g_dropped_pending.load(std::memory_order_relaxed)));
 	std::fflush(stdout);
-	stats.max_pending = 0;
 }
 
 int64_t NowMs() {
@@ -325,8 +334,12 @@ void KernelQueueTrigger(KernelEqueueEvent* event, intptr_t data, size_t max_pend
 	if (EqueueStatsEnabled()) {
 		auto& stats = GetEqueueStats();
 		std::lock_guard<std::mutex> lock(stats.mutex);
-		stats.per_payload[data].first++;
-		stats.max_pending = std::max<uint64_t>(stats.max_pending, event->pending_events.size());
+		auto& c = stats.counts[{event->event.ident, event->event.udata, data}];
+		c.raised++;
+		c.max_pending = std::max<uint64_t>(c.max_pending, event->pending_events.size());
+		if (event->triggered && event->pending_events.size() >= max_pending) {
+			c.dropped++;
+		}
 		EqueueStatsPrint(stats, NowMs());
 	}
 	if (!event->triggered) {
@@ -533,7 +546,7 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		std::lock_guard<std::mutex> lock(stats.mutex);
 		for (int i = 0; i < *out && i < num; i++) {
 			if (ev[i].filter == KERNEL_EVFILT_GRAPHICS) {
-				stats.per_payload[ev[i].data].second++;
+				stats.counts[{ev[i].ident, ev[i].udata, ev[i].data}].delivered++;
 			}
 		}
 		EqueueStatsPrint(stats, NowMs());
