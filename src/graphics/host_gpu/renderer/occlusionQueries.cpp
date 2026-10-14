@@ -12,12 +12,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cinttypes>
+#include <cstdlib>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <deque>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics::OcclusionQueries {
@@ -170,6 +174,7 @@ private:
 		}
 		m_total += samples;
 		m_dumps.fetch_add(1, std::memory_order_relaxed);
+		NoteStats(dump.address);
 		// DB 0 last: a reader that sees its ready bit finds the whole dump in place.
 		for (uint32_t db = OcclusionCounters::DbCount; db-- > 0;) {
 			const uint64_t value = OcclusionCounters::DbValue(db, m_total);
@@ -177,6 +182,41 @@ private:
 			                                         &value, sizeof(value));
 		}
 	}
+
+	// KYTY_OCCLUSION_STATS=1: every 10 s, how many begin/end pairs were read, how many saw no sample
+	// (occluded) and the mean sample count of the others.
+	void NoteStats(uint64_t address) {
+		static const bool enabled = std::getenv("KYTY_OCCLUSION_STATS") != nullptr;
+		if (!enabled) {
+			return;
+		}
+		if (const auto begin = m_stat_begins.find(address - sizeof(uint64_t)); begin != m_stat_begins.end()) {
+			const uint64_t diff = m_total - begin->second;
+			m_stat_pairs++;
+			m_stat_zero += diff == 0 ? 1 : 0;
+			m_stat_samples += diff;
+			m_stat_begins.erase(begin);
+		} else {
+			if (m_stat_begins.size() > 4096) {
+				m_stat_begins.clear();
+			}
+			m_stat_begins[address] = m_total;
+		}
+		const auto now = std::chrono::steady_clock::now();
+		if (now - m_stat_last > std::chrono::seconds(10)) {
+			m_stat_last = now;
+			std::printf("Occlusion queries: %" PRIu64 " pairs in 10 s, %" PRIu64 " read zero samples, mean %" PRIu64
+			            " samples of the others, ring full %" PRIu64 ", flip waits %" PRIu64 "\n",
+			            m_stat_pairs, m_stat_zero, m_stat_pairs > m_stat_zero ? m_stat_samples / (m_stat_pairs - m_stat_zero) : 0,
+			            m_ring_full.load(), m_waits.load());
+			std::fflush(stdout);
+			m_stat_pairs = m_stat_zero = m_stat_samples = 0;
+		}
+	}
+
+	std::unordered_map<uint64_t, uint64_t> m_stat_begins;
+	uint64_t                               m_stat_pairs = 0, m_stat_zero = 0, m_stat_samples = 0;
+	std::chrono::steady_clock::time_point  m_stat_last = std::chrono::steady_clock::now();
 
 	std::mutex                         m_init_mutex;
 	std::atomic<bool>                  m_ready {false};
