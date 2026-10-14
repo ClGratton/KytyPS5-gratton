@@ -253,6 +253,30 @@ static RegisterDefaults* get_internal_register_defaults(uint32_t ver) {
 	return get_register_defaults(g_agc_internal_reg_defaults_by_version[index], &storage[index]);
 }
 
+// Per command buffer: the fullest state of the round in progress and the last rounds (see
+// KYTY_AGC_CB_LOW); AgcDumpFillHistory() prints them in a guest fault report.
+struct FillSlot {
+	struct Round {
+		uint64_t ns = 0, used = 0, up = 0, down = 0;
+	};
+	std::atomic<const void*> key {nullptr};
+	std::atomic<uint64_t>    capacity {0};
+	std::atomic<uint64_t>    round_peak_used {0};
+	std::atomic<uint64_t>    round_peak_up {0};
+	std::atomic<uint64_t>    round_peak_down {0};
+	std::atomic<uint64_t>    round_peak_ns {0};
+	std::atomic<uint64_t>    last_used {0};
+	Round                    history[32] {};
+	std::atomic<uint32_t>    rounds {0};
+
+	void RecordRound(uint64_t ns, uint64_t used, uint64_t up, uint64_t down) {
+		const auto index = rounds.load(std::memory_order_relaxed);
+		history[index % 32] = {ns, used, up, down};
+		rounds.store(index + 1, std::memory_order_release);
+	}
+};
+static FillSlot g_fill_slots[1024];
+
 struct CommandBuffer {
 	using Callback = KYTY_SYSV_ABI bool (*)(CommandBuffer*, uint32_t, void*);
 
@@ -352,16 +376,8 @@ struct CommandBuffer {
 		// One record per buffer: the fullest state seen since the buffer was last rewound. A rewind is
 		// seen as the used size (cursor distance) dropping; the record of the previous round is printed
 		// then if it was fuller than the threshold.
-		struct Slot {
-			std::atomic<const void*> key {nullptr};
-			std::atomic<uint64_t>    round_peak_used {0};
-			std::atomic<uint64_t>    round_peak_up {0};
-			std::atomic<uint64_t>    round_peak_down {0};
-			std::atomic<uint64_t>    round_peak_ns {0};
-			std::atomic<uint64_t>    last_used {0};
-		};
-		static Slot slots[1024];
-		Slot*       found = nullptr;
+		auto* const slots = g_fill_slots;
+		FillSlot*   found = nullptr;
 		for (size_t probe = 0, index = (reinterpret_cast<uintptr_t>(this) >> 6u) & 1023u; probe < 1024;
 		     probe++, index = (index + 1) & 1023u) {
 			const void* expected = nullptr;
@@ -376,6 +392,7 @@ struct CommandBuffer {
 			return;
 		}
 		auto&      slot = *found;
+		slot.capacity.store(capacity, std::memory_order_relaxed);
 		const auto used = capacity - std::min<uint64_t>(available, capacity);
 		const auto now  = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -409,6 +426,9 @@ struct CommandBuffer {
 					}
 				}
 			}
+			slot.RecordRound(slot.round_peak_ns.load(std::memory_order_relaxed), peak,
+			                 slot.round_peak_up.load(std::memory_order_relaxed),
+			                 slot.round_peak_down.load(std::memory_order_relaxed));
 			slot.round_peak_used.store(0, std::memory_order_relaxed);
 		}
 		slot.last_used.store(used, std::memory_order_relaxed);
@@ -420,6 +440,33 @@ struct CommandBuffer {
 		}
 	}
 };
+
+// Prints the fill history of every command buffer seen with KYTY_AGC_CB_LOW set: the last rounds (oldest
+// first, time before now, fill, commands up, payload down) and the round in progress. For a fault report.
+void AgcDumpFillHistory(FILE* out) {
+	const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                     std::chrono::steady_clock::now().time_since_epoch()).count());
+	for (const auto& slot: g_fill_slots) {
+		const void* key = slot.key.load(std::memory_order_relaxed);
+		if (key == nullptr) {
+			continue;
+		}
+		const auto capacity = slot.capacity.load(std::memory_order_relaxed);
+		const auto rounds   = slot.rounds.load(std::memory_order_acquire);
+		std::fprintf(out, "AGC command buffer %p capacity %" PRIu64 ", %u rounds; in progress: peak %" PRIu64
+		                  " (up %" PRIu64 ", down %" PRIu64 "), now %" PRIu64 "\n  last rounds [ms ago: fill %%/up/down]:",
+		             key, capacity, rounds, slot.round_peak_used.load(std::memory_order_relaxed),
+		             slot.round_peak_up.load(std::memory_order_relaxed),
+		             slot.round_peak_down.load(std::memory_order_relaxed),
+		             slot.last_used.load(std::memory_order_relaxed));
+		for (uint32_t i = rounds > 24 ? rounds - 24 : 0; i < rounds; i++) {
+			const auto& r = slot.history[i % 32];
+			std::fprintf(out, " [%.0f: %" PRIu64 "/%" PRIu64 "/%" PRIu64 "]",
+			             static_cast<double>(now - r.ns) / 1e6, capacity != 0 ? r.used * 100 / capacity : 0, r.up, r.down);
+		}
+		std::fprintf(out, "\n");
+	}
+}
 
 struct Label {
 	volatile uint64_t m_value;

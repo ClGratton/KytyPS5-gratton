@@ -34,6 +34,8 @@ void GraphicsDbgDumpDcb(const char* type, uint32_t num_dw, const uint32_t* cmd_b
 namespace Gen5 {
 
 struct CommandBuffer;
+// Fault report: the fill history of the AGC command buffers (KYTY_AGC_CB_LOW), see agc.cpp.
+void AgcDumpFillHistory(FILE* out);
 struct Label;
 
 int KYTY_SYSV_ABI   AgcInit(uint32_t* state, uint32_t ver);
