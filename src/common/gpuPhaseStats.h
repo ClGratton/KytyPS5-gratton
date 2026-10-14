@@ -112,6 +112,10 @@ void NoteQueueReadback(bool flushed, uint64_t lag_ticks) noexcept;
 // --eager-readback: eager write-backs of hot pages (the report prints them as "eager readback (total)").
 enum class Eager : uint8_t { Scheduled, Retired, SkippedNoSpace, VerifyChecks, VerifyMismatches, Count };
 void NoteEager(Eager kind) noexcept;
+// --readback-futures: game-thread read faults served without stopping the GPU thread ("readback
+// futures (total)" in the report). `wait_ns` is the time the faulting thread waited for the copy.
+enum class Future : uint8_t { Started, Retried, Sync, Immediate, Count };
+void NoteFuture(Future kind, uint64_t wait_ns = 0) noexcept;
 void NoteFrame() noexcept;
 [[nodiscard]] uint64_t Submits() noexcept;
 [[nodiscard]] uint64_t Frames() noexcept;

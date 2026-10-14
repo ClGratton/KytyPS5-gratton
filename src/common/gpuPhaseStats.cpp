@@ -72,6 +72,8 @@ std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownStore::Count)> g_know
 std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownCopy::Count)> g_known_copies {};
 std::array<std::atomic<uint64_t>, kCoalesce> g_coalesce {};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(Eager::Count)> g_eager {};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(Future::Count)> g_future {};
+std::atomic<uint64_t> g_future_wait_ns {0};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(IndirectDraw::Route::Count)>
     g_indirect_routes {};
 std::atomic<uint32_t> g_indirect_logged {0};
@@ -318,6 +320,13 @@ void NoteEager(Eager kind) noexcept {
 	g_eager[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 }
 
+void NoteFuture(Future kind, uint64_t wait_ns) noexcept {
+	g_future[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
+	if (wait_ns != 0) {
+		g_future_wait_ns.fetch_add(wait_ns, std::memory_order_relaxed);
+	}
+}
+
 void NoteFrame() noexcept {
 	g_frames.fetch_add(1, std::memory_order_relaxed);
 }
@@ -486,6 +495,18 @@ void Report(detail::ThreadState& s, bool final_report) {
 		                    "verify_checks={} verify_mismatches={}\n",
 		                    get(Eager::Scheduled), get(Eager::Retired), get(Eager::SkippedNoSpace),
 		                    get(Eager::VerifyChecks), get(Eager::VerifyMismatches));
+	}
+	if (g_future[static_cast<size_t>(Future::Started)].load(std::memory_order_relaxed) +
+	        g_future[static_cast<size_t>(Future::Sync)].load(std::memory_order_relaxed) +
+	        g_future[static_cast<size_t>(Future::Immediate)].load(std::memory_order_relaxed) != 0) {
+		const auto get = [](Future kind) {
+			return g_future[static_cast<size_t>(kind)].load(std::memory_order_relaxed);
+		};
+		line += fmt::format("readback futures (total): started={} retried={} sync_fallback={} immediate={} "
+		                    "guest_wait_ms={:.1f}\n",
+		                    get(Future::Started), get(Future::Retried), get(Future::Sync),
+		                    get(Future::Immediate),
+		                    static_cast<double>(g_future_wait_ns.load(std::memory_order_relaxed)) / 1e6);
 	}
 	if (g_qr_calls.load(std::memory_order_relaxed) != 0) {
 		const auto calls = g_qr_calls.load(std::memory_order_relaxed);
