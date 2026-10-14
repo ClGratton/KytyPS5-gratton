@@ -41,6 +41,10 @@ public:
 	// of the stream was dropped (docs/lookahead-notes.md, "spin guard").
 	[[nodiscard]] bool Abandoned() const noexcept { return m_abandoned; }
 	[[nodiscard]] const char* AbandonReason() const noexcept { return m_abandon_reason; }
+	// Reason a shadow decode gives up when the submission it scans is retired, i.e. the guest has
+	// observed a completion that covers it and may have recycled the memory the packets point at
+	// (see Speculation::ItemStale and common/guestRetirement.h).
+	static constexpr const char* kStaleAbandonReason = "submission retired by a guest-visible completion";
 
 private:
 	friend class CommandProcessor;

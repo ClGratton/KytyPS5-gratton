@@ -12,6 +12,8 @@
 // thread forever. The lookahead code never holds a lock across code that can reach an EXIT*
 // (see the notes), so a parked thread cannot block the real GPU thread.
 
+#include "common/guestRetirement.h"
+
 #include <atomic>
 #include <cstdint>
 #include <shared_mutex>
@@ -45,6 +47,19 @@ using AbortHandler = void (*)(void* user);
 void SetThreadAbortHandler(AbortHandler handler, void* user) noexcept;
 // Number of isolated aborts so far (all threads).
 [[nodiscard]] uint32_t IsolatedAborts() noexcept;
+
+// The lookahead scans the commands of submission `item_seq` (guest queue `queue`) while the GPU
+// thread executes the same or later submissions. What it reads of the guest's memory (indirect
+// buffers, descriptor and SRT tables, constant memory) is only trustworthy while the guest cannot
+// have reused it, i.e. until the guest has observed a completion that covers the submission
+// (common/guestRetirement.h). With --async-pipelines skip the GPU thread no longer waits for the
+// compile jobs the lookahead blocks on, so the lookahead regularly resumes inside a submission the
+// GPU thread has long finished and the guest has long recycled.
+// SetItemWatch() names, for the calling thread, the retirement tracker and the item being scanned;
+// ItemStale() is true once the item is retired. No watch, or item sequence 0, is never stale.
+void               SetItemWatch(const GuestRetirement* retirement, uint32_t queue, uint64_t item_seq) noexcept;
+void               ClearItemWatch() noexcept;
+[[nodiscard]] bool ItemStale() noexcept;
 
 // Registers a lock the calling (speculative) thread currently holds, so Abort() can release it
 // before parking the thread. Only the shared-mutex flavour is needed.
