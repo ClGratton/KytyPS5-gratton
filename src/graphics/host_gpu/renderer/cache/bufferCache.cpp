@@ -23,6 +23,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <thread>
 #include <array>
 #include <cstdio>
 #include <chrono>
@@ -1066,7 +1067,7 @@ bool BufferCache::ReadMemoryFuture(uint64_t vaddr, uint64_t size, bool is_write)
 		                              .count()));
 		bool readable = false;
 		const bool last_round = round + 1 >= kMaxFutureRounds;
-		gpu.SendCommandSync([&] { readable = FinishReadFuture(vaddr, size, is_write, last_round); });
+		gpu.SendCommandSync([&] { readable = FinishReadFuture(vaddr, size, is_write, last_round, release->tick); });
 		switch (NextFutureRound(round, readable)) {
 			case FutureRound::Done: return true;
 			case FutureRound::Retry: break;
@@ -1122,18 +1123,37 @@ FutureStart BufferCache::StartReadFuture(uint64_t vaddr, uint64_t size,
 		return FutureStart::Sync;
 	}
 	// The release runs behind the write-back (priority operations are served in order), after the
-	// tick that holds the copy has completed. The open command buffer must be submitted for that.
-	m_scheduler.DeferPriorityOperation([release] { release->Signal(); });
-	m_scheduler.Flush();
+	// tick that holds the copy has completed. A copy recorded just now sits in the open command
+	// buffer, which must be submitted for that; a copy already in flight is behind a tick that was
+	// submitted, and the release simply follows that tick (no extra submit).
+	uint64_t wait_tick = scheduled != 0 ? m_scheduler.CurrentTick() : 0;
+	for (auto page = first; page < last; page += TRACKER_PAGE_SIZE) {
+		wait_tick = std::max(wait_tick, m_hot_pages.InFlight(page));
+	}
+	release->tick = wait_tick;
+	if (wait_tick < m_scheduler.CurrentTick()) {
+		m_scheduler.DeferPriorityOperationAt([release] { release->Signal(); }, wait_tick);
+	} else {
+		m_scheduler.DeferPriorityOperation([release] { release->Signal(); });
+		m_scheduler.Flush();
+	}
 	return FutureStart::Wait;
 }
 
-bool BufferCache::FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write, bool last_round) {
+bool BufferCache::FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write, bool last_round,
+                                   uint64_t own_tick) {
 	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
-	// The tick has completed and the write-back has run: this unprotects the pages, except those a
-	// newer GPU write reached.
-	RetireHotPages(first, last - first, true);
+	// The thread's own tick has completed and its write-back has run (the release came after both);
+	// the priority-operations thread may still be flagging them done. Pages whose copy is a newer
+	// one (another thread's, still in flight) stay protected: the thread runs another round instead
+	// of the GPU thread waiting for that copy.
+	const auto spin_begin = std::chrono::steady_clock::now();
+	while (own_tick != 0 && !m_scheduler.PriorityOperationsDone(own_tick) &&
+	       std::chrono::steady_clock::now() - spin_begin < std::chrono::milliseconds(2)) {
+		std::this_thread::yield();
+	}
+	RetireHotPages(first, last - first, false);
 	if (m_memory_tracker.IsRegionGpuModified(first, last - first)) {
 		// A newer GPU write kept the pages protected through every round: remember them, so that
 		// pages the GPU keeps rewriting are not retried again and again (bounded).

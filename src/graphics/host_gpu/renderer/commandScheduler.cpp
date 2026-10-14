@@ -256,13 +256,19 @@ void CommandScheduler::DeferPriorityOperation(Common::UniqueFunction<void>&& ope
 	QueueOperation(std::move(operation), true);
 }
 
-void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, bool priority) {
+void CommandScheduler::DeferPriorityOperationAt(Common::UniqueFunction<void>&& operation,
+                                                uint64_t                        tick) {
+	QueueOperation(std::move(operation), true, tick);
+}
+
+void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, bool priority,
+                                      uint64_t tick) {
 	CheckActive();
 	EXIT_IF(!operation);
 	std::unique_lock lock(m_operation_mutex);
 	if (m_operation_state == OperationState::Open) {
 		auto& queue = priority ? m_priority_operations : m_pending_operations;
-		queue.push({std::move(operation), CurrentTick()});
+		queue.push({std::move(operation), tick != 0 ? tick : CurrentTick()});
 		lock.unlock();
 		if (priority) {
 			m_operation_available.notify_one();

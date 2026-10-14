@@ -42,6 +42,11 @@ public:
 	// Guest-memory completions use the priority queue; normal callbacks maintain GPU resources.
 	void                      DeferOperation(Common::UniqueFunction<void>&& operation);
 	void                      DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
+	// Like the above, but runs after `tick` (a tick already submitted) instead of the open command
+	// buffer's tick, so the caller need not submit. The operation must not touch guest memory in a
+	// way that depends on its position among the other priority operations (a release does not).
+	void                      DeferPriorityOperationAt(Common::UniqueFunction<void>&& operation,
+	                                                   uint64_t                        tick);
 	[[nodiscard]] bool        HasPendingPriorityOperations();
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
@@ -86,7 +91,7 @@ private:
 
 	void BeginNext();
 	void PriorityOperationsThread(std::stop_token stop);
-	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority);
+	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority, uint64_t tick = 0);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
 
 	MasterSemaphore              m_master;

@@ -173,8 +173,9 @@ public:
 	                                          const std::shared_ptr<FutureRelease>& release,
 	                                          bool is_write = false);
 	// `last_round`: the thread has no round left, so pages that stay protected are marked contended.
+	// `own_tick`: the release's tick (FutureRelease::tick), 0 when the caller has none.
 	[[nodiscard]] bool        FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write = false,
-	                                           bool last_round = false);
+	                                           bool last_round = false, uint64_t own_tick = 0);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();

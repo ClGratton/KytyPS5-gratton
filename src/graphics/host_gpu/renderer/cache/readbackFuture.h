@@ -57,6 +57,8 @@ public:
 	void Signal() { m_semaphore.release(); }
 	void Wait() { m_semaphore.acquire(); }
 	[[nodiscard]] bool TryWait() { return m_semaphore.try_acquire(); }
+	// The tick whose completion (and write-back) this release follows; set by the first step.
+	uint64_t tick = 0;
 
 private:
 	std::binary_semaphore m_semaphore {0};

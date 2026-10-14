@@ -5908,7 +5908,7 @@ public:
       Require(name, "the copy landed", Backing(offset) == second_value,
               "the release fired before the write-back ran");
       Require(name, "a newer write keeps the page protected",
-              !cache.FinishReadFuture(base + offset, 1) && Backing(offset) == second_value &&
+              !cache.FinishReadFuture(base + offset, 1, false, false, release->tick) && Backing(offset) == second_value &&
                   cache.IsRegionGpuModified(base + offset, 4) &&
                   cache.HasGpuDirtyBytes(base + offset, 4),
               "a page with a newer GPU write was unprotected by an older copy");
@@ -5918,7 +5918,7 @@ public:
               "the newer write was not copied in the next round");
       second_release->Wait();
       Require(name, "second round releases the page",
-              cache.FinishReadFuture(base + offset, 1) && Backing(offset) == third_value &&
+              cache.FinishReadFuture(base + offset, 1, false, false, second_release->tick) && Backing(offset) == third_value &&
                   !cache.HasGpuDirtyBytes(base + offset, 4) &&
                   !cache.IsRegionGpuModified(base + offset, 4),
               "the second round did not deliver the newer bytes");
@@ -5942,8 +5942,8 @@ public:
       reader_a->Wait();
       reader_b->Wait();
       Require(name, "both readers see the bytes",
-              cache.FinishReadFuture(base + offset, 1) && Backing(offset) == fourth_value &&
-                  cache.FinishReadFuture(base + offset, 1),
+              cache.FinishReadFuture(base + offset, 1, false, false, reader_a->tick) && Backing(offset) == fourth_value &&
+                  cache.FinishReadFuture(base + offset, 1, false, false, reader_b->tick),
               "a reader of a copy in flight did not get the bytes");
 
       // 4b. A CPU write over a GPU-written page: the GPU's bytes land in guest memory first, then the
@@ -5966,7 +5966,7 @@ public:
       GpuWrite(offset, fourth_value);
       loser->Wait();
       Require(name, "contended: last round lost to a newer write",
-              !cache.FinishReadFuture(base + offset, 1, false, true),
+              !cache.FinishReadFuture(base + offset, 1, false, true, loser->tick),
               "the newer write did not keep the page protected");
       const auto contended_before = Common::GpuPhase::FutureCount(Future::Contended);
       auto skipped = std::make_shared<FutureRelease>();
