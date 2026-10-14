@@ -893,6 +893,8 @@ bool BufferCache::EagerDownload(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	m_scheduler.DeferPriorityOperation([this, mapped, offset, needed, buffer_address,
 	                                    copies = std::move(copies)] {
 		m_download_buffer.Invalidate(offset, needed);
+		const Libs::LibKernel::Memory::ScopedBackingWriteTag write_tag(
+		    Libs::LibKernel::Memory::BackingWriteTag::Download);
 		for (const auto& copy: copies) {
 			Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
 			                                      mapped + (copy.dstOffset - offset), copy.size);
