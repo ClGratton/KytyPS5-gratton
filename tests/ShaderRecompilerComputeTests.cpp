@@ -35036,6 +35036,56 @@ void CheckWave64WholeWaveResults() {
           "emulated halves repeated the first-active-lane broadcast");
 }
 
+// A wave64 pixel shader on a host subgroup that lacks some of its lanes (a 32-wide subgroup runs it
+// without split halves; helper invocations and partly filled subgroups are missing lanes too): the
+// per-tile light-list walk with the WaveActiveMin idiom (DPP row_shr min, v_permlanex16,
+// v_readlane 31 / 63) read undefined lanes and looped for ever on an RTX 3060 Ti. Checks the
+// SPIR-V shape of the guards; the fallbacks are best-effort, see MayLackLanes in spirvEmitterFlow.cpp.
+// Ported from upstream KytyPS5 PR #1515 (fozter, co-authored by overlordxrz-source), GPL-2.0.
+void CheckPixelCrossLaneMissingLanes() {
+  using O = ShaderOpcode;
+  constexpr const char *name = "PixelCrossLaneMissingLanes";
+  std::vector<u32> code;
+  code.push_back(EncodeVop1(0x01, 1, 250)); // v_mov_b32_dpp v1, v0 row_shr:1
+  code.push_back(EncodeVop1Dpp(0, 0x111));
+  code.push_back(EncodeSMovB32(0, InlineU32(1)));
+  code.push_back(EncodeSMovB32(1, InlineU32(0)));
+  AppendVop3(&code, 0x378, 2, Vgpr(0), 0, 1);          // v_permlanex16_b32 v2, v0, s0, s1
+  AppendVop3(&code, 0x360, 4, Vgpr(1), InlineU32(63)); // v_readlane_b32 s4, v1, 63
+  code.push_back(EncodeVop1(0x01, 3, 4));
+  code.push_back(EncodeExp0(0x00, 0xf));
+  code.push_back(EncodeExp1(1, 2, 3, 3));
+  AppendEnd(&code);
+
+  GraphicsCase test;
+  test.name = name;
+  test.fragment_code = code;
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B32, O::V_PERMLANEX16_B32,
+                  O::V_READLANE_B32, O::EXP, O::S_ENDPGM};
+  const auto pixel = CompileFragmentCase(test);
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+  std::string text;
+  Require(name, "disassembly", tools.Disassemble(pixel.spirv, &text),
+          "failed to disassemble the pixel shader");
+  Require(name, "wave64 readlane wrap",
+          text.find("BuiltIn SubgroupSize") != std::string::npos,
+          "lane 63 was not wrapped to the host subgroup size");
+  Require(name, "missing readlane source", CountText(text, "FindUMsb") >= 2u,
+          "a missing readlane source does not fall back to a live lane");
+  Require(name, "missing DPP and permlane sources",
+          CountText(text, "OpGroupNonUniformBallot ") >= 5u,
+          "DPP or permlane reads are not guarded by the present-lane ballot");
+
+  // A wave32 compute shader has no lanes beyond the host subgroup: no SubgroupSize wrap.
+  const auto compute = CompileCase(VectorReadlaneSelectsTwoKeysWithinWave());
+  std::string compute_text;
+  Require(name, "compute disassembly", tools.Disassemble(compute.spirv, &compute_text),
+          "failed to disassemble the compute shader");
+  Require(name, "wave64-only wrap",
+          compute_text.find("BuiltIn SubgroupSize") == std::string::npos,
+          "the wave64 readlane wrap leaked into a wave32 compute shader");
+}
+
 TestCase Wave64RawMasksAndScalarBranch() {
   using O = ShaderOpcode;
   std::vector<u32> code;
@@ -46029,6 +46079,7 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--wave64-only") == 0) {
     CheckWave64WholeWaveResults();
+    CheckPixelCrossLaneMissingLanes();
     VulkanHarness vulkan;
     RunCase(&vulkan, Wave32VccMasksPreserveOtherHalf());
     RunCase(&vulkan, DsPermuteWave64UsesIndependentHalves());
@@ -46757,6 +46808,7 @@ int main(int argc, char **argv) {
   CheckIndirectImageKeySwitch(vulkan);
   CheckFiniteInlineSamplerPhi(vulkan);
   CheckWave64WholeWaveResults();
+  CheckPixelCrossLaneMissingLanes();
   CheckPs5GameExampleImageClearRuntimeShape();
   vulkan.CheckSchedulerTimeline();
   vulkan.CheckGuestGpuTimestamps();
