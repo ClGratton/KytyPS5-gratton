@@ -652,6 +652,10 @@ add_executable(guest_retirement_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(guest_retirement_tests PRIVATE ${inc_headers})
 target_link_libraries(guest_retirement_tests Threads::Threads)
+add_executable(completion_signal_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/CompletionSignalTests.cpp"
+)
+target_include_directories(completion_signal_tests PRIVATE ${inc_headers})
 add_executable(speculation_item_watch_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SpeculationItemWatchTests.cpp"
 	"${KYTY_SOURCE_DIR}/common/speculation.cpp"
@@ -956,6 +960,7 @@ if(BUILD_TESTING)
 	add_test(NAME pipeline_variants COMMAND $<TARGET_FILE:pipeline_variant_tests>)
 	add_test(NAME speculation_isolation COMMAND $<TARGET_FILE:speculation_isolation_tests>)
 	add_test(NAME guest_retirement COMMAND $<TARGET_FILE:guest_retirement_tests>)
+	add_test(NAME completion_signal COMMAND $<TARGET_FILE:completion_signal_tests>)
 	add_test(NAME speculation_item_watch COMMAND $<TARGET_FILE:speculation_item_watch_tests>)
 	add_test(NAME gpu_clock COMMAND $<TARGET_FILE:gpu_clock_tests>)
 	add_test(NAME frame_pacer COMMAND $<TARGET_FILE:frame_pacer_tests>)
@@ -1149,6 +1154,7 @@ if(BUILD_TESTING)
 		pipeline_variant_tests
 		speculation_isolation_tests
 		guest_retirement_tests
+		completion_signal_tests
 		speculation_item_watch_tests
 		gpu_clock_tests
 		frame_pacer_tests
