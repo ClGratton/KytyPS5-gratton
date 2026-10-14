@@ -29,6 +29,20 @@ struct UniformFill {
 	bool operator==(const UniformFill&) const = default;
 };
 
+// The scalar reads of a snapshot as sorted, disjoint [begin, end) intervals (their union), computed
+// off the GPU thread together with the snapshot (resolved draw, notes/resolved-draw.md). `valid` is
+// false whenever the snapshot was materialized in place: only the producer of a plan sets it.
+struct ReadHull {
+	struct Interval {
+		uint64_t begin = 0;
+		uint64_t end   = 0;
+		bool     operator==(const Interval&) const = default;
+	};
+	bool                  valid       = false;
+	bool                  has_invalid = false; // a zero-sized or wrapping read: no hull, callers use the reads
+	std::vector<Interval> intervals;
+};
+
 struct ResourceSnapshot {
 	std::vector<DescriptorValue> buffers;
 	std::vector<DescriptorValue> images;
@@ -37,6 +51,7 @@ struct ResourceSnapshot {
 	std::vector<uint32_t>        user_data;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
+	ReadHull                    read_hull;
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

@@ -221,6 +221,52 @@ void TestRandomIndexAgainstBruteForce() {
 	}
 }
 
+// The read hull: when it proves "no hazard", the full check must say None (soundness, on every
+// random set); when the sets are valid and the full check says None, the proof must exist
+// (tightness: otherwise the hull would never be used).
+void TestReadHullAgainstFullCheck() {
+	std::mt19937_64 rng(0xa11ce);
+	size_t proofs = 0, refusals = 0, none_without_proof = 0, empty_reads = 0;
+	for (const uint64_t space: {uint64_t {24}, uint64_t {64}, uint64_t {4096}, uint64_t {1} << 40}) {
+		for (int trial = 0; trial < 30000; ++trial) {
+			const bool bad     = trial % 9 == 0;
+			const auto reads   = RandomRanges(rng, rng() % 12, space, bad);
+			const auto images  = RandomRanges(rng, rng() % 4, space, bad);
+			const auto buffers = RandomRanges(rng, rng() % 4, space, bad);
+			WrittenRangeIndex image_index;
+			WrittenRangeIndex buffer_index;
+			for (const auto& range: images) image_index.Add(range.first, range.second);
+			for (const auto& range: buffers) buffer_index.Add(range.first, range.second);
+			image_index.Build();
+			buffer_index.Build();
+			Libs::Graphics::ShaderRecompiler::IR::ReadHull hull;
+			BuildReadHull(reads, hull);
+			Check(hull.valid, "a built hull is valid");
+			const bool proof = HullProvesNoHazard(hull, image_index, buffer_index);
+			const auto full  = FindScalarReadHazard(reads, image_index, buffer_index);
+			if (proof) {
+				Check(full.kind == ScalarReadHazardKind::None, "a hull proof means the full check finds nothing");
+				++proofs;
+			} else {
+				++refusals;
+			}
+			if (full.kind == ScalarReadHazardKind::None && !hull.has_invalid && !image_index.HasInvalid() &&
+			    !buffer_index.HasInvalid()) {
+				Check(proof, "no hazard and nothing invalid: the hull proves it");
+			} else if (full.kind == ScalarReadHazardKind::None && !proof) {
+				++none_without_proof; // an invalid range met an empty set: the caller runs the full check
+			}
+			empty_reads += reads.empty();
+		}
+	}
+	Check(proofs > 10000 && refusals > 10000 && empty_reads > 100, "the generator exercises proofs and refusals");
+	// An unbuilt hull never proves anything.
+	WrittenRangeIndex none;
+	none.Build();
+	Libs::Graphics::ShaderRecompiler::IR::ReadHull unbuilt;
+	Check(!HullProvesNoHazard(unbuilt, none, none), "an unbuilt hull has no proof");
+}
+
 } // namespace
 
 int main() {
@@ -232,6 +278,7 @@ int main() {
 	TestRebuildKeepsNothing();
 	TestRandomAgainstNestedLoops();
 	TestRandomIndexAgainstBruteForce();
+	TestReadHullAgainstFullCheck();
 	std::puts("ScalarReadHazardTests: all passed");
 	return 0;
 }

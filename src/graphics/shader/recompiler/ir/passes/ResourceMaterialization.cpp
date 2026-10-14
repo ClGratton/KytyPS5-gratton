@@ -1117,6 +1117,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	}
 	const bool capture_reads = program.capture_specialization_reads || !program.source_reads.empty();
 	auto& reads = snapshot.specialization_reads;
+	snapshot.read_hull = {}; // derived from the reads below; only a plan producer builds it
 	reads = program.source_reads;
 	SrtReadCapture capture {runtime, reads};
 	const auto observed = capture_reads ? capture.ObservedRuntime() : runtime;

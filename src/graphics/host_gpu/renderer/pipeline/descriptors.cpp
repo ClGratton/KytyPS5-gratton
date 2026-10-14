@@ -25,6 +25,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/resolvedDrawStats.h"
 #include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1257,6 +1258,27 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			if (reader->runtime->program->stage == ShaderType::Compute) {
 				collect_buffer_writes(buffer_writes_of_others, reader);
 				buffers = &buffer_writes_of_others;
+			}
+			// Resolved draw: the plan's read hull proves the common case (no written range touches
+			// a read) without the per-read search; any doubt runs the full check below.
+			if (Config::ResolvedDrawEnabled()) {
+				const auto& hull  = reader->runtime->resources->read_hull;
+				auto&       stats = ResolvedDraw::GetStats().hazard_hull;
+				if (!hull.valid) {
+					stats.Absent();
+				} else if (HullProvesNoHazard(hull, image_writes, *buffers)) {
+					stats.Used();
+					if (Config::ResolvedDrawVerify()) {
+						if (FindScalarReadHazard(reads, image_writes, *buffers).kind !=
+						    ScalarReadHazardKind::None) {
+							EXIT("resolved draw: the read hull proved no hazard but the full check found one\n");
+						}
+						stats.Verified();
+					}
+					continue;
+				} else {
+					stats.Fallback();
+				}
 			}
 			switch (FindScalarReadHazard(reads, image_writes, *buffers).kind) {
 				case ScalarReadHazardKind::None: break;

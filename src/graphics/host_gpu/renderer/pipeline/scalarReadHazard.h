@@ -17,6 +17,8 @@
 //
 // Pure data structure, no locking: one owner thread (the GPU thread).
 
+#include "graphics/shader/recompiler/ir/ResourceSnapshot.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +64,14 @@ public:
 	}
 
 	[[nodiscard]] bool Empty() const { return m_entries.empty() && !m_invalid; }
+	// The non-empty ranges added (sorted by start after Build).
+	template <class Visit>
+	[[nodiscard]] bool AnyEntry(Visit&& visit) const {
+		for (const auto& entry: m_entries) {
+			if (visit(entry.start, entry.end)) return true;
+		}
+		return false;
+	}
 	[[nodiscard]] bool HasInvalid() const { return m_invalid; }
 	[[nodiscard]] size_t Count() const { return m_entries.size(); }
 
@@ -122,6 +132,56 @@ struct ScalarReadHazard {
 		}
 	}
 	return {};
+}
+
+// ---- resolved draw: the read hull -------------------------------------------------------------------
+
+// The union of a snapshot's scalar reads as sorted disjoint intervals. A zero-sized or wrapping read
+// makes the hull unusable (`has_invalid`), exactly the reads FindScalarReadHazard reports as invalid.
+inline void BuildReadHull(std::span<const ScalarRead> reads, ShaderRecompiler::IR::ReadHull& hull) {
+	hull.intervals.clear();
+	hull.has_invalid = false;
+	hull.valid       = true;
+	hull.intervals.reserve(reads.size());
+	for (const auto& read: reads) {
+		if (!ScalarReadIsValid(read)) {
+			hull.has_invalid = true;
+			hull.intervals.clear();
+			return;
+		}
+		hull.intervals.push_back({read.first, read.first + read.second});
+	}
+	std::sort(hull.intervals.begin(), hull.intervals.end(),
+	          [](const auto& a, const auto& b) { return a.begin < b.begin; });
+	size_t out = 0;
+	for (size_t i = 0; i < hull.intervals.size(); ++i) {
+		if (out != 0 && hull.intervals[i].begin <= hull.intervals[out - 1].end) {
+			hull.intervals[out - 1].end = std::max(hull.intervals[out - 1].end, hull.intervals[i].end);
+		} else {
+			hull.intervals[out++] = hull.intervals[i];
+		}
+	}
+	hull.intervals.resize(out);
+}
+
+// True when the hull proves that FindScalarReadHazard(reads, image_writes, buffer_writes) returns
+// None: no written range overlaps any read, and neither written set nor the reads are invalid.
+// False means "no proof" (an overlap, an invalid range or no hull): the caller runs the full check,
+// which also reports which read and which kind. Exact: a read overlaps [a, b) exactly when the union
+// of the reads does.
+[[nodiscard]] inline bool HullProvesNoHazard(const ShaderRecompiler::IR::ReadHull& hull,
+                                             const WrittenRangeIndex&               image_writes,
+                                             const WrittenRangeIndex&               buffer_writes) {
+	if (!hull.valid || hull.has_invalid || image_writes.HasInvalid() || buffer_writes.HasInvalid()) {
+		return false;
+	}
+	const auto overlaps = [&hull](uint64_t start, uint64_t end) {
+		// First interval ending after `start`; it overlaps when it begins before `end`.
+		const auto it = std::partition_point(hull.intervals.begin(), hull.intervals.end(),
+		                                     [start](const auto& i) { return i.end <= start; });
+		return it != hull.intervals.end() && it->begin < end;
+	};
+	return !image_writes.AnyEntry(overlaps) && !buffer_writes.AnyEntry(overlaps);
 }
 
 } // namespace Libs::Graphics

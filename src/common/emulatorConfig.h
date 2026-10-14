@@ -208,6 +208,10 @@ struct ConfigOptions {
 	// Bit 0 = prefetch graphics draws, bit 1 = prefetch compute dispatches,
 	// bit 2 = programs only (do not request pipelines).
 	uint32_t               pipeline_lookahead_kinds    = 3;
+	// --lookahead-workers <0-16>: 0 runs the prefetch of every draw on the lookahead thread itself;
+	// N > 0 makes that thread a sequencer that decodes the PM4 stream and hands each draw, with a
+	// copy of its registers, to N prefetch workers (notes/resolved-draw.md). Default 0.
+	uint32_t               lookahead_workers           = 0;
 	// --skip-ir-validation: skip the shader IR consistency checks in release translations (about a
 	// fifth of translate time; the output is byte-identical). Debug builds always validate and
 	// KYTY_IR_VALIDATE forces it on. Default off (= validate, stock behaviour).
@@ -273,6 +277,11 @@ struct ConfigOptions {
 	// --texture-binding-reuse: a draw keeps a slot's image binding while the descriptor, the shader's
 	// image resource and the set of cached images are unchanged. Exact; default off until measured.
 	bool                   texture_binding_reuse       = false;
+	// --resolved-draw: kyGpu takes the parts of a draw that the lookahead computed ahead of time
+	// (read hull, ...; notes/resolved-draw.md) after checking them; --resolved-draw-verify also
+	// computes each one inline and stops on a difference. Exact; default off until measured.
+	bool                   resolved_draw               = false;
+	bool                   resolved_draw_verify        = false;
 	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
 	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.

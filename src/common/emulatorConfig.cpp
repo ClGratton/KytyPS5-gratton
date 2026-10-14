@@ -65,6 +65,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// A slot's kept binding is checked against the image-set generation on every use, and
 	// ResolveTexture stops recording sources while off, so a toggle never leaves a stale source.
 	registry.Register("texture-binding-reuse", &g_config->texture_binding_reuse, false);
+	// Every use of a resolved part is checked on kyGpu against the live state; parts built while the
+	// flag was off are marked unusable, so a toggle at a frame boundary cannot use a stale part.
+	registry.Register("resolved-draw", &g_config->resolved_draw, false);
 	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
 	// the middle of a submission costs plans (misses), never a wrong draw.
 	registry.Register("srt-plans", &g_config->srt_plans, true);
@@ -140,6 +143,14 @@ bool ImageLookupMemoEnabled() {
 
 bool TextureBindingReuseEnabled() {
 	return Common::RuntimeToggles::Read(g_config->texture_binding_reuse);
+}
+
+bool ResolvedDrawEnabled() {
+	return Common::RuntimeToggles::Read(g_config->resolved_draw);
+}
+
+bool ResolvedDrawVerify() {
+	return g_config->resolved_draw_verify;
 }
 
 bool SrtPlanShadowEnabled() {

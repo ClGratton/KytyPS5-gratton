@@ -25,6 +25,8 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
+#include "graphics/host_gpu/renderer/pipeline/resolvedDrawStats.h"
+#include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
 #include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -716,7 +718,28 @@ struct PipelineCache::ProgramCache {
 			std::unique_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_gpu");
 			SrtPlan::AdoptInto(resources, specialization, plan);
-			Permutation* found = FindExistingLocked<false>(push_data_cursor, specialization, {});
+			Permutation* found = nullptr;
+			auto& perm_stats = ResolvedDraw::GetStats().permutation;
+			if (Config::ResolvedDrawEnabled() &&
+			    (plan.permutation == nullptr || plan.entry != this || plan.permutation_cursor != push_data_cursor)) {
+				if (plan.permutation == nullptr) perm_stats.Absent(); else perm_stats.Fallback();
+			}
+			if (plan.permutation != nullptr && plan.entry == this &&
+			    plan.permutation_cursor == push_data_cursor && Config::ResolvedDrawEnabled()) {
+				perm_stats.Used();
+				// Resolved draw: the producer's search, over this entry's append-only permutation
+				// list, with this cursor and a specialization equal to the adopted one, found this
+				// permutation; the first match of any later search is the same one.
+				found = const_cast<Permutation*>(static_cast<const Permutation*>(plan.permutation));
+				if (Config::ResolvedDrawVerify()) {
+					if (found != FindExistingLocked<false>(push_data_cursor, specialization, {})) {
+						EXIT("resolved draw: the planned permutation is not the one a search finds\n");
+					}
+					perm_stats.Verified();
+				}
+			} else {
+				found = FindExistingLocked<false>(push_data_cursor, specialization, {});
+			}
 			if (found == nullptr && specialization_out != nullptr) {
 				*specialization_out = specialization;
 			}
@@ -1482,6 +1505,13 @@ struct PipelineCache::ProgramCache {
 						plan->workgroup_counts.assign(runtime.workgroup_counts.begin(),
 						                              runtime.workgroup_counts.end());
 						plan->reads           = plan_recorder->Finish();
+						plan->entry              = entry;
+						plan->permutation        = permutation;
+						plan->permutation_cursor = push_data_cursor;
+						if (Config::ResolvedDrawEnabled()) {
+							// Resolved draw: parts of the draw that depend only on the snapshot.
+							BuildReadHull(plan->snapshot.specialization_reads, plan->snapshot.read_hull);
+						}
 						plan->produced_serial = SrtPlan::ProducerEvents();
 						const auto bytes      = plan->Bytes();
 						SrtPlan::NoteProduceCost(SrtPlan::NowNs() - t_plan);
@@ -2330,6 +2360,7 @@ void PipelineCache::ShutdownAsync() {
 			PipelineCacheLog("Pipeline lookahead thread: {}", m_lookahead_thread_summary());
 		}
 		PipelineCacheLog("Pipeline lookahead locks: {}", LookaheadLockSummary());
+		PipelineCacheLog("{}", ResolvedDraw::SummaryText());
 		if (Bench::TimingEnabled()) {
 			Bench::LogTiming("summary_lookahead", 0, Bench::NowNs(), 0, false, summary + skips);
 			if (m_lookahead_thread_summary) {

@@ -178,6 +178,7 @@ static void PrintUsage() {
 	         "                                       safe performance flags it names (submit-coalesce,\n"
 	         "                                       elide-barriers, bda-sync-skip, clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
+	         "                                       resolved-draw,\n"
 	         "                                       srt-plans, readback-queue,\n"
 	         "                                       heap-trim) at the next presented frame; applied changes\n"
 	         "                                       are logged and appended\n"
@@ -297,6 +298,12 @@ static void PrintUsage() {
 	::printf("  --texture-binding-reuse <true|false> A draw keeps the image binding of a shader slot while its\n"
 	         "                                       descriptor and the set of cached images are unchanged\n"
 	         "                                       (exact, less GPU-thread CPU per draw). Default: false.\n");
+	::printf("  --resolved-draw <true|false>         kyGpu uses the parts of a draw that the pipeline lookahead\n"
+	         "                                       computed ahead of time (needs --srt-plans), after\n"
+	         "                                       checking them (exact, less GPU-thread CPU per draw).\n"
+	         "                                       Default: false.\n");
+	::printf("  --resolved-draw-verify <true|false>  Also compute every used part inline and stop on a\n"
+	         "                                       difference (testing). Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -999,6 +1006,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--texture-binding-reuse") {
 			if (!ParseBool(value, options.config.texture_binding_reuse)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--resolved-draw") {
+			if (!ParseBool(value, options.config.resolved_draw)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--resolved-draw-verify") {
+			if (!ParseBool(value, options.config.resolved_draw_verify)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

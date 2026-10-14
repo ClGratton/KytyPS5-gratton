@@ -932,6 +932,11 @@ if(BUILD_TESTING)
 	set_tests_properties(emulator_srt_plan_shadow_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME emulator_srt_plans_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plans true)
+	add_test(NAME emulator_resolved_draw_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --resolved-draw true --resolved-draw-verify true)
+	add_test(NAME emulator_resolved_draw_invalid
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --resolved-draw maybe)
+	set_tests_properties(emulator_resolved_draw_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME emulator_srt_plans_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plans maybe)
 	set_tests_properties(emulator_srt_plans_invalid PROPERTIES WILL_FAIL TRUE)

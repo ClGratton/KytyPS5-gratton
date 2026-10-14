@@ -167,6 +167,12 @@ QList<Option> BuildTable() {
 	             "cached images are unchanged, instead of decoding and looking it up again. Exact; "
 	             "lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(texture_binding_reuse)});
+	defs.append({"resolved_draw", "--resolved-draw", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Use draw parts computed ahead of time",
+	             "The pipeline lookahead computes parts of each draw ahead of time (needs SRT "
+	             "plans); the GPU thread checks them against the live state and uses them instead "
+	             "of computing them. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(resolved_draw)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

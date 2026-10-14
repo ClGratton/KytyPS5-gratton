@@ -226,6 +226,13 @@ struct Plan {
 	ShaderRecompiler::IR::ResourceSpecialization    specialization;
 	std::vector<uint32_t>                            workgroup_counts;
 	ReadSet                                          reads;
+	// Resolved draw: the source entry and the permutation the producer found for this specialization
+	// (null: none yet), and the push-data cursor it searched with. Opaque here; the pipeline cache
+	// owns both types. Entries and permutations are never freed or reordered, so the pointers stay
+	// valid for the process lifetime.
+	const void*                                      entry              = nullptr;
+	const void*                                      permutation        = nullptr;
+	uint32_t                                         permutation_cursor = 0;
 	int64_t                                          produced_ns     = 0;
 	uint64_t                                         produced_serial = 0;
 
