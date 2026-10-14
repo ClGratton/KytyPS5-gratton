@@ -365,6 +365,9 @@ static bool IsPrivateCommittedRangeType(VirtualRangeType type) {
 static bool g_test_fail_next_range_replace = false;
 #endif
 
+// Hits and misses of the remembered ClampRangeSize answers, per thread (read by the thread itself).
+static thread_local MappingMemoStats g_mapping_memo_stats;
+
 class VirtualRanges {
 public:
 	struct Range {
@@ -602,6 +605,7 @@ public:
 		const auto epoch = m_epoch.load(std::memory_order_acquire);
 		if (entry.serial == m_serial && entry.epoch == epoch && entry.addr == virtual_addr &&
 		    entry.size == size) {
+			g_mapping_memo_stats.hits++;
 			if (Config::ResolvedDrawVerify()) {
 				Common::LockGuard lock(m_mutex);
 				if (m_epoch.load(std::memory_order_relaxed) == epoch &&
@@ -613,6 +617,7 @@ public:
 			}
 			return entry.result;
 		}
+		g_mapping_memo_stats.misses++;
 		Common::LockGuard lock(m_mutex);
 		const auto        result = ClampRangeSizeUnlocked(virtual_addr, size);
 		entry = {m_serial, m_epoch.load(std::memory_order_relaxed), virtual_addr, size, result};
@@ -1204,6 +1209,10 @@ uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 		     vaddr, size, clamped_size);
 	}
 	return clamped_size;
+}
+
+MappingMemoStats GetMappingMemoStats() {
+	return g_mapping_memo_stats;
 }
 
 bool IsFullyMapped(uint64_t vaddr, uint64_t size) {

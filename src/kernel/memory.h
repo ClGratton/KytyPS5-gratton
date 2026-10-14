@@ -131,6 +131,12 @@ bool                   GuestRangeNeverWritten(uint64_t vaddr, uint64_t size);
 // Debug: reads the range with pread (no page becomes resident) and says whether it is all zeros.
 bool                   GuestRangeReadsAsZero(uint64_t vaddr, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
+// Remembered ClampRangeSize answers (--mapping-memo) of the calling thread.
+struct MappingMemoStats {
+	uint64_t hits   = 0;
+	uint64_t misses = 0;
+};
+[[nodiscard]] MappingMemoStats GetMappingMemoStats();
 // Whether guest mappings cover all of [vaddr, vaddr + size), and the parts they cover (as
 // (address, size), in order): what can be read or written of a range that reaches into memory the
 // guest unmapped.
