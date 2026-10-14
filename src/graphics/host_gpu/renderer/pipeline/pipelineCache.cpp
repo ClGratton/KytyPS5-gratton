@@ -1984,8 +1984,8 @@ struct PipelineCache::ProgramCache {
 	}
 
 	[[nodiscard]] SourceEntry* FindEntry(const ProgramKey& key) {
-		std::lock_guard lock(programs_mutex);
-		const auto      iter = programs.find(key);
+		std::shared_lock lock(programs_mutex);
+		const auto       iter = programs.find(key);
 		return iter != programs.end() ? &iter->second : nullptr;
 	}
 
@@ -1993,11 +1993,11 @@ struct PipelineCache::ProgramCache {
 	// treats it like any existing entry; its own translation result is simply discarded).
 	SourceEntry* InsertEntry(const ProgramKey& key, ShaderRecompiler::IR::ResourcePlan plan,
 	                         std::unique_ptr<ShaderRecompiler::ShaderSource> call_source) {
-		std::lock_guard lock(programs_mutex);
+		std::unique_lock lock(programs_mutex);
 		return &programs.try_emplace(key, std::move(plan), std::move(call_source)).first->second;
 	}
 
-	std::mutex                                                  programs_mutex;
+	std::shared_mutex                                           programs_mutex;
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	// In-flight --async-pipelines program jobs, keyed by (program, specialization, push cursor).
 	InFlightRegistry<ProgramJobKey, ProgramJobKeyHash>          program_jobs;
