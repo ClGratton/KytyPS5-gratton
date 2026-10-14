@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <array>
 #include <atomic>
@@ -1817,7 +1818,16 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 			constexpr uint64_t ready_bit    = 1ull << 63u;
 			constexpr uint64_t counter_mask = ready_bit - 1u;
 			auto*              results      = reinterpret_cast<volatile uint64_t*>(event_address);
-			const auto         value        = ready_bit | m_synthetic_occlusion_counter;
+			// Debug experiment (KYTY_OCCLUSION_DEBUG=zero|unready): "zero" publishes ready results with
+			// equal begin and end counts (nothing passed), "unready" publishes nothing.
+			static const int debug_mode = [] {
+				const char* text = std::getenv("KYTY_OCCLUSION_DEBUG");
+				return text == nullptr ? 0 : (std::strcmp(text, "zero") == 0 ? 1 : (std::strcmp(text, "unready") == 0 ? 2 : 0));
+			}();
+			if (debug_mode == 2) {
+				break;
+			}
+			const auto         value        = ready_bit | (debug_mode == 1 ? 0 : m_synthetic_occlusion_counter);
 			for (uint32_t db = 0; db < 16u; db++) {
 				results[db * 2u] = value;
 			}
