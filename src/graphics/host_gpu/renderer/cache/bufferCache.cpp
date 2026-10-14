@@ -1065,12 +1065,13 @@ bool BufferCache::ReadMemoryFuture(uint64_t vaddr, uint64_t size, bool is_write)
 		                              std::chrono::steady_clock::now() - wait_begin)
 		                              .count()));
 		bool readable = false;
-		gpu.SendCommandSync([&] { readable = FinishReadFuture(vaddr, size, is_write); });
+		const bool last_round = round + 1 >= kMaxFutureRounds;
+		gpu.SendCommandSync([&] { readable = FinishReadFuture(vaddr, size, is_write, last_round); });
 		switch (NextFutureRound(round, readable)) {
 			case FutureRound::Done: return true;
 			case FutureRound::Retry: break;
 			case FutureRound::Fallback:
-				Common::GpuPhase::NoteFuture(Common::GpuPhase::Future::Sync);
+				Common::GpuPhase::NoteFuture(Common::GpuPhase::Future::Exhausted);
 				return false;
 		}
 	}
@@ -1084,6 +1085,17 @@ FutureStart BufferCache::StartReadFuture(uint64_t vaddr, uint64_t size,
 	}
 	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	++m_future_starts;
+	for (auto page = first; page < last; page += TRACKER_PAGE_SIZE) {
+		const auto marked = m_future_contended.find(page);
+		if (marked != m_future_contended.end()) {
+			if (IsContended(marked->second, m_future_starts)) {
+				Common::GpuPhase::NoteFuture(Common::GpuPhase::Future::Contended);
+				return FutureStart::Sync;
+			}
+			m_future_contended.erase(marked);
+		}
+	}
 	// What completed since the last submit lands first (never waits).
 	RetireHotPages(first, last - first, false);
 	uint32_t scheduled = 0;
@@ -1116,13 +1128,25 @@ FutureStart BufferCache::StartReadFuture(uint64_t vaddr, uint64_t size,
 	return FutureStart::Wait;
 }
 
-bool BufferCache::FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write) {
+bool BufferCache::FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write, bool last_round) {
 	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
 	// The tick has completed and the write-back has run: this unprotects the pages, except those a
 	// newer GPU write reached.
 	RetireHotPages(first, last - first, true);
 	if (m_memory_tracker.IsRegionGpuModified(first, last - first)) {
+		// A newer GPU write kept the pages protected through every round: remember them, so that
+		// pages the GPU keeps rewriting are not retried again and again (bounded).
+		if (last_round) {
+			if (m_future_contended.size() >= 256) {
+				m_future_contended.erase(m_future_contended.begin());
+			}
+			for (auto page = first; page < last; page += TRACKER_PAGE_SIZE) {
+				if (m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+					m_future_contended[page] = m_future_starts;
+				}
+			}
+		}
 		return false;
 	}
 	if (is_write) {

@@ -502,14 +502,15 @@ void Report(detail::ThreadState& s, bool final_report) {
 	}
 	if (g_future[static_cast<size_t>(Future::Started)].load(std::memory_order_relaxed) +
 	        g_future[static_cast<size_t>(Future::Sync)].load(std::memory_order_relaxed) +
+	        g_future[static_cast<size_t>(Future::Contended)].load(std::memory_order_relaxed) +
 	        g_future[static_cast<size_t>(Future::Waited)].load(std::memory_order_relaxed) != 0) {
 		const auto get = [](Future kind) {
 			return g_future[static_cast<size_t>(kind)].load(std::memory_order_relaxed);
 		};
-		line += fmt::format("readback futures (total): started={} retried={} sync_fallback={} waited={} "
-		                    "guest_wait_ms={:.1f}\n",
+		line += fmt::format("readback futures (total): started={} retried={} sync={} exhausted={} contended={} "
+		                    "waited={} guest_wait_ms={:.1f}\n",
 		                    get(Future::Started), get(Future::Retried), get(Future::Sync),
-		                    get(Future::Waited),
+		                    get(Future::Exhausted), get(Future::Contended), get(Future::Waited),
 		                    static_cast<double>(g_future_wait_ns.load(std::memory_order_relaxed)) / 1e6);
 	}
 	if (g_qr_calls.load(std::memory_order_relaxed) != 0) {

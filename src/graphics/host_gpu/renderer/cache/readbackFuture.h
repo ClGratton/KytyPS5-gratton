@@ -43,6 +43,14 @@ inline constexpr uint32_t kMaxFutureRounds = 3;
 	return rounds_done + 1 < kMaxFutureRounds ? FutureRound::Retry : FutureRound::Fallback;
 }
 
+// A page whose rounds were exhausted (the GPU rewrites it faster than a copy lands) is served by the
+// synchronous path for the next `kContendedStarts` first steps instead of burning three rounds again.
+inline constexpr uint64_t kContendedStarts = 256;
+
+[[nodiscard]] constexpr bool IsContended(uint64_t marked_at_start, uint64_t now_start) {
+	return marked_at_start != 0 && now_start - marked_at_start < kContendedStarts;
+}
+
 // One-shot, released by the priority-operations thread once the write-back of the copy has run.
 class FutureRelease {
 public:

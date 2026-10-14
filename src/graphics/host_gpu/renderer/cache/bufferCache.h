@@ -172,7 +172,9 @@ public:
 	[[nodiscard]] FutureStart StartReadFuture(uint64_t vaddr, uint64_t size,
 	                                          const std::shared_ptr<FutureRelease>& release,
 	                                          bool is_write = false);
-	[[nodiscard]] bool        FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write = false);
+	// `last_round`: the thread has no round left, so pages that stay protected are marked contended.
+	[[nodiscard]] bool        FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write = false,
+	                                           bool last_round = false);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
@@ -249,6 +251,9 @@ private:
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
 	HotPageSet                                        m_hot_pages;
+	// --readback-futures: pages whose rounds were exhausted, page -> value of m_future_starts then.
+	std::map<uint64_t, uint64_t>                      m_future_contended;
+	uint64_t                                          m_future_starts = 0;
 	RangeSet                                          m_eager_pending_ranges;
 	// --readback-queue: copy on the second queue after a timeline wait on the producer's tick.
 	[[nodiscard]] bool ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,

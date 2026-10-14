@@ -5956,6 +5956,29 @@ public:
                   cache.IsRegionCpuModified(base + offset, 4),
               "a CPU write over GPU data did not get the GPU's bytes and the page");
 
+      // 4c. A page the GPU rewrote through the last round is contended: the next first step does not
+      // try (the synchronous path serves it), so a hot rewritten page does not burn rounds.
+      GpuWrite(offset, third_value);
+      auto loser = std::make_shared<FutureRelease>();
+      Require(name, "contended: round starts",
+              cache.StartReadFuture(base + offset, 1, loser) == FutureStart::Wait,
+              "the round did not start");
+      GpuWrite(offset, fourth_value);
+      loser->Wait();
+      Require(name, "contended: last round lost to a newer write",
+              !cache.FinishReadFuture(base + offset, 1, false, true),
+              "the newer write did not keep the page protected");
+      const auto contended_before = Common::GpuPhase::FutureCount(Future::Contended);
+      auto skipped = std::make_shared<FutureRelease>();
+      Require(name, "contended: the next first step defers to the synchronous path",
+              cache.StartReadFuture(base + offset, 1, skipped) == FutureStart::Sync &&
+                  Common::GpuPhase::FutureCount(Future::Contended) == contended_before + 1,
+              "a contended page started another future");
+      Fault(offset); // contended: served synchronously
+      Require(name, "contended page still reads back",
+              Backing(offset) == fourth_value && !cache.IsRegionGpuModified(base + offset, 4),
+              "the synchronous path lost the newer bytes");
+
       // 5. Flag off at run time: a fault takes the synchronous path.
       Config::Load(Config::ConfigOptions{});
       GpuWrite(offset, first_value);

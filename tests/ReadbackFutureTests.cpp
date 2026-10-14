@@ -33,6 +33,13 @@ void TestRounds() {
 	Check(NextFutureRound(2, true) == FutureRound::Done, "readable on the last round: done");
 }
 
+void TestContendedWindow() {
+	Check(!IsContended(0, 5), "never marked: not contended");
+	Check(IsContended(10, 11), "just marked: contended");
+	Check(IsContended(10, 10 + kContendedStarts - 1), "still inside the window");
+	Check(!IsContended(10, 10 + kContendedStarts), "the window ended");
+}
+
 void TestReleaseIsOneShotAcrossThreads() {
 	auto       release = std::make_shared<FutureRelease>();
 	const auto start   = std::chrono::steady_clock::now();
@@ -53,6 +60,7 @@ void TestReleaseIsOneShotAcrossThreads() {
 int main() {
 	TestStartDecision();
 	TestRounds();
+	TestContendedWindow();
 	TestReleaseIsOneShotAcrossThreads();
 	std::printf("ReadbackFutureTests: ok\n");
 	return 0;
