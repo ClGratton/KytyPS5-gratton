@@ -3,6 +3,7 @@
 #include "common/gpuPhaseStats.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/renderer/gpuCost.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 
@@ -104,6 +105,7 @@ CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graph
       m_command_pool(graphics, m_master), m_command(*this),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {
 	GpuOps::Initialize(graphics, m_master, Config::GetGpuOpsMode());
+	GpuCost::Initialize(graphics);
 }
 
 CommandScheduler::~CommandScheduler() {
@@ -358,6 +360,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
+	if (GpuCost::Enabled()) GpuCost::OnBegin(m_command.m_buffer);
 	m_dynamic_state.Invalidate();
 	return m_command;
 }
@@ -408,6 +411,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
+	if (GpuCost::Enabled()) GpuCost::OnSubmit(buffer, tick, *this);
 	m_command.m_buffer = nullptr;
 	return tick;
 }

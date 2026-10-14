@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/gpuCost.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -516,6 +517,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	{
 		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
+		if (GpuCost::Enabled()) {
+			GpuCost::DescribeShader("cs", program, input_info.threads_num[0] * input_info.threads_num[1] *
+			                                           input_info.threads_num[2]);
+			GpuCost::Tag(program.shader_hash, 0);
+		}
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 		if (GpuOps::Enabled()) {
 			GpuOps::Op op;
@@ -659,6 +665,11 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                              vk::PipelineStageFlagBits::eTransfer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
+	if (GpuCost::Enabled()) {
+		GpuCost::DescribeShader("cs", program, input_info.threads_num[0] * input_info.threads_num[1] *
+		                                           input_info.threads_num[2]);
+		GpuCost::Tag(program.shader_hash, 0);
+	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	if (GpuOps::Enabled()) {
 		GpuOps::Op op;

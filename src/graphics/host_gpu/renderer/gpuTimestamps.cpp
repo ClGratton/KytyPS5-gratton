@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/gpuClock.h"
+#include "graphics/host_gpu/renderer/gpuCost.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -311,6 +312,7 @@ uint64_t SampleGuestClock(CommandBuffer& command, void* dst, uint32_t size, Poin
 }
 
 void OnGuestFlip(CommandBuffer& command) {
+	if (GpuCost::Enabled()) GpuCost::OnFlip();
 	ParseTimeScaler().AddBoundary(Sync::ReadReferenceClock());
 	uint32_t slot = 0;
 	if (!GpuModeAvailable(command) || !Host().Acquire(slot)) {

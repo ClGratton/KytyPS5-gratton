@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/host_gpu/renderer/gpuCost.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 
@@ -1597,6 +1598,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
+	if (GpuCost::Enabled()) {
+		for (const auto& vertex_stage: vertex_stages) {
+			GpuCost::DescribeShader("vs", *vertex_stage.stage.program, 0);
+		}
+		if (state.ps_active) {
+			GpuCost::DescribeShader("ps", *state.ps_input_info.stage.program, 0);
+		}
+		GpuCost::Tag(state.vertex_info[0].stage.program->shader_hash,
+		             state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
+	}
 	{
 		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
