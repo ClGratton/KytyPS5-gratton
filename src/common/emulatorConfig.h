@@ -271,6 +271,9 @@ struct ConfigOptions {
 	// the writes visible pending (and keeps the render pass open) until something may read them
 	// (renderer/pendingWrites.h). Default off.
 	bool                   defer_draw_write_barriers   = false;
+	// --overlap-dispatches: consecutive direct compute dispatches whose bound resources do not
+	// conflict run without a barrier between them (renderer/dispatchHazard.h). Default off.
+	bool                   overlap_dispatches          = false;
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
 	// clear discovery needs no GPU->CPU readback for them. Default off.
 	bool                   known_fills                 = false;
@@ -417,6 +420,7 @@ uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();
 bool              ElideBarriersEnabled();
 bool              DeferDrawWriteBarriers();
+bool              OverlapDispatchesEnabled();
 bool              KnownFillsEnabled();
 bool              KnownStoresEnabled();
 bool              KnownCopiesEnabled();

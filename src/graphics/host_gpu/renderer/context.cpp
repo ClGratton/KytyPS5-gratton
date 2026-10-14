@@ -27,10 +27,62 @@ bool CommandBuffer::IsInvalid() const {
 	return m_buffer == nullptr;
 }
 
+namespace {
+
+// A group stays small enough that the pairwise range test stays cheap.
+constexpr uint32_t MaxDeferredDispatches = 128;
+constexpr size_t   MaxDeferredRanges     = 256;
+
+} // namespace
+
 vk::CommandBuffer CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	if (m_deferred_barrier && !m_deferred_joining) {
+		FlushDeferredBarrier();
+	}
 	++m_recorded_work;
 	return m_buffer;
+}
+
+CommandBuffer::DeferredJoin CommandBuffer::JoinDeferredBarrier(const DispatchAccess& access,
+                                                               bool writes) const {
+	EXIT_IF(m_deferred_joining);
+	if (!m_deferred_barrier || (writes && !m_deferred_full) ||
+	    m_deferred_dispatches >= MaxDeferredDispatches ||
+	    m_deferred_access.ranges.size() + access.ranges.size() > MaxDeferredRanges ||
+	    access.ConflictsWith(m_deferred_access)) {
+		return {};
+	}
+	m_deferred_joining = true;
+	return {true};
+}
+
+void CommandBuffer::DeferBarrier(const DispatchAccess& access, bool full) const {
+	if (m_deferred_joining) {
+		EXIT_IF(!m_deferred_barrier);
+		m_deferred_access.Merge(access);
+		m_deferred_dispatches++;
+		m_deferred_joining = false;
+	} else {
+		EXIT_IF(m_deferred_barrier);
+		m_deferred_barrier    = true;
+		m_deferred_full       = full;
+		m_deferred_dispatches = 1;
+		m_deferred_access     = access;
+	}
+}
+
+void CommandBuffer::FlushDeferredBarrier() const {
+	EXIT_IF(m_deferred_joining);
+	if (!m_deferred_barrier) {
+		return;
+	}
+	// The barrier each dispatch of the group would have recorded right after itself.
+	ShaderAccessBarrier(m_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	m_deferred_barrier    = false;
+	m_deferred_full       = false;
+	m_deferred_dispatches = 0;
+	m_deferred_access.Clear();
 }
 
 void CommandBuffer::AssertRecording() const {
@@ -38,7 +90,8 @@ void CommandBuffer::AssertRecording() const {
 }
 
 void CommandBuffer::Begin() {
-	EXIT_IF(m_rendering || m_pending_shader_writes || IsInvalid());
+	EXIT_IF(m_rendering || m_pending_shader_writes || m_deferred_barrier || m_deferred_joining ||
+	        IsInvalid());
 	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};

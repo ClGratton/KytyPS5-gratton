@@ -180,6 +180,7 @@ static void PrintUsage() {
 	::printf("  --toggle-control <path>              Poll this file (name=value lines) and flip the runtime-\n"
 	         "                                       safe performance flags it names (submit-coalesce,\n"
 	         "                                       elide-barriers, defer-draw-write-barriers,\n"
+	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue,\n"
@@ -253,6 +254,11 @@ static void PrintUsage() {
 	         "                                       that makes the writes visible pending, and keeps the\n"
 	         "                                       render pass open, until a later draw may read the\n"
 	         "                                       written bytes or any other command is recorded.\n"
+	         "                                       Default: false.\n");
+	::printf("  --overlap-dispatches <true|false>    Direct compute dispatches whose bound buffers, images and\n"
+	         "                                       memory do not conflict with those of the dispatches before\n"
+	         "                                       them run without a barrier in between; the barrier is\n"
+	         "                                       recorded once, before the next other command.\n"
 	         "                                       Default: false.\n");
 	::printf("  --known-fills <true|false>           Remember ranges last written by one GPU uniform fill so\n"
 	         "                                       color-metadata clear discovery needs no GPU->CPU\n"
@@ -970,6 +976,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--defer-draw-write-barriers") {
 			if (!ParseBool(value, options.config.defer_draw_write_barriers)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--overlap-dispatches") {
+			if (!ParseBool(value, options.config.overlap_dispatches)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

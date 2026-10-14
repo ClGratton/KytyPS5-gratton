@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/guest_gpu/command_processor/shadowTypes.h"
+#include "graphics/host_gpu/renderer/dispatchHazard.h"
 #include "graphics/host_gpu/renderer/pendingWrites.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -137,6 +138,20 @@ public:
 		return static_cast<bool>(m_pending_shader_writes);
 	}
 
+	// --overlap-dispatches: a direct dispatch leaves its post-dispatch barrier pending instead of
+	// recording it (dispatchHazard.h has the rule). Handle() records it before any other command, so
+	// only a dispatch that JoinDeferredBarrier accepted is recorded without it. `access` is what the
+	// dispatch reads and writes, `writes` whether it writes, `full` whether the dispatch that starts
+	// a group recorded the all-commands -> compute barrier before itself (a later writer may only
+	// join such a group: that barrier ordered everything recorded earlier before the whole group).
+	struct DeferredJoin {
+		bool joined = false;
+	};
+	[[nodiscard]] DeferredJoin JoinDeferredBarrier(const DispatchAccess& access, bool writes) const;
+	void                       DeferBarrier(const DispatchAccess& access, bool full) const;
+	void                       FlushDeferredBarrier() const;
+	[[nodiscard]] bool         HasDeferredBarrier() const noexcept { return m_deferred_barrier; }
+
 	// Every access for recording counts as work (RecordedWork); sync code that only validates the
 	// buffer uses AssertRecording, which does not.
 	[[nodiscard]] vk::CommandBuffer Handle() const;
@@ -172,6 +187,11 @@ private:
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
 	mutable vk::PipelineStageFlags m_pending_shader_writes;
+	mutable bool           m_deferred_barrier    = false;
+	mutable bool           m_deferred_full       = false;
+	mutable bool           m_deferred_joining    = false;
+	mutable uint32_t       m_deferred_dispatches = 0;
+	mutable DispatchAccess m_deferred_access;
 	mutable uint64_t    m_recorded_work = 0; // Handle() calls; never reset
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
@@ -258,6 +278,7 @@ private:
 	                                      const DrawCallInfo&          draw) const;
 	void RecordPendingWrites(std::span<PreparedBindings* const> stages);
 	PendingBufferWrites m_pending_writes;
+	DispatchAccess      m_dispatch_access; // scratch of DispatchDirect
 	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
 	                                                     const CommandBuffer&          buffer);
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
