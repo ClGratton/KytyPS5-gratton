@@ -90,13 +90,21 @@ struct ReadSet {
 	//   read(kind, address, std::span<uint32_t> out, bool exact) -> bool
 	//     exact: a bridged window; fail instead of answering for unmapped memory. Not exact: the
 	//     semantics of the original reader of that kind (scalar reads zero-fill unmapped memory).
-	//   dirty(address, bytes) -> bool: the range holds GPU-written bytes the guest backing lacks.
+	//   dirty(address, bytes) -> bool: the range (one run of a Clean window) holds GPU-written bytes the
+	//     guest backing lacks and whose value the reader cannot supply otherwise.
 	template <class Read, class Dirty>
 	[[nodiscard]] Result Validate(Read&& read, Dirty&& dirty) const {
 		std::array<uint32_t, kMaxWindowBytes / 4u> scratch;
 		for (const auto& window: windows) {
-			if (window.kind == ReadKind::Clean && dirty(window.address, window.bytes)) {
-				return Result::GpuDirty;
+			if (window.kind == ReadKind::Clean) {
+				// Only the bytes the walk read matter: a bridged gap that holds GPU-written bytes is
+				// not compared, so it cannot invalidate the plan.
+				for (uint32_t i = 0; i < window.run_count; ++i) {
+					const auto& run = runs[window.first_run + i];
+					if (dirty(window.address + run.offset_bytes, run.dwords * 4u)) {
+						return Result::GpuDirty;
+					}
+				}
 			}
 			const bool bridged = window.run_count > 1 || window.bytes != runs[window.first_run].dwords * 4u;
 			bool       read_ok = read(window.kind, window.address,
