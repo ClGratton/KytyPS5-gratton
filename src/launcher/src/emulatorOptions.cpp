@@ -147,6 +147,12 @@ QList<Option> BuildTable() {
 	             "Remembers ranges last written by a uniform GPU fill so clear discovery needs no "
 	             "GPU to CPU readback for them.",
 	             EMU_BOOL(known_fills)});
+	defs.append({"image_lookup_memo", "--image-lookup-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Remember texture lookups",
+	             "A texture lookup remembers which cached image it found until an image is added "
+	             "or removed, instead of walking the page table every draw. Exact; lowers the GPU "
+	             "thread's CPU time per draw.",
+	             EMU_BOOL(image_lookup_memo)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

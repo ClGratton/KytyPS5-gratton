@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
+#include "graphics/host_gpu/renderer/cache/imageLookupMemo.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
@@ -198,6 +199,11 @@ private:
 	bool             m_vram_audit_done        = false;
 	mutable uint32_t m_image_query_epoch      = 0;
 	bool             m_readback_linear_images = false;
+	// --image-lookup-memo (imageLookupMemo.h): unique SameBacking matches of FindImage, valid while
+	// m_image_set_generation is unchanged. The generation moves whenever an image is registered or
+	// unregistered and whenever AssociateStencil rewrites a registered image's info. Under m_lock.
+	ImageLookupMemo  m_image_lookup_memo;
+	uint64_t         m_image_set_generation   = 1;
 
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;

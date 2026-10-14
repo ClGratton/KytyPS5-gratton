@@ -58,6 +58,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("elide-barriers", &g_config->elide_barriers, false);
 	registry.Register("bda-sync-skip", &g_config->bda_sync_skip, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
+	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
+	// generation keeps moving whether or not the memo is consulted.
+	registry.Register("image-lookup-memo", &g_config->image_lookup_memo, false);
 	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
 	// the middle of a submission costs plans (misses), never a wrong draw.
 	registry.Register("srt-plans", &g_config->srt_plans, true);
@@ -125,6 +128,10 @@ bool ElideBarriersEnabled() {
 
 bool KnownFillsEnabled() {
 	return g_config->known_fills;
+}
+
+bool ImageLookupMemoEnabled() {
+	return Common::RuntimeToggles::Read(g_config->image_lookup_memo);
 }
 
 bool SrtPlanShadowEnabled() {
