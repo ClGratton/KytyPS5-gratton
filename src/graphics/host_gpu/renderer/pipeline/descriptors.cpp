@@ -382,8 +382,8 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	     descriptor.fields[5], descriptor.fields[6], descriptor.fields[7]);
 }
 
-static TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::ImageResource& resource,
-                                               TextureCache::BindingType                  binding) {
+TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::ImageResource& resource,
+                                        TextureCache::BindingType                  binding) {
 	TextureCache::ImageDesc desc {};
 	switch (resource.numeric_class) {
 		case Prospero::TextureNumericClass::Float:

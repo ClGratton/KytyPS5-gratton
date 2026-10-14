@@ -5641,6 +5641,43 @@ public:
   // zero-initialized, so the production table must be cleared before its first use. The
   // whole table is poisoned before the first production use, which comes either from a
   // buffer registration or from a consumer asking for the table.
+  // A null T# is bound to a 1x1 dummy. Sampled with a comparison sampler the dummy's view must
+  // support depth comparison; R32_SFLOAT does not on NVIDIA (VUID-*-None-06479, DEVICE_LOST in
+  // upstream #1476/#1458/#1498), so the dummy of a depth-compare resource is a depth format.
+  void CheckNullTextureDepthCompare() {
+    constexpr const char *name = "NullTextureDepthCompare";
+    const auto supports_compare = [&](vk::Format format) {
+      vk::FormatProperties3 props3{};
+      vk::FormatProperties2 props2{};
+      props2.pNext = &props3;
+      m_physical_device.getFormatProperties2(format, &props2);
+      return static_cast<bool>(props3.optimalTilingFeatures &
+                               vk::FormatFeatureFlagBits2::eSampledImageDepthComparison);
+    };
+    ShaderRecompiler::IR::ImageResource resource{};
+    resource.resource_class = ShaderRecompiler::IR::ImageResourceClass::Sampled;
+    resource.numeric_class = Prospero::TextureNumericClass::Float;
+    resource.read = true;
+
+    resource.depth_compare = true;
+    const auto compare = NullTextureDesc(resource, TextureCache::BindingType::Texture);
+    Require(name, "depth-compare null image view format",
+            supports_compare(compare.view_info.format),
+            "the null image sampled with depth compare has a view format without "
+            "SAMPLED_IMAGE_DEPTH_COMPARISON");
+    Require(name, "depth-compare null image aspect",
+            compare.view_info.aspect == vk::ImageAspectFlagBits::eDepth &&
+                compare.info.IsDepth() && compare.info.pixel_format == compare.view_info.format,
+            "the depth-compare null image is not a depth image with a depth view");
+
+    resource.depth_compare = false;
+    const auto plain = NullTextureDesc(resource, TextureCache::BindingType::Texture);
+    Require(name, "plain null image stays a float colour image",
+            plain.view_info.aspect == vk::ImageAspectFlagBits::eColor && !plain.info.IsDepth() &&
+                plain.view_info.format == vk::Format::eR32Sfloat,
+            "a null image that is not compared changed format");
+  }
+
   void CheckBdaPageTableInitialization() {
     constexpr const char *name = "BdaPageTableInitialization";
     constexpr uint64_t page = BufferCache::CACHING_PAGESIZE;
@@ -46437,6 +46474,11 @@ int main(int argc, char **argv) {
     vulkan.CheckUnifiedTextureCacheFlow();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--null-depth-compare-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckNullTextureDepthCompare();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--bda-page-table-init-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBdaPageTableInitialization();
@@ -46653,6 +46695,7 @@ int main(int argc, char **argv) {
   vulkan.CheckGpuMappedRangeLifecycle();
   vulkan.CheckStreamBufferRing();
   vulkan.CheckBdaPageTableInitialization();
+  vulkan.CheckNullTextureDepthCompare();
   vulkan.CheckGpuTilerCpuParity();
   vulkan.CheckNativeIndirectDispatch();
   vulkan.CheckMeshIndirectArgs();

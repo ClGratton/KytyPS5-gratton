@@ -79,6 +79,11 @@ template <typename T>
 void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
                             const ShaderTextureResource& descriptor, uint64_t size);
 
+// The 1x1 dummy bound for a null T#. A slot sampled with depth compare gets the depth format, since
+// R32_SFLOAT cannot be sampled with a comparison sampler on every GPU.
+[[nodiscard]] TextureCache::ImageDesc NullTextureDesc(const ShaderRecompiler::IR::ImageResource& resource,
+                                                      TextureCache::BindingType binding);
+
 // Prints the number of fallback bindings (target-flagged image without an attachment) at exit.
 // Idempotent; called once from the emulator's run path, after the logging shutdown hooks.
 void RegisterTargetFallbackSummary();

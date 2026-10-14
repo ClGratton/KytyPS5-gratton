@@ -1134,6 +1134,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --known-stores-only)
 	add_test(NAME bda_page_table_initialization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bda-page-table-init-only)
+	add_test(NAME null_texture_depth_compare
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --null-depth-compare-only)
 	add_test(NAME color_render_target_1d
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --rt1d-only)
 
