@@ -461,6 +461,11 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+add_executable(atomic_bit_mirror_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/AtomicBitMirrorTests.cpp"
+)
+target_include_directories(atomic_bit_mirror_tests PRIVATE ${inc_headers})
+
 add_executable(gds_copy_plan_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GdsCopyPlanTests.cpp"
 )
@@ -965,6 +970,7 @@ if(BUILD_TESTING)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
 	add_test(NAME avplayer_file COMMAND $<TARGET_FILE:avplayer_file_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
+	add_test(NAME atomic_bit_mirror COMMAND $<TARGET_FILE:atomic_bit_mirror_tests>)
 	add_test(NAME mesh_dispatch COMMAND $<TARGET_FILE:mesh_dispatch_tests>)
 	add_test(NAME null_page_read COMMAND $<TARGET_FILE:null_page_read_tests>)
 	add_test(NAME driver_cache_checkpoint COMMAND $<TARGET_FILE:driver_cache_checkpoint_tests>)
@@ -1225,6 +1231,7 @@ if(BUILD_TESTING)
 		trophy_system_tests
 		avplayer_file_tests
 		bit_array_tests
+		atomic_bit_mirror_tests
 		mesh_dispatch_tests
 		null_page_read_tests
 		driver_cache_checkpoint_tests
