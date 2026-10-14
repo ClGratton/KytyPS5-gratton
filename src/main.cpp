@@ -177,7 +177,8 @@ static void PrintUsage() {
 	::printf("  --toggle-control <path>              Poll this file (name=value lines) and flip the runtime-\n"
 	         "                                       safe performance flags it names (submit-coalesce,\n"
 	         "                                       elide-barriers, bda-sync-skip, clean-guest-reads,\n"
-	         "                                       image-lookup-memo, srt-plans, readback-queue,\n"
+	         "                                       image-lookup-memo, texture-binding-reuse,\n"
+	         "                                       srt-plans, readback-queue,\n"
 	         "                                       heap-trim) at the next presented frame; applied changes\n"
 	         "                                       are logged and appended\n"
 	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
@@ -280,6 +281,9 @@ static void PrintUsage() {
 	::printf("  --image-lookup-memo <true|false>     Remember which cached image a texture lookup found until\n"
 	         "                                       an image is added or removed (exact, less GPU-thread\n"
 	         "                                       CPU per draw). Default: false.\n");
+	::printf("  --texture-binding-reuse <true|false> A draw keeps the image binding of a shader slot while its\n"
+	         "                                       descriptor and the set of cached images are unchanged\n"
+	         "                                       (exact, less GPU-thread CPU per draw). Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -961,6 +965,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--image-lookup-memo") {
 			if (!ParseBool(value, options.config.image_lookup_memo)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--texture-binding-reuse") {
+			if (!ParseBool(value, options.config.texture_binding_reuse)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

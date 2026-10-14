@@ -33,6 +33,16 @@ struct PreparedBindings {
 		BufferId id;
 	};
 
+	// What an image binding was resolved from, so that the next draw that binds the same descriptor
+	// in the same slot can keep it (--texture-binding-reuse, TextureCache::RefindImage).
+	struct ImageSource {
+		ShaderRecompiler::IR::ImageResource   resource;
+		ShaderRecompiler::IR::DescriptorValue value;
+		ImageId                               found;              // FindImage's result
+		uint64_t                              generation = 0;     // 0: not reusable
+		uint32_t                              metadata_base_layer = 0;
+	};
+
 	// The draw owns the immutable compiled-program/runtime-snapshot association through commit.
 	const ShaderStageRuntime* runtime = nullptr;
 	// Keep the resolved guest range through cache preparation; only the host buffer ID may
@@ -40,6 +50,7 @@ struct PreparedBindings {
 	std::vector<BufferSource>             buffer_sources;
 	std::vector<vk::DescriptorBufferInfo> buffers;
 	std::vector<TextureBinding>           images;
+	std::vector<ImageSource>              image_sources; // parallel to `images`
 	std::vector<vk::Sampler>              samplers;
 	vk::DescriptorBufferInfo              gds {nullptr, 0, VK_WHOLE_SIZE};
 	vk::DescriptorBufferInfo              flattened_srt;

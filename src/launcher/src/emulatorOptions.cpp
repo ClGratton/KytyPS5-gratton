@@ -153,6 +153,12 @@ QList<Option> BuildTable() {
 	             "or removed, instead of walking the page table every draw. Exact; lowers the GPU "
 	             "thread's CPU time per draw.",
 	             EMU_BOOL(image_lookup_memo)});
+	defs.append({"texture_binding_reuse", "--texture-binding-reuse", Tab::Gpu, "CPU cost per draw",
+	             Kind::Bool, "Keep texture bindings between draws",
+	             "A draw keeps a shader slot's texture binding while the descriptor and the set of "
+	             "cached images are unchanged, instead of decoding and looking it up again. Exact; "
+	             "lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(texture_binding_reuse)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

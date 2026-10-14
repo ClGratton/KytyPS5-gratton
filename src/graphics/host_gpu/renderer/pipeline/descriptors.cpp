@@ -537,7 +537,11 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 }
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
-                                              const ShaderRecompiler::IR::DescriptorValue& value) {
+                                              const ShaderRecompiler::IR::DescriptorValue& value,
+                                              PreparedBindings::ImageSource*               source) {
+	if (source != nullptr) {
+		source->generation = 0;
+	}
 	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
 	}
@@ -707,7 +711,17 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.view_info.base_level = view_base;
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 
-	auto       id                  = texture_cache.FindImage(desc, shader_conversion);
+	const auto metadata_base_layer = desc.view_info.base_layer;
+	uint64_t   generation          = 0;
+	const bool record_source       = source != nullptr && Config::TextureBindingReuseEnabled();
+	auto       id = texture_cache.FindImage(desc, shader_conversion, record_source ? &generation : nullptr);
+	if (record_source && generation != 0) {
+		source->resource            = resource;
+		source->value               = value;
+		source->found               = id;
+		source->generation          = generation;
+		source->metadata_base_layer = metadata_base_layer;
+	}
 	auto*      image               = &texture_cache.GetImage(id);
 	const bool stencil_association = static_cast<bool>(image->depth_id);
 	if (stencil_association) {
@@ -782,6 +796,61 @@ void RenderExecutor::ResetBindings() {
 	m_bound_images.clear();
 }
 
+// KYTY_TEXTURE_REUSE_VERIFY=1: every kept binding is compared with a fresh ResolveTexture.
+static bool TextureReuseVerifyEnabled() {
+	static const bool enabled = [] {
+		const char* text = std::getenv("KYTY_TEXTURE_REUSE_VERIFY");
+		return text != nullptr && text[0] != '\0' && text[0] != '0';
+	}();
+	return enabled;
+}
+
+static void VerifyKeptTexture(const TextureBinding& kept, const TextureBinding& fresh) {
+	static std::atomic<uint64_t> verified {0};
+	const auto& a = kept.desc.info;
+	const auto& b = fresh.desc.info;
+	bool same = kept.image_id == fresh.image_id && kept.desc.type == fresh.desc.type &&
+	            kept.desc.view_info == fresh.desc.view_info && a.data == b.data &&
+	            a.stencil == b.stencil && a.extent == b.extent && a.resources == b.resources &&
+	            a.pixel_format == b.pixel_format && a.guest_format == b.guest_format &&
+	            a.bytes_per_block == b.bytes_per_block && a.samples == b.samples &&
+	            a.tile_mode == b.tile_mode && a.type == b.type && a.pitch == b.pitch &&
+	            a.bgra16 == b.bgra16 && a.metadata.range == b.metadata.range &&
+	            a.metadata.kind == b.metadata.kind &&
+	            a.metadata.dcc_alpha_msb == b.metadata.dcc_alpha_msb;
+	for (uint32_t level = 0; same && level < a.resources.levels && level < a.mip_layout.size(); ++level) {
+		same = a.mip_layout[level] == b.mip_layout[level];
+	}
+	if (!same) {
+		EXIT("texture binding reuse disagrees with a fresh ResolveTexture: kept image %u/%u fresh %u/%u "
+		     "address=0x%016" PRIx64 "\n",
+		     kept.image_id.index, kept.image_id.generation, fresh.image_id.index,
+		     fresh.image_id.generation, a.data.address);
+	}
+	const auto n = verified.fetch_add(1, std::memory_order_relaxed) + 1;
+	if ((n & ((1u << 20) - 1u)) == 0) {
+		std::printf("TextureBindingReuse verify: %" PRIu64 " kept bindings agree with a fresh resolve, 0 mismatches\n", n);
+		std::fflush(stdout);
+	}
+}
+
+// Whether a slot's previous image binding stands for ResolveTexture(resource, value): the same
+// resource and descriptor find the same image while the image set is unchanged (RefindImage checks
+// the generation and repeats FindImage's bookkeeping), and the binding must still follow that
+// image's stencil association.
+static bool ReuseTexture(TextureCache& cache, const PreparedBindings::ImageSource& source,
+                         const TextureBinding&                        binding,
+                         const ShaderRecompiler::IR::ImageResource&   resource,
+                         const ShaderRecompiler::IR::DescriptorValue& value) {
+	if (source.generation == 0 || !(source.value == value) || !(source.resource == resource) ||
+	    !cache.RefindImage(source.found, source.generation, binding.desc,
+	                       source.metadata_base_layer)) {
+		return false;
+	}
+	const auto depth_id = cache.GetImage(source.found).depth_id;
+	return (depth_id ? depth_id : source.found) == binding.image_id;
+}
+
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
 	Common::GpuPhase::Scope gpu_phase_srt(Common::GpuPhase::Phase::Srt);
@@ -797,8 +866,27 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.images.resize(program.info.images.size());
 	prepared.samplers.clear();
 	prepared.shader_data.clear();
+	prepared.image_sources.resize(program.info.images.size());
+	const bool reuse_bindings = Config::TextureBindingReuseEnabled();
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
-		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
+		// Consecutive draws mostly bind the same textures: keep the slot's binding while the
+		// descriptor, the shader's image resource and the image set are unchanged.
+		if (reuse_bindings && ReuseTexture(m_context.GetTextureCache(), prepared.image_sources[i],
+		                                   prepared.images[i], program.info.images[i],
+		                                   snapshot.images[i])) {
+			auto& kept = prepared.images[i];
+			// As ResolveTexture returns it; RebindImages acquires the views.
+			kept.image_view = nullptr;
+			kept.layout     = vk::ImageLayout::eUndefined;
+			kept.mip_views.clear();
+			if (TextureReuseVerifyEnabled()) {
+				VerifyKeptTexture(kept, ResolveTexture(program.info.images[i], snapshot.images[i]));
+			}
+			BindImage(kept.image_id, kept.desc.type == TextureCache::BindingType::Storage);
+			continue;
+		}
+		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i],
+		                              &prepared.image_sources[i]);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
@@ -921,6 +1009,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	const auto& snapshot = *prepared.runtime->resources;
 	auto&       images   = prepared.images;
 	EXIT_IF(images.size() != program.info.images.size());
+	// Bindings assembled without PrepareBindings have no recorded sources.
+	prepared.image_sources.resize(images.size());
 	auto& texture_cache = m_context.GetTextureCache();
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
@@ -931,7 +1021,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				old_image->binding = {};
 			}
 			Common::GpuPhase::Scope gpu_phase_resolve(Common::GpuPhase::Phase::DescResolve);
-			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
+			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
+			                           &prepared.image_sources[i]);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
 		} else {
