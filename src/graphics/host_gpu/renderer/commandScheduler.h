@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -105,6 +106,7 @@ private:
 	std::mutex                   m_operation_mutex;
 	std::condition_variable      m_operation_available;
 	std::jthread                 m_priority_thread;
+	std::string                  m_hang_provider_name;
 	bool                         m_priority_active      = false;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;

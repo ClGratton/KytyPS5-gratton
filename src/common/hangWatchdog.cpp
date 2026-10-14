@@ -185,7 +185,10 @@ void Report(unsigned index, double stalled_s) {
 		if (const auto prev = first.find(tid); prev != first.end() && hz > 0 && dt > 0) {
 			cpu = static_cast<double>(sample.ticks - prev->second.ticks) / hz / dt * 100.0;
 		}
-		if (cpu >= 30.0 || sample.name == "kyty-lookahead") {
+		// The threads that move work between the guests and the GPU are shown even when they sleep:
+		// in a deadlock they are the ones blocked.
+		if (cpu >= 30.0 || sample.name == "kyty-lookahead" || sample.name == "kyGpu" ||
+		    sample.name == "kyPrioOps" || sample.name == "kyGuestMain") {
 			busy.push_back(tid);
 		}
 		std::string wchan = sample.wchan;

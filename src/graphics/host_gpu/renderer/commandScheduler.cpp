@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
 #include "common/gpuPhaseStats.h"
+#include "common/hangWatchdog.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
@@ -104,9 +105,31 @@ CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graph
       m_command_pool(graphics, m_master), m_command(*this),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {
 	GpuOps::Initialize(graphics, m_master, Config::GetGpuOpsMode());
+	// A hang report shows the state of the operation queues (never blocks on their mutex).
+	m_hang_provider_name = "command_scheduler@" + std::to_string(reinterpret_cast<uintptr_t>(this));
+	Common::Hang::RegisterProvider(m_hang_provider_name.c_str(), [this] {
+		std::string text = "tick current=" + std::to_string(m_master.CurrentTick()) +
+		                   " known_gpu=" + std::to_string(m_master.KnownGpuTick());
+		std::unique_lock lock(m_operation_mutex, std::try_to_lock);
+		if (!lock.owns_lock()) {
+			return text + " (operation mutex busy)";
+		}
+		text += " | priority ops=" + std::to_string(m_priority_operations.size());
+		if (!m_priority_operations.empty()) {
+			text += " front_tick=" + std::to_string(m_priority_operations.front().tick) +
+			        " back_tick=" + std::to_string(m_priority_operations.back().tick);
+		}
+		text += " active=" + std::to_string(m_priority_active ? m_priority_active_tick : 0) +
+		        " | pending ops=" + std::to_string(m_pending_operations.size());
+		if (!m_pending_operations.empty()) {
+			text += " front_tick=" + std::to_string(m_pending_operations.front().tick);
+		}
+		return text;
+	});
 }
 
 CommandScheduler::~CommandScheduler() {
+	Common::Hang::UnregisterProvider(m_hang_provider_name.c_str());
 	Shutdown();
 }
 
