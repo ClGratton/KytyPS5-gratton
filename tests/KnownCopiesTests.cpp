@@ -80,6 +80,16 @@ void TestResolve() {
 	src.dst_sel = 0;
 	Check(!ResolveKnownCopy(Copy(), src, Desc(0x40000, 64), Launch(1), out), "a component select that is not the identity");
 	src = Desc(0x10000, 64);
+	auto dst1 = Desc(0x40000, 64);
+	src.dst_sel = dst1.dst_sel = 4u | (0u << 3) | (0u << 6) | (1u << 9); // (x, 0, 0, 1): one component
+	Check(ResolveKnownCopy(Copy(), src, dst1, Launch(1), out), "a (x, 0, 0, 1) select of a one-component format");
+	src.words = dst1.words = 2;
+	src.stride = dst1.stride = 8;
+	Check(!ResolveKnownCopy(Copy(), src, dst1, Launch(1), out), "the same select of a two-component format drops y");
+	src = Desc(0x10000, 64);
+	src.dst_sel = 5u | (5u << 3) | (6u << 6) | (7u << 9); // x reads y
+	Check(!ResolveKnownCopy(Copy(), src, Desc(0x40000, 64), Launch(1), out), "x selecting another component");
+	src = Desc(0x10000, 64);
 	src.swizzle = true;
 	Check(!ResolveKnownCopy(Copy(), src, Desc(0x40000, 64), Launch(1), out), "swizzled");
 	src = Desc(0x10000, 64);
@@ -112,6 +122,36 @@ void TestResolve() {
 	Check(ResolveKnownCopy(Copy(), src, dst, Launch(1), out) && out.bytes == 64 * 16, "four 32-bit components");
 }
 
+void TestReasons() {
+	KnownCopy out;
+	auto Reason = [&](const CopyDescriptor& s, const CopyDescriptor& d, const CopyLaunch& l) {
+		return ResolveKnownCopyReason(Copy(), s, d, l, out);
+	};
+	Check(Reason(Desc(0x100000, 64), Desc(0x400000, 64), Launch(1)) == CopyReject::None, "tracked");
+	auto bad = Desc(0x100000, 64);
+	bad.words = 0;
+	Check(Reason(bad, Desc(0x400000, 64), Launch(1)) == CopyReject::Format, "format");
+	bad = Desc(0x100000, 64);
+	bad.stride = 8;
+	Check(Reason(bad, Desc(0x400000, 64), Launch(1)) == CopyReject::Stride, "stride");
+	bad = Desc(0x100000, 64);
+	bad.dst_sel = 0;
+	Check(Reason(bad, Desc(0x400000, 64), Launch(1)) == CopyReject::ComponentSelect, "select");
+	bad = Desc(0x100000, 64);
+	bad.mapped = false;
+	Check(Reason(bad, Desc(0x400000, 64), Launch(1)) == CopyReject::Unmapped, "mapped");
+	Check(Reason(Desc(0x100000, 64), Desc(0x400000, 64), Launch(2)) == CopyReject::Invocations, "invocations");
+	auto l = Launch(1);
+	l.use_plain_mode = false;
+	Check(Reason(Desc(0x100000, 64), Desc(0x400000, 64), l) == CopyReject::Launch, "launch");
+	Check(Reason(Desc(0x100000, 64), Desc(0x1000c0, 64), Launch(1)) == CopyReject::Overlap, "overlap");
+	for (const char* name: kCopyRejectNames) {
+		Check(name != nullptr && name[0] != 0, "every reason has a name");
+	}
+	static_assert(sizeof(kCopyRejectNames) / sizeof(kCopyRejectNames[0]) == static_cast<size_t>(CopyReject::Count),
+	              "one name per reason");
+}
+
 void TestRuns() {
 	std::vector<DwordRun> runs;
 	const uint32_t uniform[8] = {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
@@ -131,6 +171,7 @@ void TestRuns() {
 
 int main() {
 	TestResolve();
+	TestReasons();
 	TestRuns();
 	std::printf("KnownCopiesTests: ok\n");
 	return 0;

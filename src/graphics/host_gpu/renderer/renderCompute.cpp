@@ -143,11 +143,22 @@ static void RecordUniformCopy(RenderContext& context, const ShaderComputeInputIn
 	launch.thread_dimensions = input.dispatch_thread_dimensions;
 	launch.use_plain_mode    = mode == 0x41u;
 	KnownCopy resolved;
-	if (ResolveKnownCopy(copy,
-	                     MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.src_resource])),
-	                     MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.dst_resource])),
-	                     launch, resolved)) {
+	const auto reason = ResolveKnownCopyReason(
+	    copy, MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.src_resource])),
+	    MakeCopyDescriptor(DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[copy.dst_resource])),
+	    launch, resolved);
+	if (reason == CopyReject::None) {
 		context.GetBufferCache().RecordKnownCopy(resolved);
+	} else {
+		// Loud, once per reason: a copy shader that cannot be tracked costs the clear-code drain.
+		static std::atomic<uint32_t> logged {0};
+		const uint32_t bit = 1u << static_cast<uint32_t>(reason);
+		if ((logged.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+			std::printf("known-copies: a metadata-style copy dispatch (shader 0x%016" PRIx64 ") is not tracked: %s "
+			            "(further ones are not logged)\n",
+			            input.stage.program->shader_hash, kCopyRejectNames[static_cast<uint32_t>(reason)]);
+			std::fflush(stdout);
+		}
 	}
 }
 
