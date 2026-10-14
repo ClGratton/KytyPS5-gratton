@@ -34,6 +34,10 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -611,6 +615,49 @@ void GuestGpu::WaitForIdle() {
 	}
 }
 
+// Debug fault injection: KYTY_GPU_STALL_INJECT=<period_ms>,<stall_ms>[,<start_ms>] makes the GPU thread
+// sleep stall_ms before a submission once per period (after start_ms of run time), like the long
+// pipeline-compile or driver stalls of a first play. Used to see what a guest does when frames
+// take far longer than it expects. Default off.
+static void InjectGpuStall() {
+	struct Plan {
+		bool     enabled   = false;
+		uint64_t period_ns = 0;
+		uint64_t stall_ms  = 0;
+		uint64_t start_ns  = 0;
+	};
+	static const Plan plan = [] {
+		Plan        result;
+		const char* text = std::getenv("KYTY_GPU_STALL_INJECT");
+		if (text == nullptr) {
+			return result;
+		}
+		unsigned long long period = 0, stall = 0, start = 0;
+		if (std::sscanf(text, "%llu,%llu,%llu", &period, &stall, &start) >= 2 && period != 0 && stall != 0) {
+			result.enabled   = true;
+			result.period_ns = period * 1000000ull;
+			result.stall_ms  = stall;
+			result.start_ns  = start * 1000000ull;
+		}
+		return result;
+	}();
+	if (!plan.enabled) {
+		return;
+	}
+	static const auto begin = std::chrono::steady_clock::now();
+	static uint64_t   next_ns = 0;
+	const auto        now = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count());
+	if (now < plan.start_ns || now < next_ns) {
+		return;
+	}
+	next_ns = now + plan.period_ns;
+	std::printf("GPU stall injected: %llu ms at %.1f s\n", static_cast<unsigned long long>(plan.stall_ms),
+	            static_cast<double>(now) / 1e9);
+	std::fflush(stdout);
+	std::this_thread::sleep_for(std::chrono::milliseconds(plan.stall_ms));
+}
+
 void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
@@ -693,6 +740,7 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		EXIT_IF(!has_submission);
+		InjectGpuStall();
 		const bool complete = gpu->Process(submission);
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
