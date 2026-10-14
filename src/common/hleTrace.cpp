@@ -360,7 +360,9 @@ void Dump(FILE* out, unsigned own_entries, unsigned merged_entries, LocateFn loc
 			continue;
 		}
 		const auto head = ring->head.load(std::memory_order_acquire);
-		const auto n    = std::min<uint64_t>({head, RING_ENTRIES, MERGE_CAPACITY - used});
+		// An even share per thread, so a chatty thread does not hide the others' calls.
+		const auto share = std::max<uint64_t>(64, MERGE_CAPACITY / std::max<uint32_t>(rings, 1u));
+		const auto n     = std::min<uint64_t>({head, RING_ENTRIES, MERGE_CAPACITY - used, share});
 		for (uint64_t i = head - n; i < head; i++) {
 			g_merged[used].entry = ring->entries[i & (RING_ENTRIES - 1)];
 			g_merged[used].ring  = ring;
