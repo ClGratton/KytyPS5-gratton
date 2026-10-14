@@ -344,6 +344,10 @@ struct ConfigOptions {
 	// is loaded; --toggle-control flips it, common/runtimeToggles.h). Not a command-line option.
 	bool                   poll_before_wait_on         = false;
 	bool                   eager_readback_verify       = false;
+	// --readback-futures: a game thread's read fault on GPU-written memory no longer stops the GPU
+	// thread: it copies the bytes out, submits and goes on; the faulting thread alone waits for the
+	// copy to land (frame pipelining, notes/frame-pipelining.md). Default off.
+	bool                   readback_futures            = false;
 	std::filesystem::path  bench_render_csv;
 	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
 	// names at the next presented frame (common/runtimeToggles.h). Default off.
@@ -443,6 +447,7 @@ bool              ReadbackQueueEnabled();
 bool              EagerReadbackEnabled();
 uint32_t          PollBeforeWaitUs();
 bool              EagerReadbackVerifyEnabled();
+bool              ReadbackFuturesEnabled();
 
 LogDirection          GetPrintfDirection();
 std::filesystem::path GetPrintfOutputFile();

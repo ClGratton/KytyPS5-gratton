@@ -208,6 +208,12 @@ QList<Option> BuildTable() {
 	             "be submitted and written back to guest memory when it completes, so the next read "
 	             "needs no fault and no GPU drain. Off until measured.",
 	             EMU_BOOL(eager_readback)});
+	defs.append({"readback_futures", "--readback-futures", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Bool, "Let the GPU thread run on while a game thread waits for a readback",
+	             "A game thread's read of GPU-written memory no longer stops the GPU thread: it "
+	             "copies the bytes out and goes on, and only the reading thread waits for them. "
+	             "Exact; off until measured.",
+	             EMU_BOOL(readback_futures)});
 	defs.append({"gpu_indirect_draws", "--gpu-indirect-draws", Tab::Gpu, "Draw path", Kind::Bool,
 	             "GPU-built indirect draws",
 	             "Indirect draws whose argument block a GPU pass wrote are built on the GPU instead "

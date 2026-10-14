@@ -91,6 +91,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// copy is in flight when the flag goes off is finished by the next submit or read fault), so
 	// the flag only decides whether new pages are marked hot and new copies scheduled.
 	registry.Register("eager-readback", &g_config->eager_readback, false);
+	// Read per game-thread read fault; copies in flight are retired by the same code whether or not
+	// the flag is on (they share the eager copies' bookkeeping).
+	registry.Register("readback-futures", &g_config->readback_futures, false);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -230,6 +233,10 @@ uint32_t PollBeforeWaitUs() {
 
 bool EagerReadbackEnabled() {
 	return Common::RuntimeToggles::Read(g_config->eager_readback);
+}
+
+bool ReadbackFuturesEnabled() {
+	return Common::RuntimeToggles::Read(g_config->readback_futures);
 }
 
 bool EagerReadbackVerifyEnabled() {

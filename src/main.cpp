@@ -180,6 +180,7 @@ static void PrintUsage() {
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
 	         "                                       known-copies, gpu-indirect-draws, eager-readback,\n"
+	         "                                       readback-futures,\n"
 	         "                                       poll-before-wait) at the next\n"
 	         "                                       presented frame; applied changes are logged and appended\n"
 	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
@@ -319,6 +320,10 @@ static void PrintUsage() {
 	         "                                       memory right after the GPU writes them (copied in the\n"
 	         "                                       command buffer about to be submitted), so the next read\n"
 	         "                                       needs no fault and no GPU drain. Default: false.\n");
+	::printf("  --readback-futures <true|false>      A game thread's read fault on GPU-written memory does not\n"
+	         "                                       stop the GPU thread: it copies the bytes out, submits and\n"
+	         "                                       goes on, and only the faulting thread waits for the copy to\n"
+	         "                                       land (frame pipelining). Default: false.\n");
 	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback, re-read every page from the\n"
 	         "                                       GPU (a full drain) before it is unprotected and report\n"
 	         "                                       any difference. Slow. Default: false.\n");
@@ -1047,6 +1052,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			options.config.poll_before_wait_us = static_cast<uint32_t>(us);
 		} else if (arg == "--eager-readback") {
 			if (!ParseBool(value, options.config.eager_readback)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--readback-futures") {
+			if (!ParseBool(value, options.config.readback_futures)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
