@@ -79,6 +79,7 @@ public:
 		std::atomic<uint64_t> tasks_stale {0}; // dropped by a worker: the guest retired the item meanwhile
 		// KYTY_LOOKAHEAD_REPLAY=K (debug, needs workers): each submission is decoded K-1 more times
 		// and its tasks are run with the plans discarded, to measure what the workers can do.
+		std::atomic<uint64_t> tasks_run {0};    // tasks a worker actually ran (not dropped as stale)
 		std::atomic<uint64_t> replay_tasks {0};
 		std::atomic<int64_t>  replay_ns {0};
 		std::atomic<uint64_t> items_abandoned {0}; // decode budget / unreadable condition hit

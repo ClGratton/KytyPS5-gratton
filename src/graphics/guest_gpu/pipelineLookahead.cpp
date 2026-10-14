@@ -209,6 +209,7 @@ private:
 		if (Common::Speculation::ItemStale()) {
 			m_owner.m_stats.tasks_stale.fetch_add(1, std::memory_order_relaxed);
 		} else {
+			m_owner.m_stats.tasks_run.fetch_add(1, std::memory_order_relaxed);
 			SrtPlan::PlanSinkScope sink(&task.plans);
 			std::optional<SrtPlan::EventScope> event;
 			if (SrtPlan::Enabled()) {
@@ -341,7 +342,7 @@ std::string PipelineLookahead::SummaryText() const {
 	return fmt::format(
 	    "items={};items_late={};draws={};dispatches={};max_queue={};busy_ms={};draw_ms={};dispatch_ms={};"
 	    "aborted={};abandoned={};stale={};retire_signals={};dropped={};workers={};tasks={};worker_busy_ms={};"
-	    "sequencer_stall_ms={};max_ring={};tasks_stale={};replay_tasks={};replay_ms={};sizeof_ctx={};sizeof_ucfg={};"
+	    "sequencer_stall_ms={};max_ring={};tasks_stale={};tasks_run={};replay_tasks={};replay_ms={};sizeof_ctx={};sizeof_ucfg={};"
 	    "sizeof_sh={};sizeof_vsinfo={};sizeof_psinfo={}",
 	    m_stats.items.load(), m_stats.items_late.load(), m_stats.draws.load(),
 	    m_stats.dispatches.load(), m_stats.max_queue.load(), m_stats.busy_ns.load() / 1000000,
@@ -350,7 +351,7 @@ std::string PipelineLookahead::SummaryText() const {
 	    m_stats.items_stale.load(), Common::GuestRetirement::Global().SignalCalls(),
 	    m_stats.items_dropped.load(), Config::GetLookaheadWorkers(), m_stats.tasks.load(),
 	    m_stats.worker_busy_ns.load() / 1000000, m_stats.sequencer_stall_ns.load() / 1000000,
-	    m_stats.max_ring.load(), m_stats.tasks_stale.load(), m_stats.replay_tasks.load(),
+	    m_stats.max_ring.load(), m_stats.tasks_stale.load(), m_stats.tasks_run.load(), m_stats.replay_tasks.load(),
 	    m_stats.replay_ns.load() / 1000000, sizeof(HW::Context), sizeof(HW::UserConfig), sizeof(HW::Shader),
 	    sizeof(ShaderVertexInputInfo), sizeof(ShaderPixelInputInfo));
 }
@@ -469,7 +470,7 @@ void PipelineLookahead::Process(Item& item) {
 		}();
 		if (replays > 1 && item.kind != Kind::Reset && !m_current_late) {
 			m_pool->Drain();
-			const auto tasks_before = m_stats.tasks.load(std::memory_order_relaxed);
+			const auto tasks_before = m_stats.tasks_run.load(std::memory_order_relaxed);
 			const auto t_replay     = Bench::NowNs();
 			m_replaying             = true;
 			for (uint32_t r = 1; r < replays && !Common::Speculation::Aborted(); ++r) {
@@ -480,7 +481,7 @@ void PipelineLookahead::Process(Item& item) {
 			}
 			m_pool->Drain();
 			m_replaying = false;
-			m_stats.replay_tasks.fetch_add(m_stats.tasks.load(std::memory_order_relaxed) - tasks_before,
+			m_stats.replay_tasks.fetch_add(m_stats.tasks_run.load(std::memory_order_relaxed) - tasks_before,
 			                               std::memory_order_relaxed);
 			m_stats.replay_ns.fetch_add(Bench::NowNs() - t_replay, std::memory_order_relaxed);
 		}
