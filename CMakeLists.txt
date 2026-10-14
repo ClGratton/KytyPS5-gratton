@@ -494,6 +494,11 @@ add_executable(sys_file_read_tests EXCLUDE_FROM_ALL
 target_link_libraries(sys_file_read_tests common)
 target_include_directories(sys_file_read_tests PRIVATE ${inc_headers})
 
+add_executable(occlusion_counters_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/OcclusionCountersTests.cpp"
+)
+target_include_directories(occlusion_counters_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
@@ -962,6 +967,7 @@ if(BUILD_TESTING)
 	add_test(NAME skip_dependencies COMMAND $<TARGET_FILE:skip_dependencies_tests>)
 	add_test(NAME pipeline_cache_file COMMAND $<TARGET_FILE:pipeline_cache_file_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
+	add_test(NAME occlusion_counters COMMAND $<TARGET_FILE:occlusion_counters_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_fallback_disabled PROPERTIES
@@ -1140,6 +1146,7 @@ if(BUILD_TESTING)
 		playgo_api_tests
 		gds_copy_plan_tests
 		lru_cache_tests
+		occlusion_counters_tests
 		vram_policy_tests
 		heap_trim_tests
 		lds_span_tests
