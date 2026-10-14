@@ -505,17 +505,22 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 
 
 // Contention and popularity figures of the lookahead, printed with its summary (observation only).
+// Only rare events are counted in shared atomics; the popularity table is per thread (merged for the
+// summary) so that several prefetch workers do not meet on one counter or one lock per materialization.
+struct PopularityShard {
+	std::mutex                             mutex; // taken by its own thread per call, by the summary once
+	std::unordered_map<uint64_t, uint64_t> counts;
+};
+
 struct LookaheadLockStats {
-	std::atomic<uint64_t> lookahead_locks {0};     // entry locks taken by the lookahead
-	std::atomic<uint64_t> lookahead_waits {0};     // of those, blocked behind another thread
+	std::atomic<uint64_t> lookahead_waits {0};     // entry locks the lookahead was blocked on
 	std::atomic<int64_t>  lookahead_wait_ns {0};
-	std::atomic<uint64_t> gpu_locks {0};
 	std::atomic<uint64_t> gpu_waits {0};
 	std::atomic<int64_t>  gpu_wait_ns {0};
 	std::atomic<uint64_t> compile_waits {0};       // the lookahead blocked on a program/pipeline compile
 	std::atomic<int64_t>  compile_wait_ns {0};
-	std::mutex                                 popularity_mutex;
-	std::unordered_map<uint64_t, uint64_t>     popularity;     // lookahead materializations per shader hash
+	std::mutex                                    shards_mutex;
+	std::vector<std::shared_ptr<PopularityShard>> shards;
 };
 
 LookaheadLockStats& LockStats() {
@@ -523,23 +528,39 @@ LookaheadLockStats& LockStats() {
 	return stats;
 }
 
+void NotePopularity(uint64_t shader_hash) {
+	thread_local std::shared_ptr<PopularityShard> shard = [] {
+		auto created = std::make_shared<PopularityShard>();
+		auto& stats  = LockStats();
+		std::lock_guard lock(stats.shards_mutex);
+		stats.shards.push_back(created);
+		return created;
+	}();
+	std::lock_guard lock(shard->mutex);
+	++shard->counts[shader_hash];
+}
+
 std::string LookaheadLockSummary() {
 	auto& stats = LockStats();
 	std::vector<std::pair<uint64_t, uint64_t>> top;
 	uint64_t total = 0;
 	{
-		std::lock_guard lock(stats.popularity_mutex);
-		for (const auto& [hash, count]: stats.popularity) {
+		std::unordered_map<uint64_t, uint64_t> merged;
+		std::lock_guard registry_lock(stats.shards_mutex);
+		for (const auto& shard: stats.shards) {
+			std::lock_guard lock(shard->mutex);
+			for (const auto& [hash, count]: shard->counts) merged[hash] += count;
+		}
+		for (const auto& [hash, count]: merged) {
 			top.emplace_back(count, hash);
 			total += count;
 		}
 	}
 	std::sort(top.begin(), top.end(), std::greater<>());
 	std::string text = fmt::format(
-	    "entry_locks lookahead={} waits={} wait_ms={:.1f}; gpu={} waits={} wait_ms={:.1f}; "
+	    "entry_lock_waits lookahead={} wait_ms={:.1f}; gpu={} wait_ms={:.1f}; "
 	    "compile_waits={} compile_wait_ms={:.1f}; materializations={} distinct_shaders={} top:",
-	    stats.lookahead_locks.load(), stats.lookahead_waits.load(),
-	    static_cast<double>(stats.lookahead_wait_ns.load()) / 1e6, stats.gpu_locks.load(),
+	    stats.lookahead_waits.load(), static_cast<double>(stats.lookahead_wait_ns.load()) / 1e6,
 	    stats.gpu_waits.load(), static_cast<double>(stats.gpu_wait_ns.load()) / 1e6,
 	    stats.compile_waits.load(), static_cast<double>(stats.compile_wait_ns.load()) / 1e6, total,
 	    top.size());
@@ -778,11 +799,7 @@ struct PipelineCache::ProgramCache {
 			Common::Speculation::HeldLock held(mutex.Raw(), true);
 			Common::Hang::Phase phase("lookahead_materialize");
 			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead");
-			{
-				auto& stats = LockStats();
-				std::lock_guard pop_lock(stats.popularity_mutex);
-				++stats.popularity[resource_plan.shader_hash];
-			}
+			NotePopularity(resource_plan.shader_hash);
 			ShaderRecompiler::IR::ResourceSnapshot discarded;
 			auto& snapshot = keep != nullptr ? *keep : discarded; // --srt-plan-shadow keeps it
 			materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
@@ -846,13 +863,12 @@ struct PipelineCache::ProgramCache {
 		void LockEntry(Lock& lock, const char* what) {
 			Common::GpuPhase::Scope gpu_phase_lock(Common::GpuPhase::Phase::PipeEntryLock);
 			Common::Hang::Phase phase(what);
-			auto&      stats = LockStats();
-			const bool la    = Common::Speculation::Active();
-			(la ? stats.lookahead_locks : stats.gpu_locks).fetch_add(1, std::memory_order_relaxed);
 			if (lock.try_lock()) {
 				return;
 			}
-			const auto t0 = Bench::NowNs();
+			auto&      stats = LockStats();
+			const bool la    = Common::Speculation::Active();
+			const auto t0    = Bench::NowNs();
 			lock.lock();
 			(la ? stats.lookahead_waits : stats.gpu_waits).fetch_add(1, std::memory_order_relaxed);
 			(la ? stats.lookahead_wait_ns : stats.gpu_wait_ns)
