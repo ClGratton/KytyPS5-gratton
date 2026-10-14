@@ -165,7 +165,7 @@ void TestGraphicsTriggersAreQueuedInOrder() {
 	Check(add(0x40, QueuingTrigger) == OK && add(0x41, SmallQueueTrigger) == OK, "add events");
 
 	// Two payloads alternate before the guest waits: both are delivered, in order.
-	constexpr intptr_t kA = 43981, kB = 0;
+	constexpr intptr_t kA = 0x1234, kB = 0;
 	for (int i = 0; i < 3; ++i) {
 		Check(EventQueue::KernelTriggerEvent(queue, 0x40, EventQueue::KERNEL_EVFILT_GRAPHICS,
 		                                     reinterpret_cast<void*>(kA)) == OK, "trigger a");
