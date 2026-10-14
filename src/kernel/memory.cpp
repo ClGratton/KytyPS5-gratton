@@ -380,7 +380,7 @@ public:
 
 	bool Add(uint64_t start, uint64_t size, uint64_t offset, int protection, int memory_type,
 	         VirtualRangeType type, const char* name, bool disallow_merge = false) {
-		Common::LockGuard lock(m_mutex);
+		MutatingLock lock(*this);
 
 		if (start == 0 || size == 0) {
 			return false;
@@ -410,7 +410,7 @@ public:
 	}
 
 	bool Remove(uint64_t start, uint64_t size) {
-		Common::LockGuard lock(m_mutex);
+		MutatingLock lock(*this);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -441,7 +441,7 @@ public:
 	}
 
 	bool ReleaseReserved(uint64_t start, uint64_t size) {
-		Common::LockGuard lock(m_mutex);
+		MutatingLock lock(*this);
 
 		for (size_t index = 0; index < m_ranges.size(); index++) {
 			auto& r = m_ranges[index];
@@ -456,7 +456,7 @@ public:
 	bool ReplaceSpan(uint64_t start, uint64_t size, VirtualRangeType expected_type,
 	                 uint64_t offset, int protection, int memory_type, VirtualRangeType type,
 	                 const char* name, bool disallow_merge = false) {
-		Common::LockGuard lock(m_mutex);
+		MutatingLock lock(*this);
 
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
@@ -503,7 +503,7 @@ public:
 	}
 
 	void Rename(uint64_t start, uint64_t size, const char* name) {
-		Common::LockGuard lock(m_mutex);
+		MutatingLock lock(*this);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -515,7 +515,7 @@ public:
 	}
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
-		Common::LockGuard lock(m_mutex);
+		MutatingLock lock(*this);
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
@@ -585,9 +585,41 @@ public:
 		return false;
 	}
 
+	// ClampRangeSize with the answer remembered per thread. The answer is a function of m_ranges
+	// alone; an entry is used only while the epoch it was computed at is still the current one,
+	// and the epoch moves under the mutex on every change, so a hit equals the locked answer. It
+	// saves the global mutex the GPU thread otherwise takes several times per draw.
 	uint64_t ClampRangeSize(uint64_t virtual_addr, uint64_t size) {
+		if (!Config::MappingMemoEnabled()) {
+			Common::LockGuard lock(m_mutex);
+			return ClampRangeSizeUnlocked(virtual_addr, size);
+		}
+		struct Entry {
+			uint64_t serial = 0, epoch = 0, addr = 0, size = 0, result = 0;
+		};
+		thread_local std::array<Entry, 512> memo {};
+		auto& entry = memo[((virtual_addr >> 4) ^ (size * 0x9E3779B97F4A7C15ull >> 40)) & 511u];
+		const auto epoch = m_epoch.load(std::memory_order_acquire);
+		if (entry.serial == m_serial && entry.epoch == epoch && entry.addr == virtual_addr &&
+		    entry.size == size) {
+			if (Config::ResolvedDrawVerify()) {
+				Common::LockGuard lock(m_mutex);
+				if (m_epoch.load(std::memory_order_relaxed) == epoch &&
+				    ClampRangeSizeUnlocked(virtual_addr, size) != entry.result) {
+					EXIT("VirtualRanges: remembered clamp of 0x%016" PRIx64 "+0x%" PRIx64
+					     " differs from the live answer\n",
+					     virtual_addr, size);
+				}
+			}
+			return entry.result;
+		}
 		Common::LockGuard lock(m_mutex);
+		const auto        result = ClampRangeSizeUnlocked(virtual_addr, size);
+		entry = {m_serial, m_epoch.load(std::memory_order_relaxed), virtual_addr, size, result};
+		return result;
+	}
 
+	uint64_t ClampRangeSizeUnlocked(uint64_t virtual_addr, uint64_t size) {
 		if (virtual_addr == 0 || size == 0 || size > UINT64_MAX - virtual_addr) {
 			return 0;
 		}
@@ -850,6 +882,26 @@ private:
 
 	std::vector<Range> m_ranges;
 	Common::Mutex      m_mutex;
+	// Counts every change of m_ranges, bumped under m_mutex before it is released. A query result
+	// remembered together with the epoch it was computed at is still the answer while the epoch
+	// has not moved (ClampRangeSize).
+	std::atomic<uint64_t> m_epoch {1};
+	const uint64_t        m_serial = NextSerial();
+
+	static uint64_t NextSerial() {
+		static std::atomic<uint64_t> next {1};
+		return next.fetch_add(1, std::memory_order_relaxed);
+	}
+	// The lock of a mutator: the epoch moves before the mutex is released (members are destroyed
+	// in reverse order), so a reader that sees the old epoch ran before the change.
+	struct MutatingLock {
+		explicit MutatingLock(VirtualRanges& ranges): lock(ranges.m_mutex), epoch(ranges.m_epoch) {}
+		~MutatingLock() { epoch.fetch_add(1, std::memory_order_release); }
+		MutatingLock(const MutatingLock&)            = delete;
+		MutatingLock& operator=(const MutatingLock&) = delete;
+		Common::LockGuard      lock;
+		std::atomic<uint64_t>& epoch;
+	};
 };
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)

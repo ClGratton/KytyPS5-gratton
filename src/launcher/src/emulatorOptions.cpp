@@ -179,6 +179,12 @@ QList<Option> BuildTable() {
 	             "plans); the GPU thread checks them against the live state and uses them instead "
 	             "of computing them. Exact; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(resolved_draw)});
+	defs.append({"mapping_memo", "--mapping-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Remember which guest ranges are fully mapped",
+	             "The GPU thread remembers whether a guest range is fully mapped until the memory "
+	             "map changes, instead of taking the map's lock for every buffer of every draw. "
+	             "Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(mapping_memo)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

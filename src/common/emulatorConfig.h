@@ -282,6 +282,7 @@ struct ConfigOptions {
 	// computes each one inline and stops on a difference. Exact; default off until measured.
 	bool                   resolved_draw               = false;
 	bool                   resolved_draw_verify        = false;
+	bool                   mapping_memo                = false;
 	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
 	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.
@@ -410,6 +411,7 @@ bool              SkipGuardEnabled();
 bool              SkipGuardRequested();
 bool              SkipGuardBdaEnabled();
 bool              SrtTableWalkEnabled();
+bool              MappingMemoEnabled();
 bool              DrawKeyVerifyEnabled();
 bool              GpuIndirectDrawsEnabled();
 bool              ReadbackQueueEnabled();

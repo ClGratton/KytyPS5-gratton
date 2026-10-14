@@ -68,6 +68,7 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Every use of a resolved part is checked on kyGpu against the live state; parts built while the
 	// flag was off are marked unusable, so a toggle at a frame boundary cannot use a stale part.
 	registry.Register("resolved-draw", &g_config->resolved_draw, false);
+	registry.Register("mapping-memo", &g_config->mapping_memo, false);
 	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
 	// the middle of a submission costs plans (misses), never a wrong draw.
 	registry.Register("srt-plans", &g_config->srt_plans, true);
@@ -147,6 +148,10 @@ bool TextureBindingReuseEnabled() {
 
 bool ResolvedDrawEnabled() {
 	return Common::RuntimeToggles::Read(g_config->resolved_draw);
+}
+
+bool MappingMemoEnabled() {
+	return Common::RuntimeToggles::Read(g_config->mapping_memo);
 }
 
 bool ResolvedDrawVerify() {

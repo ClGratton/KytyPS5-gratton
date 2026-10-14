@@ -938,7 +938,7 @@ if(BUILD_TESTING)
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --lookahead-workers 99)
 	set_tests_properties(emulator_lookahead_workers_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME emulator_resolved_draw_cli
-	         COMMAND $<TARGET_FILE:kyty_emulator> --help --resolved-draw true --resolved-draw-verify true)
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --resolved-draw true --resolved-draw-verify true --mapping-memo true)
 	add_test(NAME emulator_resolved_draw_invalid
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --resolved-draw maybe)
 	set_tests_properties(emulator_resolved_draw_invalid PROPERTIES WILL_FAIL TRUE)
