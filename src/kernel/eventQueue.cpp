@@ -14,7 +14,10 @@
 #include <cstdio>
 #include <chrono>
 #include <fmt/format.h>
+#include <cstdlib>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <list>
 #include <unordered_map>
 #include <vector>
@@ -263,6 +266,53 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
 
 static std::atomic<uint64_t> g_dropped_pending {0};
 
+// Debug: KYTY_EQUEUE_STATS=1 prints, every 10 s, how many graphics interrupt triggers were raised
+// and how many the guest was handed, per payload (context id), and the deepest pending queue.
+namespace {
+struct EqueueStats {
+	std::mutex                                                                 mutex;
+	std::map<intptr_t, std::pair<uint64_t, uint64_t>>                          per_payload; // raised, delivered
+	uint64_t                                                                   max_pending = 0;
+	int64_t                                                                    last_ms     = 0;
+};
+
+bool EqueueStatsEnabled() {
+	static const bool enabled = std::getenv("KYTY_EQUEUE_STATS") != nullptr;
+	return enabled;
+}
+
+EqueueStats& GetEqueueStats() {
+	static EqueueStats stats;
+	return stats;
+}
+
+void EqueueStatsPrint(EqueueStats& stats, int64_t now_ms) {
+	if (now_ms - stats.last_ms <= 10000) {
+		return;
+	}
+	stats.last_ms = now_ms;
+	std::printf("EventQueue stats (10 s), graphics interrupts raised/delivered per payload:");
+	size_t shown = 0;
+	for (auto& [payload, counts]: stats.per_payload) {
+		if (shown++ < 8) {
+			std::printf(" %#llx: %llu/%llu", static_cast<unsigned long long>(payload),
+			            static_cast<unsigned long long>(counts.first), static_cast<unsigned long long>(counts.second));
+		}
+		counts = {0, 0};
+	}
+	std::printf(" (%zu payloads), deepest pending queue %llu, dropped %llu\n", stats.per_payload.size(),
+	            static_cast<unsigned long long>(stats.max_pending),
+	            static_cast<unsigned long long>(g_dropped_pending.load(std::memory_order_relaxed)));
+	std::fflush(stdout);
+	stats.max_pending = 0;
+}
+
+int64_t NowMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace
+
+
 void KernelQueueTrigger(KernelEqueueEvent* event, intptr_t data, size_t max_pending) {
 	EXIT_IF(event == nullptr);
 	// Every trigger is delivered with its own payload: a GPU interrupt carries a context id, and a
@@ -272,6 +322,13 @@ void KernelQueueTrigger(KernelEqueueEvent* event, intptr_t data, size_t max_pend
 	auto next   = event->event;
 	next.fflags = 1;
 	next.data   = data;
+	if (EqueueStatsEnabled()) {
+		auto& stats = GetEqueueStats();
+		std::lock_guard<std::mutex> lock(stats.mutex);
+		stats.per_payload[data].first++;
+		stats.max_pending = std::max<uint64_t>(stats.max_pending, event->pending_events.size());
+		EqueueStatsPrint(stats, NowMs());
+	}
 	if (!event->triggered) {
 		event->event     = next;
 		event->triggered = true;
@@ -470,6 +527,16 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 
 	if (*out == KERNEL_ERROR_EBADF) {
 		return KERNEL_ERROR_EBADF;
+	}
+	if (EqueueStatsEnabled() && *out > 0) {
+		auto& stats = GetEqueueStats();
+		std::lock_guard<std::mutex> lock(stats.mutex);
+		for (int i = 0; i < *out && i < num; i++) {
+			if (ev[i].filter == KERNEL_EVFILT_GRAPHICS) {
+				stats.per_payload[ev[i].data].second++;
+			}
+		}
+		EqueueStatsPrint(stats, NowMs());
 	}
 	if (*out == 0) {
 		LOGF("\tEqueue wait timedout: %s\n", owner->GetName().c_str());
