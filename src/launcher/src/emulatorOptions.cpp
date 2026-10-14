@@ -556,9 +556,6 @@ QVariantMap Recommended() {
 	values.insert(QStringLiteral("srt_plans"), true);
 	values.insert(QStringLiteral("image_lookup_memo"), true);
 	values.insert(QStringLiteral("texture_binding_reuse"), true);
-	values.insert(QStringLiteral("known_stores"), true);
-	values.insert(QStringLiteral("known_copies"), true);
-	values.insert(QStringLiteral("gpu_indirect_draws"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);
