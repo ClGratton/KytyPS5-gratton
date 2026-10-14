@@ -1456,7 +1456,7 @@ elseif(WIN32 OR LINUX)
 	target_link_options(kyty_emulator PRIVATE "-Wl,-Map=${KYTY_EMULATOR_MAP_LINK_PATH}")
 endif()
 
-if(LINUX AND NOT KYTY_HEAP_PROFILE)
+if(LINUX AND NOT KYTY_HEAP_PROFILE AND NOT KYTY_NO_STRIP)
     target_link_options(kyty_emulator PRIVATE
         $<$<CONFIG:Release>:-Wl,--strip-all>
     )
