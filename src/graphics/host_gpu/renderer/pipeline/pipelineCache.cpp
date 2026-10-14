@@ -1421,14 +1421,17 @@ struct PipelineCache::ProgramCache {
 						SrtPlan::NoteProduceCost(SrtPlan::NowNs() - t_plan);
 						plan->produced_ns = SrtPlan::NowNs();
 						if (Common::DrawRepeat::Enabled()) {
-							// Debug only (KYTY_DRAW_REPEAT): the dwords this draw's scalar walk read, with its inputs.
-							uint64_t h = Common::DrawRepeat::HashBytes(
-							    plan->reads.values.data(), plan->reads.values.size() * 4u, plan->shader_hash);
-							h = Common::DrawRepeat::HashBytes(plan->snapshot.user_data.data(),
-							                                  plan->snapshot.user_data.size() * 4u, h);
-							h = Common::DrawRepeat::HashBytes(plan->workgroup_counts.data(),
-							                                  plan->workgroup_counts.size() * 4u, h);
-							Common::DrawRepeat::NoteReads(Common::DrawRepeat::Mix(h, plan->shader_base));
+							// Debug only (KYTY_DRAW_REPEAT): the dwords this draw's scalar walk read (values only),
+							// and the walk's inputs (which carry pointers), hashed apart.
+							const uint64_t values = Common::DrawRepeat::HashBytes(
+							    plan->reads.values.data(), plan->reads.values.size() * 4u,
+							    plan->shader_hash ^ plan->stage);
+							uint64_t inputs = Common::DrawRepeat::HashBytes(
+							    plan->snapshot.user_data.data(), plan->snapshot.user_data.size() * 4u,
+							    plan->shader_base);
+							inputs = Common::DrawRepeat::HashBytes(plan->workgroup_counts.data(),
+							                                       plan->workgroup_counts.size() * 4u, inputs);
+							Common::DrawRepeat::NoteReads(values, inputs);
 						}
 						SrtPlan::GetStore().Put(std::move(plan));
 						SrtPlan::NoteProduced(bytes);

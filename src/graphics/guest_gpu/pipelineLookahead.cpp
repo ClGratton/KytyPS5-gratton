@@ -256,6 +256,67 @@ struct PlanProgress {
 };
 } // namespace
 
+
+namespace {
+// KYTY_DRAW_REPEAT (debug only): the hashes of one draw's inputs, see common/drawRepeat.h.
+namespace DR = Common::DrawRepeat;
+
+uint64_t UserWords(const HW::UserSgprInfo& sgpr, uint64_t h) {
+	return DR::HashBytes(sgpr.value, std::min<uint32_t>(sgpr.count, HW::UserSgprInfo::SGPRS_MAX) * 4u, h);
+}
+
+void ClearUserSgprValues(HW::UserSgprInfo& sgpr) {
+	std::memset(sgpr.value, 0, sizeof(sgpr.value));
+}
+
+void DrawSignature(CommandProcessor& cp, const ShadowDraw& draw) {
+	const auto& ctx = cp.GetCtx();
+	const auto& sh  = cp.GetShCtx();
+	DR::Inputs  in;
+	in.kind = DR::Draw;
+	in.program = DR::Mix(DR::Mix(DR::Mix(sh.GetVs().es_regs.data_addr, sh.GetVs().ls_regs.data_addr),
+	                             DR::Mix(sh.GetVs().hs_regs.data_addr, sh.GetVs().gs_regs.data_addr)),
+	                     sh.GetPs().ps_regs.data_addr);
+	in.h[DR::CtxAll] = DR::HashObject(ctx);
+	uint64_t rt      = DR::HashObject(ctx.GetDepthRenderTarget());
+	for (uint32_t slot = 0; slot < 8; slot++) {
+		rt = DR::HashObject(ctx.GetRenderTarget(slot), rt);
+	}
+	in.h[DR::CtxRt] = rt;
+	HW::Shader stat = sh; // copy: pointers and user SGPR values removed
+	auto&      vs   = const_cast<HW::VertexShaderInfo&>(stat.GetVs());
+	auto&      ps   = const_cast<HW::PixelShaderInfo&>(stat.GetPs());
+	vs.hs_regs.user_data_addr = vs.gs_regs.user_data_addr = 0;
+	ps.ps_regs.user_data_addr = ps.ps_regs.auxiliary_table_addr = 0;
+	ClearUserSgprValues(vs.hs_user_sgpr);
+	ClearUserSgprValues(vs.gs_user_sgpr);
+	ClearUserSgprValues(ps.ps_user_sgpr);
+	in.h[DR::ShStatic] = DR::HashObject(stat);
+	uint64_t user = DR::Mix(sh.GetVs().hs_regs.user_data_addr, sh.GetVs().gs_regs.user_data_addr);
+	user          = DR::Mix(DR::Mix(user, sh.GetPs().ps_regs.user_data_addr), sh.GetPs().ps_regs.auxiliary_table_addr);
+	user          = UserWords(sh.GetVs().hs_user_sgpr, user);
+	user          = UserWords(sh.GetVs().gs_user_sgpr, user);
+	user          = UserWords(sh.GetPs().ps_user_sgpr, user);
+	in.h[DR::ShUser] = user;
+	in.h[DR::Args]   = DR::HashObject(cp.GetUcfg(), DR::HashObject(draw));
+	DR::NoteDraw(in);
+}
+
+void DispatchSignature(CommandProcessor& cp, const ShadowDispatch& dispatch) {
+	const auto& cs = cp.GetShCtx().GetCs();
+	DR::Inputs  in;
+	in.kind          = DR::Dispatch;
+	in.program       = cs.cs_regs.data_addr;
+	in.h[DR::CtxAll] = DR::HashObject(cp.GetCtx().GetShaderRegisters());
+	HW::ComputeShaderInfo stat = cs;
+	ClearUserSgprValues(stat.cs_user_sgpr);
+	in.h[DR::ShStatic] = DR::HashObject(stat);
+	in.h[DR::ShUser]   = UserWords(cs.cs_user_sgpr, 0);
+	in.h[DR::Args]     = DR::HashObject(dispatch);
+	DR::NoteDraw(in);
+}
+} // namespace
+
 void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	PlanProgress plan_progress;
 	m_stats.draws.fetch_add(1, std::memory_order_relaxed);
@@ -270,18 +331,7 @@ void PipelineLookahead::OnDraw(CommandProcessor& cp, const ShadowDraw& draw) {
 	(void)m_renderer.GetRenderExecutor().PrefetchDraw(cp.GetCtx(), cp.GetShCtx(), cp.GetUcfg(),
 	                                                  draw, status);
 	if (Common::DrawRepeat::Enabled()) {
-		const auto& vs = cp.GetShCtx().GetVs();
-		Common::DrawRepeat::Inputs in;
-		in.kind    = Common::DrawRepeat::Draw;
-		in.program = Common::DrawRepeat::Mix(
-		    Common::DrawRepeat::Mix(Common::DrawRepeat::Mix(vs.es_regs.data_addr, vs.ls_regs.data_addr),
-		                            Common::DrawRepeat::Mix(vs.hs_regs.data_addr, vs.gs_regs.data_addr)),
-		    cp.GetShCtx().GetPs().ps_regs.data_addr);
-		in.ctx  = Common::DrawRepeat::HashBytes(&cp.GetCtx(), sizeof(cp.GetCtx()));
-		in.sh   = Common::DrawRepeat::HashBytes(&cp.GetShCtx(), sizeof(cp.GetShCtx()));
-		in.args = Common::DrawRepeat::HashBytes(&cp.GetUcfg(), sizeof(cp.GetUcfg()),
-		                                        Common::DrawRepeat::HashBytes(&draw, sizeof(draw)));
-		Common::DrawRepeat::NoteDraw(in);
+		DrawSignature(cp, draw);
 	}
 	SkipDeps::NoteLookaheadCall("draw", call_start, Bench::NowNs() - call_start);
 }
@@ -304,14 +354,7 @@ void PipelineLookahead::OnDispatch(CommandProcessor& cp, const ShadowDispatch& d
 	                                              cp.GetCtx().GetShaderRegisters(), dispatch.mode,
 	                                              cp.IsAsyncComputeQueue(), groups);
 	if (Common::DrawRepeat::Enabled()) {
-		Common::DrawRepeat::Inputs in;
-		in.kind    = Common::DrawRepeat::Dispatch;
-		in.program = cp.GetShCtx().GetCs().cs_regs.data_addr;
-		in.ctx     = Common::DrawRepeat::HashBytes(&cp.GetCtx().GetShaderRegisters(),
-		                                           sizeof(cp.GetCtx().GetShaderRegisters()));
-		in.sh      = Common::DrawRepeat::HashBytes(&cp.GetShCtx().GetCs(), sizeof(cp.GetShCtx().GetCs()));
-		in.args    = Common::DrawRepeat::HashBytes(&dispatch, sizeof(dispatch));
-		Common::DrawRepeat::NoteDraw(in);
+		DispatchSignature(cp, dispatch);
 	}
 	SkipDeps::NoteLookaheadCall("dispatch", call_start, Bench::NowNs() - call_start);
 }

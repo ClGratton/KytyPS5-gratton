@@ -10,17 +10,16 @@
 //
 // Runs on the lookahead thread only (the shadow command processor sees every draw in submission
 // order). Per draw it hashes five groups of inputs:
-//   ctx    - the context registers (render targets, viewport, blend, depth, ...)
-//   sh     - the shader stage registers and user data (shader bases, root-table pointers, user SGPRs)
-//   args   - user config registers and the draw arguments (primitive type, counts, index type)
-//   reads  - the dwords the shader's scalar-read walk read from guest memory, with its inputs
-//            (from the SRT plan the lookahead builds for the draw)
+// see Component below.
 // A draw is matched to the previous frame's draw by (ordinal of its submission within the frame,
 // program, occurrence of that program within the submission). A frame ends at a SuspendPoint item.
-// Output: one CSV row per frame, see drawRepeat.cpp.
+// Output: one CSV row per frame, see drawRepeat.cpp. Structures are hashed with their padding bytes masked out.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <new>
 
 namespace Common::DrawRepeat {
 
@@ -28,15 +27,57 @@ namespace Common::DrawRepeat {
 
 enum Kind : uint32_t { Draw = 0, Dispatch = 1 };
 
+// Components of a draw's signature (each hashed on its own, so a difference can be attributed).
+enum Component : unsigned {
+	CtxAll = 0,   // all context registers
+	CtxRt,        // the render targets and the depth target (addresses move when the swap chain rotates)
+	ShStatic,     // shader stage registers without user-data pointers / user SGPR values
+	ShUser,       // user-data address words and user SGPR values (root-table pointers, immediates)
+	Args,         // user config registers and the draw arguments
+	ReadsValues,  // the dwords the scalar-read walk read (values only)
+	ReadsInputs,  // the walk's inputs (user data dwords, shader base, workgroup counts)
+	ComponentCount
+};
+
 struct Inputs {
 	Kind     kind    = Draw;
 	uint64_t program = 0; // identity of the shaders (code addresses)
-	uint64_t ctx     = 0;
-	uint64_t sh      = 0;
-	uint64_t args    = 0;
+	uint64_t h[ComponentCount] {};
 };
 
 [[nodiscard]] uint64_t HashBytes(const void* data, size_t size, uint64_t seed = 0) noexcept;
+// Bytes of T that no member initializer writes (padding): found once by default-initialising T over a
+// buffer of zeros and over a buffer of ones (clang has no __builtin_clear_padding).
+template <class T>
+[[nodiscard]] const std::array<unsigned char, sizeof(T)>& PaddingMask() {
+	static const auto mask = [] {
+		alignas(T) unsigned char zeros[sizeof(T)];
+		alignas(T) unsigned char ones[sizeof(T)];
+		std::memset(zeros, 0x00, sizeof(T));
+		std::memset(ones, 0xff, sizeof(T));
+		new (zeros) T;
+		new (ones) T;
+		std::array<unsigned char, sizeof(T)> m {};
+		for (size_t i = 0; i < sizeof(T); i++) {
+			m[i] = zeros[i] == ones[i] ? 0xffu : 0x00u;
+		}
+		return m;
+	}();
+	return mask;
+}
+
+// Hash of an object with its padding bytes masked out (so stale padding never decides an equality).
+template <class T>
+[[nodiscard]] uint64_t HashObject(const T& value, uint64_t seed = 0) noexcept {
+	const auto&            mask = PaddingMask<T>();
+	alignas(T) unsigned char buffer[sizeof(T)];
+	std::memcpy(buffer, &value, sizeof(T));
+	for (size_t i = 0; i < sizeof(T); i++) {
+		buffer[i] &= mask[i];
+	}
+	return HashBytes(buffer, sizeof(T), seed);
+}
+
 [[nodiscard]] inline uint64_t Mix(uint64_t h, uint64_t v) noexcept {
 	h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
 	return h;
@@ -45,7 +86,7 @@ struct Inputs {
 // Lookahead thread. `reset` is a SuspendPoint item (frame boundary), otherwise a submission.
 void BeginItem(bool reset) noexcept;
 // A plan was stored for the draw being prepared: fold its reads into the draw's signature.
-void NoteReads(uint64_t hash) noexcept;
+void NoteReads(uint64_t values_hash, uint64_t inputs_hash) noexcept;
 // The draw (or dispatch) has been looked at. Takes the reads noted since the previous call.
 void NoteDraw(const Inputs& inputs) noexcept;
 
