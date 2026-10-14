@@ -52,9 +52,10 @@ namespace Libs::Graphics {
 // (branch conditions are evaluated from memory the GPU thread has without waiting) and set aside the
 // known dwords of the ranges it binds for writing; after it is recorded, tell the buffer cache which
 // dwords it left with a constant value and which of the set-aside ones it provably did not touch
-// (binding forgot them, the cache cannot tell which bytes of a bound range a shader writes). Skipped
-// for async compute (another queue: its writes are not ordered with the stream the GPU thread
-// reasons about). See knownStores.h for the exactness argument.
+// (binding forgot them, the cache cannot tell which bytes of a bound range a shader writes). Dispatches
+// of the guest's async compute queues are included: the emulator processes every guest queue on the
+// GPU thread and records it into the same stream, in the order it processes it, which is the order the
+// reasoning here follows. See knownStores.h for the exactness argument.
 struct UniformStoreScope {
 	bool                                       active = false;
 	std::vector<StoreExtent>                   extents;
@@ -65,7 +66,7 @@ struct UniformStoreScope {
 static void PrepareUniformStores(RenderContext& context, const ShaderComputeInputInfo& input,
                                  uint64_t invocations, UniformStoreScope& scope) {
 	scope.active = false;
-	if (!Config::KnownStoresEnabled() || input.async_compute || input.stage.resources == nullptr ||
+	if (!Config::KnownStoresEnabled() || input.stage.resources == nullptr ||
 	    input.stage.resources->uniform_stores == nullptr) {
 		return;
 	}
@@ -124,7 +125,7 @@ static CopyDescriptor MakeCopyDescriptor(const ShaderBufferResource& d) {
 
 static void RecordUniformCopy(RenderContext& context, const ShaderComputeInputInfo& input, uint32_t group_x,
                               uint32_t group_y, uint32_t group_z, uint32_t mode) {
-	if (!Config::KnownCopiesEnabled() || input.async_compute || input.stage.resources == nullptr) {
+	if (!Config::KnownCopiesEnabled() || input.stage.resources == nullptr) {
 		return;
 	}
 	const auto& resources = *input.stage.resources;
