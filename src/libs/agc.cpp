@@ -27,6 +27,8 @@
 
 #include <algorithm>
 #include <array>
+#include "common/hleTrace.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -388,6 +390,24 @@ struct CommandBuffer {
 				            slot.round_peak_down.load(std::memory_order_relaxed),
 				            reinterpret_cast<const void*>(callback));
 				std::fflush(stdout);
+				// KYTY_AGC_CB_SPIKE_TRACE=1 (with --debug-hle-trace): print this thread's HLE ring for the first
+				// rounds that filled the payload end far beyond the usual payload-to-command ratio, and for the
+				// first ordinary round, to compare what the guest did in them.
+				static const bool spike_trace = std::getenv("KYTY_AGC_CB_SPIKE_TRACE") != nullptr;
+				if (spike_trace) {
+					const auto up_peak   = slot.round_peak_up.load(std::memory_order_relaxed);
+					const auto down_peak = slot.round_peak_down.load(std::memory_order_relaxed);
+					static std::atomic<uint32_t> spike_dumps {0}, normal_dumps {0};
+					const bool spike = peak * 100 / capacity >= 20 && down_peak > 40 * up_peak;
+					const bool plain = !spike && peak * 100 / capacity >= 10;
+					if ((spike && spike_dumps.fetch_add(1) < 3) || (plain && normal_dumps.fetch_add(1) < 1)) {
+						std::printf("--- HLE ring of the allocating thread after a %s round of buffer %p ---\n",
+						            spike ? "SPIKE" : "ordinary", static_cast<const void*>(this));
+						Common::HleTrace::Dump(stdout, 1024, 0, nullptr);
+						std::printf("--- end of ring ---\n");
+						std::fflush(stdout);
+					}
+				}
 			}
 			slot.round_peak_used.store(0, std::memory_order_relaxed);
 		}
