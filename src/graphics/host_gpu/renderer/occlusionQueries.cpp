@@ -217,7 +217,11 @@ Host& Instance() {
 
 bool Dump(CommandBuffer& command, uint64_t address) {
 	auto& host = Instance();
-	if (address == 0 || (address & 7u) != 0 || !host.Initialize(command.GetGraphics())) {
+	// A dump with no command buffer being recorded (a packet decoded outside a submission) cannot record
+	// a query: it publishes the visible count.
+	if (address == 0 || (address & 7u) != 0 ||
+	    !command.GetContext().GetCommandScheduler().Active() ||
+	    !host.Initialize(command.GetGraphics())) {
 		return false;
 	}
 	host.Dump(command, address);
