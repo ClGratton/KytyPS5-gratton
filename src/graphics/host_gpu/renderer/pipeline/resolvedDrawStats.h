@@ -13,15 +13,21 @@
 
 namespace Libs::Graphics::ResolvedDraw {
 
+// One writer (kyGpu), so a plain relaxed load and store counts exactly and costs a mov instead of the
+// locked add of fetch_add (about 20 cycles each, several per draw).
+inline void Bump(std::atomic<uint64_t>& counter) {
+	counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+
 struct Counter {
 	std::atomic<uint64_t> used {0};      // the precomputed part was taken
 	std::atomic<uint64_t> fallback {0};  // there was one, but it could not be used (checked and refused)
 	std::atomic<uint64_t> absent {0};    // the plan carried none (producer had nothing, or flag was off)
 	std::atomic<uint64_t> verified {0};  // used parts also computed inline and compared (verify mode)
-	void Used() { used.fetch_add(1, std::memory_order_relaxed); }
-	void Fallback() { fallback.fetch_add(1, std::memory_order_relaxed); }
-	void Absent() { absent.fetch_add(1, std::memory_order_relaxed); }
-	void Verified() { verified.fetch_add(1, std::memory_order_relaxed); }
+	void Used() { Bump(used); }
+	void Fallback() { Bump(fallback); }
+	void Absent() { Bump(absent); }
+	void Verified() { Bump(verified); }
 	[[nodiscard]] std::string Text(const char* name) const {
 		return fmt::format("{}: used={} fallback={} absent={} verified={}", name,
 		                   used.load(std::memory_order_relaxed), fallback.load(std::memory_order_relaxed),
