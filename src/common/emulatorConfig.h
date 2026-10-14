@@ -313,7 +313,7 @@ struct ConfigOptions {
 	// packet and the mesh-shader variant it builds can never disagree. Starts equal to the flag.
 	bool                   debug_gpu_indirect_request  = false;
 	bool                   debug_skip_meta_drain       = false;
-	uint32_t               debug_skip_drain_verify     = 64;
+	uint32_t               debug_skip_drain_verify     = 3; // seconds between verify drains
 	std::filesystem::path  bench_render_csv;
 	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
 	// names at the next presented frame (common/runtimeToggles.h). Default off.

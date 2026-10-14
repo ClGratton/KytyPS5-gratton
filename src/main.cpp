@@ -287,7 +287,7 @@ static void PrintUsage() {
 	::printf("  --debug-skip-srt-drain <true|false>   MEASUREMENT HACK, never a fix (readback-ceiling): the SRT walk reads\n"
 	         "                                       GPU-dirty guest bytes without draining the GPU.\n"
 	         "  --debug-skip-meta-drain <true|false>  MEASUREMENT HACK: render-target clear codes without draining.\n"
-	         "  --debug-skip-drain-verify <N>        With the two above, every Nth such read drains and compares (_skip_drain.log).\n"
+	         "  --debug-skip-drain-verify <S>        With the two above, at most one such read per S seconds (and kind) drains and compares (_skip_drain.log). Default 3.\n"
 	         "  (runtime toggle debug-gpu-indirect-draws, --toggle-control only: --gpu-indirect-draws flipped by the GPU\n"
 	         "   thread at a guest flip; MEASUREMENT, not a supported mode.)\n");
 	::printf("  --poll-before-wait <0-1000>          Microseconds to poll the GPU timeline before blocking in\n"

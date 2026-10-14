@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -13,6 +14,7 @@ namespace {
 
 struct Counters {
 	std::atomic<uint64_t> calls {0};
+	std::atomic<int64_t>  last_verify_ns {0};
 	std::atomic<uint64_t> skipped {0};
 	std::atomic<uint64_t> checks {0};
 	std::atomic<uint64_t> mismatches {0};
@@ -28,9 +30,17 @@ const char* Name(Kind kind) {
 
 bool SkipNow(Kind kind) noexcept {
 	auto&      c      = g_counters[static_cast<size_t>(kind)];
-	const auto n      = std::max<uint32_t>(Config::DebugSkipDrainVerify(), 1u);
-	const auto call   = c.calls.fetch_add(1, std::memory_order_relaxed) + 1;
-	const bool verify = (call % n) == 0;
+	// A verify drain waits for the whole backlog of the GPU (about 9 ms here), so it is rationed by time,
+	// not by call count: the stale reads of one frame can number in the hundreds (a count-based sample
+	// then drains every frame and the "ceiling" is gone). At most one verify per kind every N seconds.
+	const auto seconds = std::max<uint32_t>(Config::DebugSkipDrainVerify(), 1u);
+	const auto now_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                         std::chrono::steady_clock::now().time_since_epoch())
+	                         .count();
+	c.calls.fetch_add(1, std::memory_order_relaxed);
+	auto       last   = c.last_verify_ns.load(std::memory_order_relaxed);
+	const bool verify = (last == 0 || now_ns - last >= static_cast<int64_t>(seconds) * 1'000'000'000) &&
+	                    c.last_verify_ns.compare_exchange_strong(last, now_ns, std::memory_order_relaxed);
 	if (!verify) {
 		c.skipped.fetch_add(1, std::memory_order_relaxed);
 	}
@@ -45,7 +55,7 @@ void NoteVerify(Kind kind, uint64_t address, const void* stale, const void* now,
 	if (mismatch) {
 		c.mismatches.fetch_add(1, std::memory_order_relaxed);
 	}
-	if (mismatch || (checks & 63u) == 1u) {
+	if (mismatch || (checks & 3u) == 1u) {
 		if (std::FILE* f = std::fopen("_skip_drain.log", "a")) {
 			if (mismatch) {
 				const auto* a = static_cast<const uint8_t*>(stale);
