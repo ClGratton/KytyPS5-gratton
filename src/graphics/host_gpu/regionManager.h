@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_REGIONMANAGER_H_
 
 #include "common/assert.h"
+#include "common/atomicBitMirror.h"
 #include "graphics/host_gpu/bdaSyncGate.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -95,6 +96,8 @@ public:
 		m_cpu_dirty.Fill();
 		m_writable.Fill();
 		m_readable.Fill();
+		m_cpu_mirror.Reset(m_cpu_dirty);
+		m_gpu_mirror.Reset(m_gpu_dirty);
 	}
 
 	KYTY_CLASS_NO_COPY(RegionManager);
@@ -143,6 +146,19 @@ public:
 		return GetBits<source>().FirstRangeFrom(start).first < end;
 	}
 
+	// Lock-free twin of IsModified (--tracker-lockfree, see AtomicBitMirror): the mirror of the
+	// dirty bits is published under the lock by every change, before the pages' protection moves.
+	template <DirtySource source>
+	[[nodiscard]] bool IsModifiedLockFree(uint64_t offset, uint64_t size) const {
+		const auto [start, end] = GetPageRange(m_cpu_addr + offset, size);
+		return GetMirror<source>().Any(start, end);
+	}
+
+	// Verifier: both mirrors equal their bits. Caller holds `lock`.
+	[[nodiscard]] bool MirrorsMatch() const {
+		return m_cpu_mirror.Matches(m_cpu_dirty) && m_gpu_mirror.Matches(m_gpu_dirty);
+	}
+
 	template <DirtySource source, bool enable>
 	void ChangeState(uint64_t vaddr, uint64_t size) {
 		const auto [start, end] = GetPageRange(vaddr, size);
@@ -162,6 +178,7 @@ public:
 		} else {
 			bits.UnsetRange(start, end);
 		}
+		GetMirror<source>().Publish(bits, start, end);
 		if constexpr (source == DirtySource::Cpu && enable) {
 			// After the bits are set (K15): a BDA sync that read the generation earlier either
 			// uploads these pages or sees the new value on its next call.
@@ -186,6 +203,7 @@ public:
 		RegionBits mask(bits, start, end);
 		if constexpr (clear) {
 			bits.UnsetRange(start, end);
+			GetMirror<source>().Publish(bits, start, end);
 			if constexpr (source == DirtySource::Cpu) {
 				UpdateProtection<true, false>();
 			} else {
@@ -211,6 +229,24 @@ private:
 		}
 		previous = protection;
 		m_page_manager.UpdatePageWatchersForRegion<track, is_read>(m_cpu_addr, mask);
+	}
+
+	template <DirtySource source>
+	Common::AtomicBitMirror<TRACKER_REGION_PAGES>& GetMirror() {
+		if constexpr (source == DirtySource::Cpu) {
+			return m_cpu_mirror;
+		} else {
+			return m_gpu_mirror;
+		}
+	}
+
+	template <DirtySource source>
+	const Common::AtomicBitMirror<TRACKER_REGION_PAGES>& GetMirror() const {
+		if constexpr (source == DirtySource::Cpu) {
+			return m_cpu_mirror;
+		} else {
+			return m_gpu_mirror;
+		}
 	}
 
 	template <DirtySource source>
@@ -248,6 +284,9 @@ private:
 	RegionBits   m_gpu_dirty;
 	RegionBits   m_writable;
 	RegionBits   m_readable;
+	// Lock-free copies of m_cpu_dirty / m_gpu_dirty, written under `lock` (see IsModifiedLockFree).
+	Common::AtomicBitMirror<TRACKER_REGION_PAGES> m_cpu_mirror;
+	Common::AtomicBitMirror<TRACKER_REGION_PAGES> m_gpu_mirror;
 };
 
 } // namespace Libs::Graphics

@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -339,6 +340,98 @@ void TestQueriesDoNotRequireMappedOwnership() {
   Check(harness.tracker.IsRegionCpuModified(address, page_size) &&
             !harness.tracker.IsRegionGpuModified(address, page_size),
         "unowned tracker range did not expose its initial CPU-dirty state");
+}
+
+uint64_t NextRandom(uint64_t &state) {
+  state += 0x9e3779b97f4a7c15ull;
+  uint64_t z = state;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+  return z ^ (z >> 31);
+}
+
+// --tracker-lockfree: the lock-free queries answer exactly what the locked ones do, and a read-only
+// upload pass that skips regions without CPU-dirty pages uploads exactly the same ranges, over
+// random sequences of CPU claims, uploads (read-only and written), GPU releases and invalidations
+// that cross region boundaries. Two trackers run the same operations; one uses the lock-free paths.
+void TestLockFreeQueriesMatchLocked() {
+  TrackerHarness locked_harness;
+  TrackerHarness fast_harness;
+  const auto page_size = locked_harness.page_manager.GetPageSize();
+  constexpr uint64_t pages = 3 * 1024 + 100; // three tracker regions and a bit
+  auto *locked_memory = Allocate(locked_harness.page_manager, pages);
+  auto *fast_memory = Allocate(fast_harness.page_manager, pages);
+  const auto locked_base = reinterpret_cast<uint64_t>(locked_memory);
+  const auto fast_base = reinterpret_cast<uint64_t>(fast_memory);
+  auto &locked = locked_harness.tracker;
+  auto &fast = fast_harness.tracker;
+  uint64_t rng = 12345;
+  uint64_t mismatches = 0;
+  uint64_t queries = 0;
+  uint64_t skipped_passes = 0;
+  for (int step = 0; step < 3000; step++) {
+    const uint64_t first = NextRandom(rng) % (pages - 1);
+    const uint64_t length_pages = 1 + NextRandom(rng) % (NextRandom(rng) % 8 == 0 ? pages - first : 40);
+    const uint64_t offset = first * page_size + NextRandom(rng) % page_size;
+    const uint64_t length = std::min<uint64_t>(length_pages * page_size, pages * page_size - offset);
+    switch (NextRandom(rng) % 5) {
+    case 0: // the CPU claims the pages (a guest write), the GPU releases them first
+      locked.TakeGpuPagesForCpu(locked_base + offset, length);
+      fast.TakeGpuPagesForCpu(fast_base + offset, length);
+      break;
+    case 1:
+    case 2: { // upload; every other one is a written (GPU-owned) pass
+      const bool written = (NextRandom(rng) % 2) == 0;
+      std::vector<std::pair<uint64_t, uint64_t>> locked_ranges;
+      std::vector<std::pair<uint64_t, uint64_t>> fast_ranges;
+      locked.ForEachUploadRange(
+          locked_base + offset, length, written,
+          [&](uint64_t a, uint64_t b) noexcept { locked_ranges.emplace_back(a - locked_base, b); }, []() noexcept {});
+      fast.ForEachUploadRange(
+          fast_base + offset, length, written,
+          [&](uint64_t a, uint64_t b) noexcept { fast_ranges.emplace_back(a - fast_base, b); }, []() noexcept {},
+          true);
+      if (locked_ranges != fast_ranges) {
+        mismatches++;
+      }
+      if (!written && fast_ranges.empty()) {
+        skipped_passes++;
+      }
+      break;
+    }
+    case 3:
+      locked.UnmarkRegionAsGpuModified(locked_base + offset, length);
+      fast.UnmarkRegionAsGpuModified(fast_base + offset, length);
+      break;
+    default:
+      break;
+    }
+    for (int q = 0; q < 6; q++) {
+      const uint64_t qfirst = NextRandom(rng) % (pages - 1);
+      const uint64_t qlen = 1 + NextRandom(rng) % (NextRandom(rng) % 8 == 0 ? pages - qfirst : 40);
+      const uint64_t qoffset = qfirst * page_size;
+      const uint64_t qbytes = std::min<uint64_t>(qlen * page_size, pages * page_size - qoffset);
+      queries += 2;
+      if (locked.IsRegionCpuModified(locked_base + qoffset, qbytes) !=
+              fast.IsRegionCpuModifiedLockFree(fast_base + qoffset, qbytes) ||
+          locked.IsRegionGpuModified(locked_base + qoffset, qbytes) !=
+              fast.IsRegionGpuModifiedLockFree(fast_base + qoffset, qbytes) ||
+          fast.IsRegionCpuModified(fast_base + qoffset, qbytes) !=
+              fast.IsRegionCpuModifiedLockFree(fast_base + qoffset, qbytes) ||
+          fast.IsRegionGpuModified(fast_base + qoffset, qbytes) !=
+              fast.IsRegionGpuModifiedLockFree(fast_base + qoffset, qbytes)) {
+        mismatches++;
+      }
+    }
+  }
+  Check(queries > 0 && skipped_passes > 0, "lock-free test did not exercise the clean-skip path");
+  Check(mismatches == 0, "lock-free tracker queries or upload passes differ from the locked ones");
+  locked.UnmarkRegionAsGpuModified(locked_base, pages * page_size);
+  fast.UnmarkRegionAsGpuModified(fast_base, pages * page_size);
+  locked.UntrackMemory(locked_base, pages * page_size);
+  fast.UntrackMemory(fast_base, pages * page_size);
+  Release(locked_memory);
+  Release(fast_memory);
 }
 
 void TestConcurrentRegionPublication() {
@@ -1390,6 +1483,7 @@ int main(int argc, char **argv) {
   TestRangeSet();
   TestQueriesDoNotRequireMappedOwnership();
   TestConcurrentRegionPublication();
+  TestLockFreeQueriesMatchLocked();
   TestCpuDirtyUpload();
   TestCleanUploadPreservesOwnership();
   TestRangeInvalidation();
