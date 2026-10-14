@@ -191,7 +191,7 @@ void TestRuntimeToggleControlFile() {
 
 	{
 		std::ofstream out(dir / "toggles.tmp");
-		out << "# seq 1\nsrt-plans=false\nsubmit-coalesce=off\nreadback-queue=true\nsrt-table-walk=true\n";
+		out << "# seq 1\nsrt-plans=false\nsubmit-coalesce=off\nreadback-queue=true\ndraw-key-cache=true\n";
 	}
 	std::filesystem::rename(dir / "toggles.tmp", control);
 	for (int i = 0; i < 100 && !RT::detail::g_pending.load(); i++) {
@@ -207,7 +207,7 @@ void TestRuntimeToggleControlFile() {
 	text << csv.rdbuf();
 	Check(text.str().find(",42,srt-plans,1,0,applied") != std::string::npos, "the change is logged with its frame");
 	Check(text.str().find("readback-queue,0,1,not_armed_at_startup") != std::string::npos, "the refusal is logged");
-	Check(text.str().find("srt-table-walk") != std::string::npos &&
+	Check(text.str().find("draw-key-cache") != std::string::npos &&
 	          text.str().find("unknown_or_not_runtime_safe") != std::string::npos,
 	      "a flag that is not registered is refused");
 

@@ -69,6 +69,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// flag was off are marked unusable, so a toggle at a frame boundary cannot use a stale part.
 	registry.Register("resolved-draw", &g_config->resolved_draw, false);
 	registry.Register("mapping-memo", &g_config->mapping_memo, false);
+	// Read per refresh; the tables it uses are built with the program whatever the flag says, and a
+	// table refresh equals the graph walk (--debug-draw-key-verify), so a toggle only picks the path.
+	registry.Register("srt-table-walk", &g_config->srt_table_walk, false);
 	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
 	// the middle of a submission costs plans (misses), never a wrong draw.
 	registry.Register("srt-plans", &g_config->srt_plans, true);
@@ -183,7 +186,7 @@ bool DrawKeyCacheEnabled() {
 }
 
 bool SrtTableWalkEnabled() {
-	return g_config->srt_table_walk || g_config->draw_key_cache;
+	return Common::RuntimeToggles::Read(g_config->srt_table_walk) || g_config->draw_key_cache;
 }
 
 bool DrawKeyVerifyEnabled() {

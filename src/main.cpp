@@ -179,6 +179,7 @@ static void PrintUsage() {
 	         "                                       elide-barriers, bda-sync-skip, clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       resolved-draw, mapping-memo,\n"
+	         "                                       srt-table-walk,\n"
 	         "                                       srt-plans, readback-queue,\n"
 	         "                                       heap-trim) at the next presented frame; applied changes\n"
 	         "                                       are logged and appended\n"
