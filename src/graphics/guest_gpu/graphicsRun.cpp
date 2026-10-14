@@ -1807,7 +1807,9 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				     "\n",
 				     event_index, event_address);
 			}
-			{
+			// With no command buffer being recorded (a packet decoded outside a submission) there is
+			// nothing to record a host query in: the visible count below.
+			if (GetScheduler().Active()) {
 				Common::LockGuard lock(m_renderer.GetMutex());
 				if (OcclusionQueries::Dump(CurrentBuffer(), event_address)) {
 					break;
