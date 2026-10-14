@@ -279,6 +279,13 @@ void CommandScheduler::DeferPriorityOperation(Common::UniqueFunction<void>&& ope
 	QueueOperation(std::move(operation), true);
 }
 
+bool CommandScheduler::HasOpenTickPriorityOperation() {
+	std::lock_guard lock(m_operation_mutex);
+	// An operation is queued with the tick of the command buffer that is open at the time; once that
+	// buffer is submitted the current tick moves past it.
+	return !m_priority_operations.empty() && m_max_priority_tick >= m_master.CurrentTick();
+}
+
 void CommandScheduler::DeferPriorityOperationAt(Common::UniqueFunction<void>&& operation,
                                                 uint64_t                        tick) {
 	QueueOperation(std::move(operation), true, tick);
@@ -291,7 +298,11 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 	std::unique_lock lock(m_operation_mutex);
 	if (m_operation_state == OperationState::Open) {
 		auto& queue = priority ? m_priority_operations : m_pending_operations;
-		queue.push({std::move(operation), tick != 0 ? tick : CurrentTick()});
+		const uint64_t op_tick = tick != 0 ? tick : CurrentTick();
+		if (priority) {
+			m_max_priority_tick = std::max(m_max_priority_tick, op_tick);
+		}
+		queue.push({std::move(operation), op_tick});
 		lock.unlock();
 		if (priority) {
 			m_operation_available.notify_one();

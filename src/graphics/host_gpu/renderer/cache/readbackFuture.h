@@ -11,6 +11,7 @@
 //
 // The GPU thread never waits for the GPU in P1 or P3.
 
+#include <chrono>
 #include <cstdint>
 #include <semaphore>
 
@@ -56,6 +57,10 @@ class FutureRelease {
 public:
 	void Signal() { m_semaphore.release(); }
 	void Wait() { m_semaphore.acquire(); }
+	// False when the release did not come within `ms` (tests: a deadlock must fail, not hang).
+	[[nodiscard]] bool WaitFor(uint32_t ms) {
+		return m_semaphore.try_acquire_for(std::chrono::milliseconds(ms));
+	}
 	[[nodiscard]] bool TryWait() { return m_semaphore.try_acquire(); }
 	// The tick whose completion (and write-back) this release follows; set by the first step.
 	uint64_t tick = 0;

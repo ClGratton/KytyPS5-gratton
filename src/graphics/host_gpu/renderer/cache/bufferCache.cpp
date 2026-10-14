@@ -1133,6 +1133,12 @@ FutureStart BufferCache::StartReadFuture(uint64_t vaddr, uint64_t size,
 	release->tick = wait_tick;
 	if (wait_tick < m_scheduler.CurrentTick()) {
 		m_scheduler.DeferPriorityOperationAt([release] { release->Signal(); }, wait_tick);
+		// Priority operations run in order: if one queued before this release waits for the open
+		// command buffer (an event the submit coalescer is holding back), the release is stuck behind
+		// it until somebody submits, and the GPU thread may have nothing else to do. Submit.
+		if (m_scheduler.HasOpenTickPriorityOperation()) {
+			m_scheduler.Flush();
+		}
 	} else {
 		m_scheduler.DeferPriorityOperation([release] { release->Signal(); });
 		m_scheduler.Flush();

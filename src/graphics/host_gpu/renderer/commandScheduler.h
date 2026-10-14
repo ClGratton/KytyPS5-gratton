@@ -46,6 +46,9 @@ public:
 	// Like the above, but runs after `tick` (a tick already submitted) instead of the open command
 	// buffer's tick, so the caller need not submit. The operation must not touch guest memory in a
 	// way that depends on its position among the other priority operations (a release does not).
+	// True when a priority operation waits for the tick of the open (not yet submitted) command
+	// buffer: it cannot run, and nothing behind it can either, until that buffer is submitted.
+	[[nodiscard]] bool        HasOpenTickPriorityOperation();
 	void                      DeferPriorityOperationAt(Common::UniqueFunction<void>&& operation,
 	                                                   uint64_t                        tick);
 	[[nodiscard]] bool        HasPendingPriorityOperations();
@@ -107,6 +110,7 @@ private:
 	std::condition_variable      m_operation_available;
 	std::jthread                 m_priority_thread;
 	std::string                  m_hang_provider_name;
+	uint64_t                     m_max_priority_tick = 0; // guarded by m_operation_mutex
 	bool                         m_priority_active      = false;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;

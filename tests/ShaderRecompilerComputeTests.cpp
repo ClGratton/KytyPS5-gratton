@@ -5939,11 +5939,22 @@ public:
       Require(name, "reader B waits for the same copy",
               cache.StartReadFuture(base + offset, 1, reader_b) == FutureStart::Wait,
               "reader B did not wait for the copy in flight");
+      // An event held back by the submit coalescer sits in the priority queue at the open tick,
+      // ahead of reader C's release: C's first step must submit, or C waits for ever.
+      scheduler.DeferPriorityOperation([] {});
+      auto reader_c = std::make_shared<FutureRelease>();
+      Require(name, "reader C waits for the same copy",
+              cache.StartReadFuture(base + offset, 1, reader_c) == FutureStart::Wait,
+              "reader C did not wait for the copy in flight");
+      Require(name, "reader C is released although an event is held back",
+              reader_c->WaitFor(5000),
+              "a release queued behind an unsubmitted event never fired (deadlock)");
       reader_a->Wait();
       reader_b->Wait();
       Require(name, "both readers see the bytes",
               cache.FinishReadFuture(base + offset, 1, false, false, reader_a->tick) && Backing(offset) == fourth_value &&
-                  cache.FinishReadFuture(base + offset, 1, false, false, reader_b->tick),
+                  cache.FinishReadFuture(base + offset, 1, false, false, reader_b->tick) &&
+                  cache.FinishReadFuture(base + offset, 1, false, false, reader_c->tick),
               "a reader of a copy in flight did not get the bytes");
 
       // 4b. A CPU write over a GPU-written page: the GPU's bytes land in guest memory first, then the
@@ -6061,7 +6072,9 @@ public:
             const uint32_t value = counter.fetch_add(1) + 1;
             GpuWrite(page_a, value);
             GpuWrite(page_b, value);
-            if (value % 3 == 0) {
+            // Like an end-of-pipe event whose submit the coalescer holds back.
+            scheduler.DeferPriorityOperation([] {});
+            if (value % 5 == 0) {
               scheduler.Flush();
             }
           });
