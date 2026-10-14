@@ -252,6 +252,8 @@ static void PrintUsage() {
 	         "                                       from what the dispatch is proven to write, instead of\n"
 	         "                                       draining the GPU to read it (SRT walk). Exact, runtime\n"
 	         "                                       toggle. Default: false.\n");
+	::printf("  --debug-known-verify-all <true|false> Verify every known answer (a GPU drain each). A correctness run,\n"
+	         "                                       not a benchmark. Default: false.\n");
 	::printf("  --known-copies <true|false>          A compute dispatch proven to copy records from one buffer to\n"
 	         "                                       another (the color-metadata copy of fast-cleared targets)\n"
 	         "                                       leaves the destination known when the source is readable\n"
@@ -958,6 +960,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--known-stores") {
 			if (!ParseBool(value, options.config.known_stores)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-known-verify-all") {
+			if (!ParseBool(value, options.config.debug_known_verify_all)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

@@ -1235,7 +1235,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& binding,
 		const auto now_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
 		                        std::chrono::steady_clock::now().time_since_epoch())
 		                        .count();
-		verifying = seconds != 0 && verify_ration.Due(now_ns, seconds);
+		verifying = Config::DebugKnownVerifyAll() || (seconds != 0 && verify_ration.Due(now_ns, seconds));
 	}
 	if (gpu_modified) {
 		if (known_fill) {

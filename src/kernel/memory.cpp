@@ -1121,7 +1121,7 @@ static bool TryReadKnownDirty(Graphics::BufferCache& buffers, uint64_t vaddr, vo
 	const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
 	                        std::chrono::steady_clock::now().time_since_epoch())
 	                        .count();
-	if (seconds != 0 && ration.Due(now_ns, seconds)) {
+	if (Config::DebugKnownVerifyAll() || (seconds != 0 && ration.Due(now_ns, seconds))) {
 		Common::GpuPhase::NoteGpuThreadFault();
 		buffers.ReadMemory(vaddr, size);
 		std::array<uint32_t, 256> real;

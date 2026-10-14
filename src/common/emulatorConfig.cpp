@@ -157,6 +157,10 @@ uint32_t DebugKnownVerifySeconds() {
 	return g_config->debug_known_verify_s;
 }
 
+bool DebugKnownVerifyAll() {
+	return g_config->debug_known_verify_all;
+}
+
 bool ImageLookupMemoEnabled() {
 	return Common::RuntimeToggles::Read(g_config->image_lookup_memo);
 }

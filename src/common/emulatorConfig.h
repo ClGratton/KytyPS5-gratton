@@ -281,6 +281,9 @@ struct ConfigOptions {
 	// known value is not used: the GPU is drained, the real bytes are read and compared (loud log and
 	// the knowledge dropped on a mismatch; counters in --gpu-phase-stats). 0 = off.
 	uint32_t               debug_known_verify_s        = 0;
+	// --debug-known-verify-all: verify every known answer (a GPU drain each; a correctness run, not a
+	// benchmark).
+	bool                   debug_known_verify_all      = false;
 	// --image-lookup-memo: FindImage remembers unique matches until the set of registered images
 	// changes (renderer/cache/imageLookupMemo.h). Exact; default off until measured.
 	bool                   image_lookup_memo           = false;
@@ -410,6 +413,7 @@ bool              KnownFillsEnabled();
 bool              KnownStoresEnabled();
 bool              KnownCopiesEnabled();
 uint32_t          DebugKnownVerifySeconds();
+bool              DebugKnownVerifyAll();
 bool              ImageLookupMemoEnabled();
 bool              TextureBindingReuseEnabled();
 bool              CleanGuestReadsEnabled();
