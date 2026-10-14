@@ -158,6 +158,8 @@ struct DepthZInfo {
 			default: return false;
 		}
 	}
+
+	bool operator==(const DepthZInfo&) const = default;
 };
 
 struct DepthStencilInfo {
@@ -186,6 +188,8 @@ struct DepthStencilInfo {
 			default: return false;
 		}
 	}
+
+	bool operator==(const DepthStencilInfo&) const = default;
 };
 
 struct DepthDepthView {
@@ -194,12 +198,16 @@ struct DepthDepthView {
 	uint8_t  current_mip_level     = 0;
 	bool     depth_write_disable   = false;
 	bool     stencil_write_disable = false;
+
+	bool operator==(const DepthDepthView&) const = default;
 };
 
 struct DepthDepthSizeXY {
 	uint16_t x_max = 0;
 	uint16_t y_max = 0;
 	bool     valid = false;
+
+	bool operator==(const DepthDepthSizeXY&) const = default;
 };
 
 struct DepthRenderTarget {
@@ -214,6 +222,8 @@ struct DepthRenderTarget {
 	uint64_t stencil_write_base_addr = 0;
 	uint64_t htile_data_base_addr    = 0;
 	uint8_t  shading_rate_encoding   = 0;
+
+	bool operator==(const DepthRenderTarget&) const = default;
 };
 
 struct RenderControl {
@@ -226,6 +236,8 @@ struct RenderControl {
 	bool    copy_stencil_to_color    = false;
 	bool    copy_centroid            = false;
 	uint8_t copy_sample              = 0;
+
+	bool operator==(const RenderControl&) const = default;
 };
 
 struct DepthRenderOverride {
@@ -282,6 +294,8 @@ struct DepthControl {
 	bool    backface_enable     = false;
 	uint8_t stencilfunc         = 0;
 	uint8_t stencilfunc_bf      = 0;
+
+	bool operator==(const DepthControl&) const = default;
 };
 
 struct StencilControl {
@@ -291,6 +305,8 @@ struct StencilControl {
 	uint8_t stencil_fail_bf  = 0;
 	uint8_t stencil_zpass_bf = 0;
 	uint8_t stencil_zfail_bf = 0;
+
+	bool operator==(const StencilControl&) const = default;
 };
 
 struct StencilMask {
@@ -302,6 +318,8 @@ struct StencilMask {
 	uint8_t stencil_mask_bf      = 0;
 	uint8_t stencil_writemask_bf = 0;
 	uint8_t stencil_opval_bf     = 0;
+
+	bool operator==(const StencilMask&) const = default;
 };
 
 struct ModeControl {
