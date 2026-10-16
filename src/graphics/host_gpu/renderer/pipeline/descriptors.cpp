@@ -23,6 +23,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/image/compareView.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
@@ -42,6 +43,7 @@
 #include <cstdlib>
 #include <fmt/format.h>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <span>
 #include <vector>
@@ -65,6 +67,66 @@ using BindingKind = ShaderRecompiler::IR::DescriptorBindingKind;
 constexpr uint32_t    kTargetFallbackLogLimit = 16;
 std::atomic<uint32_t> g_target_fallback_count {0};
 std::once_flag        g_target_fallback_summary_once;
+
+// Whether `format` can be sampled with a comparison sampler on this device
+// (VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT); the answer per format never changes.
+bool ViewFormatSupportsDepthComparison(const GraphicContext& graphics, vk::Format format) {
+	// Draws repeat the same view format, so each thread remembers its last answer and skips the lock.
+	thread_local VkPhysicalDevice last_device = nullptr;
+	thread_local int              last_format = -1;
+	thread_local bool             last_answer = false;
+	const auto device = static_cast<VkPhysicalDevice>(graphics.physical_device);
+	if (last_device == device && last_format == static_cast<int>(format)) {
+		return last_answer;
+	}
+	static std::mutex                                       mutex;
+	static std::map<std::pair<VkPhysicalDevice, int>, bool> answers;
+	std::scoped_lock lock {mutex};
+	auto [it, inserted] = answers.try_emplace(std::pair {device, static_cast<int>(format)}, false);
+	if (inserted) {
+		vk::FormatProperties3 properties3 {};
+		vk::FormatProperties2 properties2 {};
+		properties2.pNext = &properties3;
+		graphics.physical_device.getFormatProperties2(format, &properties2);
+		it->second = static_cast<bool>(properties3.optimalTilingFeatures &
+		                               vk::FormatFeatureFlagBits2::eSampledImageDepthComparison);
+	}
+	last_device = device;
+	last_format = static_cast<int>(format);
+	last_answer = it->second;
+	return it->second;
+}
+
+CompareViewReport g_compare_view_report;
+
+// A texture slot the shader samples with a comparison sampler must be bound to a view whose format
+// supports depth comparison (VUID-*-None-06479, see compareView.h). Safety net, not a fix: a colour
+// image found at the address of a depth texture cannot be viewed as a depth format, so the draw
+// still runs, with undefined behaviour on a GPU like NVIDIA's, and this says so, loudly, with
+// everything needed to find where the image came from. Logs the first kLogLimit occurrences.
+void ReportComparedView(const GraphicContext& graphics, const TextureBinding& binding,
+                        const Image& image) {
+	const auto host_view = std::ranges::find(image.views, binding.image_view, &CachedImageView::view);
+	if (host_view == image.views.end()) {
+		return;
+	}
+	const auto verdict = ClassifyComparedView(
+	    true, ViewFormatSupportsDepthComparison(graphics, host_view->info.format));
+	const auto count = g_compare_view_report.Note(verdict);
+	if (!CompareViewReport::ShouldLog(count)) {
+		return;
+	}
+	std::printf("Texture: depth-compare sampling through a view format the GPU cannot compare "
+	            "(undefined behaviour, VUID-*-None-06479): addr=0x%016" PRIx64
+	            " image=%u/%u image_format=%d view_format=%d depth_image=%d render_target=%d "
+	            "tile=%u guest_format=%u (%" PRIu32 " so far)\n",
+	            image.info.data.address, binding.image_id.index, binding.image_id.generation,
+	            static_cast<int>(image.backing.format), static_cast<int>(host_view->info.format),
+	            image.info.IsDepth() ? 1 : 0, image.binding.is_target ? 1 : 0,
+	            static_cast<uint32_t>(image.info.tile_mode),
+	            static_cast<uint32_t>(image.info.guest_format), count);
+	std::fflush(stdout);
+}
 
 void PrintTargetFallbackSummary() {
 	static std::atomic<bool> printed {false};
@@ -1320,6 +1382,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				              vk::AccessFlagBits2::eShaderRead, range, vk_buffer);
 			}
 			binding.layout = image.backing.state.layout;
+			if (!storage && program.info.images[i].depth_compare) {
+				ReportComparedView(m_context.GetGraphics(), binding, image);
+			}
 			gpu_phase_transit.End();
 		}
 
