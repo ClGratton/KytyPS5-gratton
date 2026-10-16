@@ -6,6 +6,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -687,6 +688,85 @@ void TestDeadPhiCyclesAndPlanningRoots() {
   Check(entry.empty() && loop.empty(), "DCE reused stale marks after removing its roots");
 }
 
+// A resource-table pointer in user data that the game left zero (a draw during a level load): the
+// walk also evaluates the scalar load at +0x18 through it, which the shader may never execute. A
+// read through a null table is zero, the same value the GPU reads from unmapped memory and the one a
+// zeroed descriptor already treats as "no resource". Every walker path must give that value and
+// leave the host alone: the compiled walk (which declines such a table), the interpreter without a
+// reader, and the capturing reader (which has nothing to watch there). A table in real memory must
+// still be read, and read the same on all of them.
+void TestNullTablePointerReadsZero() {
+  Fixture fixture;
+  const auto memory = fixture.AddMemory(ResourceKind::ScalarAddress);
+  const auto low = fixture.Emit(ValueOpcode::GetUserData,
+                                {Value(static_cast<ScalarReg>(2))});
+  const auto high = fixture.Emit(ValueOpcode::GetUserData,
+                                 {Value(static_cast<ScalarReg>(3))});
+  const auto value =
+      RawRead(fixture, Address(fixture, low, high), Value(0x18u), memory);
+  LoadBuffer(fixture, {value, Value(0u), Value(16u), Value(0u)});
+  fixture.Plan();
+  const auto plan = ExtractResourcePlan(fixture.program);
+  Check(plan.srt_code != nullptr, "user-data table reads were not compiled");
+  Check(plan.srt_reads.size() == 1, "the table read was not flattened");
+
+  alignas(8) std::array<uint32_t, 8> table{};
+  table[6] = 0xfeedbeefu; // +0x18
+  const auto real = reinterpret_cast<uint64_t>(table.data());
+
+  struct Walk {
+    bool ok = false;
+    std::vector<uint32_t> flat;
+    uint32_t evaluated = 0xdeadbeefu;
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    bool evaluate_ok = false;
+  };
+  // Without a reader: the compiled walk, then (declined) the interpreter.
+  const auto ordinary = [&](uint64_t pointer) {
+    const std::array user_data{static_cast<uint32_t>(pointer),
+                               static_cast<uint32_t>(pointer >> 32u)};
+    const SrtRuntime runtime{.user_data = user_data};
+    Walk walk;
+    walk.ok = SrtWalker(plan, runtime).RefreshFlatBuffer(walk.flat);
+    walk.evaluate_ok =
+        SrtWalker(plan, runtime).Evaluate(plan.srt_reads[0].value, walk.evaluated);
+    return walk;
+  };
+  // Through the capturing reader (no reader behind it): the interpreter records what it read.
+  const auto captured = [&](uint64_t pointer) {
+    const std::array user_data{static_cast<uint32_t>(pointer),
+                               static_cast<uint32_t>(pointer >> 32u)};
+    const SrtRuntime runtime{.user_data = user_data};
+    Walk walk;
+    SrtReadCapture capture(runtime, walk.ranges);
+    walk.ok = SrtWalker(plan, capture.ObservedRuntime()).RefreshFlatBuffer(walk.flat);
+    return walk;
+  };
+
+  // Null, and a pointer whose read is the last dword below the guest address space (0x3fffc).
+  for (const uint64_t null_table : {uint64_t{0}, uint64_t{0x20000}, uint64_t{0x3ffe4}}) {
+    const auto plain = ordinary(null_table);
+    Check(plain.ok && plain.flat == std::vector<uint32_t>{0u},
+          "the walk did not read a null table as zero");
+    Check(plain.evaluate_ok && plain.evaluated == 0u,
+          "an ordinary read did not read a null table as zero");
+    const auto seen = captured(null_table);
+    Check(seen.ok && seen.flat == std::vector<uint32_t>{0u},
+          "the capturing walk did not read a null table as zero");
+    Check(seen.ranges.empty(), "a null table read was recorded as a range to watch");
+  }
+
+  const auto plain = ordinary(real);
+  Check(plain.ok && plain.flat == std::vector<uint32_t>{0xfeedbeefu} &&
+            plain.evaluate_ok && plain.evaluated == 0xfeedbeefu,
+        "a table in real memory was not read by the compiled walk");
+  const auto seen = captured(real);
+  Check(seen.ok && seen.flat == plain.flat,
+        "the capturing walk and the compiled walk disagree on a real table");
+  Check(seen.ranges.size() == 1 && seen.ranges[0] == std::pair<uint64_t, uint64_t>{real + 0x18u, 4u},
+        "the capturing walk did not record the dword it read");
+}
+
 void TestUndefinedRuntimeValueFails() {
   Fixture fixture;
   const auto undef = fixture.Emit(ValueOpcode::UndefU32);
@@ -737,6 +817,7 @@ int main() {
     TestOptimizationPipeline();
     TestControlFlowValueSurvivesReadLaneFolding();
     TestDeadPhiCyclesAndPlanningRoots();
+    TestNullTablePointerReadsZero();
     TestUndefinedRuntimeValueFails();
     std::cout << "TypedValuePlanningTests: all cases passed\n";
     return 0;

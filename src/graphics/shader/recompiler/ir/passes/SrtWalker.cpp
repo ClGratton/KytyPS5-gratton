@@ -2,6 +2,7 @@
 
 #include "common/abi.h"
 #include "common/assert.h"
+#include "common/guestAddressSpace.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <xbyak/xbyak.h>
@@ -38,6 +39,9 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 	auto& capture = *static_cast<SrtReadCapture*>(userdata);
 	if (capture.m_source.read_memory != nullptr) {
 		if (!capture.m_source.read_memory(capture.m_source.userdata, address, values)) return false;
+	} else if (Common::ReadGuestNullPage(address, values)) {
+		// A null table: zeros, and nothing to watch (that memory can never be written).
+		return true;
 	} else {
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 	}
@@ -500,6 +504,15 @@ void CompileSrtWalker(ResourcePlan& program) {
 			code.cmp(code.rdi, code.r10);
 			code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
 		}
+		// A table whose lowest read is below the guest address space (a null pointer, or a pointer
+		// the game has not filled in yet) is not read here: the compiled walk declines, and the
+		// interpreter answers each read of it as exactly as it does for the other tables.
+		if (const auto lowest_ok = static_cast<int64_t>(Common::kGuestAddressSpaceStart) - first;
+		    lowest_ok > 0) {
+			code.mov(code.r10, lowest_ok);
+			code.cmp(code.rdi, code.r10);
+			code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
+		}
 		if (last > 0) {
 			code.mov(code.r10, AddressMask - last);
 			code.cmp(code.rdi, code.r10);
@@ -797,7 +810,10 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		}
 	} else {
 		if (vector) return false;
-		std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+		// Without a reader the walk reads guest memory directly, except the null page.
+		if (!Common::ReadGuestNullPage(address, {&word, 1})) {
+			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+		}
 	}
 	result = word;
 	return true;
@@ -1302,8 +1318,13 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		m_context.values.resize(m_program.evaluation_value_count);
 		using Walker = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 		    ResourcePlan::EvaluationContext::Entry*, uint64_t, size_t);
-		return m_program.srt_code->getCode<Walker>()(m_runtime.user_data.data(), flat.data(),
-		    m_context.values.data(), m_context.generation, m_runtime.user_data.size());
+		// The compiled walk answers what it can read straight away and declines the rest (a table
+		// pointer below the guest address space, an address that overflows, too little user data);
+		// the interpreter below decides those exactly.
+		if (m_program.srt_code->getCode<Walker>()(m_runtime.user_data.data(), flat.data(),
+		    m_context.values.data(), m_context.generation, m_runtime.user_data.size())) {
+			return true;
+		}
 	}
 	const bool fast_ok = m_runtime.table_walk && m_runtime.read_memory != nullptr &&
 	                     m_active_mask.IsEmpty();
