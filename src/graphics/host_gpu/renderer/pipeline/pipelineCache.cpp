@@ -2497,7 +2497,14 @@ void PipelineCache::Save() {
 	if (m_driver_cache == nullptr) {
 		return;
 	}
+	if (!WriteDriverCache()) {
+		return;
+	}
+	m_graphics.device.destroyPipelineCache(m_driver_cache, nullptr);
+	m_driver_cache = nullptr;
+}
 
+bool PipelineCache::WriteDriverCache() {
 	size_t               size = 0;
 	vk::Result           result;
 	std::vector<uint8_t> payload;
@@ -2518,14 +2525,14 @@ void PipelineCache::Save() {
 	    size > std::numeric_limits<uint32_t>::max()) {
 		PipelineCacheLog("Vulkan pipeline cache: save failed ({}, {} bytes)",
 		                 vk::to_string(result), size);
-		return;
+		return false;
 	}
 	payload.resize(size);
 	const auto contents = PipelineCacheFile::Store(
 	    DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties()), payload);
 	if (!Common::File::CreateDirectories(m_driver_cache_path.parent_path())) {
 		PipelineCacheLog("Vulkan pipeline cache: failed to create cache directory");
-		return;
+		return false;
 	}
 	auto temp_path = m_driver_cache_path;
 	temp_path += ".tmp";
@@ -2540,12 +2547,11 @@ void PipelineCache::Save() {
 	    !Common::File::RenameFile(temp_path, m_driver_cache_path)) {
 		PipelineCacheLog("Vulkan pipeline cache: failed to write {}",
 		                 Common::PathToString(m_driver_cache_path));
-		return;
+		return false;
 	}
 	PipelineCacheLog("Vulkan pipeline cache: saved {} bytes to {}", payload.size(),
 	                 Common::PathToString(m_driver_cache_path));
-	m_graphics.device.destroyPipelineCache(m_driver_cache, nullptr);
-	m_driver_cache = nullptr;
+	return true;
 }
 
 // ---- --async-pipelines: pipeline jobs ----------------------------------------------------------

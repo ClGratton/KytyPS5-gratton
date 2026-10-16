@@ -490,6 +490,10 @@ private:
 	bool              m_prefetch_stopped = false;
 
 	void InitializeDriverCache();
+	// Reads m_driver_cache from the driver and replaces the cache file with it; false (and a log
+	// line) when that failed. Callable from any thread while pipelines are being created: the
+	// driver synchronizes the cache object. The cache must stay alive meanwhile.
+	bool WriteDriverCache();
 	// The pool when async is on and still running (it stops in Save()), else nullptr.
 	AsyncPipelineCompiler* AsyncPool();
 	// Stops the workers (cancels queued jobs, waits for running ones). Idempotent.
