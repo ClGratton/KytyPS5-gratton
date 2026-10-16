@@ -6,6 +6,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
+#include "common/guestAddressSpace.h"
 #include "common/enomemTrace.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
