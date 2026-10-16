@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
 #include "graphics/host_gpu/renderer/pipeline/variantStore.h"
 #include "graphics/host_gpu/renderer/pipeline/drawKeyMemo.h"
+#include "graphics/host_gpu/renderer/pipeline/driverCacheCheckpoint.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/frontend/decode/DrawSkipSafety.h"
@@ -424,6 +425,9 @@ private:
 	std::unique_ptr<ProgramCache> m_program_cache;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
+	// --driver-cache-checkpoint: the thread that writes m_driver_cache while the game runs. Stopped
+	// (joined) first thing in Save(), before the final write and before the cache is destroyed.
+	std::unique_ptr<DriverCacheCheckpointer> m_driver_cache_checkpoint;
 	// Guarded by m_pipelines_mutex whenever m_async_mode != Off (workers publish into them).
 	// Pipeline objects are heap nodes that are never erased while the cache lives, so a returned
 	// Pipeline& / Pipeline* stays valid after the lock is dropped.

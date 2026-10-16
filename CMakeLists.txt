@@ -645,6 +645,12 @@ target_include_directories(bda_sync_gate_tests PRIVATE ${inc_headers})
 find_package(Threads REQUIRED)
 target_link_libraries(bda_sync_gate_tests Threads::Threads)
 
+add_executable(driver_cache_checkpoint_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/DriverCacheCheckpointTests.cpp"
+)
+target_include_directories(driver_cache_checkpoint_tests PRIVATE ${inc_headers})
+target_link_libraries(driver_cache_checkpoint_tests Threads::Threads)
+
 add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
@@ -926,6 +932,7 @@ if(BUILD_TESTING)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME mesh_dispatch COMMAND $<TARGET_FILE:mesh_dispatch_tests>)
 	add_test(NAME null_page_read COMMAND $<TARGET_FILE:null_page_read_tests>)
+	add_test(NAME driver_cache_checkpoint COMMAND $<TARGET_FILE:driver_cache_checkpoint_tests>)
 	add_test(NAME swapchain_extent COMMAND $<TARGET_FILE:swapchain_extent_tests>)
 	add_test(NAME playgo_api COMMAND $<TARGET_FILE:playgo_api_tests>)
 	add_test(NAME gds_copy_plan COMMAND $<TARGET_FILE:gds_copy_plan_tests>)
@@ -1162,6 +1169,7 @@ if(BUILD_TESTING)
 		bit_array_tests
 		mesh_dispatch_tests
 		null_page_read_tests
+		driver_cache_checkpoint_tests
 		swapchain_extent_tests
 		playgo_api_tests
 		gds_copy_plan_tests

@@ -2489,11 +2489,37 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: initialized empty");
 		init_result = "empty";
 	}
+	if (const auto seconds = Config::GetDriverCacheCheckpointSeconds(); seconds != 0) {
+		// Pipelines the driver has created so far (the GPU thread and the pipeline workers both
+		// count into these): a checkpoint is due only when that number moved.
+		const auto created = [this] {
+			return uint64_t {m_graphics.pipelines_graphics.load(std::memory_order_relaxed)} +
+			       m_graphics.pipelines_compute.load(std::memory_order_relaxed);
+		};
+		const auto write = [this, created] {
+			// t0/t1 are on the clock of --bench-frames-csv, so a bench run can line the write up with
+			// the frames it overlapped.
+			const auto t0 = Bench::NowNs();
+			const bool ok = WriteDriverCache();
+			const auto t1 = Bench::NowNs();
+			PipelineCacheLog("Vulkan pipeline cache: checkpoint {} in {} ms t0_ns={} t1_ns={} "
+			                 "({} pipelines created so far)",
+			                 ok ? "written" : "FAILED (retried next period)", (t1 - t0) / 1000000,
+			                 t0, t1, created());
+			return ok;
+		};
+		m_driver_cache_checkpoint =
+		    std::make_unique<DriverCacheCheckpointer>(std::chrono::seconds(seconds), created, write);
+		PipelineCacheLog("Vulkan pipeline cache: checkpoint every {} s while pipelines are created",
+		                 seconds);
+	}
 }
 
 void PipelineCache::Save() {
-	// Join the workers first: they use m_driver_cache, and it is destroyed below.
+	// Join the workers and the checkpoint thread first: they use m_driver_cache, and it is
+	// destroyed below.
 	ShutdownAsync();
+	m_driver_cache_checkpoint.reset();
 	if (m_driver_cache == nullptr) {
 		return;
 	}

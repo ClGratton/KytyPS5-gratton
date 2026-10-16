@@ -247,6 +247,10 @@ uint32_t GetPipelineWorkerCount() {
 	return std::max(1u, std::min(8u, hardware / 2u));
 }
 
+uint32_t GetDriverCacheCheckpointSeconds() {
+	return g_config->driver_cache_checkpoint_s;
+}
+
 uint32_t GetScreenWidth() {
 	return g_config->screen_width;
 }
