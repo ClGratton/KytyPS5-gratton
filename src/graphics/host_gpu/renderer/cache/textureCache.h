@@ -33,6 +33,20 @@ struct TextureCacheTestAccess;
 
 class TextureCache {
 public:
+	// --texture-lock-batch: holds the cache lock for the scope's lifetime, so the many short lookups of a draw (each takes
+	// the lock itself) only count a nested acquisition. GPU thread, around code that does texture-cache work only. The flag
+	// is read once at the scope's start.
+	class LockBatch {
+	public:
+		explicit LockBatch(TextureCache& cache);
+		~LockBatch();
+		LockBatch(const LockBatch&)            = delete;
+		LockBatch& operator=(const LockBatch&) = delete;
+
+	private:
+		TextureCache* m_cache;
+	};
+
 	enum class BindingType : uint8_t { Texture, Storage, RenderTarget, DepthTarget, VideoOut };
 
 	struct ImageDesc {
@@ -190,7 +204,7 @@ private:
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
-	TrackingSpinLock                                  m_lock;
+	ReentrantTrackingLock                             m_lock;
 	PageManager&                                      m_page_manager;
 	BlitHelper                                        m_blit_helper;
 	TileManager                                       m_tiler;

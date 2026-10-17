@@ -884,6 +884,37 @@ void TestWriteFaultRunAhead() {
   Release(memory);
 }
 
+void TestReentrantLock() {
+  // The owning thread may take the lock again; only the outermost pair holds it against another thread.
+  ReentrantTrackingLock lock;
+  Check(!lock.HeldByCurrentThread(), "reentrant lock: not held at the start");
+  lock.lock();
+  lock.lock();
+  lock.lock();
+  Check(lock.HeldByCurrentThread(), "reentrant lock: held after nested locks");
+  std::atomic<int> state{0};
+  std::thread other([&] {
+    state.store(1);
+    lock.lock();
+    state.store(2);
+    lock.unlock();
+  });
+  while (state.load() == 0) std::this_thread::yield();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  Check(state.load() == 1, "reentrant lock: another thread waits while nested locks are held");
+  lock.unlock();
+  lock.unlock();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  Check(state.load() == 1, "reentrant lock: still held after two of three unlocks");
+  lock.unlock();
+  other.join();
+  Check(state.load() == 2, "reentrant lock: the other thread got it after the last unlock");
+  Check(!lock.HeldByCurrentThread(), "reentrant lock: released at the end");
+  lock.lock();
+  Check(lock.HeldByCurrentThread(), "reentrant lock: usable again");
+  lock.unlock();
+}
+
 void TestCpuStoreKeepsProtection() {
   TrackerHarness harness;
   auto &tracker = harness.tracker;
@@ -1553,6 +1584,7 @@ int main(int argc, char **argv) {
   TestTakeGpuPagesForCpu();
   TestRangeEpochs();
   TestWriteFaultRunAhead();
+  TestReentrantLock();
   TestCpuStoreKeepsProtection();
   TestExactDirtyIntervalsSharingTrackerPage();
   TestGpuDownloadProtectionMirrors();

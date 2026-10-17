@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cinttypes>
+#include <optional>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -1003,6 +1004,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.shader_data.clear();
 	prepared.image_sources.resize(program.info.images.size());
 	const bool reuse_bindings = Config::TextureBindingReuseEnabled();
+	std::optional<TextureCache::LockBatch> texture_batch;
+	texture_batch.emplace(m_context.GetTextureCache());
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		// Consecutive draws mostly bind the same textures: keep the slot's binding while the
 		// descriptor, the shader's image resource and the image set are unchanged.
@@ -1030,6 +1033,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		binding.mip_views.clear();
 		prepared.images[i] = std::move(binding);
 	}
+	texture_batch.reset();
 	Common::GpuPhase::Scope gpu_phase_samplers(Common::GpuPhase::Phase::SrtSamplers);
 	prepared.samplers.reserve(program.info.samplers.size());
 	for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
@@ -1155,6 +1159,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	// Bindings assembled without PrepareBindings have no recorded sources.
 	prepared.image_sources.resize(images.size());
 	auto& texture_cache = m_context.GetTextureCache();
+	const TextureCache::LockBatch texture_batch(texture_cache);
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		if (!images[i].image_id) continue;
@@ -1212,10 +1217,12 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	if (uses_dma) {
 		m_context.PrepareBda(address_writes);
 	}
+	auto& cache = m_context.GetTextureCache();
+	std::optional<TextureCache::LockBatch> texture_batch;
+	texture_batch.emplace(cache);
 	for (auto* stage: stages) {
 		RebindImages(*stage);
 	}
-	auto& cache = m_context.GetTextureCache();
 	for (auto& target: colors) {
 		EXIT_IF(!target.image_id);
 		const auto old_image = cache.m_slot_images.try_get(target.image_id);
@@ -1230,6 +1237,7 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 			BindRenderTarget(target.image_id);
 		}
 	}
+	texture_batch.reset();
 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only
 	// after image identities are final; attachment layout transitions follow buffer alias copies.
 	for (auto* stage: stages) {

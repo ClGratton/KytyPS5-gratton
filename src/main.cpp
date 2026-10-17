@@ -185,7 +185,7 @@ static void PrintUsage() {
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
 	         "                                       tracker-sleeping-locks,\n"
 	         "                                       cp-direct-stores, draw-state-memo,\n"
-	         "                                       async-upload-copies,\n"
+	         "                                       async-upload-copies, texture-lock-batch,\n"
 	         "                                       image-presence, image-pool,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
@@ -273,6 +273,9 @@ static void PrintUsage() {
 	         "                                       upload ring runs on two helper threads instead of the GPU\n"
 	         "                                       thread; the ring is complete before the next submit.\n"
 	         "                                       Default: false.\n");
+	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
+	         "                                       draw's runs of image lookups instead of once per lookup\n"
+	         "                                       (exact). Default: false.\n");
 	::printf("  --draw-state-memo <true|false>       The GPU thread does not repeat work that is a function of the\n"
 	         "                                       GPU registers while the registers have not changed since the\n"
 	         "                                       draw it was done for (exact). Default: false.\n");
@@ -1072,6 +1075,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--async-upload-copies") {
 			if (!ParseBool(value, options.config.async_upload_copies)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--texture-lock-batch") {
+			if (!ParseBool(value, options.config.texture_lock_batch)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

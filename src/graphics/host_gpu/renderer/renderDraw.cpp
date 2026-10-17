@@ -492,6 +492,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 	EXIT_IF(colors == nullptr || color_count > RENDER_COLOR_ATTACHMENTS_MAX);
 	feedback_aspects = {};
 	auto&       cache = m_context.GetTextureCache();
+	const TextureCache::LockBatch texture_batch(cache);
 	RenderState state {};
 	state.width                 = std::numeric_limits<uint32_t>::max();
 	state.height                = std::numeric_limits<uint32_t>::max();
@@ -1101,6 +1102,8 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
 	Common::GpuPhase::Scope gpu_phase_targets(Common::GpuPhase::Phase::DrawTargets);
+	std::optional<TextureCache::LockBatch> texture_batch;
+	texture_batch.emplace(buffer.GetContext().GetTextureCache());
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 		if ((mrt_mask & (1u << slot)) != 0) {
 			ResolveRenderColorTarget(buffer, state.color_info[state.color_count],
@@ -1114,6 +1117,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "ResolveRenderDepthTarget");
 	}
 	ResolveRenderDepthTarget(buffer, state.depth_info);
+	texture_batch.reset();
 	gpu_phase_targets.End();
 
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {

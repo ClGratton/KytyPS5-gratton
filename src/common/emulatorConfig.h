@@ -296,6 +296,9 @@ struct ConfigOptions {
 	// --async-upload-copies: the guest-to-ring memcpy of a large buffer upload runs on helper threads
 	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default off.
 	bool                   async_upload_copies         = false;
+	// --texture-lock-batch: the GPU thread takes the texture cache lock once around a draw's runs of lookups instead of once
+	// per lookup (graphics/host_gpu/renderer/cache/textureCache.h LockBatch). Default off.
+	bool                   texture_lock_batch          = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -494,6 +497,7 @@ bool              PlanPrefetchEnabled();
 bool              CpDirectStoresEnabled();
 bool              DrawStateMemoEnabled();
 bool              AsyncUploadCopiesEnabled();
+bool              TextureLockBatchEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();

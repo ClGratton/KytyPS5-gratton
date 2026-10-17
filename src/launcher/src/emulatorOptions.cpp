@@ -259,6 +259,12 @@ QList<Option> BuildTable() {
 	             "With this two helper threads do the copy while the GPU thread goes on, and the staging area "
 	             "is complete before the work is handed to the GPU. Exact; lowers the GPU thread's CPU time.",
 	             EMU_BOOL(async_upload_copies)});
+	defs.append({"texture_lock_batch", "--texture-lock-batch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Take the texture cache lock once per run of image lookups",
+	             "Every image a draw uses is looked up under a short lock, taken and released for each one. "
+	             "With this the GPU thread holds it across the whole run of lookups of a draw. Exact; lowers "
+	             "the GPU thread's CPU time per draw.",
+	             EMU_BOOL(texture_lock_batch)});
 	defs.append({"draw_state_memo", "--draw-state-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Do not redo per-draw work while the GPU registers have not changed",
 	             "Most draws of a frame set the same GPU state as the draw before. With this the GPU thread "

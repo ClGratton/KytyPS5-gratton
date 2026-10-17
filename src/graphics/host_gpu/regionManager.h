@@ -80,6 +80,31 @@ private:
 
 static_assert(std::atomic_uint32_t::is_always_lock_free);
 
+// A TrackingSpinLock the owning thread may take again: only the outermost pair of lock()/unlock() touches the atomic, a
+// nested pair is a thread-id compare and a counter. TextureCache uses it so a draw's many short lookups can run under one
+// acquisition (TextureCache::LockBatch).
+class ReentrantTrackingLock final {
+public:
+	void lock() noexcept {
+		if (m_lock.HeldByCurrentThread()) {
+			++m_depth;
+			return;
+		}
+		m_lock.lock();
+		m_depth = 1;
+	}
+	void unlock() noexcept {
+		if (--m_depth == 0) m_lock.unlock();
+	}
+	[[nodiscard]] bool HeldByCurrentThread() const noexcept {
+		return m_lock.HeldByCurrentThread();
+	}
+
+private:
+	TrackingSpinLock m_lock;
+	uint32_t         m_depth {0}; // owner only
+};
+
 class RegionManager final {
 public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
