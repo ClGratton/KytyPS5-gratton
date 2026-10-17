@@ -674,6 +674,20 @@ QVariantMap Recommended() {
 	values.insert(QStringLiteral("texture_binding_reuse"), true);
 	values.insert(QStringLiteral("defer_draw_write_barriers"), true);
 	values.insert(QStringLiteral("readback_futures"), true);
+	// perf-stack (2026-10-17): resolved-draw and the eight GPU-thread CPU cuts, all exact and measured as one
+	// stack (in-level ABAB +31.8 % fps, kyGpu busy 60.1 -> 45.9 ms; verifiers 0 mismatches).
+	values.insert(QStringLiteral("resolved_draw"), true);
+	values.insert(QStringLiteral("lookahead_workers"), 4);
+	values.insert(QStringLiteral("srt_table_walk"), true);
+	values.insert(QStringLiteral("mapping_memo"), true);
+	values.insert(QStringLiteral("bda_dirty_log"), true);
+	values.insert(QStringLiteral("lazy_op_poll"), true);
+	values.insert(QStringLiteral("backing_read_cache"), true);
+	values.insert(QStringLiteral("write_fault_around"), true);
+	values.insert(QStringLiteral("plan_prefetch"), true);
+	values.insert(QStringLiteral("tracker_lockfree"), true);
+	values.insert(QStringLiteral("image_presence"), true);
+	values.insert(QStringLiteral("image_pool"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);
