@@ -183,7 +183,7 @@ static void PrintUsage() {
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
-	         "                                       tracker-sleeping-locks,\n"
+	         "                                       tracker-sleeping-locks, scalable-read-locks,\n"
 	         "                                       cp-direct-stores, draw-state-memo,\n"
 	         "                                       async-upload-copies, texture-lock-batch,\n"
 	         "                                       push-descriptor-delta,\n"
@@ -291,6 +291,10 @@ static void PrintUsage() {
 	         "                                       a page-protection call sleeps after a short spin instead of\n"
 	         "                                       burning a core for the whole call. The GPU thread always\n"
 	         "                                       spins. Default: false.\n");
+	::printf("  --scalable-read-locks <true|false>   The pipeline map and the program table are read under a lock whose\n"
+	         "                                       readers do not write to a cache line shared with the other\n"
+	         "                                       threads (the GPU thread and the look-ahead workers looked\n"
+	         "                                       them up on every draw). Exact. Default: false.\n");
 	::printf("  --write-fault-around <true|false>    A guest write fault that continues a sequential run of\n"
 	         "                                       writes marks the clean pages ahead as modified with it,\n"
 	         "                                       so a streaming writer faults once per run instead of once\n"
@@ -1104,6 +1108,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--tracker-sleeping-locks") {
 			if (!ParseBool(value, options.config.tracker_sleeping_locks)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--scalable-read-locks") {
+			if (!ParseBool(value, options.config.scalable_read_locks)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

@@ -291,6 +291,13 @@ QList<Option> BuildTable() {
 	             "on a core for the whole protection call. With this they sleep after a short spin, which leaves "
 	             "cores to the GPU thread and the draw workers.",
 	             EMU_BOOL(tracker_sleeping_locks)});
+	defs.append({"scalable_read_locks", "--scalable-read-locks", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Look up pipelines and programs without a shared reader count",
+	             "Every draw looks its pipeline and shader program up in tables that the GPU thread and the "
+	             "look-ahead workers all read. With the usual reader-writer lock they share one counter and "
+	             "the cache line moves between cores on every lookup. With this each thread counts in a line "
+	             "of its own. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(scalable_read_locks)});
 	defs.append({"write_fault_around", "--write-fault-around", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the pages ahead of a sequential writer in one fault",
 	             "The emulator write-protects the memory the GPU uses to learn when the game "

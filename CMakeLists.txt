@@ -703,6 +703,12 @@ add_executable(adaptive_lock_tests EXCLUDE_FROM_ALL
 target_include_directories(adaptive_lock_tests PRIVATE ${inc_headers})
 target_link_libraries(adaptive_lock_tests Threads::Threads)
 
+add_executable(scalable_shared_mutex_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ScalableSharedMutexTests.cpp"
+)
+target_include_directories(scalable_shared_mutex_tests PRIVATE ${inc_headers})
+target_link_libraries(scalable_shared_mutex_tests Threads::Threads)
+
 add_executable(remembered_mapping_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/RememberedMappingTests.cpp"
 )
@@ -1073,6 +1079,7 @@ if(BUILD_TESTING)
 	add_test(NAME remembered_mapping COMMAND $<TARGET_FILE:remembered_mapping_tests>)
 	add_test(NAME page_presence COMMAND $<TARGET_FILE:page_presence_tests>)
 	add_test(NAME adaptive_lock COMMAND $<TARGET_FILE:adaptive_lock_tests>)
+	add_test(NAME scalable_shared_mutex COMMAND $<TARGET_FILE:scalable_shared_mutex_tests>)
 	add_test(NAME push_descriptor_cache COMMAND $<TARGET_FILE:push_descriptor_cache_tests>)
 	add_test(NAME hardware_context_epoch COMMAND $<TARGET_FILE:hardware_context_epoch_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
@@ -1306,6 +1313,7 @@ if(BUILD_TESTING)
 		remembered_mapping_tests
 		page_presence_tests
 		adaptive_lock_tests
+		scalable_shared_mutex_tests
 		push_descriptor_cache_tests
 		hardware_context_epoch_tests
 		sys_file_read_tests

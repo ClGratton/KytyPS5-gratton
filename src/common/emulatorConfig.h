@@ -286,6 +286,10 @@ struct ConfigOptions {
 	// --tracker-sleeping-locks: a game thread that waits for a tracker lock (held across an mprotect) sleeps after a short
 	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default off.
 	bool                   tracker_sleeping_locks      = false;
+	// --scalable-read-locks: the pipeline map and the program table are read under a reader-writer lock whose readers write
+	// only to a cache line of their own (common/scalableSharedMutex.h), instead of the one shared reader count that the GPU
+	// thread and the look-ahead workers fight over on every draw. Exact. Default off.
+	bool                   scalable_read_locks         = false;
 	// --cp-direct-stores: the command processor's stores to guest memory (labels, fences, WRITE_DATA) go through the
 	// backing view and mark the tracker directly instead of taking a write fault on the GPU thread. Default off.
 	bool                   cp_direct_stores            = false;

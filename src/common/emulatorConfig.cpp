@@ -1,5 +1,6 @@
 #include "common/emulatorConfig.h"
 #include "common/adaptiveLock.h"
+#include "common/scalableSharedMutex.h"
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
@@ -36,6 +37,7 @@ void Load(const ConfigOptions& cfg) {
 
 	*g_config = cfg;
 	Common::g_sleeping_locks_field = &g_config->tracker_sleeping_locks;
+	Common::g_scalable_locks_field = &g_config->scalable_read_locks;
 	g_config->gpu_indirect_draws_request = cfg.gpu_indirect_draws;
 	g_config->poll_before_wait_on = cfg.poll_before_wait_us != 0;
 
@@ -83,6 +85,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("plan-prefetch", &g_config->plan_prefetch, false);
 	// Read per lock acquisition; a waiter that already spins or sleeps finishes its wait either way.
 	registry.Register("tracker-sleeping-locks", &g_config->tracker_sleeping_locks, false);
+	// Read per lock acquisition; each acquisition releases through the guard that took it, and a writer excludes both kinds.
+	registry.Register("scalable-read-locks", &g_config->scalable_read_locks, false);
 	// Read per store; a page marked dirty while still protected needs no cleanup when the flag goes off (the next guest write
 	// to it faults like any protected page, an upload clears it).
 	registry.Register("cp-direct-stores", &g_config->cp_direct_stores, false);

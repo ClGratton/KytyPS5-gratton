@@ -58,6 +58,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <optional>
+#include <optional>
 #include <shared_mutex>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
@@ -2013,8 +2014,8 @@ struct PipelineCache::ProgramCache {
 	}
 
 	[[nodiscard]] SourceEntry* FindEntry(const ProgramKey& key) {
-		std::shared_lock lock(programs_mutex);
-		const auto       iter = programs.find(key);
+		Common::ScalableSharedMutex::SharedGuard lock(programs_mutex);
+		const auto                               iter = programs.find(key);
 		return iter != programs.end() ? &iter->second : nullptr;
 	}
 
@@ -2022,11 +2023,11 @@ struct PipelineCache::ProgramCache {
 	// treats it like any existing entry; its own translation result is simply discarded).
 	SourceEntry* InsertEntry(const ProgramKey& key, ShaderRecompiler::IR::ResourcePlan plan,
 	                         std::unique_ptr<ShaderRecompiler::ShaderSource> call_source) {
-		std::unique_lock lock(programs_mutex);
+		Common::ScalableSharedMutex::ExclusiveGuard lock(programs_mutex);
 		return &programs.try_emplace(key, std::move(plan), std::move(call_source)).first->second;
 	}
 
-	std::shared_mutex                                           programs_mutex;
+	Common::ScalableSharedMutex                                 programs_mutex;
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	// In-flight --async-pipelines program jobs, keyed by (program, specialization, push cursor).
 	InFlightRegistry<ProgramJobKey, ProgramJobKeyHash>          program_jobs;
@@ -2401,9 +2402,9 @@ void PipelineCache::ShutdownAsync() {
 }
 
 PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const GraphicsPipelineKey& key) {
-	std::shared_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	std::optional<Common::ScalableSharedMutex::SharedGuard> lock;
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
-		lock.lock();
+		lock.emplace(m_pipelines_mutex);
 	}
 	const auto iter = m_graphics_pipelines.find(key);
 	return iter != m_graphics_pipelines.end() ? iter->second.get() : nullptr;
@@ -2444,9 +2445,9 @@ PipelineCache::Pipeline* PipelineCache::FindGraphicsPipelineMemo(const GraphicsP
 }
 
 PipelineCache::Pipeline* PipelineCache::FindComputePipeline(uint64_t program_id) {
-	std::shared_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	std::optional<Common::ScalableSharedMutex::SharedGuard> lock;
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
-		lock.lock();
+		lock.emplace(m_pipelines_mutex);
 	}
 	const auto iter = m_compute_pipelines.find(program_id);
 	return iter != m_compute_pipelines.end() ? iter->second.get() : nullptr;
@@ -2455,9 +2456,9 @@ PipelineCache::Pipeline* PipelineCache::FindComputePipeline(uint64_t program_id)
 PipelineCache::Pipeline* PipelineCache::PublishGraphicsPipeline(const GraphicsPipelineKey& key,
                                                                 std::unique_ptr<Pipeline>& pipeline,
                                                                 bool& inserted) {
-	std::unique_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	std::optional<Common::ScalableSharedMutex::ExclusiveGuard> lock;
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
-		lock.lock();
+		lock.emplace(m_pipelines_mutex);
 	}
 	auto [iter, was_inserted] = m_graphics_pipelines.try_emplace(key, nullptr);
 	inserted                  = was_inserted;
@@ -2470,9 +2471,9 @@ PipelineCache::Pipeline* PipelineCache::PublishGraphicsPipeline(const GraphicsPi
 PipelineCache::Pipeline* PipelineCache::PublishComputePipeline(uint64_t program_id,
                                                                std::unique_ptr<Pipeline>& pipeline,
                                                                bool& inserted) {
-	std::unique_lock<std::shared_mutex> lock(m_pipelines_mutex, std::defer_lock);
+	std::optional<Common::ScalableSharedMutex::ExclusiveGuard> lock;
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
-		lock.lock();
+		lock.emplace(m_pipelines_mutex);
 	}
 	auto [iter, was_inserted] = m_compute_pipelines.try_emplace(program_id, nullptr);
 	inserted                  = was_inserted;

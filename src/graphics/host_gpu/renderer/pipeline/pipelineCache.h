@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/scalableSharedMutex.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
 #include "graphics/host_gpu/renderer/pipeline/variantStore.h"
 #include "graphics/host_gpu/renderer/pipeline/drawKeyMemo.h"
@@ -434,7 +435,7 @@ private:
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
-	std::shared_mutex                                       m_pipelines_mutex;
+	Common::ScalableSharedMutex                             m_pipelines_mutex;
 
 	// --draw-key-cache (GPU thread only): the last few graphics pipelines found, compared by key
 	// before the hash and map lookup. Pipeline nodes are never erased while the cache lives.
