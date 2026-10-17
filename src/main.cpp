@@ -84,6 +84,9 @@ static void PrintUsage() {
 	::printf("  --gpu-time-scale <0.1-16>            Multiply the GPU durations a game observes. Games with\n"
 	         "                                       dynamic resolution render lower above 1.0 and higher\n"
 	         "                                       below it. Default: 1.0.\n");
+	::printf("  --eop-labels-at-completion <on|off>  Make the data of an end-of-pipe packet visible to the game\n"
+	         "                                       when the GPU has finished the work before it (like the\n"
+	         "                                       interrupt), not when the packet is parsed. Default: on.\n");
 	::printf("  --fps-limit <0-1000>                 Present at most this many frames per second; 0 is off.\n"
 	         "                                       Capped by --vblank-frequency. Default: 0.\n");
 	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
@@ -849,6 +852,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--gpu-timestamps") {
 			if (!ParseGpuTimestampMode(value, options.config.gpu_timestamps)) {
 				::printf("invalid --gpu-timestamps (legacy or gpu): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--eop-labels-at-completion") {
+			if (!ParseBool(value, options.config.eop_labels_at_completion)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--gpu-time-scale") {

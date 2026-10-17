@@ -158,6 +158,14 @@ QList<Option> BuildTable() {
 	             [](const C& c) { return QVariant(c.gc_clock_frames ? QStringLiteral("frames")
 	                                                                 : QStringLiteral("runs")); },
 	             {"runs", "frames"}});
+	defs.append({"eop_labels_at_completion", "--eop-labels-at-completion", Tab::Gpu, "Submission",
+	             Kind::Bool, "Show end-of-pipe labels when the GPU has finished",
+	             "The data an end-of-pipe packet writes (the fences a game polls) becomes visible "
+	             "when the GPU has finished the work before it, like the interrupt of the same "
+	             "packet, not when the packet is parsed, which can be a few frames earlier. Keep it "
+	             "on: a game that takes a label as proof that a frame is done otherwise reuses "
+	             "state the GPU still needs.",
+	             EMU_BOOL(eop_labels_at_completion)});
 	defs.append({"elide_barriers", "--elide-barriers", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Elide redundant barriers",
 	             "Leaves out a guest cache-flush barrier when nothing was recorded since the "

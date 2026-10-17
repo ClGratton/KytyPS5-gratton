@@ -540,6 +540,10 @@ double GetGpuTimeScale() {
 	return std::clamp(g_config->gpu_time_scale, MIN_GPU_TIME_SCALE, MAX_GPU_TIME_SCALE);
 }
 
+bool EopLabelsAtCompletionEnabled() {
+	return g_config != nullptr && g_config->eop_labels_at_completion;
+}
+
 uint32_t GetFpsLimit() {
 	return std::min(g_config->fps_limit, MAX_FPS_LIMIT);
 }

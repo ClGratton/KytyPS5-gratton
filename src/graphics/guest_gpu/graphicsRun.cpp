@@ -1499,7 +1499,9 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 	auto write32 = [&](bool with_writeback) {
 		auto* dst  = static_cast<uint32_t*>(dst_gpu_addr);
 		auto  data = static_cast<uint32_t>(value);
-		StoreGuest(dst, &data, sizeof(data));
+		if (!Sync::PublishLabel(command, dst, data, sizeof(data))) {
+			StoreGuest(dst, &data, sizeof(data));
+		}
 
 		if (with_interrupt) {
 			if (with_writeback) {
@@ -1559,7 +1561,9 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 				}
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
-					StoreGuest(dst, &value, sizeof(value));
+					if (!Sync::PublishLabel(command, dst, value, sizeof(value), event_write_source == 0x04)) {
+						StoreGuest(dst, &value, sizeof(value));
+					}
 
 					if (with_interrupt) {
 						if (with_writeback) {

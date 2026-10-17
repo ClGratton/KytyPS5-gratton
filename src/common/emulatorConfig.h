@@ -106,6 +106,13 @@ struct ConfigOptions {
 	GpuTimestampMode       gpu_timestamps              = GpuTimestampMode::Gpu;
 	// Multiplier on the GPU durations a guest observes (1.0 = off); see --gpu-time-scale.
 	double                 gpu_time_scale              = 1.0;
+	// The data an end-of-pipe packet (release-mem / event-write-EOP label) writes becomes visible to the guest
+	// when the GPU has finished the work before it, in GPU order like the interrupt of the same packet, not
+	// when the command processor parses it. On hardware the label cannot be seen before the work is done;
+	// parsed early (the GPU thread runs up to a few frames ahead of the GPU) a title that takes a label as
+	// proof that a frame is finished reuses state the GPU still needs. GPU clock samples keep their own
+	// handling (--gpu-timestamps).
+	bool                   eop_labels_at_completion    = true;
 	// Presented frames per second cap (0 = off); see --fps-limit.
 	uint32_t               fps_limit                   = 0;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
@@ -495,6 +502,7 @@ bool     AmdCpuEnabled();
 uint32_t GetVblankFrequency();
 GpuTimestampMode GetGpuTimestampMode();
 double   GetGpuTimeScale();
+bool     EopLabelsAtCompletionEnabled();
 uint32_t GetFpsLimit();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();
