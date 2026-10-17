@@ -320,6 +320,58 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 	return true;
 }
 
+template <typename Handle>
+static uint64_t HandleKey(Handle handle) {
+	return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<typename Handle::NativeType>(handle)));
+}
+
+// What the dispatch about to be recorded reads and writes, for CommandBuffer::JoinDeferredBarrier
+// (--overlap-dispatches). Everything the shader can reach is named; what it reaches by address
+// (BDA) or through GDS is "all", so such a dispatch never overlaps a writer.
+static void CollectDispatchAccess(TextureCache& textures, const ShaderStageRuntime& stage,
+                                  const PreparedBindings& bindings, DispatchAccess& access) {
+	using Space = DispatchAccess::Space;
+	access.Clear();
+	const auto& program = *stage.program;
+	if (program.info.uses_dma) {
+		access.reads_all  = true;
+		access.writes_all = program.has_address_writes;
+	}
+	if (bindings.gds.buffer != nullptr) {
+		access.reads_all  = true;
+		access.writes_all = true;
+	}
+	for (const auto& resource: program.info.buffers) {
+		if (resource.descriptor_index == UINT32_MAX) {
+			continue;
+		}
+		if (resource.descriptor_index >= bindings.buffer_sources.size()) {
+			// Not resolved: unknown.
+			access.reads_all  = true;
+			access.writes_all = true;
+			continue;
+		}
+		const auto& source = bindings.buffer_sources[resource.descriptor_index];
+		access.Add(Space::Guest, 0, source.address, source.size, resource.written);
+	}
+	EXIT_IF(bindings.images.size() < program.info.images.size());
+	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+		const auto& resource = program.info.images[i];
+		const bool  write    = (resource.written || resource.atomic) &&
+		                   resource.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage;
+		const auto& image = textures.GetImage(bindings.images[i].image_id);
+		access.Add(Space::HostImage, HandleKey(image.backing.image), 0, 1, write);
+		// Another host image can alias the same guest memory; its guest range names it.
+		for (const auto range: {image.info.data, image.info.stencil, image.info.metadata.range}) {
+			access.Add(Space::Guest, 0, range.address, range.size, write);
+		}
+	}
+	if (bindings.shared_memory.buffer != nullptr) {
+		const auto& memory = bindings.shared_memory;
+		access.Add(Space::HostBuffer, HandleKey(memory.buffer), memory.offset, memory.range, true);
+	}
+}
+
 static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& input,
                              PreparedBindings& bindings, uint64_t indirect_args = 0) {
 	if (input.stage.program->bindings.descriptor_counts[
@@ -560,9 +612,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
 
-	auto              vk_buffer        = buffer.Handle();
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =
@@ -573,7 +622,23 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		                           ShaderRecompiler::IR::ImageResourceClass::Storage;
 	                }) ||
 	    has_storage_writes;
-	if (has_storage_writes) {
+	// --overlap-dispatches: join the group of dispatches still waiting for their barrier when this
+	// one conflicts with none of them. Anything else records the pending barrier first: Handle()
+	// does it for every command that is not a joining dispatch.
+	const bool overlap = Config::OverlapDispatchesEnabled();
+	CommandBuffer::DeferredJoin join {};
+	if (overlap) {
+		CollectDispatchAccess(m_context.GetTextureCache(), input_info.stage, bindings,
+		                      m_dispatch_access);
+		join = buffer.JoinDeferredBarrier(m_dispatch_access, has_storage_writes);
+	}
+
+	auto              vk_buffer        = buffer.Handle();
+	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+	               std::span {&descriptor_stage, 1u});
+	// A joined writer needs no barrier before it: the group's first dispatch recorded one that
+	// ordered everything recorded earlier before the whole group.
+	if (has_storage_writes && !join.joined) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
 		// while allowing the queue to execute asynchronously.
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -657,7 +722,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	if (overlap) {
+		buffer.DeferBarrier(m_dispatch_access, has_storage_writes);
+	} else {
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	}
 	if (uniform_fill) {
 		// After binding, which registered this dispatch's writes and forgot older fills.
 		m_context.GetBufferCache().RecordKnownFill(fill_descriptor.Base48(), fill_size, fill_value);

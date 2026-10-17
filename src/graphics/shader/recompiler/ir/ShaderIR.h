@@ -118,6 +118,12 @@ struct BufferResource {
 	bool                   read               = false;
 	bool                   written            = false;
 	bool                   atomic             = false;
+	bool                   stored             = false; // Plain (non-atomic) stores.
+	bool                   loaded             = false; // Plain (non-atomic) loads, scalar loads included.
+	// False if any atomic on the resource can make its result depend on the order of draws: an
+	// operation that is not commutative (swap, compare-swap) or one whose returned value is used.
+	// What --defer-draw-write-barriers needs to leave two draws' atomics on a range unordered.
+	bool                   ordered_atomic     = false;
 	bool                   formatted          = false;
 	bool                   scalar             = false;
 	uint32_t               indirect_root              = NoIndirectBuffer;
@@ -311,11 +317,14 @@ enum class DescriptorBindingKind : uint32_t {
 	FlattenedSrt,
 	ShaderData,
 	SharedMemory,
+	// The shader loop guard's own report buffer (common/loopGuard.h). Separate from Gds: a shader
+	// with only a guard has no GDS hazards, so it must not get the GDS barrier.
+	LoopGuard,
 	Count,
 };
 
 static_assert(static_cast<uint32_t>(DescriptorBindingKind::Samplers) == 49u);
-static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 56u);
+static_assert(static_cast<uint32_t>(DescriptorBindingKind::Count) == 57u);
 
 struct PushData {
 	static constexpr uint32_t DwordCount = 32;
@@ -478,12 +487,14 @@ struct ShaderInfo {
 	bool                            uses_swizzle                  = false;
 	bool                            uses_lds                      = false;
 	bool                            uses_gds                      = false;
+	bool                            uses_loop_guard               = false;
 	bool                            uses_flattened_srt            = false;
 	bool                            uses_dispatch_threads         = false;
 	bool                            bvh                           = false;
 	bool                            subgroup_ballot               = false;
 	bool                            subgroup_barrier              = false;
 	bool                            subgroup_shuffle              = false;
+	bool                            subgroup_arithmetic           = false;
 	bool                            subgroup_local_invocation_id  = false;
 	bool                            compute_derivatives           = false;
 	bool                            image_gather_extended         = false;

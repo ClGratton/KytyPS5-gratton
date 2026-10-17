@@ -46,6 +46,8 @@ confirms them (forks/decision.md).
 | `--pipeline-lookahead` | false (play: true) | as above; needs `--async-pipelines` stall or skip |
 | `--submit-coalesce`, `--gc-clock frames` | false, runs (play: true, frames) | K13+K43: submits per frame 360 to 47, fps +5.8 % |
 | `--elide-barriers`, `--known-fills`, `--clean-guest-reads` | false (play: true) | drain cuts K14/K22/K20: fps +6.2 % (3 vs 3) |
+| `--defer-draw-write-barriers` | false | keeps the render pass open after a draw whose shaders write buffers and records the barrier only when a later draw may touch the written bytes (guest-address ranges; any address-using shader, plain vs atomic mixes and order-dependent atomics keep it). Level frame GPU busy 35.8 -> 30.9 ms (in-run ABAB, paired -4.95 ms, 8 cycles, run twice), fps +1.9 % and +2.3 % (the frame is bound by the kyGpu thread, not the GPU), render passes 1004 -> 418 per frame |
+| `--overlap-dispatches` | false | independent consecutive dispatches run without a barrier between them (range sets of the bound buffers, deferred group barrier). GPU busy -0.4 ms per level frame (se 0.15), fps unchanged: not worth enabling today |
 | `--readback-queue`, `--bda-sync-skip`, `--pipelines-unoptimized-first`, `--skip-ir-validation` | false | no gain / under 1 % / no gain on NVIDIA / 0.6 s per run |
 | `--pipeline-workers`, `--pipeline-lookahead-kinds`, `--submit-coalesce-max/-us` | auto, all, 16, 0 | tuning knobs |
 | `--driver-cache-checkpoint <seconds>` | 0 (off: the driver pipeline cache is written only at exit) | durability, not speed: a background thread writes the cache every N s while pipelines are created, so a crash or hang keeps them. 9-42 ms per write (11-34 MB), no frame-time difference at 1 vs 1, fresh and warm cache (bench/RESULTS.md, K122) |
@@ -55,7 +57,7 @@ confirms them (forks/decision.md).
 | `--gc-texture-*-mb`, `--gc-buffer-*-mb` | 0 = derived from the device budget | tunable thresholds, never per-game |
 
 ## Debug and measurement (off)
-`--vulkan-validation`, `--shader-validation`, `--gpu-assisted-validation`, `--command-buffer-dump*`,
+`--vulkan-validation`, `--debug-sync-validation` (synchronization validation, hazards logged as `[Vulkan]` lines, never fatal), `--shader-validation`, `--gpu-assisted-validation`, `--command-buffer-dump*`,
 `--graphics-debug-dump`, `--printf-direction/-output-file`, `--shader-log-*`, `--spirv-debug-printf`,
 `--profile`, `--rd`, `--vram-stats`, `--mem-stats`, `--vram-audit`, `--vram-ballast-mb`,
 `--debug-hang-watchdog` (play config passes 15), `--debug-lookahead-verify`, `--gpu-phase-stats`,

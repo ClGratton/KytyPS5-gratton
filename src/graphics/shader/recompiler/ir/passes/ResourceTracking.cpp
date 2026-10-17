@@ -2161,10 +2161,11 @@ private:
 		}
 	}
 
-	uint32_t AddBuffer(uint32_t source, const MemoryInfo& memory, ValueOpcode op, uint32_t pc) {
+	uint32_t AddBuffer(uint32_t source, const MemoryInfo& memory, const Inst& inst, uint32_t pc) {
+		const auto op = inst.GetOpcode();
 		for (uint32_t i = 0; i < m_info.buffers.size(); i++) {
 			if (m_info.buffers[i].source == source) {
-				Merge(m_info.buffers[i], memory, op, pc);
+				Merge(m_info.buffers[i], memory, inst, pc);
 				return i;
 			}
 		}
@@ -2174,13 +2175,32 @@ private:
 		BufferResource resource;
 		resource.source       = source;
 		resource.first_use_pc = pc;
-		Merge(resource, memory, op, pc);
+		Merge(resource, memory, inst, pc);
 		m_info.buffers.push_back(resource);
 		return static_cast<uint32_t>(m_info.buffers.size() - 1);
 	}
 
-	static void Merge(BufferResource& resource, const MemoryInfo& memory, ValueOpcode op,
+	// Atomics whose final value does not depend on the order they are applied in.
+	static bool IsCommutativeAtomic(ValueOpcode op) {
+		switch (op) {
+			case ValueOpcode::BufferAtomicIAdd32:
+			case ValueOpcode::BufferAtomicISub32:
+			case ValueOpcode::BufferAtomicSMin32:
+			case ValueOpcode::BufferAtomicUMin32:
+			case ValueOpcode::BufferAtomicSMax32:
+			case ValueOpcode::BufferAtomicUMax32:
+			case ValueOpcode::BufferAtomicAnd32:
+			case ValueOpcode::BufferAtomicAnd64:
+			case ValueOpcode::BufferAtomicOr32:
+			case ValueOpcode::BufferAtomicOr64:
+			case ValueOpcode::BufferAtomicXor32: return true;
+			default: return false;
+		}
+	}
+
+	static void Merge(BufferResource& resource, const MemoryInfo& memory, const Inst& inst,
 	                  uint32_t pc) {
+		const auto op            = inst.GetOpcode();
 		const auto access        = BufferAccessOf(op);
 		const bool atomic        = access == BufferAccess::Atomic;
 		const bool write         = access == BufferAccess::Write || atomic;
@@ -2189,6 +2209,10 @@ private:
 		resource.read            = resource.read || !write || atomic;
 		resource.written         = resource.written || write;
 		resource.atomic          = resource.atomic || atomic;
+		resource.stored          = resource.stored || access == BufferAccess::Write;
+		resource.loaded          = resource.loaded || access == BufferAccess::Read;
+		resource.ordered_atomic  = resource.ordered_atomic ||
+		                           (atomic && (!IsCommutativeAtomic(op) || !inst.Uses().empty()));
 		resource.formatted       = resource.formatted || memory.formatted;
 		resource.scalar          = resource.scalar || op == ValueOpcode::ReadConstBuffer ||
 		                           memory.kind == ResourceKind::ScalarBuffer;
@@ -2359,7 +2383,7 @@ private:
 				m_info.uses_dma                         = true;
 				return;
 			}
-			resource = AddBuffer(source, memory, op, flags.pc);
+			resource = AddBuffer(source, memory, inst, flags.pc);
 			if (resource == UINT32_MAX) {
 				Fail(flags.pc, "buffer resource limit exceeded");
 			}

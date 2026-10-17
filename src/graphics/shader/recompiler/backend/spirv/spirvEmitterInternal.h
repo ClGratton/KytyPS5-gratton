@@ -120,6 +120,8 @@ struct EmitterState {
 	uint32_t                                         bvh_intersect_function  = 0;
 	uint32_t                                         gds_variable            = 0;
 	uint32_t                                         gds_length              = 0;
+	// --shader-loop-limit: the report buffer (one dword per shader slot, atomic max).
+	uint32_t                                         loop_guard_variable     = 0;
 	uint32_t                                         push_constant_variable  = 0;
 	uint32_t                                         shader_data_storage_variable = 0;
 	uint32_t                                         flattened_srt_variable  = 0;
@@ -154,6 +156,9 @@ struct EmitterState {
 	uint32_t                                         loop_budget_variable   = 0;
 	std::unordered_set<const IR::Block*>             loop_merges;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
+	// Only a wave64 program on a host subgroup that may be narrower (no split halves) reads it.
+	uint32_t                   subgroup_size_variable                = 0;
+	bool                       lane_fallback_logged                  = false;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
 	uint32_t                   clip_distance_variable                = 0;
@@ -417,6 +422,7 @@ uint32_t EmitInputComponentU32(EmitterState& state, IR::StageInputKind kind, uin
 uint32_t EmitLocalInvocationIndex(EmitterState& state);
 
 uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t ballot, uint32_t lane);
+uint32_t EmitSubgroupSize(EmitterState& state);
 
 uint32_t EmitSubgroupLaneActiveBool(EmitterState& state, uint32_t lane);
 

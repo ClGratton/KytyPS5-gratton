@@ -5,6 +5,8 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/guest_gpu/command_processor/shadowTypes.h"
+#include "graphics/host_gpu/renderer/dispatchHazard.h"
+#include "graphics/host_gpu/renderer/pendingWrites.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -123,7 +125,32 @@ public:
 	void SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0 = 0, uint32_t arg1 = 0,
 	                  uint32_t arg2 = 0, uint32_t arg3 = 0, uint64_t arg4 = 0);
 	void BeginRendering(const RenderState& state) const;
+	// Ends the rendering instance, then records the barrier of any deferred shader writes.
 	void EndRendering() const;
+	// --defer-draw-write-barriers: a draw whose shaders wrote buffers leaves the barrier that makes
+	// the writes visible pending while rendering continues (pendingWrites.h has the rule). Every
+	// command other than a draw ends rendering before it records, which records the barrier; a later
+	// draw that may touch the written bytes ends rendering first, and so does the end of the buffer.
+	void DeferShaderWriteBarrier(vk::PipelineStageFlags source_stages) const {
+		m_pending_shader_writes |= source_stages;
+	}
+	[[nodiscard]] bool HasPendingShaderWrites() const noexcept {
+		return static_cast<bool>(m_pending_shader_writes);
+	}
+
+	// --overlap-dispatches: a direct dispatch leaves its post-dispatch barrier pending instead of
+	// recording it (dispatchHazard.h has the rule). Handle() records it before any other command, so
+	// only a dispatch that JoinDeferredBarrier accepted is recorded without it. `access` is what the
+	// dispatch reads and writes, `writes` whether it writes, `full` whether the dispatch that starts
+	// a group recorded the all-commands -> compute barrier before itself (a later writer may only
+	// join such a group: that barrier ordered everything recorded earlier before the whole group).
+	struct DeferredJoin {
+		bool joined = false;
+	};
+	[[nodiscard]] DeferredJoin JoinDeferredBarrier(const DispatchAccess& access, bool writes) const;
+	void                       DeferBarrier(const DispatchAccess& access, bool full) const;
+	void                       FlushDeferredBarrier() const;
+	[[nodiscard]] bool         HasDeferredBarrier() const noexcept { return m_deferred_barrier; }
 
 	// Every access for recording counts as work (RecordedWork); sync code that only validates the
 	// buffer uses AssertRecording, which does not.
@@ -159,6 +186,12 @@ private:
 	uint64_t            m_debug_arg4      = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	mutable vk::PipelineStageFlags m_pending_shader_writes;
+	mutable bool           m_deferred_barrier    = false;
+	mutable bool           m_deferred_full       = false;
+	mutable bool           m_deferred_joining    = false;
+	mutable uint32_t       m_deferred_dispatches = 0;
+	mutable DispatchAccess m_deferred_access;
 	mutable uint64_t    m_recorded_work = 0; // Handle() calls; never reset
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
@@ -237,6 +270,15 @@ private:
 	void                         ResolvePendingMetaClears(CommandBuffer& buffer);
 	void TrackMetaFills(const ShaderComputeInputInfo& input, CommandBuffer& buffer);
 	std::unordered_set<uint64_t> m_pending_meta_fills;
+	// --defer-draw-write-barriers: whether this draw may touch bytes that earlier draws wrote while
+	// their barrier is pending (pendingWrites.h), and adding this draw's own writes.
+	[[nodiscard]] bool ReadsPendingWrites(std::span<PreparedBindings* const> stages,
+	                                      const DrawRenderState&       state,
+	                                      const DrawIndexBufferSource& index_source,
+	                                      const DrawCallInfo&          draw) const;
+	void RecordPendingWrites(std::span<PreparedBindings* const> stages);
+	PendingBufferWrites m_pending_writes;
+	DispatchAccess      m_dispatch_access; // scratch of DispatchDirect
 	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
 	                                                     const CommandBuffer&          buffer);
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,

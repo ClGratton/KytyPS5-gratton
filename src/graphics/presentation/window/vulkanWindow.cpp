@@ -850,7 +850,8 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
 			// Only validation errors are fatal; GENERAL-type errors can come
 			// from unrelated loader/layer issues (e.g. a broken overlay).
 			error = static_cast<bool>(message_types &
-			                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
+			                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation) &&
+			        !Config::SyncValidationEnabled();
 			break;
 		default: severity_str = "?";
 	}
@@ -935,7 +936,7 @@ void WindowContext::CreateVulkan() {
 		EXIT("--spirv-debug-printf and --gpu-assisted-validation are mutually exclusive\n");
 	}
 
-	vk::ValidationFeatureEnableEXT enabled_features[3]    = {};
+	vk::ValidationFeatureEnableEXT enabled_features[4]    = {};
 	uint32_t                       enabled_features_count = 0;
 #ifdef KYTY_ENABLE_BEST_PRACTICES
 	enabled_features[enabled_features_count++] = vk::ValidationFeatureEnableEXT::eBestPractices;
@@ -949,6 +950,14 @@ void WindowContext::CreateVulkan() {
 		enabled_features[enabled_features_count++] = vk::ValidationFeatureEnableEXT::eGpuAssisted;
 		LOGF("Vulkan GPU-assisted validation is enabled; expect a large slowdown\n");
 		std::printf("Vulkan GPU-assisted validation is enabled; expect a large slowdown\n");
+		std::fflush(stdout);
+	}
+
+	if (Config::SyncValidationEnabled()) {
+		enabled_features[enabled_features_count++] =
+		    vk::ValidationFeatureEnableEXT::eSynchronizationValidation;
+		LOGF("Vulkan synchronization validation is enabled; expect a large slowdown\n");
+		std::printf("Vulkan synchronization validation is enabled; expect a large slowdown\n");
 		std::fflush(stdout);
 	}
 

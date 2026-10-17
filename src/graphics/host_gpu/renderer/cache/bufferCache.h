@@ -60,7 +60,7 @@ public:
 	KYTY_CLASS_NO_COPY(BufferCache);
 
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
-	// Logs what the shader loop guards reported through the host tail of the GDS buffer.
+	// Logs what the shader loop guards reported into the loop guard buffer.
 	void                   PollLoopGuard();
 	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false,
 	                                  Common::GpuPhase::DrainCause cause =
@@ -84,6 +84,7 @@ public:
 	// load by address and that GPU passes write. Created on first use (4 MiB).
 	[[nodiscard]] StreamBuffer& GetDrawRecordBuffer();
 	[[nodiscard]] const Buffer* GetGdsBuffer() const noexcept { return &m_gds_buffer; }
+	[[nodiscard]] const Buffer* GetLoopGuardBuffer() const noexcept { return &m_loop_guard_buffer; }
 	// Both the first registration and the first consumer clear the table, so unowned entries read as zero.
 	[[nodiscard]] Buffer* GetBdaPageTableBuffer();
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
@@ -208,6 +209,7 @@ private:
 	CommandScheduler&                                 m_scheduler;
 	FaultManager                                      m_fault_manager;
 	Buffer                                            m_gds_buffer;
+	Buffer                                            m_loop_guard_buffer;
 	Buffer                                            m_bda_pagetable_buffer;
 	bool                                              m_bda_pagetable_initialized = false;
 	Common::SlotVector<Buffer>                        m_slot_buffers;

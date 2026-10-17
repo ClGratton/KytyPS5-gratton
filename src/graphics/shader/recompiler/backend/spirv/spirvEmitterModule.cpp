@@ -230,6 +230,7 @@ void DefineDescriptors(EmitterState& state) {
 	}
 	counts[static_cast<size_t>(Kind::Samplers)] = static_cast<uint32_t>(info.samplers.size());
 	counts[static_cast<size_t>(Kind::Gds)] = info.uses_gds;
+	counts[static_cast<size_t>(Kind::LoopGuard)] = info.uses_loop_guard;
 	counts[static_cast<size_t>(Kind::SharedMemory)] =
 	    info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer;
 	counts[static_cast<size_t>(Kind::BdaPagetable)] = info.uses_dma;
@@ -315,6 +316,10 @@ void DefineDescriptors(EmitterState& state) {
 				break;
 			case IR::DescriptorBindingKind::Gds:
 				state.gds_variable = Define(StorageBufferType(state, state.storage_buffers[2]), "gds");
+				break;
+			case IR::DescriptorBindingKind::LoopGuard:
+				state.loop_guard_variable =
+				    Define(StorageBufferType(state, state.storage_buffers[2]), "loop_guard");
 				break;
 			case IR::DescriptorBindingKind::SharedMemory:
 				state.lds_variable = Define(StorageBufferType(state, state.storage_buffers[2]), "lds_dwords");
@@ -578,6 +583,18 @@ void DefineInputs(EmitterState& state) {
 		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn,
 		                            spv::BuiltInHelperInvocation);
 	}
+	if (state.program.wave_size == 64u && state.lane_count == 1u && state.program.info.subgroup_shuffle) {
+		// A wave64 program without split halves on a 32-wide host subgroup names lanes the subgroup
+		// does not have (v_readlane_b32 s, v, 63): V_READLANE wraps them by this size.
+		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
+		                                              "gl_SubgroupSize");
+		state.subgroup_size_variable = variable;
+		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn,
+		                            spv::BuiltInSubgroupSize);
+		if (state.program.stage == ShaderType::Pixel) {
+			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationFlat);
+		}
+	}
 	if (state.program.info.subgroup_local_invocation_id) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
@@ -775,7 +792,7 @@ void DefineModule(EmitterState& state) {
 	}
 	if (state.lane_count == 2 || state.program.info.subgroup_barrier ||
 	    state.program.info.subgroup_ballot || state.program.info.subgroup_shuffle ||
-	    state.program.info.subgroup_local_invocation_id) {
+	    state.program.info.subgroup_arithmetic || state.program.info.subgroup_local_invocation_id) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
 	if (state.lane_count == 2 || state.program.info.subgroup_ballot) {
@@ -783,6 +800,9 @@ void DefineModule(EmitterState& state) {
 	}
 	if (state.program.info.subgroup_shuffle) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);
+	}
+	if (state.program.info.subgroup_arithmetic) {
+		state.builder.RequireCapability(spv::CapabilityGroupNonUniformArithmetic);
 	}
 	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute) {
 		state.builder.RequireCapability(spv::CapabilityComputeDerivativeGroupQuadsKHR);

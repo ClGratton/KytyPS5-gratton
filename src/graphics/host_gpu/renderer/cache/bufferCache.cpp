@@ -38,8 +38,11 @@ namespace Libs::Graphics {
 namespace {
 
 constexpr uint64_t MiB           = 1024 * 1024;
-// The guest sees 64 KiB; the host tail after it holds the shader loop guard reports (common/loopGuard.h).
-constexpr uint64_t GdsBufferSize = Common::LoopGuard::GuestGdsBytes + Common::LoopGuard::HostTailBytes;
+// The guest's GDS is 64 KiB, and the buffer is exactly that, so a guest access past it is out of
+// bounds for the shader too. The shader loop guard reports (common/loopGuard.h) go to a buffer of
+// their own (LoopGuardBufferSize): sharing GDS made every guarded shader a GDS user.
+constexpr uint64_t GdsBufferSize       = Common::LoopGuard::GuestGdsBytes;
+constexpr uint64_t LoopGuardBufferSize = Common::LoopGuard::BufferBytes;
 
 } // namespace
 
@@ -427,6 +430,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
       m_gds_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, GdsBufferSize),
+      m_loop_guard_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, LoopGuardBufferSize),
       m_bda_pagetable_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                              BDA_PAGETABLE_SIZE),
       m_memory_tracker(page_manager),
@@ -452,6 +456,9 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	}
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
+	std::memset(m_loop_guard_buffer.Mapped().data(), 0, static_cast<size_t>(m_loop_guard_buffer.Size()));
+	m_loop_guard_buffer.Flush(0, m_loop_guard_buffer.Size());
+	SetVulkanObjectNameF(m_graphics.device, m_loop_guard_buffer.Handle(), "Loop Guard Buffer");
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
 	                     "BDA Page Table Buffer");
 	const auto null_id =
@@ -1151,14 +1158,13 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 
 void BufferCache::PollLoopGuard() {
 	const auto limit = Config::GetShaderLoopLimit();
-	if (limit == 0 || m_gds_buffer.Mapped().empty()) {
+	if (limit == 0 || m_loop_guard_buffer.Mapped().empty()) {
 		return;
 	}
-	// Best effort, like Sync::ReadGds: the shaders write the tail with device atomics into this
+	// Best effort, like Sync::ReadGds: the shaders write the slots with device atomics into this
 	// mapped stream buffer while it is read.
 	std::array<uint32_t, Common::LoopGuard::Slots> tail {};
-	std::memcpy(tail.data(), m_gds_buffer.Mapped().data() + Common::LoopGuard::GuestGdsBytes,
-	            sizeof(tail));
+	std::memcpy(tail.data(), m_loop_guard_buffer.Mapped().data(), sizeof(tail));
 	for (const auto& line: Common::LoopGuard::GetMonitor().Observe(tail, limit)) {
 		LOGF("%s", line.c_str());
 		std::printf("%s", line.c_str());

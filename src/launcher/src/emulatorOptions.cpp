@@ -157,6 +157,18 @@ QList<Option> BuildTable() {
 	             "Leaves out a guest cache-flush barrier when nothing was recorded since the "
 	             "previous one in the same command buffer (about half of them in the measurements).",
 	             EMU_BOOL(elide_barriers)});
+	defs.append({"defer_draw_write_barriers", "--defer-draw-write-barriers", Tab::Gpu,
+	             "Barriers and readbacks", Kind::Bool, "Defer draw write barriers",
+	             "A draw whose shaders write buffers (feedback, counters, atomic maxima) no longer "
+	             "ends the render pass and records a barrier after itself; the barrier waits until a "
+	             "later draw may read the written bytes or any other command is recorded.",
+	             EMU_BOOL(defer_draw_write_barriers)});
+	defs.append({"overlap_dispatches", "--overlap-dispatches", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Bool, "Overlap independent dispatches",
+	             "Consecutive compute dispatches whose bound resources do not conflict run without a "
+	             "barrier between them, as on the console; the barrier is recorded once, before the "
+	             "next other command.",
+	             EMU_BOOL(overlap_dispatches)});
 	defs.append({"known_fills", "--known-fills", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
 	             "Remember GPU fills",
 	             "Remembers ranges last written by a uniform GPU fill so clear discovery needs no "

@@ -2054,6 +2054,8 @@ void TestDenseBufferTracking() {
             resource.formatted && resource.max_byte_extent == 16 &&
             resource.first_use_pc == 4,
         "buffer access facts were not merged");
+  Check(resource.loaded && resource.stored && !resource.ordered_atomic,
+        "plain load/store facts, or an unused commutative atomic's order, were not merged");
   Check(first.Instruction()->Flags<uint32_t>() == 0 &&
             second.Instruction()->Flags<uint32_t>() == 1,
         "typed handles were not assigned dense indices");
@@ -2064,6 +2066,54 @@ void TestDenseBufferTracking() {
 
   CheckFatal([&] { fixture.PlanAndTrack(); }, "already tracked",
              "resource tracking allowed a second mutation pass");
+}
+
+// What --defer-draw-write-barriers needs to know about a buffer: whether it is touched only by
+// atomics whose order does not matter (commutative, result unused), plain loads and stores apart.
+void TestBufferAtomicOrderFacts() {
+  const auto run = [](ValueOpcode op, bool use_result, bool plain_load) {
+    Fixture fixture;
+    std::array<Value, 8> userdata;
+    for (uint32_t index = 0; index < userdata.size(); index++) {
+      userdata[index] = fixture.UserData(index);
+    }
+    const auto buffer =
+        fixture.Buffer({userdata[0], userdata[1], userdata[2], userdata[3]}, 4);
+    const auto other =
+        fixture.Buffer({userdata[4], userdata[5], userdata[6], userdata[7]}, 40);
+    MemoryInfo info;
+    info.kind = ResourceKind::Buffer;
+    const auto flags = fixture.AddMemory(info, 4);
+    const auto old = fixture.Emit(
+        op, {buffer, Value(0u), Value(0u), Value(1u), Value(0u), Value(true)}, flags);
+    if (use_result) {
+      // A live use: dead code does not count. The result goes to another buffer.
+      fixture.Emit(ValueOpcode::StoreBufferU32,
+                   {other, Value(0u), Value(0u), Value(0u), old, Value(true)},
+                   fixture.AddMemory(info, 44));
+    }
+    if (plain_load) {
+      const auto load_flags = fixture.AddMemory(info, 4);
+      fixture.Emit(ValueOpcode::LoadBufferU32,
+                   {buffer, Value(0u), Value(0u), Value(0u), Value(true)}, load_flags);
+    }
+    fixture.PlanAndTrack();
+    Check(fixture.program.info.buffers.size() == (use_result ? 2u : 1u), "buffer count");
+    return fixture.program.info.buffers[0];
+  };
+  const auto fire_and_forget = run(ValueOpcode::BufferAtomicUMax32, false, false);
+  Check(fire_and_forget.atomic && fire_and_forget.written && !fire_and_forget.stored &&
+            !fire_and_forget.loaded && !fire_and_forget.ordered_atomic,
+        "an unused atomic umax is not order-free");
+  const auto add = run(ValueOpcode::BufferAtomicIAdd32, false, false);
+  Check(!add.ordered_atomic, "an unused atomic add is not order-free");
+  const auto swap = run(ValueOpcode::BufferAtomicSwap32, false, false);
+  Check(swap.atomic && swap.ordered_atomic, "an atomic swap is order-free");
+  const auto returning = run(ValueOpcode::BufferAtomicIAdd32, true, false);
+  Check(returning.ordered_atomic, "an atomic whose result is used is order-free");
+  const auto mixed = run(ValueOpcode::BufferAtomicUMax32, false, true);
+  Check(mixed.atomic && mixed.loaded && !mixed.stored,
+        "a plain load next to an atomic was not recorded");
 }
 
 void TestScalarAndVectorBufferAlias() {
@@ -3765,7 +3815,8 @@ void TestImageBindingAbi() {
             static_cast<uint32_t>(DescriptorBindingKind::FlattenedSrt) == 53u &&
             static_cast<uint32_t>(DescriptorBindingKind::ShaderData) == 54u &&
             static_cast<uint32_t>(DescriptorBindingKind::SharedMemory) == 55u &&
-            static_cast<uint32_t>(DescriptorBindingKind::Count) == 56u,
+            static_cast<uint32_t>(DescriptorBindingKind::LoopGuard) == 56u &&
+            static_cast<uint32_t>(DescriptorBindingKind::Count) == 57u,
         "native descriptor binding anchors changed");
 
   const std::array sampled_dimensions{
@@ -3987,6 +4038,7 @@ int main() {
       }
     };
     Run("dense buffers", TestDenseBufferTracking);
+    Run("buffer atomic order facts", TestBufferAtomicOrderFacts);
     Run("compute buffer fill", TestComputeBufferFill);
     Run("uniform stores", TestUniformStores);
     Run("uniform copy", TestUniformCopy);

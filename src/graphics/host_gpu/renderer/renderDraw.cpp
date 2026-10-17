@@ -1287,6 +1287,67 @@ static void LogMeshDispatchSliced(const vk::PhysicalDeviceMeshShaderPropertiesEX
 	}
 }
 
+// Whether a draw may touch buffer bytes that earlier draws wrote while their barrier is still
+// pending (pendingWrites.h): any buffer binding, vertex, index or argument range overlapping them,
+// or a shader that reads or writes through addresses (unknown ranges). Two accesses that are only
+// order-free atomics need no barrier.
+bool RenderExecutor::ReadsPendingWrites(std::span<PreparedBindings* const> stages,
+                                        const DrawRenderState&             state,
+                                        const DrawIndexBufferSource&       index_source,
+                                        const DrawCallInfo&                draw) const {
+	for (const auto* stage: stages) {
+		const auto& program = *stage->runtime->program;
+		if (program.info.uses_dma) {
+			return true;
+		}
+		for (const auto& resource: program.info.buffers) {
+			if (resource.descriptor_index == UINT32_MAX ||
+			    resource.descriptor_index >= stage->buffer_sources.size()) {
+				continue;
+			}
+			const auto& source = stage->buffer_sources[resource.descriptor_index];
+			const bool  order_free =
+			    resource.atomic && !resource.stored && !resource.loaded && !resource.ordered_atomic;
+			if (source.address != 0 && source.size != 0 &&
+			    m_pending_writes.Conflicts(source.address, source.size, order_free)) {
+				return true;
+			}
+		}
+	}
+	for (uint32_t stage = 0; stage < state.programs.VertexStageCount(); stage++) {
+		const auto& vertex_input = state.vertex_info[stage];
+		for (int i = 0; i < vertex_input.buffers_num; i++) {
+			const auto& vertex = vertex_input.buffers[i];
+			if (vertex.addr != 0 &&
+			    m_pending_writes.Conflicts(vertex.addr, VertexBufferDescriptorSize(i, vertex_input),
+			                               false)) {
+				return true;
+			}
+		}
+	}
+	return (index_source.address != 0 &&
+	        m_pending_writes.Conflicts(index_source.address, index_source.size, false)) ||
+	       (draw.indirect_args != 0 &&
+	        m_pending_writes.Conflicts(draw.indirect_args, MeshIndirectArgs::ArgumentsSize, false));
+}
+
+// Adds the buffer ranges this draw's shaders write to the pending writes.
+void RenderExecutor::RecordPendingWrites(std::span<PreparedBindings* const> stages) {
+	for (const auto* stage: stages) {
+		const auto& program = *stage->runtime->program;
+		for (const auto& resource: program.info.buffers) {
+			if (!resource.written || resource.descriptor_index == UINT32_MAX ||
+			    resource.descriptor_index >= stage->buffer_sources.size()) {
+				continue;
+			}
+			const auto& source = stage->buffer_sources[resource.descriptor_index];
+			m_pending_writes.Add(source.address, source.size,
+			                     resource.atomic && !resource.stored && !resource.loaded &&
+			                         !resource.ordered_atomic);
+		}
+	}
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -1521,6 +1582,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	}
 
+	// --defer-draw-write-barriers: earlier draws' buffer writes may still wait for their barrier
+	// (CommandBuffer::DeferShaderWriteBarrier). When this draw may touch them, it ends rendering
+	// first, which records the barrier. Resource preparation can restart the scheduler, which
+	// records and clears the barrier, so the set is only trusted while the buffer still has one.
+	if (!buffer.HasPendingShaderWrites()) {
+		m_pending_writes.Clear();
+	} else if (ReadsPendingWrites(stages, state, index_source, draw)) {
+		m_context.GetCommandScheduler().EndRendering();
+		m_pending_writes.Clear();
+	}
+
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
@@ -1684,8 +1756,21 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		shader_write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
 	}
 	if (shader_write_stages) {
-		m_context.GetCommandScheduler().EndRendering();
-		ShaderWriteBarrier(vk_buffer, shader_write_stages);
+		if (Config::DeferDrawWriteBarriers()) {
+			// Games write per-draw feedback (atomic maxima, counters) from thousands of draws a
+			// frame. The guest orders such writes only through its own sync packets, so the barrier
+			// waits until something may read them instead of cutting the render pass after every
+			// draw (ReadsPendingWrites above; every other command ends rendering first).
+			buffer.DeferShaderWriteBarrier(shader_write_stages);
+			RecordPendingWrites(stages);
+			if (m_pending_writes.Full()) {
+				m_context.GetCommandScheduler().EndRendering();
+				m_pending_writes.Clear();
+			}
+		} else {
+			m_context.GetCommandScheduler().EndRendering();
+			ShaderWriteBarrier(vk_buffer, shader_write_stages);
+		}
 	}
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {

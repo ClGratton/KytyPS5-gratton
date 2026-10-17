@@ -90,6 +90,9 @@ static void PrintUsage() {
 	::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
 	::printf("  --gpu-assisted-validation <t|f>      Bounds-check shader accesses on the GPU.\n"
 	         "                                       Implies --vulkan-validation; very slow.\n");
+	::printf("  --debug-sync-validation <t|f>        Synchronization validation (needs the Khronos layer):\n"
+	         "                                       barrier hazards are logged as [Vulkan] lines and are\n"
+	         "                                       not fatal. Implies --vulkan-validation; very slow.\n");
 	::printf("  --shader-validation <true|false>     Enable shader validation.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --shader-optimization-type <value>   None, Size, or Performance.\n");
@@ -176,7 +179,9 @@ static void PrintUsage() {
 	         "                                       frame; buffered, flushed at exit. Default: off.\n");
 	::printf("  --toggle-control <path>              Poll this file (name=value lines) and flip the runtime-\n"
 	         "                                       safe performance flags it names (submit-coalesce,\n"
-	         "                                       elide-barriers, bda-sync-skip, clean-guest-reads,\n"
+	         "                                       elide-barriers, defer-draw-write-barriers,\n"
+	         "                                       overlap-dispatches,\n"
+	         "                                       bda-sync-skip, clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue,\n"
 	         "                                       heap-trim) at the next presented frame; applied changes\n"
@@ -250,6 +255,17 @@ static void PrintUsage() {
 	::printf("  --elide-barriers <true|false>        Leave out a guest cache-flush/partial-flush global memory\n"
 	         "                                       barrier when nothing was recorded since the previous\n"
 	         "                                       one in the same command buffer. Default: false.\n");
+	::printf("  --defer-draw-write-barriers <true|false>  A draw whose shaders write buffers (per-draw\n"
+	         "                                       feedback, counters, atomic maxima) leaves the barrier\n"
+	         "                                       that makes the writes visible pending, and keeps the\n"
+	         "                                       render pass open, until a later draw may read the\n"
+	         "                                       written bytes or any other command is recorded.\n"
+	         "                                       Default: false.\n");
+	::printf("  --overlap-dispatches <true|false>    Direct compute dispatches whose bound buffers, images and\n"
+	         "                                       memory do not conflict with those of the dispatches before\n"
+	         "                                       them run without a barrier in between; the barrier is\n"
+	         "                                       recorded once, before the next other command.\n"
+	         "                                       Default: false.\n");
 	::printf("  --known-fills <true|false>           Remember ranges last written by one GPU uniform fill so\n"
 	         "                                       color-metadata clear discovery needs no GPU->CPU\n"
 	         "                                       readback for them. Default: false.\n");
@@ -728,6 +744,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--debug-sync-validation") {
+			if (!ParseBool(value, options.config.debug_sync_validation_enabled)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
 		} else if (arg == "--shader-validation") {
 			if (!ParseBool(value, options.config.shader_validation_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
@@ -956,6 +977,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--elide-barriers") {
 			if (!ParseBool(value, options.config.elide_barriers)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--defer-draw-write-barriers") {
+			if (!ParseBool(value, options.config.defer_draw_write_barriers)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--overlap-dispatches") {
+			if (!ParseBool(value, options.config.overlap_dispatches)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
@@ -1219,7 +1250,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		}
 	}
 
-	if (options.config.gpu_assisted_validation_enabled) {
+	if (options.config.gpu_assisted_validation_enabled || options.config.debug_sync_validation_enabled) {
 		options.config.vulkan_validation_enabled = true;
 	}
 

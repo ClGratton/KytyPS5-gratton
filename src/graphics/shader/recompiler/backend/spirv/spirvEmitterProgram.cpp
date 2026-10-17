@@ -86,11 +86,11 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 }
 
 // Loop guard report (see common/loopGuard.h): an invocation that used a large share of its budget
-// records how much into this shader's slot of the GDS host tail (atomic max), so the host can log
+// records how much into this shader's slot of the loop guard buffer (atomic max), so the host can log
 // the high-water mark and, loudly, a trip. Emitted at every return; a return has no successors, so
 // the extra blocks need no phi patching.
 void EmitLoopGuardReport(EmitterState& state) {
-	if (state.loop_budget_variable == 0 || state.gds_variable == 0) {
+	if (state.loop_budget_variable == 0 || state.loop_guard_variable == 0) {
 		return;
 	}
 	auto&      builder = state.builder;
@@ -110,9 +110,8 @@ void EmitLoopGuardReport(EmitterState& state) {
 	const auto slot_pointer = builder.AllocateId();
 	builder.AddFunction(spv::OpAccessChain,
 	                    TypePointer(state, spv::StorageClassStorageBuffer, TypeU32(state)),
-	                    slot_pointer, state.gds_variable, ConstantU32(state, 0),
-	                    ConstantU32(state, Common::LoopGuard::FirstDword +
-	                                           Common::LoopGuard::SlotFor(state.program.shader_hash)));
+	                    slot_pointer, state.loop_guard_variable, ConstantU32(state, 0),
+	                    ConstantU32(state, Common::LoopGuard::SlotFor(state.program.shader_hash)));
 	const auto old = builder.AllocateId();
 	builder.AddFunction(spv::OpAtomicUMax, TypeU32(state), old, slot_pointer,
 	                    ConstantU32(state, spv::ScopeDevice),
@@ -317,8 +316,9 @@ void Invoke(Return (*emit)(Context&, Args...), ValueEmitContext& ctx, const IR::
 
 void EmitDirectInstruction(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (ctx.half != 0 && (inst.GetOpcode() == IR::ValueOpcode::Ballot ||
-	                     inst.GetOpcode() == IR::ValueOpcode::ReadFirstLane)) {
-		// Both operations already combine both emulated halves into one whole-wave result.
+	                     inst.GetOpcode() == IR::ValueOpcode::ReadFirstLane ||
+	                     inst.GetOpcode() == IR::ValueOpcode::SubgroupReduceU32)) {
+		// These operations combine both emulated halves into one whole-wave result.
 		ctx.Define(inst, ctx.other_half->Result(inst));
 		return;
 	}
@@ -587,30 +587,40 @@ uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	return ballot;
 }
 
+// The lane a wave-wide read takes its value from.
+//
+// v_readfirstlane_b32 writes its scalar destination whatever EXEC is, and RDNA 2 names lane 0 when
+// no lane is active. Neither operation underneath says that: OpGroupNonUniformBallotFindLSB is
+// undefined on an empty ballot, and GLSL.std.450 FindILsb answers -1, which the `+ 32` below turns
+// into lane 31. Name lane 0 for the empty ballot instead of inheriting either answer.
 uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
+	const auto low  = state.builder.AllocateId();
+	const auto high = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, ballot, 0);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, ballot, 1);
+	// A subgroup here is never wider than 64 lanes, so those two words hold every lane.
+	const auto any_active =
+	    Binary(state, spv::OpINotEqual, TypeBool(state),
+	           Binary(state, spv::OpBitwiseOr, TypeU32(state), low, high), ConstantU32(state, 0));
 	if (other_half == nullptr) {
-		const auto result = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result,
+		const auto found = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), found,
 		                          ConstantU32(state, spv::ScopeSubgroup), ballot);
-		return result;
+		return Select(state, TypeU32(state), any_active, found, ConstantU32(state, 0));
 	}
-	const auto low        = state.builder.AllocateId();
-	const auto high       = state.builder.AllocateId();
 	const auto low_first  = state.builder.AllocateId();
 	const auto high_first = state.builder.AllocateId();
 	const auto low_active = state.builder.AllocateId();
-	const auto result     = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, ballot, 0);
-	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, ballot, 1);
 	state.builder.AddFunction(spv::OpExtInst, TypeU32(state), low_first, GlslStd450(state),
 	                          GLSLstd450FindILsb, low);
 	state.builder.AddFunction(spv::OpExtInst, TypeU32(state), high_first, GlslStd450(state),
 	                          GLSLstd450FindILsb, high);
 	state.builder.AddFunction(spv::OpINotEqual, TypeBool(state), low_active, low,
 	                          ConstantU32(state, 0));
-	state.builder.AddFunction(spv::OpSelect, TypeU32(state), result, low_active, low_first,
-	                          EmitAddU32(state, high_first, ConstantU32(state, 32)));
-	return result;
+	const auto upper =
+	    Select(state, TypeU32(state), any_active,
+	           EmitAddU32(state, high_first, ConstantU32(state, 32)), ConstantU32(state, 0));
+	return Select(state, TypeU32(state), low_active, low_first, upper);
 }
 
 uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t lane) {
@@ -711,7 +721,7 @@ void EmitProgram(EmitterState& state) {
 		state.builder.AddName(state.pixel_valid_mask_variable, "pixel_valid_mask_active");
 	}
 	state.loop_merges.clear();
-	if (state.loop_limit != 0 && state.gds_variable != 0 && ProgramHasGuardableLoop(program)) {
+	if (state.loop_limit != 0 && state.loop_guard_variable != 0 && ProgramHasGuardableLoop(program)) {
 		state.loop_budget_variable = state.builder.AllocateId();
 		state.builder.AddName(state.loop_budget_variable, "loop_budget");
 	}

@@ -20,8 +20,7 @@ void Check(bool value, const char* message) {
 constexpr uint32_t Limit = 100000;
 
 void TestSlots() {
-	static_assert(FirstDword * sizeof(uint32_t) == GuestGdsBytes);
-	static_assert(HostTailBytes == Slots * sizeof(uint32_t));
+	static_assert(BufferBytes == Slots * sizeof(uint32_t));
 	Check(SlotFor(0x0123456789abcdefull) < Slots, "slot in range");
 	Check(SlotFor(1) != SlotFor(2) || SlotFor(2) != SlotFor(3), "slots spread");
 	Check(ReportThreshold(1u << 20) == 16384u, "threshold is a 64th of the limit");
