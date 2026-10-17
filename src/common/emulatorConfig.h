@@ -272,7 +272,7 @@ struct ConfigOptions {
 	// (host_gpu/bdaDirtyLog.h). Exact: the pass it replaces finds nothing else. Default off.
 	bool                   bda_dirty_log               = false;
 	// --lazy-op-poll: the per-draw poll for finished deferred operations queries the GPU timeline at
-	// most every 100 us (commandScheduler.h). Default off.
+	// most every 100 us and never waits for the priority-operations thread (commandScheduler.h). Default off.
 	bool                   lazy_op_poll                = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).

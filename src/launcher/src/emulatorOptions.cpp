@@ -232,8 +232,10 @@ QList<Option> BuildTable() {
 	             "Ask the GPU timeline less often between draws",
 	             "Before each draw the GPU thread checks whether deferred operations (resource "
 	             "releases, readback publication) have finished, which costs a driver call while "
-	             "any are in flight. With this it asks at most every 100 microseconds; the "
-	             "operations run a few draws later. Exact; lowers the GPU thread's CPU time per draw.",
+	             "any are in flight, and waits for the priority-operations thread when an "
+	             "earlier guest-memory completion has not run. With this it asks at most every 100 "
+	             "microseconds and never waits; the operations run a few draws later. Exact; "
+	             "lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(lazy_op_poll)});
 	defs.append({"bda_dirty_log", "--bda-dirty-log", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Synchronize only the buffers whose memory changed",

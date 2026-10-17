@@ -291,6 +291,12 @@ void CommandScheduler::PopPendingOperations() {
 					m_last_poll_ns = now;
 				}
 			} else {
+				// The per-draw form does not block on the priority thread: an operation that has to
+				// run after an earlier guest-memory completion stays queued and is looked at again by
+				// the next draw (the draw that waited here stalled 2 ms per frame in the level).
+				if (m_lazy_poll && PriorityOperationsBeforeUnlocked(tick)) {
+					return;
+				}
 				operation = std::move(m_pending_operations.front());
 				m_pending_operations.pop();
 				m_pending_count.fetch_sub(1, std::memory_order_release);

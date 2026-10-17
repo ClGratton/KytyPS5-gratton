@@ -255,8 +255,9 @@ static void PrintUsage() {
 	         "                                       since the last full pass. Default: false.\n");
 	::printf("  --lazy-op-poll <true|false>          The per-draw check for finished deferred operations asks\n"
 	         "                                       the GPU timeline at most every 100 microseconds instead\n"
-	         "                                       of at every draw (operations run a few draws later;\n"
-	         "                                       exact). Default: false.\n");
+	         "                                       of at every draw, and leaves an operation queued instead\n"
+	         "                                       of waiting for the priority-operations thread (operations\n"
+	         "                                       run a few draws later; exact). Default: false.\n");
 	::printf("  --bda-dirty-log <true|false>         Before draws that address memory through raw pointers,\n"
 	         "                                       synchronize only the buffers that overlap a range that\n"
 	         "                                       became CPU-modified or got a buffer since the last\n"
