@@ -311,6 +311,10 @@ struct ConfigOptions {
 	// --push-descriptor-delta: a graphics draw pushes only the descriptor bindings whose content differs from what the pushed
 	// set already holds (graphics/host_gpu/renderer/pipeline/pushDescriptorCache.h). Default off.
 	bool                   push_descriptor_delta       = false;
+	// --small-copy-dedup: a small CPU-written constant range whose bytes equal an earlier copy of the same guest range in the
+	// same scheduler tick is not copied into the stream ring again; the earlier ring offset is used
+	// (graphics/host_gpu/renderer/cache/smallCopyDedup.h). Default off.
+	bool                   small_copy_dedup            = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -512,6 +516,7 @@ bool              AsyncUploadCopiesEnabled();
 bool              SubmitThreadEnabled();
 bool              TextureLockBatchEnabled();
 bool              PushDescriptorDeltaEnabled();
+bool              SmallCopyDedupEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();

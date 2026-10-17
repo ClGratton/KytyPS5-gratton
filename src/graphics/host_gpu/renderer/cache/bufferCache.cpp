@@ -1497,10 +1497,31 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	if (!is_written && size <= CACHING_PAGESIZE && !dirty.gpu && dirty.cpu) {
 		const auto alignment = std::max<uint64_t>(
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
+		// --small-copy-dedup: the same guest range copied earlier in this tick and ring lap with equal bytes is already in
+		// the ring (the dedup compares every byte; its kept bytes are what the ring was written from).
+		const bool dedup = Config::SmallCopyDedupEnabled();
+		const auto tick  = m_scheduler.CurrentTick();
+		const auto lap   = m_stream_buffer.Lap();
+		if (dedup) {
+			if (const auto kept = m_small_copy_dedup.Find(vaddr, reinterpret_cast<const void*>(vaddr),
+			                                              static_cast<uint32_t>(size), tick, lap)) {
+				m_obtain_stats.small_copy_reuse++;
+				m_obtain_stats.small_copy_reuse_bytes += size;
+				return {&m_stream_buffer, *kept};
+			}
+		}
 		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 		if (mapped != nullptr) {
-			std::memcpy(mapped, reinterpret_cast<const void*>(vaddr), size);
-			m_stream_buffer.Commit();
+			if (dedup) {
+				const auto* source = m_small_copy_dedup.Stage(vaddr, reinterpret_cast<const void*>(vaddr),
+				                                              static_cast<uint32_t>(size));
+				std::memcpy(mapped, source, size);
+				m_stream_buffer.Commit();
+				m_small_copy_dedup.Commit(vaddr, static_cast<uint32_t>(size), offset, tick, m_stream_buffer.Lap());
+			} else {
+				std::memcpy(mapped, reinterpret_cast<const void*>(vaddr), size);
+				m_stream_buffer.Commit();
+			}
 			m_obtain_stats.small_copies++;
 			return {&m_stream_buffer, offset};
 		}
@@ -1715,8 +1736,9 @@ void BufferCache::LogRingStatsPeriodic() {
 	    stats.bytes >> 20, stats.wraps, stats.waits, static_cast<double>(stats.wait_ns) / 1e6));
 	const auto& o = m_obtain_stats;
 	Log::WriteToConsoleAndLog(fmt::format(
-	    "[obtain-buffer] total: calls={} memo_hits={} stored={} small_copies={} written={} texel={}\n", o.calls,
-	    o.memo_hits, o.stored, o.small_copies, o.written, o.texel));
+	    "[obtain-buffer] total: calls={} memo_hits={} stored={} small_copies={} written={} texel={} small_copy_reuse={} ({} MiB)\n",
+	    o.calls, o.memo_hits, o.stored, o.small_copies, o.written, o.texel, o.small_copy_reuse,
+	    o.small_copy_reuse_bytes >> 20));
 	const auto mapping = LibKernel::Memory::GetMappingMemoStats();
 	Log::WriteToConsoleAndLog(fmt::format("[mapping-memo] gpu thread: hits={} misses={}\n", mapping.hits,
 	                                      mapping.misses));

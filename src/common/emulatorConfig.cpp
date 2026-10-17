@@ -101,6 +101,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("texture-lock-batch", &g_config->texture_lock_batch, false);
 	// Read per draw; with the flag off the held content is dropped, so a toggle needs no cleanup.
 	registry.Register("push-descriptor-delta", &g_config->push_descriptor_delta, false);
+	// Read per small copy; a kept copy is only answered from while it is in the same tick and ring lap, so a toggle needs no cleanup.
+	registry.Register("small-copy-dedup", &g_config->small_copy_dedup, false);
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
@@ -199,6 +201,10 @@ bool AsyncUploadCopiesEnabled() {
 
 bool PushDescriptorDeltaEnabled() {
 	return Common::RuntimeToggles::Read(g_config->push_descriptor_delta);
+}
+
+bool SmallCopyDedupEnabled() {
+	return Common::RuntimeToggles::Read(g_config->small_copy_dedup);
 }
 
 bool TextureLockBatchEnabled() {

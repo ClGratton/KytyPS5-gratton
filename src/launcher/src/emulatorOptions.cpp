@@ -265,6 +265,13 @@ QList<Option> BuildTable() {
 	             "same as in the draw before and the driver keeps them. With this only the ones that changed "
 	             "are sent, which is cheaper for the driver. Exact; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(push_descriptor_delta)});
+	defs.append({"small_copy_dedup", "--small-copy-dedup", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Do not copy the same small constant data twice in a row",
+	             "Shaders read small blocks of constants the game wrote. Each draw copies them into a ring the "
+	             "GPU reads from, and most of the time the block is byte for byte what the draw before copied. "
+	             "With this the earlier copy is used again, after comparing every byte. Exact; lowers the GPU "
+	             "thread's CPU time and the data sent to the GPU.",
+	             EMU_BOOL(small_copy_dedup)});
 	defs.append({"texture_lock_batch", "--texture-lock-batch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the texture cache lock once per run of image lookups",
 	             "Every image a draw uses is looked up under a short lock, taken and released for each one. "

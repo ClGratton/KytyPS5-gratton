@@ -697,6 +697,11 @@ add_executable(push_descriptor_cache_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(push_descriptor_cache_tests PRIVATE ${inc_headers})
 
+add_executable(small_copy_dedup_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/SmallCopyDedupTests.cpp"
+)
+target_include_directories(small_copy_dedup_tests PRIVATE ${inc_headers})
+
 add_executable(adaptive_lock_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AdaptiveLockTests.cpp"
 )
@@ -1095,6 +1100,7 @@ if(BUILD_TESTING)
 	add_test(NAME scalable_shared_mutex COMMAND $<TARGET_FILE:scalable_shared_mutex_tests>)
 	add_test(NAME finished_prefix COMMAND $<TARGET_FILE:finished_prefix_tests>)
 	add_test(NAME push_descriptor_cache COMMAND $<TARGET_FILE:push_descriptor_cache_tests>)
+	add_test(NAME small_copy_dedup COMMAND $<TARGET_FILE:small_copy_dedup_tests>)
 	add_test(NAME hardware_context_epoch COMMAND $<TARGET_FILE:hardware_context_epoch_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
@@ -1331,6 +1337,7 @@ if(BUILD_TESTING)
 		scalable_shared_mutex_tests
 		finished_prefix_tests
 		push_descriptor_cache_tests
+		small_copy_dedup_tests
 		hardware_context_epoch_tests
 		sys_file_read_tests
 		hle_trace_tests

@@ -187,7 +187,7 @@ static void PrintUsage() {
          "                                       submit-thread,\n"
 	         "                                       cp-direct-stores, draw-state-memo,\n"
 	         "                                       async-upload-copies, texture-lock-batch,\n"
-	         "                                       push-descriptor-delta,\n"
+	         "                                       push-descriptor-delta, small-copy-dedup,\n"
 	         "                                       image-presence, image-pool,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
@@ -278,6 +278,10 @@ static void PrintUsage() {
 	::printf("  --push-descriptor-delta <true|false> A graphics draw pushes only the descriptor bindings whose\n"
 	         "                                       content differs from what the pushed set already holds\n"
 	         "                                       (exact). Default: false.\n");
+	::printf("  --small-copy-dedup <true|false>      A small CPU-written constant range whose bytes equal an earlier\n"
+	         "                                       copy of the same range in the same submission is not copied\n"
+	         "                                       into the stream ring again (exact: bytes are compared).\n"
+	         "                                       Default: false.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"
 	         "                                       (exact). Default: false.\n");
@@ -1091,6 +1095,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--push-descriptor-delta") {
 			if (!ParseBool(value, options.config.push_descriptor_delta)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--small-copy-dedup") {
+			if (!ParseBool(value, options.config.small_copy_dedup)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

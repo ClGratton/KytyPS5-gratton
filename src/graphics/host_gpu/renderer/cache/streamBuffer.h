@@ -120,6 +120,8 @@ public:
 		uint64_t bytes   = 0; // bytes reserved
 	};
 	[[nodiscard]] RingStats GetRingStats() const noexcept { return m_ring_stats; }
+	// The lap of the ring (the number of wraps so far): an offset handed out in an earlier lap may have been overwritten.
+	[[nodiscard]] uint64_t Lap() const noexcept { return m_ring_stats.wraps; }
 
 private:
 	friend struct StreamBufferTestAccess;

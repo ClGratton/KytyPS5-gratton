@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/renderer/cache/knownFills.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/readbackFuture.h"
+#include "graphics/host_gpu/renderer/cache/smallCopyDedup.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <atomic>
@@ -81,6 +82,7 @@ public:
 	// rest. Kept by the GPU thread; read for the exit summary.
 	struct ObtainStats {
 		uint64_t calls = 0, memo_hits = 0, small_copies = 0, written = 0, texel = 0, stored = 0;
+		uint64_t small_copy_reuse = 0, small_copy_reuse_bytes = 0; // --small-copy-dedup: answered by an earlier copy
 	};
 	[[nodiscard]] const ObtainStats& GetObtainStats() const noexcept { return m_obtain_stats; }
 	[[nodiscard]] StreamBuffer&                GetUtilityBuffer(MemoryUsage usage) noexcept {
@@ -321,6 +323,8 @@ private:
 	static constexpr size_t kObtainMemoSlots = 512;
 	std::array<ObtainMemo, kObtainMemoSlots> m_obtain_memo {};
 	ObtainStats                              m_obtain_stats {};
+	// --small-copy-dedup: the bytes and ring offsets of this tick's small constant copies.
+	SmallCopyDedup                           m_small_copy_dedup;
 	std::vector<std::pair<uint64_t, uint64_t>>* m_upload_capture = nullptr;
 	// Cumulative garbage-collection counters (GPU thread only), logged under memory pressure.
 	struct GcStats {
