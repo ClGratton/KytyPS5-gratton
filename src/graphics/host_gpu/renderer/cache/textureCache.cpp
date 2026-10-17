@@ -261,6 +261,8 @@ void TextureCache::RegisterImage(ImageId id) {
 	ForEachPage(image.info.data.address, image.info.data.size, [this, id](uint64_t page) {
 		m_image_page_table[page].push_back(id);
 	});
+	// Before the image can be tracked (write-protected): a fault on one of its pages finds the count.
+	m_image_presence.Add(image.info.data.address, image.info.data.size);
 	image.registered = true;
 	++m_image_set_generation;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
@@ -283,6 +285,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 			EXIT("TextureCache: image missing from page owner index\n");
 		}
 	});
+	m_image_presence.Remove(image.info.data.address, image.info.data.size);
 	m_lru_cache.Free(image.lru_id);
 	const auto accounted = image.AccountedSize();
 	if (accounted > m_total_used_memory) {
@@ -1880,6 +1883,16 @@ void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 	if (!GuestRange {address, size}.Valid()) {
 		EXIT("TextureCache: invalid memory-invalidation range\n");
 	}
+	// --image-presence: a write to pages no image covers needs nothing from the cache.
+	if (Config::ImagePresenceEnabled() && !m_image_presence.Any(address, size)) {
+		if (Config::ResolvedDrawVerify()) {
+			std::scoped_lock lock {m_lock};
+			if (!FindImagesInRegion(address, size, true).empty()) {
+				EXIT("image presence: no image on 0x%016" PRIx64 "+0x%" PRIx64 " but the page table has one\n", address, size);
+			}
+		}
+		return;
+	}
 	std::scoped_lock lock {m_lock};
 	InvalidateCpuAliases(address, size);
 }
@@ -2058,6 +2071,16 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 }
 
 bool TextureCache::HasGpuModifiedImage(uint64_t address, uint64_t size) {
+	// --image-presence: no image covers these pages, so none is GPU-modified (no lock, no page-table walk).
+	if (Config::ImagePresenceEnabled() && !m_image_presence.Any(address, size)) {
+		if (Config::ResolvedDrawVerify() && !m_lock.HeldByCurrentThread()) {
+			std::scoped_lock lock {m_lock};
+			if (!FindImagesInRegion(address, size, true).empty()) {
+				EXIT("image presence: no image on 0x%016" PRIx64 "+0x%" PRIx64 " but the page table has one\n", address, size);
+			}
+		}
+		return false;
+	}
 	if (m_lock.HeldByCurrentThread()) {
 		return true;
 	}

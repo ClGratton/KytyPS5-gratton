@@ -680,6 +680,12 @@ target_include_directories(bda_sync_gate_tests PRIVATE ${inc_headers})
 find_package(Threads REQUIRED)
 target_link_libraries(bda_sync_gate_tests Threads::Threads)
 
+add_executable(page_presence_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PagePresenceTests.cpp"
+)
+target_include_directories(page_presence_tests PRIVATE ${inc_headers})
+target_link_libraries(page_presence_tests Threads::Threads)
+
 add_executable(remembered_mapping_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/RememberedMappingTests.cpp"
 )
@@ -1047,6 +1053,7 @@ if(BUILD_TESTING)
 	add_test(NAME pipeline_cache_file COMMAND $<TARGET_FILE:pipeline_cache_file_tests>)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME remembered_mapping COMMAND $<TARGET_FILE:remembered_mapping_tests>)
+	add_test(NAME page_presence COMMAND $<TARGET_FILE:page_presence_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_fallback_disabled PROPERTIES
@@ -1275,6 +1282,7 @@ if(BUILD_TESTING)
 		pipeline_cache_file_tests
 		bda_sync_gate_tests
 		remembered_mapping_tests
+		page_presence_tests
 		sys_file_read_tests
 		hle_trace_tests
 		async_pipeline_tests

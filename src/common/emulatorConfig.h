@@ -283,6 +283,9 @@ struct ConfigOptions {
 	// --plan-prefetch: kyGpu prefetches every cache line of the next SRT plan's blocks while it uses the current
 	// one (srtPlan.cpp). Default off.
 	bool                   plan_prefetch               = false;
+	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
+	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
+	bool                   image_presence              = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -472,6 +475,7 @@ bool              LazyOpPollEnabled();
 bool              BackingReadCacheEnabled();
 bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
+bool              ImagePresenceEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

@@ -231,6 +231,14 @@ QList<Option> BuildTable() {
 	             "pointers while no page changed since the last full pass. Under 1% in the "
 	             "measurements.",
 	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"image_presence", "--image-presence", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Skip the texture cache lock for memory no image covers",
+	             "Reading shader metadata and vertex tables, and every guest write fault on a "
+	             "streaming buffer, used to take the texture cache lock and walk its page table to "
+	             "find that no image is there. With this the cache keeps a count of images per page "
+	             "and answers that without the lock. Exact; lowers CPU time on the GPU thread and "
+	             "on game threads.",
+	             EMU_BOOL(image_presence)});
 	defs.append({"plan_prefetch", "--plan-prefetch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Prefetch the next draw's precomputed data",
 	             "The pipeline lookahead builds each draw's plan on another core out of many small "
