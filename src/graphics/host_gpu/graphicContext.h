@@ -160,6 +160,11 @@ struct GraphicContext {
 	// Diagnostics (--vram-stats): driver objects that live in VRAM outside VMA.
 	std::atomic<uint32_t> dedicated_images {0};
 	std::atomic<uint32_t> host_fallback_images {0};
+	// Image allocation churn (vma.cpp CreateImage / DeleteImage), for the periodic memory log.
+	struct ImageChurn {
+		std::atomic<uint64_t> creates {0}, create_bytes {0}, create_ns {0}, dedicated_creates {0};
+		std::atomic<uint64_t> deletes {0}, delete_ns {0};
+	} image_churn;
 	std::atomic<uint32_t> pipelines_graphics {0};
 	std::atomic<uint32_t> pipelines_compute {0};
 	std::array<std::atomic<int64_t>, static_cast<size_t>(VramClass::Count)> vram_bytes {};

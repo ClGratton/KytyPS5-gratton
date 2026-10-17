@@ -346,6 +346,12 @@ void RenderContext::LogFaultStatsPeriodic() {
 	    "run-ahead events={} pages={}\n",
 	    m_fault_writes.load(), static_cast<double>(m_fault_write_ns.load()) / 1e6, m_fault_gpu_thread.load(),
 	    m_fault_reads.load(), g_fault_run_events.load(), g_fault_run_pages.load()));
+	const auto& churn = m_graphics.image_churn;
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[images] created={} ({} dedicated, {:.1f} MiB, {:.1f} ms) deleted={} ({:.1f} ms)\n", churn.creates.load(),
+	    churn.dedicated_creates.load(), static_cast<double>(churn.create_bytes.load()) / 1048576.0,
+	    static_cast<double>(churn.create_ns.load()) / 1e6, churn.deletes.load(),
+	    static_cast<double>(churn.delete_ns.load()) / 1e6));
 }
 
 void RenderContext::RunGarbageCollector() {

@@ -192,6 +192,21 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
 	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkAlloc);
 	KYTY_PROFILER_FUNCTION();
+	const auto churn_start = std::chrono::steady_clock::now();
+	struct ChurnNote {
+		GraphicContext& graphics;
+		VulkanImage&    image;
+		std::chrono::steady_clock::time_point start;
+		~ChurnNote() {
+			auto& c = graphics.image_churn;
+			c.creates.fetch_add(1, std::memory_order_relaxed);
+			c.create_bytes.fetch_add(image.alloc_size, std::memory_order_relaxed);
+			c.dedicated_creates.fetch_add(image.dedicated ? 1 : 0, std::memory_order_relaxed);
+			c.create_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                          std::chrono::steady_clock::now() - start).count()),
+			                      std::memory_order_relaxed);
+		}
+	} churn_note {*this, image, churn_start};
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
 
 	// Classification for priorities and --vram-stats. Block-compressed images are textures.
@@ -319,6 +334,7 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image == nullptr || image.allocation == nullptr);
 
+	const auto delete_start = std::chrono::steady_clock::now();
 	AccountVram(image.vram_class, -static_cast<int64_t>(image.alloc_size));
 	if (image.dedicated) {
 		dedicated_images.fetch_sub(1, std::memory_order_relaxed);
@@ -328,6 +344,10 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	image.image      = nullptr;
 	image.allocation = nullptr;
 	image.alloc_size = 0;
+	image_churn.deletes.fetch_add(1, std::memory_order_relaxed);
+	image_churn.delete_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                    std::chrono::steady_clock::now() - delete_start).count()),
+	                                std::memory_order_relaxed);
 }
 
 void GraphicContext::AccountVram(VramClass vram_class, int64_t delta) noexcept {
