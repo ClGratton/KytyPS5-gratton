@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/cache/uploadCopier.h"
 
+#include "common/profiler.h"
+
 #include "kernel/memory.h"
 
 #include <cstring>
@@ -53,6 +55,7 @@ void UploadCopier::Submit(const Item* items, size_t count) {
 }
 
 void UploadCopier::Run() {
+	KYTY_PROFILER_THREAD("kyUpload"); // not the creator's name: the bench reads the GPU thread's CPU by name
 	for (;;) {
 		Item item;
 		bool got = false;
