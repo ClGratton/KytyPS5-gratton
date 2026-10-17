@@ -68,7 +68,8 @@ public:
 				size_t extra_bytes = 0;
 				if (run_ahead && bytes <= TRACKER_PAGE_SIZE) {
 					const size_t page = offset / TRACKER_PAGE_SIZE;
-					const size_t extra = manager->FaultRunAhead(page);
+					static thread_local RegionManager::FaultStream stream;
+					const size_t extra = manager->FaultRunAhead(page, stream);
 					extra_bytes        = extra * TRACKER_PAGE_SIZE;
 					if (extra != 0) {
 						g_fault_run_events.fetch_add(1, std::memory_order_relaxed);

@@ -108,25 +108,32 @@ public:
 	[[nodiscard]] uint32_t Epoch() const { return m_epoch.load(std::memory_order_acquire); }
 	// Write-fault run-ahead (--write-fault-around). A guest thread that writes a buffer sequentially faults
 	// once per page: the handler unprotects the page, the next upload protects it again, and the write
-	// pointer moves on to the next protected page. When the faulting page continues where the previous
-	// fault's run ended, the pages after it that are still clean on both sides are marked CPU-dirty with it
-	// (one change, one unprotect), doubling the run each time up to kMaxFaultRun. A page marked dirty without a
-	// write only costs one redundant upload; a page an image also watches stays protected (the page manager
-	// counts watchers), so the image still sees the real write. Returns the number of pages after `page` to
-	// add. The lock is held.
+	// pointer moves on to the next protected page. A fault on the page where the SAME THREAD's previous
+	// fault run ended continues a sequential stream (measured: 54 % of the faults are +1 page from the same
+	// thread's previous fault, 7 % from the previous fault in the region, because several threads write one
+	// region): the pages after it that are still clean on both sides are marked CPU-dirty with it (one change,
+	// one unprotect), doubling the run each time up to kMaxFaultRun. A page marked dirty without a write only
+	// costs one redundant upload; a page an image also watches stays protected (the page manager counts
+	// watchers), so the image still sees the real write. Returns the number of pages after `page` to add.
+	// The lock is held; `stream` is the calling thread's.
 	static constexpr size_t kMaxFaultRun = 64;
-	[[nodiscard]] size_t FaultRunAhead(size_t page) {
-		const bool sequential = m_fault_next != 0 && page == m_fault_next;
-		m_fault_run           = sequential ? (m_fault_run == 0 ? 2 : std::min(m_fault_run * 2, kMaxFaultRun)) : 0;
-		size_t extra          = 0;
-		if (m_fault_run != 0) {
-			const size_t limit = std::min(page + 1 + m_fault_run, TRACKER_REGION_PAGES);
+	struct FaultStream {
+		uint64_t next_address = 0; // where the previous fault's run ended
+		size_t   run          = 0;
+	};
+	[[nodiscard]] size_t FaultRunAhead(size_t page, FaultStream& stream) {
+		const uint64_t address    = m_cpu_addr + page * TRACKER_PAGE_SIZE;
+		const bool     sequential = stream.next_address != 0 && address == stream.next_address;
+		stream.run = sequential ? (stream.run == 0 ? 2 : std::min(stream.run * 2, kMaxFaultRun)) : 0;
+		size_t extra = 0;
+		if (stream.run != 0) {
+			const size_t limit = std::min(page + 1 + stream.run, TRACKER_REGION_PAGES);
 			const auto   cpu   = m_cpu_dirty.FirstRangeFrom(page + 1).first;
 			const auto   gpu   = m_gpu_dirty.FirstRangeFrom(page + 1).first;
 			const size_t stop  = std::min({limit, static_cast<size_t>(cpu), static_cast<size_t>(gpu)});
 			extra              = stop > page + 1 ? stop - (page + 1) : 0;
 		}
-		m_fault_next = page + 1 + extra;
+		stream.next_address = address + (1 + extra) * TRACKER_PAGE_SIZE;
 		return extra;
 	}
 
@@ -236,8 +243,6 @@ private:
 
 	PageManager& m_page_manager;
 	uint64_t     m_cpu_addr = 0;
-	size_t       m_fault_next = 0; // FaultRunAhead: where the run of the previous write fault ended
-	size_t       m_fault_run  = 0; // FaultRunAhead: pages added to the previous fault
 	std::atomic<uint32_t> m_epoch {0};
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
