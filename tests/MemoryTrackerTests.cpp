@@ -886,7 +886,7 @@ void TestWriteFaultRunAhead() {
 
 void TestReentrantLock() {
   // The owning thread may take the lock again; only the outermost pair holds it against another thread.
-  ReentrantTrackingLock lock;
+  Libs::Graphics::ReentrantTrackingLock lock;
   Check(!lock.HeldByCurrentThread(), "reentrant lock: not held at the start");
   lock.lock();
   lock.lock();
