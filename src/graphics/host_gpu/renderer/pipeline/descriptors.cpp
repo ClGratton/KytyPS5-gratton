@@ -44,6 +44,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <limits>
@@ -1245,6 +1246,32 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	}
 }
 
+// The words a pushed write is compared by (--push-descriptor-delta): the type and count, then the handles and ranges of each
+// descriptor. False for a write that carries neither buffer nor image infos.
+static bool PushWriteContent(const vk::WriteDescriptorSet& write, std::vector<uint64_t>& out) {
+	out.clear();
+	out.push_back((static_cast<uint64_t>(write.descriptorType) << 32u) | write.descriptorCount);
+	if (write.pBufferInfo != nullptr) {
+		for (uint32_t i = 0; i < write.descriptorCount; i++) {
+			const auto& info = write.pBufferInfo[i];
+			out.push_back(std::bit_cast<uint64_t>(info.buffer));
+			out.push_back(info.offset);
+			out.push_back(info.range);
+		}
+		return true;
+	}
+	if (write.pImageInfo != nullptr) {
+		for (uint32_t i = 0; i < write.descriptorCount; i++) {
+			const auto& info = write.pImageInfo[i];
+			out.push_back(std::bit_cast<uint64_t>(info.sampler));
+			out.push_back(std::bit_cast<uint64_t>(info.imageView));
+			out.push_back(static_cast<uint64_t>(info.imageLayout));
+		}
+		return true;
+	}
+	return false;
+}
+
 void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     vk::PipelineBindPoint              pipeline_bind_point,
                                     const PipelineCache::Pipeline&     pipeline,
@@ -1626,14 +1653,49 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		                        push_data.dwords.data());
 	}
 
-	if (!m_descriptor_writes.empty()) {
+	const bool graphics_bind = pipeline_bind_point == vk::PipelineBindPoint::eGraphics;
+	auto&      push_cache    = m_context.GetCommandScheduler().GetPushDescriptorCache();
+	if (m_descriptor_writes.empty()) {
+		// Binding this pipeline may disturb the pushed set (its layout is not known to match).
+		if (graphics_bind) push_cache.Invalidate();
+	} else {
 		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
-			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,
-			                               static_cast<uint32_t>(m_descriptor_writes.size()),
-			                               m_descriptor_writes.data());
+			const vk::WriteDescriptorSet* writes = m_descriptor_writes.data();
+			uint32_t                      count  = static_cast<uint32_t>(m_descriptor_writes.size());
+			if (graphics_bind && Config::PushDescriptorDeltaEnabled()) {
+				// The pushed set keeps the bindings a push does not write (until it is disturbed): leave out
+				// those whose content is what it holds.
+				push_cache.Begin(std::bit_cast<uint64_t>(pipeline.pipeline_layout));
+				m_push_writes.clear();
+				for (const auto& write: m_descriptor_writes) {
+					if (!PushWriteContent(write, m_push_content)) {
+						push_cache.Forget(write.dstBinding);
+						m_push_writes.push_back(write);
+					} else if (push_cache.Changed(write.dstBinding, m_push_content)) {
+						m_push_writes.push_back(write);
+					}
+				}
+				writes = m_push_writes.data();
+				count  = static_cast<uint32_t>(m_push_writes.size());
+				if (count == 0) push_cache.NoteElided();
+				static const bool stats = std::getenv("KYTY_DRAW_STATE_STATS") != nullptr;
+				if (stats && (push_cache.GetStats().pushes & 0x3ffff) == 0) {
+					const auto& s = push_cache.GetStats();
+					std::printf("[push-descriptor-delta] pushes=%lu elided=%.1f%% writes_pushed=%.1f%% of %lu disturbed=%lu\n",
+					            (unsigned long)s.pushes, 100.0 * s.pushes_elided / s.pushes,
+					            100.0 * s.writes_pushed / (s.writes_seen ? s.writes_seen : 1),
+					            (unsigned long)s.writes_seen, (unsigned long)s.disturbed);
+				}
+			} else if (graphics_bind) {
+				push_cache.Invalidate();
+			}
+			if (count != 0) {
+				vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0, count, writes);
+			}
 		} else {
+			if (graphics_bind) push_cache.Invalidate(); // a bound set replaces the pushed one
 			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
 			for (auto& write: m_descriptor_writes) {
 				write.dstSet = set;

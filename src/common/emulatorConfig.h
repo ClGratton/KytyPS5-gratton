@@ -299,6 +299,9 @@ struct ConfigOptions {
 	// --texture-lock-batch: the GPU thread takes the texture cache lock once around a draw's runs of lookups instead of once
 	// per lookup (graphics/host_gpu/renderer/cache/textureCache.h LockBatch). Default off.
 	bool                   texture_lock_batch          = false;
+	// --push-descriptor-delta: a graphics draw pushes only the descriptor bindings whose content differs from what the pushed
+	// set already holds (graphics/host_gpu/renderer/pipeline/pushDescriptorCache.h). Default off.
+	bool                   push_descriptor_delta       = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -498,6 +501,7 @@ bool              CpDirectStoresEnabled();
 bool              DrawStateMemoEnabled();
 bool              AsyncUploadCopiesEnabled();
 bool              TextureLockBatchEnabled();
+bool              PushDescriptorDeltaEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();

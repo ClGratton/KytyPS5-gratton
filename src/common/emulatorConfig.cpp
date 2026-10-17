@@ -92,6 +92,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("async-upload-copies", &g_config->async_upload_copies, false);
 	// Read at each batch scope; a scope that opened under the flag closes under it whatever the flag says now.
 	registry.Register("texture-lock-batch", &g_config->texture_lock_batch, false);
+	// Read per draw; with the flag off the held content is dropped, so a toggle needs no cleanup.
+	registry.Register("push-descriptor-delta", &g_config->push_descriptor_delta, false);
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
@@ -182,6 +184,10 @@ bool PlanPrefetchEnabled() {
 
 bool AsyncUploadCopiesEnabled() {
 	return Common::RuntimeToggles::Read(g_config->async_upload_copies);
+}
+
+bool PushDescriptorDeltaEnabled() {
+	return Common::RuntimeToggles::Read(g_config->push_descriptor_delta);
 }
 
 bool TextureLockBatchEnabled() {

@@ -186,6 +186,7 @@ static void PrintUsage() {
 	         "                                       tracker-sleeping-locks,\n"
 	         "                                       cp-direct-stores, draw-state-memo,\n"
 	         "                                       async-upload-copies, texture-lock-batch,\n"
+	         "                                       push-descriptor-delta,\n"
 	         "                                       image-presence, image-pool,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
@@ -273,6 +274,9 @@ static void PrintUsage() {
 	         "                                       upload ring runs on two helper threads instead of the GPU\n"
 	         "                                       thread; the ring is complete before the next submit.\n"
 	         "                                       Default: false.\n");
+	::printf("  --push-descriptor-delta <true|false> A graphics draw pushes only the descriptor bindings whose\n"
+	         "                                       content differs from what the pushed set already holds\n"
+	         "                                       (exact). Default: false.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"
 	         "                                       (exact). Default: false.\n");
@@ -1075,6 +1079,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--async-upload-copies") {
 			if (!ParseBool(value, options.config.async_upload_copies)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--push-descriptor-delta") {
+			if (!ParseBool(value, options.config.push_descriptor_delta)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

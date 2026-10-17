@@ -259,6 +259,12 @@ QList<Option> BuildTable() {
 	             "With this two helper threads do the copy while the GPU thread goes on, and the staging area "
 	             "is complete before the work is handed to the GPU. Exact; lowers the GPU thread's CPU time.",
 	             EMU_BOOL(async_upload_copies)});
+	defs.append({"push_descriptor_delta", "--push-descriptor-delta", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Hand the driver only the shader bindings that changed since the last draw",
+	             "Each draw tells the graphics driver all the resources its shaders use. Most of them are the "
+	             "same as in the draw before and the driver keeps them. With this only the ones that changed "
+	             "are sent, which is cheaper for the driver. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(push_descriptor_delta)});
 	defs.append({"texture_lock_batch", "--texture-lock-batch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the texture cache lock once per run of image lookups",
 	             "Every image a draw uses is looked up under a short lock, taken and released for each one. "
