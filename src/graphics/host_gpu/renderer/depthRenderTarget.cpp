@@ -1,6 +1,8 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
+#include "common/gpuPhaseStats.h"
 #include "common/common.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -14,11 +16,13 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/resolvedDrawStats.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -355,11 +359,107 @@ bool DescribeRenderDepthTarget(GraphicContext& graphics, const HW::Context& hw,
 	return true;
 }
 
+// ---- resolved draw: memo of DescribeRenderDepthTarget -------------------------------------------------
+//
+// A pure function of the depth registers, the render/depth/stencil controls and the two clear values
+// (and the graphics context, which does not change). kyGpu keeps the last result and compares the
+// inputs field by field; a match returns the stored description, a miss computes and stores it.
+// Only the callers that start from an empty RenderDepthInfo use it (the stored result then equals
+// what the function would have written into one).
+namespace {
+struct DepthDescribeMemo {
+	bool                valid = false;
+	HW::DepthRenderTarget z;
+	HW::RenderControl     rc;
+	HW::DepthControl      dc;
+	HW::StencilControl    sc;
+	HW::StencilMask       sm;
+	float                 depth_clear   = 0.0f;
+	uint8_t               stencil_clear = 0;
+	bool                  ok            = false;
+	RenderDepthInfo       result;
+};
+
+bool SameDepthDescription(const RenderDepthInfo& a, const RenderDepthInfo& b) {
+	const auto& x = a.desc.info;
+	const auto& y = b.desc.info;
+	const auto  same_stencil = [](const vk::StencilOpState& l, const vk::StencilOpState& r) {
+		return l.failOp == r.failOp && l.passOp == r.passOp && l.depthFailOp == r.depthFailOp &&
+		       l.compareOp == r.compareOp && l.compareMask == r.compareMask &&
+		       l.writeMask == r.writeMask && l.reference == r.reference;
+	};
+	bool same = a.desc.type == b.desc.type && a.desc.view_info == b.desc.view_info && x.data == y.data &&
+	            x.stencil == y.stencil && x.extent == y.extent && x.resources == y.resources &&
+	            x.pixel_format == y.pixel_format && x.guest_format == y.guest_format &&
+	            x.bytes_per_block == y.bytes_per_block && x.samples == y.samples &&
+	            x.tile_mode == y.tile_mode && x.type == y.type && x.pitch == y.pitch &&
+	            x.metadata.range == y.metadata.range && x.metadata.kind == y.metadata.kind &&
+	            a.depth_clear_enable == b.depth_clear_enable &&
+	            a.depth_load_clear_enable == b.depth_load_clear_enable &&
+	            std::bit_cast<uint32_t>(a.depth_clear_value) == std::bit_cast<uint32_t>(b.depth_clear_value) &&
+	            a.depth_test_enable == b.depth_test_enable && a.depth_write_enable == b.depth_write_enable &&
+	            a.depth_compare_op == b.depth_compare_op &&
+	            a.depth_bounds_test_enable == b.depth_bounds_test_enable &&
+	            a.stencil_clear_enable == b.stencil_clear_enable &&
+	            a.stencil_clear_value == b.stencil_clear_value && a.stencil_test_enable == b.stencil_test_enable &&
+	            same_stencil(a.stencil_front, b.stencil_front) && same_stencil(a.stencil_back, b.stencil_back);
+	for (uint32_t level = 0; same && level < x.resources.levels && level < x.mip_layout.size(); ++level) {
+		same = x.mip_layout[level] == y.mip_layout[level];
+	}
+	return same;
+}
+} // namespace
+
+static bool DescribeDepthTargetMemoized(GraphicContext& graphics, const HW::Context& hw, RenderDepthInfo& r) {
+	if (!Config::ResolvedDrawEnabled()) {
+		return DescribeRenderDepthTarget(graphics, hw, r);
+	}
+	static thread_local DepthDescribeMemo memo;
+	auto& stats = ResolvedDraw::GetStats().depth_target;
+	if (memo.valid && memo.z == hw.GetDepthRenderTarget() && memo.rc == hw.GetRenderControl() &&
+	    memo.dc == hw.GetDepthControl() && memo.sc == hw.GetStencilControl() && memo.sm == hw.GetStencilMask() &&
+	    std::bit_cast<uint32_t>(memo.depth_clear) == std::bit_cast<uint32_t>(hw.GetDepthClearValue()) &&
+	    memo.stencil_clear == hw.GetStencilClearValue()) {
+		stats.Used();
+		if (memo.ok) {
+			r = memo.result;
+		}
+		if (Config::ResolvedDrawVerify()) {
+			RenderDepthInfo fresh;
+			const bool      fresh_ok = DescribeRenderDepthTarget(graphics, hw, fresh);
+			if (fresh_ok != memo.ok || (fresh_ok && !SameDepthDescription(fresh, memo.result))) {
+				EXIT("resolved draw: the memoized depth-target description differs from a fresh one\n");
+			}
+			stats.Verified();
+		}
+		return memo.ok;
+	}
+	stats.Fallback();
+	RenderDepthInfo fresh;
+	const bool      ok = DescribeRenderDepthTarget(graphics, hw, fresh);
+	memo.valid         = true;
+	memo.z             = hw.GetDepthRenderTarget();
+	memo.rc            = hw.GetRenderControl();
+	memo.dc            = hw.GetDepthControl();
+	memo.sc            = hw.GetStencilControl();
+	memo.sm            = hw.GetStencilMask();
+	memo.depth_clear   = hw.GetDepthClearValue();
+	memo.stencil_clear = hw.GetStencilClearValue();
+	memo.ok            = ok;
+	if (ok) {
+		memo.result = fresh;
+		r           = fresh;
+	}
+	return ok;
+}
+
 void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
 	KYTY_PROFILER_FUNCTION();
-	if (!DescribeRenderDepthTarget(buffer.GetGraphics(), buffer.GetRegisters(), r)) {
+	Common::GpuPhase::Scope gpu_phase_describe(Common::GpuPhase::Phase::DrawDescribe);
+	if (!DescribeDepthTargetMemoized(buffer.GetGraphics(), buffer.GetRegisters(), r)) {
 		return;
 	}
+	gpu_phase_describe.End();
 	auto& cache = m_context.GetTextureCache();
 	r.image_id  = cache.FindImage(r.desc);
 	BindRenderTarget(r.image_id);

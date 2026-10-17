@@ -158,6 +158,9 @@ void InitSubsystems() {
 	options.mem_stats         = true;
 	options.mem_release_punch = true;
 	options.mem_residency     = true;
+	// The remembered clamp answers are compared with the live ones for the whole suite.
+	options.mapping_memo         = true;
+	options.resolved_draw_verify = true;
 	Config::Load(options);
 
 	subsystems.Initialize<Log::Lifecycle>();
@@ -1291,6 +1294,74 @@ void TestClampRangeSizeOfUnmappedMemoryBindsNothing() {
 	// A descriptor over released memory: no buffer (0), not an exit.
 	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page) == 0,
 	      "a range at an unmapped address did not return 0");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestRememberedClampFollowsEveryMappingChange() {
+	const char*        test = "RememberedClampFollowsEveryMappingChange";
+	constexpr uint64_t page = SceKernelPageSize;
+	Check(test, Config::MappingMemoEnabled(), "this suite runs with --mapping-memo on");
+	const auto base = MapNamedFlexible(test, page * 4, SceKernelProtCpuRw, "clamp_memo");
+	for (int round = 0; round < 3; round++) {
+		// ask twice so the second answer comes from the memory
+		for (int i = 0; i < 2; i++) {
+			Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page * 4) == page * 4 &&
+			                Libs::LibKernel::Memory::IsFullyMapped(base, page * 4),
+			      "a mapped range was not whole");
+		}
+		CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + page, page), "KernelMunmap(hole)");
+		for (int i = 0; i < 2; i++) {
+			Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page * 4) == page &&
+			                !Libs::LibKernel::Memory::IsFullyMapped(base, page * 4),
+			      "a remembered answer survived an unmap");
+		}
+		void* hole = reinterpret_cast<void*>(base + page);
+		CheckOk(test,
+		        Libs::LibKernel::Memory::KernelMapNamedFlexibleMemory(
+		            &hole, page, SceKernelProtCpuRw, SceKernelMapFixed, "clamp_memo"),
+		        "KernelMapNamedFlexibleMemory(into the hole)");
+		Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page * 4) == page * 4,
+		      "a remembered answer survived a map into the hole");
+	}
+	CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base, page * 4), "KernelMunmap");
+	Check(test, Libs::LibKernel::Memory::ClampRangeSize(base, page * 4) == 0,
+	      "a remembered answer survived the last unmap");
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestRememberedClampMatchesAModelUnderRandomChanges() {
+	const char*        test = "RememberedClampMatchesAModelUnderRandomChanges";
+	constexpr uint64_t page = SceKernelPageSize;
+	constexpr uint64_t pages = 700; // 11 MB: several 2 MiB epoch granules
+	const auto base = MapNamedFlexible(test, page * pages, SceKernelProtCpuRw, "clamp_model");
+	std::vector<bool> mapped(pages, true);
+	uint32_t rng = 12345;
+	const auto next = [&] { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
+	for (int step = 0; step < 6000; step++) {
+		const auto op = next() % 4;
+		const uint64_t index = next() % pages;
+		if (op == 0 && mapped[index]) {
+			CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + index * page, page), "KernelMunmap");
+			mapped[index] = false;
+		} else if (op == 1 && !mapped[index]) {
+			void* at = reinterpret_cast<void*>(base + index * page);
+			CheckOk(test,
+			        Libs::LibKernel::Memory::KernelMapNamedFlexibleMemory(
+			            &at, page, SceKernelProtCpuRw, SceKernelMapFixed, "clamp_model"),
+			        "KernelMapNamedFlexibleMemory(fixed)");
+			mapped[index] = true;
+		} else {
+			const uint64_t first = next() % pages;
+			const uint64_t count = 1 + next() % (pages - first);
+			uint64_t       expect = 0;
+			while (expect < count && mapped[first + expect]) expect++;
+			const auto got = Libs::LibKernel::Memory::ClampRangeSize(base + first * page, count * page);
+			Check(test, got == expect * page, "a remembered clamp differs from the model");
+		}
+	}
+	for (uint64_t i = 0; i < pages; i++) {
+		if (mapped[i]) CheckOk(test, Libs::LibKernel::Memory::KernelMunmap(base + i * page, page), "KernelMunmap(end)");
+	}
 	std::printf("[host]    %-48s ok\n", test);
 }
 
@@ -5102,6 +5173,8 @@ int main(int argc, char** argv) {
 	RunTest(TestRuntimeMemoryOwnerLifecycle);
 	RunTest(TestWriteBackingToPartlyUnmappedAndPrivateMemory);
 	RunTest(TestClampRangeSizeOfUnmappedMemoryBindsNothing);
+	RunTest(TestRememberedClampFollowsEveryMappingChange);
+	RunTest(TestRememberedClampMatchesAModelUnderRandomChanges);
 	RunTest(TestFlexibleMapQueryAndWholeMunmap);
 	RunTest(TestPartialFlexibleMunmapAndFindNext);
 	RunTest(TestReserveMapFixedAndNoOverwrite);

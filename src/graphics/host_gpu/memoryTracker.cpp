@@ -67,12 +67,44 @@ RegionManager* MemoryTracker::GetOrCreateRegion(uint64_t index) {
 	return ptr;
 }
 
+uint32_t MemoryTracker::RangeEpochs(uint64_t vaddr, uint64_t size, uint32_t (&out)[2]) const noexcept {
+	if (size == 0 || vaddr / TRACKER_REGION_SIZE >= REGION_COUNT ||
+	    (vaddr + size - 1) / TRACKER_REGION_SIZE >= REGION_COUNT || vaddr + size < vaddr) {
+		return 0;
+	}
+	const uint64_t first = vaddr / TRACKER_REGION_SIZE;
+	const uint64_t last  = (vaddr + size - 1) / TRACKER_REGION_SIZE;
+	if (last - first > 1) {
+		return 0;
+	}
+	uint32_t count = 0;
+	for (uint64_t index = first; index <= last; ++index) {
+		const auto* manager = m_regions[index].load(std::memory_order_acquire);
+		if (manager == nullptr) {
+			return 0;
+		}
+		out[count++] = manager->Epoch();
+	}
+	return count;
+}
+
 bool MemoryTracker::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	return Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
 		return manager->IsModified<DirtySource::Cpu>(offset, bytes);
 	});
+}
+
+MemoryTracker::DirtyState MemoryTracker::QueryDirty(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	DirtyState state;
+	Iterate<true>(vaddr, size, [&state](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		std::scoped_lock lock(manager->lock);
+		state.cpu = state.cpu || manager->IsModified<DirtySource::Cpu>(offset, bytes);
+		state.gpu = state.gpu || manager->IsModified<DirtySource::Gpu>(offset, bytes);
+	});
+	return state;
 }
 
 bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {

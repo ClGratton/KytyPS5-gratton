@@ -17,6 +17,7 @@
 #include "common/threads.h"
 #include "graphics/guest_gpu/csRegisters.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "common/fairSharedMutex.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -25,6 +26,8 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/graphicsVariantKeys.h"
+#include "graphics/host_gpu/renderer/pipeline/resolvedDrawStats.h"
+#include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
 #include "graphics/host_gpu/renderer/pipeline/variantKeys.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -36,6 +39,7 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -52,6 +56,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <optional>
 #include <shared_mutex>
 #include <span>
@@ -506,6 +511,77 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 	return false;
 }
 
+
+// Contention and popularity figures of the lookahead, printed with its summary (observation only).
+// Only rare events are counted in shared atomics; the popularity table is per thread (merged for the
+// summary) so that several prefetch workers do not meet on one counter or one lock per materialization.
+struct PopularityShard {
+	std::mutex                             mutex; // taken by its own thread per call, by the summary once
+	std::unordered_map<uint64_t, uint64_t> counts;
+};
+
+struct LookaheadLockStats {
+	std::atomic<uint64_t> lookahead_waits {0};     // entry locks the lookahead was blocked on
+	std::atomic<int64_t>  lookahead_wait_ns {0};
+	std::atomic<uint64_t> gpu_waits {0};
+	std::atomic<int64_t>  gpu_wait_ns {0};
+	std::atomic<uint64_t> compile_waits {0};       // the lookahead blocked on a program/pipeline compile
+	std::atomic<int64_t>  compile_wait_ns {0};
+	std::mutex                                    shards_mutex;
+	std::vector<std::shared_ptr<PopularityShard>> shards;
+};
+
+LookaheadLockStats& LockStats() {
+	static LookaheadLockStats stats;
+	return stats;
+}
+
+void NotePopularity(uint64_t shader_hash) {
+	thread_local std::shared_ptr<PopularityShard> shard = [] {
+		auto created = std::make_shared<PopularityShard>();
+		auto& stats  = LockStats();
+		std::lock_guard lock(stats.shards_mutex);
+		stats.shards.push_back(created);
+		return created;
+	}();
+	std::lock_guard lock(shard->mutex);
+	++shard->counts[shader_hash];
+}
+
+std::string LookaheadLockSummary() {
+	auto& stats = LockStats();
+	std::vector<std::pair<uint64_t, uint64_t>> top;
+	uint64_t total = 0;
+	{
+		std::unordered_map<uint64_t, uint64_t> merged;
+		std::lock_guard registry_lock(stats.shards_mutex);
+		for (const auto& shard: stats.shards) {
+			std::lock_guard lock(shard->mutex);
+			for (const auto& [hash, count]: shard->counts) merged[hash] += count;
+		}
+		for (const auto& [hash, count]: merged) {
+			top.emplace_back(count, hash);
+			total += count;
+		}
+	}
+	std::sort(top.begin(), top.end(), std::greater<>());
+	std::string text = fmt::format(
+	    "entry_lock_waits lookahead={} wait_ms={:.1f}; gpu={} wait_ms={:.1f}; "
+	    "compile_waits={} compile_wait_ms={:.1f}; materializations={} distinct_shaders={} top:",
+	    stats.lookahead_waits.load(), static_cast<double>(stats.lookahead_wait_ns.load()) / 1e6,
+	    stats.gpu_waits.load(), static_cast<double>(stats.gpu_wait_ns.load()) / 1e6,
+	    stats.compile_waits.load(), static_cast<double>(stats.compile_wait_ns.load()) / 1e6, total,
+	    top.size());
+	double cumulative = 0.0;
+	for (size_t i = 0; i < std::min<size_t>(top.size(), 12); ++i) {
+		cumulative += total != 0 ? 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total) : 0.0;
+		text += fmt::format(" {:016x}:{:.1f}%(cum {:.1f}%)", top[i].second,
+		                    total != 0 ? 100.0 * static_cast<double>(top[i].first) / static_cast<double>(total) : 0.0,
+		                    cumulative);
+	}
+	return text;
+}
+
 } // namespace
 
 std::size_t PipelineCache::GraphicsPipelineKeyHash::operator()(const GraphicsPipelineKey& key) const {
@@ -669,10 +745,31 @@ struct PipelineCache::ProgramCache {
 		// same permutation search runs. The plan keeps the entry's old buffers for recycling.
 		Permutation* FindPermutationAdopting(SrtPlan::Plan& plan, uint32_t push_data_cursor,
 		                                     ShaderRecompiler::IR::ResourceSpecialization* specialization_out) {
-			std::unique_lock lock(mutex, std::defer_lock);
+			std::shared_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_gpu");
 			SrtPlan::AdoptInto(resources, specialization, plan);
-			Permutation* found = FindExistingLocked<false>(push_data_cursor, specialization, {});
+			Permutation* found = nullptr;
+			auto& perm_stats = ResolvedDraw::GetStats().permutation;
+			if (Config::ResolvedDrawEnabled() &&
+			    (plan.permutation == nullptr || plan.entry != this || plan.permutation_cursor != push_data_cursor)) {
+				if (plan.permutation == nullptr) perm_stats.Absent(); else perm_stats.Fallback();
+			}
+			if (plan.permutation != nullptr && plan.entry == this &&
+			    plan.permutation_cursor == push_data_cursor && Config::ResolvedDrawEnabled()) {
+				perm_stats.Used();
+				// Resolved draw: the producer's search, over this entry's append-only permutation
+				// list, with this cursor and a specialization equal to the adopted one, found this
+				// permutation; the first match of any later search is the same one.
+				found = const_cast<Permutation*>(static_cast<const Permutation*>(plan.permutation));
+				if (Config::ResolvedDrawVerify()) {
+					if (found != FindExistingLocked<false>(push_data_cursor, specialization, {})) {
+						EXIT("resolved draw: the planned permutation is not the one a search finds\n");
+					}
+					perm_stats.Verified();
+				}
+			} else {
+				found = FindExistingLocked<false>(push_data_cursor, specialization, {});
+			}
 			if (found == nullptr && specialization_out != nullptr) {
 				*specialization_out = specialization;
 			}
@@ -705,11 +802,12 @@ struct PipelineCache::ProgramCache {
 		                             ShaderRecompiler::IR::ResourceSpecialization& specialization_out,
 		                             bool&                                   materialized,
 		                             ShaderRecompiler::IR::ResourceSnapshot* keep = nullptr) {
-			std::unique_lock lock(mutex, std::defer_lock);
+			std::shared_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_lookahead");
-			Common::Speculation::HeldLock held(&mutex);
+			Common::Speculation::HeldLock held(mutex.Raw(), true);
 			Common::Hang::Phase phase("lookahead_materialize");
 			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead");
+			NotePopularity(resource_plan.shader_hash);
 			ShaderRecompiler::IR::ResourceSnapshot discarded;
 			auto& snapshot = keep != nullptr ? *keep : discarded; // --srt-plan-shadow keeps it
 			materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, snapshot,
@@ -722,9 +820,9 @@ struct PipelineCache::ProgramCache {
 
 		bool MaterializePrivate(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                        ShaderRecompiler::IR::ResourceSpecialization& specialization_out) {
-			std::unique_lock lock(mutex, std::defer_lock);
+			std::shared_lock lock(mutex, std::defer_lock);
 			LockEntry(lock, "entry_lock_lookahead");
-			Common::Speculation::HeldLock held(&mutex);
+			Common::Speculation::HeldLock held(mutex.Raw(), true);
 			Common::Hang::Phase phase("lookahead_materialize");
 			SkipDeps::ReaderScope reader(resource_plan.shader_hash, "walk_lookahead_private");
 			ShaderRecompiler::IR::ResourceSnapshot snapshot;
@@ -762,14 +860,27 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::deque<Permutation>                      permutations;
-		mutable std::shared_mutex                    mutex;
+		// Shared by the lookahead's materializations (private output, per-thread scratch) and by
+		// kyGpu's adoption; exclusive for whoever changes the entry itself (publishing a permutation,
+		// refreshing a call source, kyGpu's own materialization into `resources`).
+		mutable Common::FairSharedMutex              mutex;
 
 	private:
 		// Takes the entry lock, publishing "waiting for the entry lock" for the hang watchdog.
-		void LockEntry(std::unique_lock<std::shared_mutex>& lock, const char* what) {
+		template <class Lock>
+		void LockEntry(Lock& lock, const char* what) {
 			Common::GpuPhase::Scope gpu_phase_lock(Common::GpuPhase::Phase::PipeEntryLock);
 			Common::Hang::Phase phase(what);
+			if (lock.try_lock()) {
+				return;
+			}
+			auto&      stats = LockStats();
+			const bool la    = Common::Speculation::Active();
+			const auto t0    = Bench::NowNs();
 			lock.lock();
+			(la ? stats.lookahead_waits : stats.gpu_waits).fetch_add(1, std::memory_order_relaxed);
+			(la ? stats.lookahead_wait_ns : stats.gpu_wait_ns)
+			    .fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
 		}
 
 		void MaterializeLocked(const ShaderRecompiler::IR::SrtRuntime& runtime,
@@ -1423,11 +1534,18 @@ struct PipelineCache::ProgramCache {
 						plan->workgroup_counts.assign(runtime.workgroup_counts.begin(),
 						                              runtime.workgroup_counts.end());
 						plan->reads           = plan_recorder->Finish();
+						plan->entry              = entry;
+						plan->permutation        = permutation;
+						plan->permutation_cursor = push_data_cursor;
+						if (Config::ResolvedDrawEnabled()) {
+							// Resolved draw: parts of the draw that depend only on the snapshot.
+							BuildReadHull(plan->snapshot.specialization_reads, plan->snapshot.read_hull);
+						}
 						plan->produced_serial = SrtPlan::ProducerEvents();
 						const auto bytes      = plan->Bytes();
 						SrtPlan::NoteProduceCost(SrtPlan::NowNs() - t_plan);
 						plan->produced_ns = SrtPlan::NowNs();
-						SrtPlan::GetStore().Put(std::move(plan));
+						SrtPlan::PutPlan(std::move(plan));
 						SrtPlan::NoteProduced(bytes);
 					} else {
 						SrtPlan::NoteProduceFailed();
@@ -1528,7 +1646,10 @@ struct PipelineCache::ProgramCache {
 			// skip the GPU thread does not wait with it, so the submission being scanned can be
 			// executed and its memory recycled meanwhile: what the lookahead reads after this wait
 			// (descriptor tables, indirect register tables) is not the draw's any more.
+			const auto t0   = Bench::NowNs();
 			const bool done = job.Wait();
+			LockStats().compile_waits.fetch_add(1, std::memory_order_relaxed);
+			LockStats().compile_wait_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
 			return done && !Common::Speculation::ItemStale();
 		};
 		const auto note_skip = [&] {
@@ -1892,8 +2013,8 @@ struct PipelineCache::ProgramCache {
 	}
 
 	[[nodiscard]] SourceEntry* FindEntry(const ProgramKey& key) {
-		std::lock_guard lock(programs_mutex);
-		const auto      iter = programs.find(key);
+		std::shared_lock lock(programs_mutex);
+		const auto       iter = programs.find(key);
 		return iter != programs.end() ? &iter->second : nullptr;
 	}
 
@@ -1901,11 +2022,11 @@ struct PipelineCache::ProgramCache {
 	// treats it like any existing entry; its own translation result is simply discarded).
 	SourceEntry* InsertEntry(const ProgramKey& key, ShaderRecompiler::IR::ResourcePlan plan,
 	                         std::unique_ptr<ShaderRecompiler::ShaderSource> call_source) {
-		std::lock_guard lock(programs_mutex);
+		std::unique_lock lock(programs_mutex);
 		return &programs.try_emplace(key, std::move(plan), std::move(call_source)).first->second;
 	}
 
-	std::mutex                                                  programs_mutex;
+	std::shared_mutex                                           programs_mutex;
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	// In-flight --async-pipelines program jobs, keyed by (program, specialization, push cursor).
 	InFlightRegistry<ProgramJobKey, ProgramJobKeyHash>          program_jobs;
@@ -2267,6 +2388,8 @@ void PipelineCache::ShutdownAsync() {
 		if (m_lookahead_thread_summary) {
 			PipelineCacheLog("Pipeline lookahead thread: {}", m_lookahead_thread_summary());
 		}
+		PipelineCacheLog("Pipeline lookahead locks: {}", LookaheadLockSummary());
+		PipelineCacheLog("{}", ResolvedDraw::SummaryText());
 		if (Bench::TimingEnabled()) {
 			Bench::LogTiming("summary_lookahead", 0, Bench::NowNs(), 0, false, summary + skips);
 			if (m_lookahead_thread_summary) {

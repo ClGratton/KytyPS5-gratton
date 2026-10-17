@@ -106,6 +106,13 @@ bool EquivalentValue(const ResourcePlan& program, Value left, Value right,
 } // namespace
 
 ResourcePlan::ResourcePlan() = default;
+
+ResourcePlan::Scratch& ResourcePlan::ThreadScratch() const {
+	// A scratch outlives its plan on a thread that touched it (a plan address may be reused): its
+	// memo generations only grow, so a stale entry never matches a later use.
+	thread_local std::unordered_map<const ResourcePlan*, Scratch> scratches;
+	return scratches[this];
+}
 ResourcePlan::ResourcePlan(ResourcePlan&&) noexcept = default;
 
 ResourcePlan::~ResourcePlan() {

@@ -26,6 +26,7 @@
 #include "graphics/host_gpu/renderer/image/compareView.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/resolvedDrawStats.h"
 #include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -747,6 +748,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	auto       id = texture_cache.FindImage(desc, shader_conversion, record_source ? &generation : nullptr);
 	if (record_source && generation != 0) {
 		source->resource            = resource;
+		source->resource_address    = &resource;
 		source->value               = value;
 		source->found               = id;
 		source->generation          = generation;
@@ -872,7 +874,8 @@ static bool ReuseTexture(TextureCache& cache, const PreparedBindings::ImageSourc
                          const TextureBinding&                        binding,
                          const ShaderRecompiler::IR::ImageResource&   resource,
                          const ShaderRecompiler::IR::DescriptorValue& value) {
-	if (source.generation == 0 || !(source.value == value) || !(source.resource == resource) ||
+	if (source.generation == 0 || !(source.value == value) ||
+	    (source.resource_address != &resource && !(source.resource == resource)) ||
 	    !cache.RefindImage(source.found, source.generation, binding.desc,
 	                       source.metadata_base_layer)) {
 		return false;
@@ -902,6 +905,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		// Consecutive draws mostly bind the same textures: keep the slot's binding while the
 		// descriptor, the shader's image resource and the image set are unchanged.
+		Common::GpuPhase::Scope gpu_phase_reuse(Common::GpuPhase::Phase::SrtReuse);
 		if (reuse_bindings && ReuseTexture(m_context.GetTextureCache(), prepared.image_sources[i],
 		                                   prepared.images[i], program.info.images[i],
 		                                   snapshot.images[i])) {
@@ -916,6 +920,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 			BindImage(kept.image_id, kept.desc.type == TextureCache::BindingType::Storage);
 			continue;
 		}
+		gpu_phase_reuse.End();
+		Common::GpuPhase::Scope gpu_phase_resolve(Common::GpuPhase::Phase::SrtResolve);
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i],
 		                              &prepared.image_sources[i]);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
@@ -923,11 +929,13 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		binding.mip_views.clear();
 		prepared.images[i] = std::move(binding);
 	}
+	Common::GpuPhase::Scope gpu_phase_samplers(Common::GpuPhase::Phase::SrtSamplers);
 	prepared.samplers.reserve(program.info.samplers.size());
 	for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
 		prepared.samplers.push_back(NativeSampler(
 		    m_context, program, i, snapshot.samplers[program.info.samplers[i].snapshot_index]));
 	}
+	gpu_phase_samplers.End();
 	prepared.shader_data.reserve(program.bindings.ShaderDataDwords());
 	for (const auto reg: program.info.user_data_registers) {
 		prepared.shader_data.push_back(snapshot.user_data[reg - program.user_data_base]);
@@ -942,7 +950,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 }
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
-	Common::GpuPhase::Scope gpu_phase_srt(Common::GpuPhase::Phase::Srt);
+	Common::GpuPhase::Scope gpu_phase_srt(Common::GpuPhase::Phase::SrtBuffers);
 	KYTY_PROFILER_FUNCTION();
 	auto& cache = m_context.GetBufferCache();
 	for (auto* stage: stages) {
@@ -1286,6 +1294,27 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			if (reader->runtime->program->stage == ShaderType::Compute) {
 				collect_buffer_writes(buffer_writes_of_others, reader);
 				buffers = &buffer_writes_of_others;
+			}
+			// Resolved draw: the plan's read hull proves the common case (no written range touches
+			// a read) without the per-read search; any doubt runs the full check below.
+			if (Config::ResolvedDrawEnabled()) {
+				const auto& hull  = reader->runtime->resources->read_hull;
+				auto&       stats = ResolvedDraw::GetStats().hazard_hull;
+				if (!hull.valid) {
+					stats.Absent();
+				} else if (HullProvesNoHazard(hull, image_writes, *buffers)) {
+					stats.Used();
+					if (Config::ResolvedDrawVerify()) {
+						if (FindScalarReadHazard(reads, image_writes, *buffers).kind !=
+						    ScalarReadHazardKind::None) {
+							EXIT("resolved draw: the read hull proved no hazard but the full check found one\n");
+						}
+						stats.Verified();
+					}
+					continue;
+				} else {
+					stats.Fallback();
+				}
 			}
 			switch (FindScalarReadHazard(reads, image_writes, *buffers).kind) {
 				case ScalarReadHazardKind::None: break;

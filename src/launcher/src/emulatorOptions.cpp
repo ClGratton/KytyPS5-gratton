@@ -77,6 +77,12 @@ QList<Option> BuildTable() {
 	             "compiles in the measurements and removes most first-play stutter."
 	             "\n\nNeeds Async pipelines = stall or skip.",
 	             EMU_BOOL(pipeline_lookahead), {}, 0, 0, "", "", true});
+	defs.append({"lookahead_workers", "--lookahead-workers", Tab::Shaders, "Pipeline compilation",
+	             Kind::Int, "Look-ahead workers:",
+	             "Worker threads that do the per-draw look-ahead work (shader programs, SRT plans, "
+	             "pipeline requests) while the look-ahead thread only decodes the command stream. "
+	             "0 keeps all of it on the look-ahead thread.\n\nNeeds Look-ahead.",
+	             EMU_INT(lookahead_workers), {}, 0, 16, "Off", ""});
 	defs.append({"pipeline_variants_replay", "--pipeline-variants-replay", Tab::Shaders,
 	             "Pipeline compilation", Kind::Bool, "Replay recorded shader variants",
 	             "Records the compute shader variants the game uses in _PipelineCache/<title>.variants "
@@ -199,6 +205,18 @@ QList<Option> BuildTable() {
 	             "cached images are unchanged, instead of decoding and looking it up again. Exact; "
 	             "lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(texture_binding_reuse)});
+	defs.append({"resolved_draw", "--resolved-draw", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Use draw parts computed ahead of time",
+	             "The pipeline lookahead computes parts of each draw ahead of time (needs SRT "
+	             "plans); the GPU thread checks them against the live state and uses them instead "
+	             "of computing them. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(resolved_draw)});
+	defs.append({"mapping_memo", "--mapping-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Remember which guest ranges are fully mapped",
+	             "The GPU thread remembers whether a guest range is fully mapped until the memory "
+	             "map changes, instead of taking the map's lock for every buffer of every draw. "
+	             "Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(mapping_memo)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

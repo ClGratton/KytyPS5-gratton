@@ -185,7 +185,8 @@ static void PrintUsage() {
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
 	         "                                       known-copies, gpu-indirect-draws, eager-readback,\n"
-	         "                                       readback-futures,\n"
+	         "                                       readback-futures, resolved-draw, mapping-memo,\n"
+	         "                                       srt-table-walk,\n"
 	         "                                       poll-before-wait) at the next\n"
 	         "                                       presented frame; applied changes are logged and appended\n"
 	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
@@ -354,6 +355,16 @@ static void PrintUsage() {
 	         "                                       vkWaitSemaphores (small readbacks finish in tens of\n"
 	         "                                       microseconds; a blocking wait adds the kernel sleep and\n"
 	         "                                       wake-up). 0 blocks at once. Default: 0.\n");
+	::printf("  --resolved-draw <true|false>         kyGpu uses the parts of a draw that the pipeline lookahead\n"
+	         "                                       computed ahead of time (needs --srt-plans), after\n"
+	         "                                       checking them (exact, less GPU-thread CPU per draw).\n"
+	         "                                       Default: false.\n");
+	::printf("  --resolved-draw-verify <true|false>  Also compute every used part inline and stop on a\n"
+	         "                                       difference (testing). Default: false.\n");
+	::printf("  --mapping-memo <true|false>          The GPU thread remembers whether a guest range is\n"
+	         "                                       fully mapped until the mapping changes, instead of\n"
+	         "                                       taking the memory-map lock per query (exact).\n"
+	         "                                       Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -373,6 +384,11 @@ static void PrintUsage() {
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
 	         "                                       Debug: restrict --pipeline-lookahead to draws or\n"
 	         "                                       dispatches. Default: all.\n");
+	::printf("  --lookahead-workers <0-16>           With --pipeline-lookahead: N prefetch workers run the\n"
+	         "                                       per-draw work (programs, SRT plans, pipeline requests)\n"
+	         "                                       from copies of the registers, while the lookahead\n"
+	         "                                       thread only decodes the PM4 stream. 0 keeps everything\n"
+	         "                                       on the lookahead thread. Default: 0.\n");
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
@@ -1118,6 +1134,21 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--resolved-draw") {
+			if (!ParseBool(value, options.config.resolved_draw)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--mapping-memo") {
+			if (!ParseBool(value, options.config.mapping_memo)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--resolved-draw-verify") {
+			if (!ParseBool(value, options.config.resolved_draw_verify)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
 		} else if (arg == "--submit-coalesce-max") {
 			uint64_t events = 0;
 			if (!ParseUint64(value, events) || events == 0 || events > 256) {
@@ -1170,6 +1201,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--lookahead-workers") {
+			uint64_t workers = 0;
+			if (!ParseUint64(value, workers) || workers > 16) {
+				::printf("invalid lookahead worker count (expected 0-16): %s\n", value.c_str());
+				return false;
+			}
+			options.config.lookahead_workers = static_cast<uint32_t>(workers);
 		} else if (arg == "--pipeline-lookahead-kinds") {
 			if (Common::EqualNoCase(value, "all")) {
 				options.config.pipeline_lookahead_kinds = 3;

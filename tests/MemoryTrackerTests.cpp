@@ -602,6 +602,103 @@ void TestGpuDirtyBits() {
   Release(memory);
 }
 
+// The region epoch: whenever the epoch of a range is unchanged, the dirty state of the range is
+// unchanged. Random operations over a few pages of two regions; after each one the remembered
+// (CPU-dirty, GPU-dirty, epochs) of several ranges is checked.
+void TestRangeEpochs() {
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  const auto page_size = harness.page_manager.GetPageSize();
+  constexpr uint64_t region = Libs::Graphics::TRACKER_REGION_SIZE;
+  auto *memory = AllocateFixedGuestRange(region * 2, 0x1000000);
+  const auto base = reinterpret_cast<uint64_t>(memory);
+  Check(base % region == 0, "epoch test needs a region aligned base");
+
+  uint32_t epochs[2] = {};
+  Check(tracker.RangeEpochs(base, page_size, epochs) == 0, "a region that does not exist has no epoch");
+  Check(tracker.IsRegionCpuModified(base, page_size), "new region is CPU dirty");
+  Check(tracker.RangeEpochs(base, page_size, epochs) == 1, "an existing region has an epoch");
+  Check(tracker.RangeEpochs(base + region - page_size, 2 * page_size, epochs) == 0,
+        "a range reaching a region that does not exist has no epochs");
+  Check(tracker.IsRegionCpuModified(base + region, page_size), "second region exists");
+  Check(tracker.RangeEpochs(base + region - page_size, 2 * page_size, epochs) == 2,
+        "a range over two regions has two epochs");
+  Check(tracker.RangeEpochs(base, region * 2 + 1, epochs) == 0, "a range over three regions has none");
+
+  struct Probe {
+    uint64_t address, size;
+    bool cpu = false, gpu = false;
+    uint32_t count = 0, epoch[2] = {};
+  };
+  std::vector<Probe> probes = {
+      {base, page_size},           {base + page_size, 3 * page_size},
+      {base + 5 * page_size, 64},  {base + region - page_size, 2 * page_size},
+      {base + region + page_size, page_size}, {base, region * 2},
+  };
+  const auto observe = [&](Probe &probe) {
+    probe.count = tracker.RangeEpochs(probe.address, probe.size, probe.epoch);
+    probe.cpu = tracker.IsRegionCpuModified(probe.address, probe.size);
+    probe.gpu = tracker.IsRegionGpuModified(probe.address, probe.size);
+  };
+  for (auto &probe : probes) observe(probe);
+
+  uint64_t rng = 0x2545f4914f6cdd1dull;
+  const auto next = [&] {
+    rng ^= rng << 13;
+    rng ^= rng >> 7;
+    rng ^= rng << 17;
+    return rng;
+  };
+  uint32_t kept = 0, moved = 0;
+  for (int step = 0; step < 4000; ++step) {
+    const uint64_t address = base + (next() % (2 * region / page_size - 8)) * page_size;
+    const uint64_t size = (1 + next() % 6) * page_size;
+    switch (next() % 7) {
+    case 0:
+      tracker.ForEachUploadRange(address, size, false, [](uint64_t, uint64_t) noexcept {}, []() noexcept {});
+      break;
+    case 1:
+      tracker.ForEachUploadRange(address, size, true, [](uint64_t, uint64_t) noexcept {}, []() noexcept {});
+      break;
+    case 2:
+      if (!tracker.IsRegionGpuModified(address, size)) tracker.MarkRegionAsCpuModified(address, size);
+      break;
+    case 3:
+      tracker.UnmarkRegionAsGpuModified(address, size);
+      break;
+    case 4:
+      tracker.TakeGpuPagesForCpu(address, size);
+      break;
+    case 5:
+      tracker.InvalidateRegion(address, size, [&] {
+        tracker.ForEachDownloadRange<true>(address, size, [](uint64_t, uint64_t) noexcept {});
+        tracker.MarkRegionAsCpuModified(address, size);
+      });
+      break;
+    default:
+      (void)tracker.IsRegionGpuModified(address, size); // queries never move an epoch
+      break;
+    }
+    for (auto &probe : probes) {
+      Probe now = probe;
+      observe(now);
+      if (now.count == probe.count && now.epoch[0] == probe.epoch[0] &&
+          (probe.count < 2 || now.epoch[1] == probe.epoch[1])) {
+        Check(now.cpu == probe.cpu && now.gpu == probe.gpu,
+              "the epochs of a range were unchanged but its dirty state changed");
+        ++kept;
+      } else {
+        ++moved;
+      }
+      probe = now;
+    }
+  }
+  Check(kept > 1000 && moved > 1000, "the epoch test saw both outcomes");
+  tracker.TakeGpuPagesForCpu(base, region * 2); // untracking refuses GPU-dirty pages
+  tracker.UntrackMemory(base, region * 2);
+  Release(memory);
+}
+
 void TestTakeGpuPagesForCpu() {
   TrackerHarness harness;
   auto &tracker = harness.tracker;
@@ -1235,6 +1332,7 @@ int main(int argc, char **argv) {
   TestGpuReacquisitionAfterInvalidation();
   TestGpuDirtyBits();
   TestTakeGpuPagesForCpu();
+  TestRangeEpochs();
   TestExactDirtyIntervalsSharingTrackerPage();
   TestGpuDownloadProtectionMirrors();
   TestCrossRegionUpload();

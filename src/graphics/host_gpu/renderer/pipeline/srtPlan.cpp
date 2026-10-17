@@ -3,6 +3,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cerrno>
@@ -22,10 +23,40 @@ constexpr size_t kMaxBytes = 192u << 20u;
 constexpr int64_t kPeriodNs = 10'000'000'000;
 
 std::atomic<uint64_t> g_producer_events {0};
-std::atomic<uint64_t> g_produced {0};
-std::atomic<uint64_t> g_produced_bytes {0};
-std::atomic<uint64_t> g_produce_failed {0};
-std::atomic<int64_t>  g_produce_ns {0};
+// The producer's counters are per thread (several prefetch workers produce plans at once, and one
+// shared counter per plan would bounce between their caches); the summary adds the shards up. A shard is
+// written by its own thread only and never freed.
+struct ProducerShard {
+	std::atomic<uint64_t> produced {0};
+	std::atomic<uint64_t> bytes {0};
+	std::atomic<uint64_t> failed {0};
+	std::atomic<int64_t>  ns {0};
+};
+constexpr size_t              kMaxProducerShards = 64;
+ProducerShard                 g_shards[kMaxProducerShards];
+std::atomic<size_t>           g_shard_count {0};
+
+ProducerShard& MyShard() {
+	thread_local ProducerShard* shard = [] {
+		const auto index = g_shard_count.fetch_add(1, std::memory_order_acq_rel);
+		return &g_shards[std::min(index, kMaxProducerShards - 1)]; // beyond 64 threads they share the last one
+	}();
+	return *shard;
+}
+
+uint64_t ShardSum(std::atomic<uint64_t> ProducerShard::*field) {
+	uint64_t total = 0;
+	const auto n = std::min(g_shard_count.load(std::memory_order_acquire), kMaxProducerShards);
+	for (size_t i = 0; i < n; ++i) total += (g_shards[i].*field).load(std::memory_order_relaxed);
+	return total;
+}
+
+int64_t ShardNs() {
+	int64_t total = 0;
+	const auto n = std::min(g_shard_count.load(std::memory_order_acquire), kMaxProducerShards);
+	for (size_t i = 0; i < n; ++i) total += g_shards[i].ns.load(std::memory_order_relaxed);
+	return total;
+}
 
 struct ConsumerState {
 	Stats          stats;
@@ -137,8 +168,8 @@ void WriteWindowRow(ConsumerState& c, const Stats::Window& w, double seconds) {
 	    static_cast<long long>(t.compare_ns), static_cast<unsigned long long>(t.windows),
 	    static_cast<unsigned long long>(t.runs), static_cast<unsigned long long>(t.dwords),
 	    static_cast<unsigned long long>(store.queued), static_cast<unsigned long long>(store.evictions),
-	    static_cast<unsigned long long>(g_produced.load()), static_cast<unsigned long long>(g_produce_failed.load()),
-	    static_cast<long long>(g_produce_ns.load()), static_cast<unsigned long long>(t.clean_windows));
+	    static_cast<unsigned long long>(ShardSum(&ProducerShard::produced)), static_cast<unsigned long long>(ShardSum(&ProducerShard::failed)),
+	    static_cast<long long>(ShardNs()), static_cast<unsigned long long>(t.clean_windows));
 	std::fflush(c.wcsv);
 }
 
@@ -165,9 +196,9 @@ std::string ProducerText() {
 	return fmt::format(
 	    "SrtPlan producer: events={} plans={} ({:.1f} MB total) failed={} produce_cost={:.0f} ns/plan; queue: put={} "
 	    "evicted={} queued={} ({:.1f} MB)\n",
-	    g_producer_events.load(), g_produced.load(), static_cast<double>(g_produced_bytes.load()) / 1048576.0,
-	    g_produce_failed.load(),
-	    g_produced.load() != 0 ? static_cast<double>(g_produce_ns.load()) / static_cast<double>(g_produced.load()) : 0.0,
+	    g_producer_events.load(), ShardSum(&ProducerShard::produced), static_cast<double>(ShardSum(&ProducerShard::bytes)) / 1048576.0,
+	    ShardSum(&ProducerShard::failed),
+	    ShardSum(&ProducerShard::produced) != 0 ? static_cast<double>(ShardNs()) / static_cast<double>(ShardSum(&ProducerShard::produced)) : 0.0,
 	    counters.put, counters.evictions, counters.queued, static_cast<double>(counters.queued_bytes) / 1048576.0);
 }
 
@@ -215,16 +246,17 @@ uint64_t ProducerEvents() {
 }
 
 void NoteProduced(uint64_t bytes) {
-	g_produced.fetch_add(1, std::memory_order_relaxed);
-	g_produced_bytes.fetch_add(bytes, std::memory_order_relaxed);
+	auto& shard = MyShard();
+	shard.produced.fetch_add(1, std::memory_order_relaxed);
+	shard.bytes.fetch_add(bytes, std::memory_order_relaxed);
 }
 
 void NoteProduceFailed() {
-	g_produce_failed.fetch_add(1, std::memory_order_relaxed);
+	MyShard().failed.fetch_add(1, std::memory_order_relaxed);
 }
 
 void NoteProduceCost(int64_t ns) {
-	g_produce_ns.fetch_add(ns, std::memory_order_relaxed);
+	MyShard().ns.fetch_add(ns, std::memory_order_relaxed);
 }
 
 void Record(const Sample& sample) {

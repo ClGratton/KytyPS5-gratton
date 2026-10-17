@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
+#include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
 #include "common/hangWatchdog.h"
 #include "common/profiler.h"
@@ -254,6 +255,11 @@ void CommandScheduler::Wait(uint64_t tick) {
 }
 
 void CommandScheduler::PopPendingOperations() {
+	// Resolved draw: nothing is queued (the common case), so there is no lock to take and nothing a fresh
+	// timeline value could release. The value is read again by every wait, so no one sees a stale tick as free.
+	if (Config::ResolvedDrawEnabled() && m_pending_count.load(std::memory_order_acquire) == 0) {
+		return;
+	}
 	bool refreshed = false;
 	for (;;) {
 		PendingOperation operation;
@@ -271,6 +277,7 @@ void CommandScheduler::PopPendingOperations() {
 			} else {
 				operation = std::move(m_pending_operations.front());
 				m_pending_operations.pop();
+				m_pending_count.fetch_sub(1, std::memory_order_release);
 			}
 		}
 		if (!operation.callback) {
@@ -315,6 +322,9 @@ void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, 
 			m_max_priority_tick = std::max(m_max_priority_tick, op_tick);
 		}
 		queue.push({std::move(operation), op_tick});
+		if (!priority) {
+			m_pending_count.fetch_add(1, std::memory_order_release);
+		}
 		lock.unlock();
 		if (priority) {
 			m_operation_available.notify_one();

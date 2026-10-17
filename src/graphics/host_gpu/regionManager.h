@@ -96,6 +96,12 @@ public:
 	KYTY_CLASS_NO_COPY(RegionManager);
 
 	[[nodiscard]] uint64_t GetCpuAddr() const { return m_cpu_addr; }
+	// Moves (under the region lock, after the bits changed) whenever any page's CPU-dirty or GPU-dirty
+	// bit may have changed in this region. A reader that saw both queries answer "clean" while it read
+	// epoch E and finds E unchanged later knows no page of the region changed state in between: a clean
+	// page is write-protected, so a guest write to it would have faulted into ChangeState, and a GPU
+	// write marks it through ChangeState as well. Readable without the lock.
+	[[nodiscard]] uint32_t Epoch() const { return m_epoch.load(std::memory_order_acquire); }
 	template <DirtySource source>
 	[[nodiscard]] bool IsModified(uint64_t offset, uint64_t size) const {
 		const auto [start, end] = GetPageRange(m_cpu_addr + offset, size);
@@ -131,6 +137,7 @@ public:
 		} else {
 			UpdateProtection<enable, true>();
 		}
+		m_epoch.fetch_add(1, std::memory_order_release);
 	}
 
 	template <DirtySource source, bool clear, typename Func>
@@ -148,6 +155,7 @@ public:
 			} else {
 				UpdateProtection<false, true>();
 			}
+			m_epoch.fetch_add(1, std::memory_order_release);
 		}
 		for (const auto [first, last]: mask) {
 			func(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
@@ -199,6 +207,7 @@ private:
 
 	PageManager& m_page_manager;
 	uint64_t     m_cpu_addr = 0;
+	std::atomic<uint32_t> m_epoch {0};
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
 	RegionBits   m_writable;

@@ -28,6 +28,7 @@
 #include <fmt/format.h>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -52,7 +53,8 @@ struct ShaderMapEntry {
 };
 
 static std::unique_ptr<std::unordered_map<uint64_t, ShaderMapEntry>> g_shader_map;
-static std::mutex                                                      g_shader_map_mutex;
+// Read by every draw (kyGpu and the prefetch workers), written when the guest registers a shader.
+static std::shared_mutex                                               g_shader_map_mutex;
 
 void ShaderInit() {
 	EXIT_IF(g_shader_map != nullptr);
@@ -78,7 +80,7 @@ uint64_t ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	}
 	const auto hash = XXH3_64bits(reinterpret_cast<const void*>(addr), data.code_size_bytes);
 	{
-		std::scoped_lock lock(g_shader_map_mutex);
+		std::unique_lock lock(g_shader_map_mutex);
 		(*g_shader_map)[addr] = {data, hash};
 	}
 	if (Bench::TimingEnabled()) {
@@ -96,7 +98,7 @@ static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {
 	EXIT_IF(g_shader_map == nullptr);
 
 	{
-		std::scoped_lock lock(g_shader_map_mutex);
+		std::shared_lock lock(g_shader_map_mutex);
 		if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
 			return iter->second;
 		}

@@ -234,6 +234,13 @@ struct Plan {
 	ShaderRecompiler::IR::ResourceSpecialization    specialization;
 	std::vector<uint32_t>                            workgroup_counts;
 	ReadSet                                          reads;
+	// Resolved draw: the source entry and the permutation the producer found for this specialization
+	// (null: none yet), and the push-data cursor it searched with. Opaque here; the pipeline cache
+	// owns both types. Entries and permutations are never freed or reordered, so the pointers stay
+	// valid for the process lifetime.
+	const void*                                      entry              = nullptr;
+	const void*                                      permutation        = nullptr;
+	uint32_t                                         permutation_cursor = 0;
 	int64_t                                          produced_ns     = 0;
 	uint64_t                                         produced_serial = 0;
 
@@ -898,6 +905,30 @@ struct AdoptTotals {
 
 [[nodiscard]] Store& GetStore();
 [[nodiscard]] int64_t NowNs();
+
+// Lookahead thread or prefetch worker: where a finished plan goes. A prefetch worker (--lookahead-workers)
+// collects the plans of one draw into its task and the sequencer puts them into the store in draw
+// order, which keeps the store single-producer; elsewhere the plan goes straight into the store.
+inline thread_local std::vector<std::unique_ptr<Plan>>* t_plan_sink = nullptr;
+inline void PutPlan(std::unique_ptr<Plan> plan) {
+	if (t_plan_sink != nullptr) {
+		t_plan_sink->push_back(std::move(plan));
+	} else {
+		GetStore().Put(std::move(plan));
+	}
+}
+class PlanSinkScope {
+public:
+	explicit PlanSinkScope(std::vector<std::unique_ptr<Plan>>* sink) noexcept: m_previous(t_plan_sink) {
+		t_plan_sink = sink;
+	}
+	~PlanSinkScope() { t_plan_sink = m_previous; }
+	PlanSinkScope(const PlanSinkScope&)            = delete;
+	PlanSinkScope& operator=(const PlanSinkScope&) = delete;
+
+private:
+	std::vector<std::unique_ptr<Plan>>* m_previous;
+};
 
 // Lookahead thread.
 void NoteProducerEvent();                  // a draw/dispatch was looked at (counts draws of lead)

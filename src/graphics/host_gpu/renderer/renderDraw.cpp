@@ -1086,6 +1086,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
+	Common::GpuPhase::Scope gpu_phase_targets(Common::GpuPhase::Phase::DrawTargets);
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 		if ((mrt_mask & (1u << slot)) != 0) {
 			ResolveRenderColorTarget(buffer, state.color_info[state.color_count],
@@ -1099,6 +1100,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "ResolveRenderDepthTarget");
 	}
 	ResolveRenderDepthTarget(buffer, state.depth_info);
+	gpu_phase_targets.End();
 
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
 		LogFramebufferSkip(draw.Name(), state.color_info[0], state.depth_info, buffer,
@@ -1443,6 +1445,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
+		Common::GpuPhase::Scope gpu_phase_vertex(Common::GpuPhase::Phase::DrawVertex);
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
 	}
@@ -1501,9 +1504,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	auto& pipeline = *pipeline_ptr;
 	vk::ImageAspectFlags feedback_aspects;
+	Common::GpuPhase::Scope gpu_phase_acquire(Common::GpuPhase::Phase::DrawTargets);
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
+	gpu_phase_acquire.End();
 
 	// --gpu-indirect-draws: mesh shaders load their draw parameters from a record by device address.
 	// Reserve and fill the record now: the ring can wait and restart the scheduler, which must not
@@ -1658,13 +1663,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
 
+	Common::GpuPhase::Scope gpu_phase_dynamic(Common::GpuPhase::Phase::DrawDynamic);
 	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
 	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
 	                           rendering);
 	dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
 	dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
+	gpu_phase_dynamic.End();
 
 	LogDrawPhase(draw.Name(), "BeginRendering");
+	Common::GpuPhase::Scope gpu_phase_record(Common::GpuPhase::Phase::DrawRecord);
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
 	}
@@ -1772,6 +1780,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			ShaderWriteBarrier(vk_buffer, shader_write_stages);
 		}
 	}
+	gpu_phase_record.End();
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
@@ -1789,6 +1798,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	Common::GpuPhase::Scope gpu_phase_pop(Common::GpuPhase::Phase::DrawPop);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -1798,10 +1808,12 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	                    reinterpret_cast<uint64_t>(args.index_addr));
 
 	Common::LockGuard lock(m_context.GetMutex());
+	gpu_phase_pop.End();
 	if (args.index_count == 0 || args.instance_count == 0) {
 		return true;
 	}
 
+	Common::GpuPhase::Scope gpu_phase_checks(Common::GpuPhase::Phase::DrawChecks);
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
 		ResetBindings();
@@ -1877,6 +1889,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count,
 	                        args.instance_count, args.first_instance, args.indirect_args};
 	DrawRenderState state {};
+	gpu_phase_checks.End();
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
 		return true;
@@ -1921,6 +1934,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	Common::GpuPhase::Scope gpu_phase_pop(Common::GpuPhase::Phase::DrawPop);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -1930,10 +1944,12 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	                    args.first_instance);
 
 	Common::LockGuard lock(m_context.GetMutex());
+	gpu_phase_pop.End();
 	if (args.vertex_count == 0 || args.instance_count == 0) {
 		return;
 	}
 
+	Common::GpuPhase::Scope gpu_phase_checks(Common::GpuPhase::Phase::DrawChecks);
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
 		ResetBindings();
@@ -1970,6 +1986,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		return;
 	}
 	DrawRenderState state {};
+	gpu_phase_checks.End();
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
 		return;
