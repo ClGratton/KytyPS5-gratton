@@ -686,6 +686,11 @@ add_executable(page_presence_tests EXCLUDE_FROM_ALL
 target_include_directories(page_presence_tests PRIVATE ${inc_headers})
 target_link_libraries(page_presence_tests Threads::Threads)
 
+add_executable(hardware_context_epoch_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HardwareContextEpochTests.cpp"
+)
+target_include_directories(hardware_context_epoch_tests PRIVATE ${inc_headers})
+
 add_executable(adaptive_lock_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AdaptiveLockTests.cpp"
 )
@@ -1061,6 +1066,7 @@ if(BUILD_TESTING)
 	add_test(NAME remembered_mapping COMMAND $<TARGET_FILE:remembered_mapping_tests>)
 	add_test(NAME page_presence COMMAND $<TARGET_FILE:page_presence_tests>)
 	add_test(NAME adaptive_lock COMMAND $<TARGET_FILE:adaptive_lock_tests>)
+	add_test(NAME hardware_context_epoch COMMAND $<TARGET_FILE:hardware_context_epoch_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_fallback_disabled PROPERTIES
@@ -1291,6 +1297,7 @@ if(BUILD_TESTING)
 		remembered_mapping_tests
 		page_presence_tests
 		adaptive_lock_tests
+		hardware_context_epoch_tests
 		sys_file_read_tests
 		hle_trace_tests
 		async_pipeline_tests
