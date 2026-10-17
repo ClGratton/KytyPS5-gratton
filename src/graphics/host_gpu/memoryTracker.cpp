@@ -63,7 +63,8 @@ RegionManager* MemoryTracker::GetOrCreateRegion(uint64_t index) {
 	auto* ptr     = manager.get();
 	m_region_storage.push_back(std::move(manager));
 	m_regions[index].store(ptr, std::memory_order_release);
-	BdaSync::NoteCpuModified(); // a new region starts out fully CPU-modified (K15)
+	// a new region starts out fully CPU-modified (K15)
+	BdaSync::NoteCpuModified(index * TRACKER_REGION_SIZE, TRACKER_REGION_SIZE);
 	return ptr;
 }
 

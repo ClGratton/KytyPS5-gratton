@@ -14,6 +14,8 @@
 // Idea from ogeidexe's fork (ogeidexe/KytyPS5@4a24f1d2d, GPL-2.0), re-implemented with a flag and
 // a testable gate.
 
+#include "graphics/host_gpu/bdaDirtyLog.h"
+
 #include <atomic>
 #include <cstdint>
 
@@ -25,8 +27,21 @@ namespace Libs::Graphics::BdaSync {
 // the next time.
 inline std::atomic<uint64_t> g_cpu_dirty_generation {0};
 
-inline void NoteCpuModified() noexcept {
+// The ranges that became CPU-modified, for --bda-dirty-log (bdaDirtyLog.h). Noted only while the consumer has armed
+// it, so the producers cost one relaxed load when the flag is off.
+inline DirtyLog          g_dirty_log;
+inline std::atomic<bool> g_dirty_log_active {false};
+
+// `address`/`size`: the range whose pages just became CPU-modified (page granularity), 0 when unknown.
+inline void NoteCpuModified(uint64_t address = 0, uint64_t size = 0) noexcept {
 	g_cpu_dirty_generation.fetch_add(1, std::memory_order_release);
+	if (g_dirty_log_active.load(std::memory_order_seq_cst)) {
+		if (size == 0) {
+			g_dirty_log.Note(0, ~uint64_t {0}); // unknown range: everything
+		} else {
+			g_dirty_log.Note(address, size);
+		}
+	}
 }
 
 struct Generations {

@@ -130,7 +130,8 @@ public:
 		if constexpr (source == DirtySource::Cpu && enable) {
 			// After the bits are set (K15): a BDA sync that read the generation earlier either
 			// uploads these pages or sees the new value on its next call.
-			BdaSync::NoteCpuModified();
+			BdaSync::NoteCpuModified(m_cpu_addr + start * TRACKER_PAGE_SIZE,
+			                         (end - start) * TRACKER_PAGE_SIZE);
 		}
 		if constexpr (source == DirtySource::Cpu) {
 			UpdateProtection<!enable, false>();
