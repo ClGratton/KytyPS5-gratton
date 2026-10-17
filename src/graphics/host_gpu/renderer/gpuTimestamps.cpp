@@ -284,7 +284,8 @@ void StoreGuestValue(void* dst, uint32_t size, uint64_t value) {
 
 } // namespace
 
-uint64_t SampleGuestClock(CommandBuffer& command, void* dst, uint32_t size, Point point) {
+uint64_t SampleGuestClock(CommandBuffer& command, void* dst, uint32_t size, Point point,
+                          bool* stored_later) {
 	static std::once_flag announced;
 	std::call_once(announced, [] {
 		Say("Guest GPU timestamps: %s, time scale %.2f\n",
@@ -294,19 +295,37 @@ uint64_t SampleGuestClock(CommandBuffer& command, void* dst, uint32_t size, Poin
 	const auto parse_time = Sync::ReadReferenceClock();
 	const auto immediate  = ParseTimeScaler().Apply(parse_time);
 	uint32_t   slot       = 0;
+	if (stored_later != nullptr) {
+		*stored_later = false;
+	}
 	if (dst == nullptr || (size != sizeof(uint32_t) && size != sizeof(uint64_t)) ||
-	    !GpuModeAvailable(command) || !Host().Acquire(slot)) {
+	    !GpuModeAvailable(command)) {
+		return immediate;
+	}
+	// Hardware writes the timestamp once, when the GPU executes the packet: the guest never sees a stand-in.
+	const bool once = stored_later != nullptr && Config::EopLabelsAtCompletionEnabled();
+	auto&      scheduler = command.GetContext().GetCommandScheduler();
+	if (!Host().Acquire(slot)) {
+		if (once) {
+			// No query slot: the parse-time value, still written at completion and in order with the labels.
+			scheduler.DeferPriorityOperation([dst, size, immediate] { StoreGuestValue(dst, size, immediate); });
+			*stored_later = true;
+		}
 		return immediate;
 	}
 	Host().Record(command, point, slot);
-	command.GetContext().GetCommandScheduler().DeferPriorityOperation(
-	    [slot, dst, size, parse_time] {
-		    uint64_t reference = 0;
-		    if (Host().Resolve(slot, reference)) {
-			    Host().NoteLag(static_cast<int64_t>(reference) - static_cast<int64_t>(parse_time));
-			    StoreGuestValue(dst, size, GpuTimeScaler().Apply(reference));
-		    }
-	    });
+	scheduler.DeferPriorityOperation([slot, dst, size, parse_time, immediate, once] {
+		uint64_t reference = 0;
+		if (Host().Resolve(slot, reference)) {
+			Host().NoteLag(static_cast<int64_t>(reference) - static_cast<int64_t>(parse_time));
+			StoreGuestValue(dst, size, GpuTimeScaler().Apply(reference));
+		} else if (once) {
+			StoreGuestValue(dst, size, immediate);
+		}
+	});
+	if (once) {
+		*stored_later = true;
+	}
 	return immediate;
 }
 

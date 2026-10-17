@@ -480,10 +480,13 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 		EXIT("invalid reference-clock copy, dst=0x%016" PRIx64 " size=%u\n", dst_address,
 		     num_bytes);
 	}
-	const auto value = GpuTimestamps::SampleGuestClock(
-	    CurrentBuffer(), reinterpret_cast<void*>(dst_address), num_bytes,
-	    GpuTimestamps::Point::TopOfPipe);
-	StoreGuest(reinterpret_cast<void*>(dst_address), &value, num_bytes);
+	bool       stored_later = false;
+	const auto value        = GpuTimestamps::SampleGuestClock(
+        CurrentBuffer(), reinterpret_cast<void*>(dst_address), num_bytes,
+        GpuTimestamps::Point::TopOfPipe, &stored_later);
+	if (!stored_later) {
+		StoreGuest(reinterpret_cast<void*>(dst_address), &value, num_bytes);
+	}
 	static std::atomic<uint32_t> clock_log_count {0};
 	if (clock_log_count.fetch_add(1) < 64) {
 		LOGF("\t copy_data reference clock: dst=0x%016" PRIx64 " value=0x%016" PRIx64
@@ -1554,15 +1557,18 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					}
 				}
 			} else {
+				bool clock_stored_later = false;
 				if (event_write_source == 0x04) {
 					value = GpuTimestamps::SampleGuestClock(
 					    command, dst_gpu_addr, sizeof(uint64_t),
-					    GpuTimestamps::Point::BottomOfPipe);
+					    GpuTimestamps::Point::BottomOfPipe, &clock_stored_later);
 				}
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
-					if (!Sync::PublishLabel(command, dst, value, sizeof(value), event_write_source == 0x04)) {
-						StoreGuest(dst, &value, sizeof(value));
+					if (!clock_stored_later) {
+						if (!Sync::PublishLabel(command, dst, value, sizeof(value), event_write_source == 0x04)) {
+							StoreGuest(dst, &value, sizeof(value));
+						}
 					}
 
 					if (with_interrupt) {
