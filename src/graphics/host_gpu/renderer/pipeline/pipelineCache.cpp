@@ -3360,51 +3360,115 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsProgramsImpl(
 	}
 	ShaderParams pixel_params;
 	if (pixel_active) {
-		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
-		if (prefetch && Common::Speculation::TakeFailure()) {
-			m_lookahead.skip[LookaheadCounters::SkipPrepareFailed].fetch_add(
-			    1, std::memory_order_relaxed);
-			return {};
-		}
-		if (!mesh_active && !tess_active && Prospero::IsRectList(user_config.GetPrimType())) {
-			pixel_info.parameter_mode = ShaderPixelParameterMode::Rectangle;
-		} else if (context.GetModeControl().provoking_vtx_last) {
-			pixel_info.parameter_mode = ShaderPixelParameterMode::LastVertex;
-		} else {
-			pixel_info.parameter_mode = ShaderPixelParameterMode::FirstVertex;
-		}
-		const auto& blend = context.GetBlendControl(0);
-		pixel_info.dual_source_blending =
-		    blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
-		    (BlendFactorIsDualSource(blend.color_srcblend) ||
-		     BlendFactorIsDualSource(blend.color_destblend) ||
-		     (blend.separate_alpha_blend && (BlendFactorIsDualSource(blend.alpha_srcblend) ||
-		                                     BlendFactorIsDualSource(blend.alpha_destblend))));
-		if (pixel_info.dual_source_blending) {
-			// MRT1 supplies the second blend source for target 0.
-			pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
-			pixel_info.target_export_mapping[1] = pixel_info.target_export_mapping[0];
-		} else if (blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
-		           pixel_info.target_output_mode[0] != 0 && pixel_info.target_output_mode[0] != 7 &&
-		           std::all_of(std::begin(pixel_info.target_output_mode) + 1,
-		                       std::end(pixel_info.target_output_mode),
-		                       [](uint8_t mode) { return mode == 0; })) {
-			switch (ClassifyBlendMapping(blend, pixel_info.target_export_mapping[0])) {
-				case BlendMappingSupport::SourceAlpha:
-					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlpha;
-					break;
-				case BlendMappingSupport::SourceAlphaOne:
-					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaOne;
-					break;
-				case BlendMappingSupport::SourceAlphaZero:
-					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaZero;
-					break;
-				default: break;
+		// Everything the pixel stage's static info is made of: its registers, the context and user config (blend state, export mapping,
+		// shader mask, primitive type) and whether the vertex side is a mesh or tessellation. --draw-state-memo keeps the last result
+		// per those inputs; only the user SGPRs are copied fresh. The workers (prefetch) always compute.
+		const auto prepare_pixel = [&]() -> bool {
+			pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+			if (prefetch && Common::Speculation::TakeFailure()) {
+				m_lookahead.skip[LookaheadCounters::SkipPrepareFailed].fetch_add(
+				    1, std::memory_order_relaxed);
+				return {};
 			}
-			if (pixel_info.alpha_blend_source != ShaderAlphaBlendSource::None) {
-				pixel_info.dual_source_blending     = true;
+			if (!mesh_active && !tess_active && Prospero::IsRectList(user_config.GetPrimType())) {
+				pixel_info.parameter_mode = ShaderPixelParameterMode::Rectangle;
+			} else if (context.GetModeControl().provoking_vtx_last) {
+				pixel_info.parameter_mode = ShaderPixelParameterMode::LastVertex;
+			} else {
+				pixel_info.parameter_mode = ShaderPixelParameterMode::FirstVertex;
+			}
+			const auto& blend = context.GetBlendControl(0);
+			pixel_info.dual_source_blending =
+			    blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
+			    (BlendFactorIsDualSource(blend.color_srcblend) ||
+			     BlendFactorIsDualSource(blend.color_destblend) ||
+			     (blend.separate_alpha_blend && (BlendFactorIsDualSource(blend.alpha_srcblend) ||
+			                                     BlendFactorIsDualSource(blend.alpha_destblend))));
+			if (pixel_info.dual_source_blending) {
+				// MRT1 supplies the second blend source for target 0.
 				pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
-				pixel_info.target_export_mapping[1] = {};
+				pixel_info.target_export_mapping[1] = pixel_info.target_export_mapping[0];
+			} else if (blend.enable && !context.GetRenderTarget(0).info.blend_bypass &&
+			           pixel_info.target_output_mode[0] != 0 && pixel_info.target_output_mode[0] != 7 &&
+			           std::all_of(std::begin(pixel_info.target_output_mode) + 1,
+			                       std::end(pixel_info.target_output_mode),
+			                       [](uint8_t mode) { return mode == 0; })) {
+				switch (ClassifyBlendMapping(blend, pixel_info.target_export_mapping[0])) {
+					case BlendMappingSupport::SourceAlpha:
+						pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlpha;
+						break;
+					case BlendMappingSupport::SourceAlphaOne:
+						pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaOne;
+						break;
+					case BlendMappingSupport::SourceAlphaZero:
+						pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaZero;
+						break;
+					default: break;
+				}
+				if (pixel_info.alpha_blend_source != ShaderAlphaBlendSource::None) {
+					pixel_info.dual_source_blending     = true;
+					pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
+					pixel_info.target_export_mapping[1] = {};
+				}
+			}
+	
+			return true;
+		};
+		struct PixelMemo {
+			bool                  valid = false;
+			uint64_t              ctx_epoch = 0, uc_epoch = 0;
+			HW::PsStageRegisters  regs {};
+			bool                  mesh_active = false, tess_active = false;
+			ShaderParams          params;
+			ShaderPixelInputInfo  info;
+		};
+		static thread_local PixelMemo memo;
+		const bool use_memo = !prefetch && Config::DrawStateMemoEnabled();
+		const bool hit = use_memo && memo.valid && memo.ctx_epoch == context.Epoch() && memo.uc_epoch == user_config.Epoch() &&
+		                 memo.mesh_active == mesh_active && memo.tess_active == tess_active &&
+		                 std::memcmp(&memo.regs, &pixel_regs.ps_regs, sizeof(memo.regs)) == 0;
+		if (hit) {
+			pixel_params = memo.params;
+			pixel_info   = memo.info;
+			// The user SGPRs are the only input of the params that the key leaves out.
+			const auto count = static_cast<size_t>(pixel_regs.ps_regs.rsrc2.user_sgpr);
+			std::copy_n(pixel_regs.ps_user_sgpr.value, count, pixel_params.user_data.begin());
+			if (Config::ResolvedDrawVerify()) {
+				const auto remembered_params = pixel_params;
+				const auto remembered_info   = pixel_info;
+				(void)prepare_pixel();
+				std::vector<uint32_t> key_fresh, key_remembered;
+				BuildStageStaticKey(pixel_info, key_fresh);
+				BuildStageStaticKey(remembered_info, key_remembered);
+				if (pixel_params.hash != remembered_params.hash || pixel_params.code.data() != remembered_params.code.data() ||
+				    pixel_params.code.size() != remembered_params.code.size() ||
+				    pixel_params.user_data_count != remembered_params.user_data_count ||
+				    pixel_params.user_data != remembered_params.user_data || key_fresh != key_remembered ||
+				    pixel_info.parameter_mode != remembered_info.parameter_mode ||
+				    pixel_info.dual_source_blending != remembered_info.dual_source_blending ||
+				    pixel_info.alpha_blend_source != remembered_info.alpha_blend_source) {
+					EXIT("draw state memo: the remembered pixel program preparation differs from a fresh one\n");
+				}
+				static std::atomic<uint64_t> verified {0};
+				if ((verified.fetch_add(1, std::memory_order_relaxed) + 1) % (1u << 20) == 0) {
+					std::printf("DrawStateMemo verify: %" PRIu64 " remembered pixel preparations agree with a fresh one\n",
+					            verified.load(std::memory_order_relaxed));
+					std::fflush(stdout);
+				}
+			}
+		} else {
+			if (!prepare_pixel()) {
+				return {};
+			}
+			if (use_memo) {
+				memo.valid       = true;
+				memo.ctx_epoch   = context.Epoch();
+				memo.uc_epoch    = user_config.Epoch();
+				memo.regs        = pixel_regs.ps_regs;
+				memo.mesh_active = mesh_active;
+				memo.tess_active = tess_active;
+				memo.params      = pixel_params;
+				memo.info        = pixel_info;
 			}
 		}
 	}

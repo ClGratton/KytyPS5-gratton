@@ -5,6 +5,7 @@
 #include "common/uniqueFunction.h"
 #include "graphics/host_gpu/renderer/dynamicState.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "graphics/host_gpu/renderer/pipeline/pushDescriptorCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 
 #include <condition_variable>
@@ -67,6 +68,7 @@ public:
 	[[nodiscard]] bool             IsFree(uint64_t tick);
 	[[nodiscard]] MasterSemaphore& GetMasterSemaphore() noexcept { return m_master; }
 	[[nodiscard]] DynamicState&    GetDynamicState() noexcept { return m_dynamic_state; }
+	[[nodiscard]] PushDescriptorCache& GetPushDescriptorCache() noexcept { return m_push_cache; }
 	[[nodiscard]] RenderContext&   Context() const noexcept { return m_context; }
 	[[nodiscard]] GraphicContext&  Graphics() const noexcept { return m_graphics; }
 
@@ -110,6 +112,7 @@ private:
 	CommandPool                  m_command_pool;
 	CommandBuffer                m_command;
 	DynamicState                 m_dynamic_state;
+	PushDescriptorCache          m_push_cache;
 	std::queue<PendingOperation> m_pending_operations;
 	std::atomic<uint32_t>        m_pending_count {0}; // size of m_pending_operations, readable without the lock
 	// True when a priority operation deferred at or before `tick` is queued or running (m_operation_mutex held).

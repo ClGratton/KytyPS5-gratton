@@ -9,6 +9,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <new>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -39,25 +40,30 @@ public:
 
 	[[nodiscard]] T& operator[](SlotId id) noexcept {
 		EXIT_IF(!is_allocated(id));
-		return *m_values[id.index].value;
+		return *m_values[id.index].ptr();
 	}
 
 	[[nodiscard]] const T& operator[](SlotId id) const noexcept {
 		EXIT_IF(!is_allocated(id));
-		return *m_values[id.index].value;
+		return *m_values[id.index].ptr();
 	}
 
 	[[nodiscard]] T* try_get(SlotId id) noexcept {
-		return is_allocated(id) ? &*m_values[id.index].value : nullptr;
+		return is_allocated(id) ? m_values[id.index].ptr() : nullptr;
 	}
 
 	[[nodiscard]] const T* try_get(SlotId id) const noexcept {
-		return is_allocated(id) ? &*m_values[id.index].value : nullptr;
+		return is_allocated(id) ? m_values[id.index].ptr() : nullptr;
 	}
 
+	// One slot lookup, one cache line: the generation and the live flag sit in front of the value, in the line its first members
+	// are in (they used to sit behind it, in the line of its last members).
 	[[nodiscard]] bool is_allocated(SlotId id) const noexcept {
-		return id && id.index < m_values.size() &&
-		       m_values[id.index].generation == id.generation && m_values[id.index].value.has_value();
+		if (!id || id.index >= m_values.size()) {
+			return false;
+		}
+		const Slot& slot = m_values[id.index];
+		return slot.generation == id.generation && slot.alive;
 	}
 
 	template <typename... Args>
@@ -66,12 +72,12 @@ public:
 		if (m_free_list.empty()) {
 			index = static_cast<uint32_t>(m_values.size());
 			m_values.emplace_back();
-			m_values.back().value.emplace(std::forward<Args>(args)...);
+			m_values.back().emplace(std::forward<Args>(args)...);
 		} else {
 			index = m_free_list.back();
 			m_free_list.pop_back();
-			EXIT_IF(m_values[index].value.has_value());
-			m_values[index].value.emplace(std::forward<Args>(args)...);
+			EXIT_IF(m_values[index].alive);
+			m_values[index].emplace(std::forward<Args>(args)...);
 		}
 		++m_size;
 		return SlotId {index, m_values[index].generation};
@@ -80,7 +86,7 @@ public:
 	void erase(SlotId id) noexcept {
 		EXIT_IF(!is_allocated(id));
 		auto& slot = m_values[id.index];
-		slot.value.reset();
+		slot.reset();
 		if (++slot.generation == 0) {
 			slot.generation = 1;
 		}
@@ -94,8 +100,8 @@ public:
 	template <typename F>
 	void ForEach(F&& fn) {
 		for (uint32_t index = 0; index < m_values.size(); ++index) {
-			if (m_values[index].value) {
-				fn(SlotId {index, m_values[index].generation}, *m_values[index].value);
+			if (m_values[index].alive) {
+				fn(SlotId {index, m_values[index].generation}, *m_values[index].ptr());
 			}
 		}
 	}
@@ -103,16 +109,37 @@ public:
 	template <typename F>
 	void ForEach(F&& fn) const {
 		for (uint32_t index = 0; index < m_values.size(); ++index) {
-			if (m_values[index].value) {
-				fn(SlotId {index, m_values[index].generation}, *m_values[index].value);
+			if (m_values[index].alive) {
+				fn(SlotId {index, m_values[index].generation}, *m_values[index].ptr());
 			}
 		}
 	}
 
 private:
 	struct Slot {
-		std::optional<T> value;
-		uint32_t         generation = 1;
+		uint32_t generation = 1;
+		bool     alive      = false;
+		alignas(T) unsigned char storage[sizeof(T)];
+
+		Slot() noexcept = default;
+		~Slot() { reset(); }
+		Slot(const Slot&)            = delete;
+		Slot& operator=(const Slot&) = delete;
+
+		[[nodiscard]] T*       ptr() noexcept { return std::launder(reinterpret_cast<T*>(storage)); }
+		[[nodiscard]] const T* ptr() const noexcept { return std::launder(reinterpret_cast<const T*>(storage)); }
+
+		template <typename... Args>
+		void emplace(Args&&... args) {
+			::new (static_cast<void*>(storage)) T(std::forward<Args>(args)...);
+			alive = true;
+		}
+		void reset() noexcept {
+			if (alive) {
+				ptr()->~T();
+				alive = false;
+			}
+		}
 	};
 
 	std::deque<Slot>             m_values;

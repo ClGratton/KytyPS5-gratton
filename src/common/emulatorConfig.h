@@ -283,6 +283,25 @@ struct ConfigOptions {
 	// --plan-prefetch: kyGpu prefetches every cache line of the next SRT plan's blocks while it uses the current
 	// one (srtPlan.cpp). Default off.
 	bool                   plan_prefetch               = false;
+	// --tracker-sleeping-locks: a game thread that waits for a tracker lock (held across an mprotect) sleeps after a short
+	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default off.
+	bool                   tracker_sleeping_locks      = false;
+	// --cp-direct-stores: the command processor's stores to guest memory (labels, fences, WRITE_DATA) go through the
+	// backing view and mark the tracker directly instead of taking a write fault on the GPU thread. Default off.
+	bool                   cp_direct_stores            = false;
+	// --draw-state-memo: per-draw work that is a pure function of the registers is not repeated while the registers' epochs
+	// (graphics/guest_gpu/hardwareContext.h) have not moved (graphics/host_gpu/renderer/renderDraw.cpp and neighbours).
+	// Default off.
+	bool                   draw_state_memo             = false;
+	// --async-upload-copies: the guest-to-ring memcpy of a large buffer upload runs on helper threads
+	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default off.
+	bool                   async_upload_copies         = false;
+	// --texture-lock-batch: the GPU thread takes the texture cache lock once around a draw's runs of lookups instead of once
+	// per lookup (graphics/host_gpu/renderer/cache/textureCache.h LockBatch). Default off.
+	bool                   texture_lock_batch          = false;
+	// --push-descriptor-delta: a graphics draw pushes only the descriptor bindings whose content differs from what the pushed
+	// set already holds (graphics/host_gpu/renderer/pipeline/pushDescriptorCache.h). Default off.
+	bool                   push_descriptor_delta       = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -478,6 +497,11 @@ bool              LazyOpPollEnabled();
 bool              BackingReadCacheEnabled();
 bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
+bool              CpDirectStoresEnabled();
+bool              DrawStateMemoEnabled();
+bool              AsyncUploadCopiesEnabled();
+bool              TextureLockBatchEnabled();
+bool              PushDescriptorDeltaEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();

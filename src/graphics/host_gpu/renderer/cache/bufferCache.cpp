@@ -4,6 +4,7 @@
 #include "graphics/host_gpu/bdaSyncGate.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/uploadCopier.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/cache/gdsCopyPlan.h"
 #include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
@@ -755,6 +756,14 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	                                  Config::WriteFaultAroundEnabled());
 }
 
+bool BufferCache::NoteGuestStore(uint64_t vaddr, uint64_t size) {
+	if (!GuestRange {vaddr, size}.Valid()) {
+		return false;
+	}
+	ForgetKnownFills(vaddr, size);
+	return m_memory_tracker.NoteCpuStore(vaddr, size);
+}
+
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
                              Common::GpuPhase::DrainCause cause) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
@@ -1392,6 +1401,18 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	};
 	auto [mapped, base_offset] = m_staging_buffer.Map(total_size, 4);
 	if (mapped != nullptr) {
+		// --async-upload-copies: the memcpy of a large upload runs on helper threads; CommandScheduler::Submit waits for them (uploadCopier.h).
+		if (Config::AsyncUploadCopiesEnabled() && m_staging_buffer.IsCoherent() && total_size >= (16u << 10u)) {
+			static thread_local std::vector<UploadCopier::Item> items;
+			items.clear();
+			for (auto& copy: copies) {
+				items.push_back({mapped + copy.srcOffset, buffer.CpuAddress() + copy.dstOffset, copy.size});
+				copy.srcOffset += base_offset;
+			}
+			UploadCopier::Get().Submit(items.data(), items.size());
+			m_staging_buffer.Commit();
+			return m_staging_buffer.Handle();
+		}
 		for (auto& copy: copies) {
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
 			read_guest(mapped + copy.srcOffset, address, copy.size);

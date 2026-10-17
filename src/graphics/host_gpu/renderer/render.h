@@ -291,6 +291,9 @@ private:
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
+	// --push-descriptor-delta: the writes that are pushed, and the words one write is compared by.
+	std::vector<vk::WriteDescriptorSet>   m_push_writes;
+	std::vector<uint64_t>                 m_push_content;
 	std::unique_ptr<MeshIndirectArgs>     m_mesh_indirect; // --gpu-indirect-draws, on first use
 
 	friend class CommandProcessor;

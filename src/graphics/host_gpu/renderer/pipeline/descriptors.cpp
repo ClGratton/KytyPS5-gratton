@@ -1,7 +1,9 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
+#include <array>
 #include <atomic>
 #include <cinttypes>
+#include <optional>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -39,8 +41,10 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <limits>
@@ -572,59 +576,19 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 	return false;
 }
 
-TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
-                                              const ShaderRecompiler::IR::DescriptorValue& value,
-                                              PreparedBindings::ImageSource*               source) {
-	if (source != nullptr) {
-		source->generation = 0;
-	}
-	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
-		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
-	}
-	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
-	const bool storage = resource.written;
-	if (storage) {
-		ValidateStorageImageResource(resource);
-	}
+namespace {
 
-	auto& texture_cache = m_context.GetTextureCache();
-	if (descriptor.IsNull()) {
-		return {.layout = vk::ImageLayout::eGeneral};
-	}
+// What ResolveTexture works out from a texture descriptor before it asks the texture cache: a pure function of the shader's image resource and
+// the descriptor dwords (it is also where an unsupported descriptor stops the emulator).
+struct DecodedTexture {
+	TextureCache::ImageDesc desc;
+	bool                    shader_conversion = false;
+	vk::Format              pixel_format      = vk::Format::eUndefined;
+	vk::Format              view_format       = vk::Format::eUndefined;
+};
 
-	// Binding resolves every texture a shader references, and while a level loads some slots still
-	// hold stale descriptors that the draw never samples (the GPU does not read them). A sampled
-	// view of eight dwords that cannot describe an image at all (a base mip above the last, a
-	// format with no texel layout) is bound as the null image, loudly; a storage view is written
-	// back and still has to be exact. A well-formed descriptor of an unsupported feature is not
-	// this case and keeps its fatal report.
-	if (!storage) {
-		const char* invalid = nullptr;
-		if (!IsMultisampledTexture(TextureType(descriptor)) &&
-		    descriptor.BaseLevel() > descriptor.LastLevel()) {
-			invalid = "base mip above last mip";
-		} else if (TileTextureElementLayout element {};
-		           !TileGetTextureElementLayout(descriptor.Format(), element)) {
-			invalid = "format without a texel layout";
-		}
-		if (invalid != nullptr) {
-			static std::atomic<uint32_t> reported {0};
-			const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
-			if (count <= 32) {
-				std::printf("Texture: sampled descriptor is not an image (%s), bound as null: "
-				            "addr=0x%016" PRIx64 " format=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,"
-				            "%08x,%08x (%" PRIu32 " so far)\n",
-				            invalid, descriptor.Base40(),
-				            static_cast<uint32_t>(descriptor.Format()), descriptor.fields[0],
-				            descriptor.fields[1], descriptor.fields[2], descriptor.fields[3],
-				            descriptor.fields[4], descriptor.fields[5], descriptor.fields[6],
-				            descriptor.fields[7], count);
-				std::fflush(stdout);
-			}
-			return {.layout = vk::ImageLayout::eGeneral};
-		}
-	}
-
+void DecodeTextureDescriptor(const ShaderRecompiler::IR::ImageResource& resource,
+                             const ShaderTextureResource& descriptor, bool storage, DecodedTexture& out) {
 	const auto address         = descriptor.Base40();
 	const auto width           = static_cast<uint32_t>(descriptor.Width5()) + 1u;
 	const auto height          = static_cast<uint32_t>(descriptor.Height5()) + 1u;
@@ -698,7 +662,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	                                     ? storage_view_format
 	                                     : pixel_format;
 	const auto block_bytes         = Prospero::BlockCompressedBytesPerBlock(format);
-	TextureCache::ImageDesc desc {};
+	auto& desc = out.desc;
+	desc = {};
 	desc.info.data         = {address, 0};
 	desc.info.pixel_format = pixel_format;
 	desc.info.guest_format = format;
@@ -742,6 +707,144 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.view_info.base_level = view_base;
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 
+	out.shader_conversion = shader_conversion;
+	out.pixel_format      = pixel_format;
+	out.view_format       = view_format;
+}
+
+// --draw-state-memo: descriptors repeat (a texture is bound by many draws, and every frame again), so the last decodes are kept, found by the
+// descriptor dwords and compared with the resource they were decoded for.
+struct DecodeMemoEntry {
+	bool                                         valid = false;
+	ShaderRecompiler::IR::ImageResource          resource;
+	ShaderRecompiler::IR::DescriptorValue        value;
+	bool                                         storage = false;
+	DecodedTexture                               decoded;
+};
+
+bool SameDecodedDesc(const TextureCache::ImageDesc& a, const TextureCache::ImageDesc& b) {
+	const auto& x = a.info;
+	const auto& y = b.info;
+	bool same = a.type == b.type && a.view_info == b.view_info && x.data == y.data && x.stencil == y.stencil &&
+	            x.extent == y.extent && x.resources == y.resources && x.pixel_format == y.pixel_format &&
+	            x.guest_format == y.guest_format && x.bytes_per_block == y.bytes_per_block && x.samples == y.samples &&
+	            x.tile_mode == y.tile_mode && x.type == y.type && x.pitch == y.pitch && x.bgra16 == y.bgra16 &&
+	            x.metadata.range == y.metadata.range && x.metadata.kind == y.metadata.kind &&
+	            x.metadata.dcc_alpha_msb == y.metadata.dcc_alpha_msb;
+	for (uint32_t level = 0; same && level < x.resources.levels && level < x.mip_layout.size(); ++level) {
+		same = x.mip_layout[level] == y.mip_layout[level];
+	}
+	return same;
+}
+
+} // namespace
+
+TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
+                                              const ShaderRecompiler::IR::DescriptorValue& value,
+                                              PreparedBindings::ImageSource*               source) {
+	if (source != nullptr) {
+		source->generation = 0;
+	}
+	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
+		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
+	}
+	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
+	const bool storage = resource.written;
+	if (storage) {
+		ValidateStorageImageResource(resource);
+	}
+
+	auto& texture_cache = m_context.GetTextureCache();
+	if (descriptor.IsNull()) {
+		return {.layout = vk::ImageLayout::eGeneral};
+	}
+
+	// Binding resolves every texture a shader references, and while a level loads some slots still
+	// hold stale descriptors that the draw never samples (the GPU does not read them). A sampled
+	// view of eight dwords that cannot describe an image at all (a base mip above the last, a
+	// format with no texel layout) is bound as the null image, loudly; a storage view is written
+	// back and still has to be exact. A well-formed descriptor of an unsupported feature is not
+	// this case and keeps its fatal report.
+	if (!storage) {
+		const char* invalid = nullptr;
+		if (!IsMultisampledTexture(TextureType(descriptor)) &&
+		    descriptor.BaseLevel() > descriptor.LastLevel()) {
+			invalid = "base mip above last mip";
+		} else if (TileTextureElementLayout element {};
+		           !TileGetTextureElementLayout(descriptor.Format(), element)) {
+			invalid = "format without a texel layout";
+		}
+		if (invalid != nullptr) {
+			static std::atomic<uint32_t> reported {0};
+			const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (count <= 32) {
+				std::printf("Texture: sampled descriptor is not an image (%s), bound as null: "
+				            "addr=0x%016" PRIx64 " format=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,"
+				            "%08x,%08x (%" PRIu32 " so far)\n",
+				            invalid, descriptor.Base40(),
+				            static_cast<uint32_t>(descriptor.Format()), descriptor.fields[0],
+				            descriptor.fields[1], descriptor.fields[2], descriptor.fields[3],
+				            descriptor.fields[4], descriptor.fields[5], descriptor.fields[6],
+				            descriptor.fields[7], count);
+				std::fflush(stdout);
+			}
+			return {.layout = vk::ImageLayout::eGeneral};
+		}
+	}
+
+	TextureCache::ImageDesc desc;
+	bool                    shader_conversion = false;
+	vk::Format              pixel_format      = vk::Format::eUndefined;
+	vk::Format              view_format       = vk::Format::eUndefined;
+	{
+		static thread_local std::array<DecodeMemoEntry, 256> memo;
+		const bool use_memo = Config::DrawStateMemoEnabled();
+		DecodeMemoEntry* entry = nullptr;
+		if (use_memo) {
+			uint64_t hash = 0x9e3779b97f4a7c15ull ^ static_cast<uint64_t>(storage);
+			for (uint32_t i = 0; i < 8; ++i) {
+				hash = (hash ^ value.dwords[i]) * 0x100000001b3ull;
+			}
+			hash ^= reinterpret_cast<uintptr_t>(&resource) >> 3u;
+			entry = &memo[(hash ^ (hash >> 29u)) % memo.size()];
+		}
+		if (entry != nullptr && entry->valid && entry->storage == storage && entry->value == value &&
+		    entry->resource == resource) {
+			desc              = entry->decoded.desc;
+			shader_conversion = entry->decoded.shader_conversion;
+			pixel_format      = entry->decoded.pixel_format;
+			view_format       = entry->decoded.view_format;
+			if (Config::ResolvedDrawVerify()) {
+				DecodedTexture fresh;
+				DecodeTextureDescriptor(resource, descriptor, storage, fresh);
+				if (!SameDecodedDesc(fresh.desc, desc) || fresh.shader_conversion != shader_conversion ||
+				    fresh.pixel_format != pixel_format || fresh.view_format != view_format) {
+					EXIT("draw state memo: a remembered texture decode differs from a fresh one, address=0x%016" PRIx64 "\n",
+					     descriptor.Base40());
+				}
+				static std::atomic<uint64_t> verified {0};
+				if ((verified.fetch_add(1, std::memory_order_relaxed) + 1) % (1u << 20) == 0) {
+					std::printf("DrawStateMemo verify: %" PRIu64 " remembered texture decodes agree with a fresh decode\n",
+					            verified.load(std::memory_order_relaxed));
+					std::fflush(stdout);
+				}
+			}
+		} else {
+			DecodedTexture decoded;
+			DecodeTextureDescriptor(resource, descriptor, storage, decoded);
+			desc              = decoded.desc;
+			shader_conversion = decoded.shader_conversion;
+			pixel_format      = decoded.pixel_format;
+			view_format       = decoded.view_format;
+			if (entry != nullptr) {
+				entry->valid    = true;
+				entry->resource = resource;
+				entry->value    = value;
+				entry->storage  = storage;
+				entry->decoded  = std::move(decoded);
+			}
+		}
+	}
 	const auto metadata_base_layer = desc.view_info.base_layer;
 	uint64_t   generation          = 0;
 	const bool record_source       = source != nullptr && Config::TextureBindingReuseEnabled();
@@ -902,6 +1005,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.shader_data.clear();
 	prepared.image_sources.resize(program.info.images.size());
 	const bool reuse_bindings = Config::TextureBindingReuseEnabled();
+	std::optional<TextureCache::LockBatch> texture_batch;
+	texture_batch.emplace(m_context.GetTextureCache());
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		// Consecutive draws mostly bind the same textures: keep the slot's binding while the
 		// descriptor, the shader's image resource and the image set are unchanged.
@@ -929,6 +1034,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		binding.mip_views.clear();
 		prepared.images[i] = std::move(binding);
 	}
+	texture_batch.reset();
 	Common::GpuPhase::Scope gpu_phase_samplers(Common::GpuPhase::Phase::SrtSamplers);
 	prepared.samplers.reserve(program.info.samplers.size());
 	for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
@@ -1054,6 +1160,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	// Bindings assembled without PrepareBindings have no recorded sources.
 	prepared.image_sources.resize(images.size());
 	auto& texture_cache = m_context.GetTextureCache();
+	const TextureCache::LockBatch texture_batch(texture_cache);
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		if (!images[i].image_id) continue;
@@ -1111,10 +1218,12 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	if (uses_dma) {
 		m_context.PrepareBda(address_writes);
 	}
+	auto& cache = m_context.GetTextureCache();
+	std::optional<TextureCache::LockBatch> texture_batch;
+	texture_batch.emplace(cache);
 	for (auto* stage: stages) {
 		RebindImages(*stage);
 	}
-	auto& cache = m_context.GetTextureCache();
 	for (auto& target: colors) {
 		EXIT_IF(!target.image_id);
 		const auto old_image = cache.m_slot_images.try_get(target.image_id);
@@ -1129,11 +1238,38 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 			BindRenderTarget(target.image_id);
 		}
 	}
+	texture_batch.reset();
 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only
 	// after image identities are final; attachment layout transitions follow buffer alias copies.
 	for (auto* stage: stages) {
 		RebindBuffers(*stage);
 	}
+}
+
+// The words a pushed write is compared by (--push-descriptor-delta): the type and count, then the handles and ranges of each
+// descriptor. False for a write that carries neither buffer nor image infos.
+static bool PushWriteContent(const vk::WriteDescriptorSet& write, std::vector<uint64_t>& out) {
+	out.clear();
+	out.push_back((static_cast<uint64_t>(write.descriptorType) << 32u) | write.descriptorCount);
+	if (write.pBufferInfo != nullptr) {
+		for (uint32_t i = 0; i < write.descriptorCount; i++) {
+			const auto& info = write.pBufferInfo[i];
+			out.push_back(std::bit_cast<uint64_t>(info.buffer));
+			out.push_back(info.offset);
+			out.push_back(info.range);
+		}
+		return true;
+	}
+	if (write.pImageInfo != nullptr) {
+		for (uint32_t i = 0; i < write.descriptorCount; i++) {
+			const auto& info = write.pImageInfo[i];
+			out.push_back(std::bit_cast<uint64_t>(info.sampler));
+			out.push_back(std::bit_cast<uint64_t>(info.imageView));
+			out.push_back(static_cast<uint64_t>(info.imageLayout));
+		}
+		return true;
+	}
+	return false;
 }
 
 void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
@@ -1517,14 +1653,49 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		                        push_data.dwords.data());
 	}
 
-	if (!m_descriptor_writes.empty()) {
+	const bool graphics_bind = pipeline_bind_point == vk::PipelineBindPoint::eGraphics;
+	auto&      push_cache    = m_context.GetCommandScheduler().GetPushDescriptorCache();
+	if (m_descriptor_writes.empty()) {
+		// Binding this pipeline may disturb the pushed set (its layout is not known to match).
+		if (graphics_bind) push_cache.Invalidate();
+	} else {
 		Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
-			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,
-			                               static_cast<uint32_t>(m_descriptor_writes.size()),
-			                               m_descriptor_writes.data());
+			const vk::WriteDescriptorSet* writes = m_descriptor_writes.data();
+			uint32_t                      count  = static_cast<uint32_t>(m_descriptor_writes.size());
+			if (graphics_bind && Config::PushDescriptorDeltaEnabled()) {
+				// The pushed set keeps the bindings a push does not write (until it is disturbed): leave out
+				// those whose content is what it holds.
+				push_cache.Begin(std::bit_cast<uint64_t>(pipeline.pipeline_layout));
+				m_push_writes.clear();
+				for (const auto& write: m_descriptor_writes) {
+					if (!PushWriteContent(write, m_push_content)) {
+						push_cache.Forget(write.dstBinding);
+						m_push_writes.push_back(write);
+					} else if (push_cache.Changed(write.dstBinding, m_push_content)) {
+						m_push_writes.push_back(write);
+					}
+				}
+				writes = m_push_writes.data();
+				count  = static_cast<uint32_t>(m_push_writes.size());
+				if (count == 0) push_cache.NoteElided();
+				static const bool stats = std::getenv("KYTY_DRAW_STATE_STATS") != nullptr;
+				if (stats && (push_cache.GetStats().pushes & 0x3ffff) == 0) {
+					const auto& s = push_cache.GetStats();
+					std::printf("[push-descriptor-delta] pushes=%lu elided=%.1f%% writes_pushed=%.1f%% of %lu disturbed=%lu\n",
+					            (unsigned long)s.pushes, 100.0 * s.pushes_elided / s.pushes,
+					            100.0 * s.writes_pushed / (s.writes_seen ? s.writes_seen : 1),
+					            (unsigned long)s.writes_seen, (unsigned long)s.disturbed);
+				}
+			} else if (graphics_bind) {
+				push_cache.Invalidate();
+			}
+			if (count != 0) {
+				vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0, count, writes);
+			}
 		} else {
+			if (graphics_bind) push_cache.Invalidate(); // a bound set replaces the pushed one
 			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
 			for (auto& write: m_descriptor_writes) {
 				write.dstSet = set;

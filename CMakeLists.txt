@@ -413,6 +413,7 @@ endfunction()
 
 add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 add_kyty_full_emulator_test(dynamic_state_tests "${KYTY_TESTS_DIR}/DynamicStateTests.cpp")
+add_kyty_full_emulator_test(slot_vector_tests "${KYTY_TESTS_DIR}/SlotVectorTests.cpp")
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
@@ -685,6 +686,22 @@ add_executable(page_presence_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(page_presence_tests PRIVATE ${inc_headers})
 target_link_libraries(page_presence_tests Threads::Threads)
+
+add_executable(hardware_context_epoch_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/HardwareContextEpochTests.cpp"
+)
+target_include_directories(hardware_context_epoch_tests PRIVATE ${inc_headers})
+
+add_executable(push_descriptor_cache_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PushDescriptorCacheTests.cpp"
+)
+target_include_directories(push_descriptor_cache_tests PRIVATE ${inc_headers})
+
+add_executable(adaptive_lock_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/AdaptiveLockTests.cpp"
+)
+target_include_directories(adaptive_lock_tests PRIVATE ${inc_headers})
+target_link_libraries(adaptive_lock_tests Threads::Threads)
 
 add_executable(remembered_mapping_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/RememberedMappingTests.cpp"
@@ -965,6 +982,7 @@ if(BUILD_TESTING)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME dynamic_state COMMAND $<TARGET_FILE:dynamic_state_tests>)
+	add_test(NAME slot_vector COMMAND $<TARGET_FILE:slot_vector_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
@@ -1054,6 +1072,9 @@ if(BUILD_TESTING)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME remembered_mapping COMMAND $<TARGET_FILE:remembered_mapping_tests>)
 	add_test(NAME page_presence COMMAND $<TARGET_FILE:page_presence_tests>)
+	add_test(NAME adaptive_lock COMMAND $<TARGET_FILE:adaptive_lock_tests>)
+	add_test(NAME push_descriptor_cache COMMAND $<TARGET_FILE:push_descriptor_cache_tests>)
+	add_test(NAME hardware_context_epoch COMMAND $<TARGET_FILE:hardware_context_epoch_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	add_test(NAME sys_file_read_fallback_disabled COMMAND $<TARGET_FILE:sys_file_read_tests>)
 	set_tests_properties(sys_file_read_fallback_disabled PROPERTIES
@@ -1228,6 +1249,7 @@ if(BUILD_TESTING)
 		ime_dialog_tests
 		shader_cfg_tests
 		dynamic_state_tests
+		slot_vector_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests
@@ -1283,6 +1305,9 @@ if(BUILD_TESTING)
 		bda_sync_gate_tests
 		remembered_mapping_tests
 		page_presence_tests
+		adaptive_lock_tests
+		push_descriptor_cache_tests
+		hardware_context_epoch_tests
 		sys_file_read_tests
 		hle_trace_tests
 		async_pipeline_tests

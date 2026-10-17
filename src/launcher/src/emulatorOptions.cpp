@@ -253,6 +253,44 @@ QList<Option> BuildTable() {
 	             "line of the next plan's blocks while it uses the current one. Only a hint to the "
 	             "CPU cache; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(plan_prefetch)});
+	defs.append({"async_upload_copies", "--async-upload-copies", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Copy uploaded game memory to the GPU on helper threads",
+	             "Data the game wrote is copied into a staging area for the GPU before it is drawn with. "
+	             "With this two helper threads do the copy while the GPU thread goes on, and the staging area "
+	             "is complete before the work is handed to the GPU. Exact; lowers the GPU thread's CPU time.",
+	             EMU_BOOL(async_upload_copies)});
+	defs.append({"push_descriptor_delta", "--push-descriptor-delta", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Hand the driver only the shader bindings that changed since the last draw",
+	             "Each draw tells the graphics driver all the resources its shaders use. Most of them are the "
+	             "same as in the draw before and the driver keeps them. With this only the ones that changed "
+	             "are sent, which is cheaper for the driver. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(push_descriptor_delta)});
+	defs.append({"texture_lock_batch", "--texture-lock-batch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Take the texture cache lock once per run of image lookups",
+	             "Every image a draw uses is looked up under a short lock, taken and released for each one. "
+	             "With this the GPU thread holds it across the whole run of lookups of a draw. Exact; lowers "
+	             "the GPU thread's CPU time per draw.",
+	             EMU_BOOL(texture_lock_batch)});
+	defs.append({"draw_state_memo", "--draw-state-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Do not redo per-draw work while the GPU registers have not changed",
+	             "Most draws of a frame set the same GPU state as the draw before. With this the GPU thread "
+	             "remembers what it worked out from that state (checks, render targets, shader set-up) and "
+	             "reuses it while the state is unchanged. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(draw_state_memo)});
+	defs.append({"cp_direct_stores", "--cp-direct-stores", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Write the GPU's fence and label values without a page fault",
+	             "When a frame finishes the emulated GPU writes small values into game memory. Those pages "
+	             "are usually write-protected for tracking, so each write took a page fault on the GPU thread. "
+	             "With this the value is written through the emulator's own view of the memory and the tracker "
+	             "is told directly. Exact; lowers the GPU thread's CPU time per frame.",
+	             EMU_BOOL(cp_direct_stores)});
+	defs.append({"tracker_sleeping_locks", "--tracker-sleeping-locks", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Let waiting game threads sleep instead of spinning in the memory tracker",
+	             "The emulator write-protects game memory the GPU uses and unprotects a page on the game's first "
+	             "write to it. Many game threads do that at once, and the ones that wait for the page lock spin "
+	             "on a core for the whole protection call. With this they sleep after a short spin, which leaves "
+	             "cores to the GPU thread and the draw workers.",
+	             EMU_BOOL(tracker_sleeping_locks)});
 	defs.append({"write_fault_around", "--write-fault-around", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the pages ahead of a sequential writer in one fault",
 	             "The emulator write-protects the memory the GPU uses to learn when the game "

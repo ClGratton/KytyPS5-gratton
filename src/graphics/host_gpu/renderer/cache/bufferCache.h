@@ -62,6 +62,9 @@ public:
 	KYTY_CLASS_NO_COPY(BufferCache);
 
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
+	// --cp-direct-stores: the emulator stored to [vaddr, vaddr + size) itself. True: the tracker took it as a CPU
+	// modification without touching any page protection; false: a page is GPU-dirty, take InvalidateMemory first.
+	[[nodiscard]] bool     NoteGuestStore(uint64_t vaddr, uint64_t size);
 	// Logs what the shader loop guards reported into the loop guard buffer.
 	void                   PollLoopGuard();
 	void                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false,

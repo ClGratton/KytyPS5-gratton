@@ -458,6 +458,20 @@ struct DrawRenderState {
 	PipelineCache::GraphicsPrograms programs;
 };
 
+// DrawRenderState is 17 KB (eight RenderColorInfo of 1,160 B, three ShaderVertexInputInfo of 2,088 B, the depth info) and used to be zeroed for
+// every draw. --draw-state-memo reuses one: what a draw reads is written first (colour entries by the describe step up to color_count, vertex
+// entry 0 and the pixel info by the program step; entries 1 and 2 only exist for tessellation, which fills all three).
+static DrawRenderState& FreshDrawRenderState() {
+	static thread_local DrawRenderState state;
+	state.depth_info          = {};
+	state.color_count         = 0;
+	state.ps_active           = true;
+	state.programs            = {};
+	state.ps_input_info       = {};
+	state.vertex_info[0]      = {};
+	return state;
+}
+
 struct DrawCallInfo {
 	CommandBufferDebugOp debug_op       = CommandBufferDebugOp::DrawIndex;
 	uint32_t             index_count    = 0;
@@ -478,6 +492,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 	EXIT_IF(colors == nullptr || color_count > RENDER_COLOR_ATTACHMENTS_MAX);
 	feedback_aspects = {};
 	auto&       cache = m_context.GetTextureCache();
+	const TextureCache::LockBatch texture_batch(cache);
 	RenderState state {};
 	state.width                 = std::numeric_limits<uint32_t>::max();
 	state.height                = std::numeric_limits<uint32_t>::max();
@@ -1087,6 +1102,8 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
 	Common::GpuPhase::Scope gpu_phase_targets(Common::GpuPhase::Phase::DrawTargets);
+	std::optional<TextureCache::LockBatch> texture_batch;
+	texture_batch.emplace(buffer.GetContext().GetTextureCache());
 	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 		if ((mrt_mask & (1u << slot)) != 0) {
 			ResolveRenderColorTarget(buffer, state.color_info[state.color_count],
@@ -1100,6 +1117,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "ResolveRenderDepthTarget");
 	}
 	ResolveRenderDepthTarget(buffer, state.depth_info);
+	texture_batch.reset();
 	gpu_phase_targets.End();
 
 	if (state.color_count == 0 && !state.depth_info.image_id && !state.ps_active) {
@@ -1787,6 +1805,79 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 }
 
+// uc_check and hw_check only look at the registers (and log once what they accept), so registers whose epochs passed them once pass them
+// again: --draw-state-memo skips the repeat.
+static void CheckDrawRegisters(CommandBuffer& buffer) {
+	auto& ucfg = buffer.GetUserConfig();
+	auto& ctx  = buffer.GetRegisters();
+	if (!Config::DrawStateMemoEnabled()) {
+		uc_check(ucfg);
+		hw_check(buffer);
+		return;
+	}
+	static thread_local uint64_t passed_uc  = ~uint64_t {0};
+	static thread_local uint64_t passed_ctx = ~uint64_t {0};
+	if (passed_uc != ucfg.Epoch()) {
+		uc_check(ucfg);
+		passed_uc = ucfg.Epoch();
+	}
+	if (passed_ctx != ctx.Epoch()) {
+		hw_check(buffer);
+		passed_ctx = ctx.Epoch();
+	}
+}
+
+// Epoch check (always under --resolved-draw-verify, and with KYTY_DRAW_STATE_STATS=1 as statistics): when the epoch of the
+// context, the user config or the shader registers equals the one of the previous draw, the content must be equal too.
+// The converse is not required (a setter that wrote the same value moves the epoch). TEMPORARY statistics beside the check.
+static void NoteDrawStateRepeat(CommandBuffer& buffer) {
+	static const bool stats = std::getenv("KYTY_DRAW_STATE_STATS") != nullptr;
+	if (!stats && !Config::ResolvedDrawVerify()) return;
+	static thread_local HW::Shader     prev_sh;
+	static thread_local HW::Context    prev_ctx;
+	static thread_local HW::UserConfig prev_uc;
+	static thread_local uint64_t       n = 0, same_ctx = 0, same_ctx_epoch = 0, same_sh = 0, same_sh_epoch = 0, same_uc = 0, same_uc_epoch = 0,
+	                             same_all_epoch = 0, same_all = 0, same_prog_user_free = 0, violations = 0;
+	const auto& sh  = buffer.GetShaders();
+	const auto& ctx = buffer.GetRegisters();
+	const auto& uc  = buffer.GetUserConfig();
+	if (n != 0) {
+		// Everything but the user SGPRs and the draw counters, by content: the shader registers are compared with the user
+		// SGPR epochs zeroed on both sides.
+		const bool ctx_eq = prev_ctx.SameRegisters(ctx);
+		const bool ctx_ep = prev_ctx.Epoch() == ctx.Epoch();
+		const bool sh_ep  = prev_sh.Epoch() == sh.Epoch();
+		const bool sh_eq  = prev_sh.SameStageRegisters(sh);
+		const bool uc_eq  = prev_uc.SameStaticRegisters(uc);
+		const bool uc_ep  = prev_uc.Epoch() == uc.Epoch();
+		same_ctx += ctx_eq;
+		same_ctx_epoch += ctx_ep;
+		same_uc += uc_eq;
+		same_uc_epoch += uc_ep;
+		same_sh_epoch += sh_ep;
+		same_sh += sh_eq;
+		same_all_epoch += ctx_ep && sh_ep && uc_ep;
+		same_all += ctx_eq && uc_eq;
+		if ((ctx_ep && !ctx_eq) || (uc_ep && !uc_eq) || (sh_ep && !sh_eq)) {
+			++violations;
+			if (Config::ResolvedDrawVerify()) {
+				EXIT("draw state epoch: an epoch is unchanged but the content differs (ctx %d uc %d shader %d)\n",
+				     ctx_ep && !ctx_eq, uc_ep && !uc_eq, sh_ep && !sh_eq);
+			}
+		}
+	}
+	n++;
+	prev_ctx = ctx;
+	prev_uc  = uc;
+	prev_sh  = sh;
+	if (stats && (n & 0x3ffff) == 0) {
+		std::printf("[draw-state-epoch] draws=%lu ctx_same_content=%.1f%% ctx_same_epoch=%.1f%% uc_same_content=%.1f%% uc_same_epoch=%.1f%% "
+		            "shader_same_content=%.1f%% shader_same_epoch=%.1f%% ctx+uc+shader_same_epoch=%.1f%% violations=%lu\n",
+		            (unsigned long)n, 100.0 * same_ctx / n, 100.0 * same_ctx_epoch / n, 100.0 * same_uc / n, 100.0 * same_uc_epoch / n,
+		            100.0 * same_sh / n, 100.0 * same_sh_epoch / n, 100.0 * same_all_epoch / n, (unsigned long)violations);
+	}
+}
+
 RenderExecutor::RenderExecutor(RenderContext& context): m_context(context) {}
 
 RenderExecutor::~RenderExecutor() = default;
@@ -1841,9 +1932,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		     static_cast<uint32_t>(args.base_vertex), args.first_instance);
 	}
 
-	uc_check(ucfg);
-
-	hw_check(buffer);
+	CheckDrawRegisters(buffer);
+	NoteDrawStateRepeat(buffer);
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
 	if (!GetDrawTopology(ucfg, topology)) {
@@ -1888,7 +1978,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count,
 	                        args.instance_count, args.first_instance, args.indirect_args};
-	DrawRenderState state {};
+	std::optional<DrawRenderState> local_state;
+	DrawRenderState&               state = Config::DrawStateMemoEnabled() ? FreshDrawRenderState() : local_state.emplace();
 	gpu_phase_checks.End();
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
@@ -1973,9 +2064,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		     args.vertex_count, args.instance_count, args.first_vertex, args.first_instance);
 	}
 
-	uc_check(ucfg);
-
-	hw_check(buffer);
+	CheckDrawRegisters(buffer);
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};
@@ -1985,7 +2074,8 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		ResetBindings();
 		return;
 	}
-	DrawRenderState state {};
+	std::optional<DrawRenderState> local_state;
+	DrawRenderState&               state = Config::DrawStateMemoEnabled() ? FreshDrawRenderState() : local_state.emplace();
 	gpu_phase_checks.End();
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();

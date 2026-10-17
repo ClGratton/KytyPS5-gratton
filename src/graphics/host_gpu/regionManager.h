@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_REGIONMANAGER_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_REGIONMANAGER_H_
 
+#include "common/adaptiveLock.h"
 #include "common/assert.h"
 #include "common/atomicBitMirror.h"
 #include "graphics/host_gpu/bdaSyncGate.h"
@@ -41,18 +42,11 @@ inline std::atomic<uint64_t> g_fault_run_pages {0};
 class TrackingSpinLock final {
 public:
 	void lock() noexcept {
-		const auto thread = CurrentThread();
-		while (m_lock.test_and_set(std::memory_order_acquire)) {
-			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
-#if defined(__x86_64__) || defined(_M_X64)
-			_mm_pause();
-#elif defined(_M_ARM64)
-			__yield();
-#elif defined(__aarch64__)
-			asm volatile("yield");
-#endif
+		if (!m_lock.TryLock()) {
+			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == CurrentThread());
+			m_lock.Lock();
 		}
-		m_owner.store(thread, std::memory_order_relaxed);
+		m_owner.store(CurrentThread(), std::memory_order_relaxed);
 	}
 	[[nodiscard]] bool HeldByCurrentThread() const noexcept {
 		return m_owner.load(std::memory_order_relaxed) == CurrentThread();
@@ -60,7 +54,7 @@ public:
 	void unlock() noexcept {
 		EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) != CurrentThread());
 		m_owner.store(0, std::memory_order_relaxed);
-		m_lock.clear(std::memory_order_release);
+		m_lock.Unlock();
 	}
 
 private:
@@ -80,11 +74,36 @@ private:
 #endif
 	}
 
-	std::atomic_flag     m_lock = ATOMIC_FLAG_INIT;
+	Common::AdaptiveLock m_lock;
 	std::atomic_uint32_t m_owner {0};
 };
 
 static_assert(std::atomic_uint32_t::is_always_lock_free);
+
+// A TrackingSpinLock the owning thread may take again: only the outermost pair of lock()/unlock() touches the atomic, a
+// nested pair is a thread-id compare and a counter. TextureCache uses it so a draw's many short lookups can run under one
+// acquisition (TextureCache::LockBatch).
+class ReentrantTrackingLock final {
+public:
+	void lock() noexcept {
+		if (m_lock.HeldByCurrentThread()) {
+			++m_depth;
+			return;
+		}
+		m_lock.lock();
+		m_depth = 1;
+	}
+	void unlock() noexcept {
+		if (--m_depth == 0) m_lock.unlock();
+	}
+	[[nodiscard]] bool HeldByCurrentThread() const noexcept {
+		return m_lock.HeldByCurrentThread();
+	}
+
+private:
+	TrackingSpinLock m_lock;
+	uint32_t         m_depth {0}; // owner only
+};
 
 class RegionManager final {
 public:
@@ -156,7 +175,38 @@ public:
 
 	// Verifier: both mirrors equal their bits. Caller holds `lock`.
 	[[nodiscard]] bool MirrorsMatch() const {
-		return m_cpu_mirror.Matches(m_cpu_dirty) && m_gpu_mirror.Matches(m_gpu_dirty);
+		// Also the protection bookkeeping: the pages whose watcher was released are the CPU-dirty ones that are not
+		// kept protected, and a kept-protected page is CPU-dirty.
+		const RegionBits released = m_cpu_dirty & ~m_dirty_protected;
+		return m_cpu_mirror.Matches(m_cpu_dirty) && m_gpu_mirror.Matches(m_gpu_dirty) &&
+		       (m_dirty_protected & ~m_cpu_dirty).None() && (released ^ m_writable).None();
+	}
+
+	// --cp-direct-stores: the emulator itself wrote [vaddr, vaddr + size) (a label, a fence value) through the backing
+	// view. The pages become CPU-dirty exactly as a guest write fault would make them, but they stay write-protected:
+	// nobody is about to write them, so the unprotect (an mprotect under the address-space mutex) and the protect that
+	// follows the upload are saved. A real guest write to such a page faults as before; ChangeState<Cpu, true> then
+	// unprotects it. Returns false, changing nothing, when a page of the range is GPU-dirty (that store needs the
+	// readback of the fault path). Caller holds `lock`.
+	[[nodiscard]] bool MarkCpuDirtyKeepProtected(uint64_t vaddr, uint64_t size) {
+		const auto [start, end] = GetPageRange(vaddr, size);
+		if (RegionBits(m_gpu_dirty, start, end).Any()) {
+			return false;
+		}
+		bool changed = false;
+		for (size_t page = start; page < end; ++page) {
+			if (!m_cpu_dirty.Get(page)) {
+				m_cpu_dirty.SetRange(page, page + 1);
+				m_dirty_protected.SetRange(page, page + 1);
+				changed = true;
+			}
+		}
+		if (changed) {
+			m_cpu_mirror.Publish(m_cpu_dirty, start, end);
+			BdaSync::NoteCpuModified(m_cpu_addr + start * TRACKER_PAGE_SIZE, (end - start) * TRACKER_PAGE_SIZE);
+			m_epoch.fetch_add(1, std::memory_order_release);
+		}
+		return true;
 	}
 
 	template <DirtySource source, bool enable>
@@ -177,6 +227,9 @@ public:
 			bits.SetRange(start, end);
 		} else {
 			bits.UnsetRange(start, end);
+		}
+		if constexpr (source == DirtySource::Cpu) {
+			m_dirty_protected.UnsetRange(start, end); // a real change of the CPU state: the pages follow it
 		}
 		GetMirror<source>().Publish(bits, start, end);
 		if constexpr (source == DirtySource::Cpu && enable) {
@@ -203,6 +256,9 @@ public:
 		RegionBits mask(bits, start, end);
 		if constexpr (clear) {
 			bits.UnsetRange(start, end);
+			if constexpr (source == DirtySource::Cpu) {
+				m_dirty_protected.UnsetRange(start, end);
+			}
 			GetMirror<source>().Publish(bits, start, end);
 			if constexpr (source == DirtySource::Cpu) {
 				UpdateProtection<true, false>();
@@ -221,8 +277,10 @@ public:
 private:
 	template <bool track, bool is_read>
 	void UpdateProtection() {
-		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
-		auto&      previous   = is_read ? m_readable : m_writable;
+		// A page that is CPU-dirty but still protected (MarkCpuDirtyKeepProtected) has not given up its watcher yet:
+		// for the protection it counts as clean.
+		const RegionBits protection = is_read ? ~m_gpu_dirty : (m_cpu_dirty & ~m_dirty_protected);
+		auto&            previous   = is_read ? m_readable : m_writable;
 		auto       mask       = protection ^ previous;
 		if (mask.None()) {
 			return;
@@ -283,6 +341,8 @@ private:
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
 	RegionBits   m_writable;
+	// CPU-dirty pages whose watcher is still held (see MarkCpuDirtyKeepProtected); a subset of m_cpu_dirty.
+	RegionBits   m_dirty_protected;
 	RegionBits   m_readable;
 	// Lock-free copies of m_cpu_dirty / m_gpu_dirty, written under `lock` (see IsModifiedLockFree).
 	Common::AtomicBitMirror<TRACKER_REGION_PAGES> m_cpu_mirror;

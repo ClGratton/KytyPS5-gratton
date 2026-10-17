@@ -1,4 +1,5 @@
 #include "common/emulatorConfig.h"
+#include "common/adaptiveLock.h"
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
@@ -34,6 +35,7 @@ void Load(const ConfigOptions& cfg) {
 	        cfg.pad_speaker_volume > 100);
 
 	*g_config = cfg;
+	Common::g_sleeping_locks_field = &g_config->tracker_sleeping_locks;
 	g_config->gpu_indirect_draws_request = cfg.gpu_indirect_draws;
 	g_config->poll_before_wait_on = cfg.poll_before_wait_us != 0;
 
@@ -79,6 +81,19 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("write-fault-around", &g_config->write_fault_around, false);
 	// A hint to the CPU's cache only; read per plan taken.
 	registry.Register("plan-prefetch", &g_config->plan_prefetch, false);
+	// Read per lock acquisition; a waiter that already spins or sleeps finishes its wait either way.
+	registry.Register("tracker-sleeping-locks", &g_config->tracker_sleeping_locks, false);
+	// Read per store; a page marked dirty while still protected needs no cleanup when the flag goes off (the next guest write
+	// to it faults like any protected page, an upload clears it).
+	registry.Register("cp-direct-stores", &g_config->cp_direct_stores, false);
+	// Read per draw; the remembered results carry the epochs they were computed at, so turning it off and on needs no cleanup.
+	registry.Register("draw-state-memo", &g_config->draw_state_memo, false);
+	// Read per upload; copies in flight are finished by the next submit whatever the flag says.
+	registry.Register("async-upload-copies", &g_config->async_upload_copies, false);
+	// Read at each batch scope; a scope that opened under the flag closes under it whatever the flag says now.
+	registry.Register("texture-lock-batch", &g_config->texture_lock_batch, false);
+	// Read per draw; with the flag off the held content is dropped, so a toggle needs no cleanup.
+	registry.Register("push-descriptor-delta", &g_config->push_descriptor_delta, false);
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
@@ -165,6 +180,26 @@ bool ImagePresenceEnabled() {
 
 bool PlanPrefetchEnabled() {
 	return Common::RuntimeToggles::Read(g_config->plan_prefetch);
+}
+
+bool AsyncUploadCopiesEnabled() {
+	return Common::RuntimeToggles::Read(g_config->async_upload_copies);
+}
+
+bool PushDescriptorDeltaEnabled() {
+	return Common::RuntimeToggles::Read(g_config->push_descriptor_delta);
+}
+
+bool TextureLockBatchEnabled() {
+	return Common::RuntimeToggles::Read(g_config->texture_lock_batch);
+}
+
+bool DrawStateMemoEnabled() {
+	return Common::RuntimeToggles::Read(g_config->draw_state_memo);
+}
+
+bool CpDirectStoresEnabled() {
+	return Common::RuntimeToggles::Read(g_config->cp_direct_stores);
 }
 
 bool WriteFaultAroundEnabled() {

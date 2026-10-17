@@ -147,6 +147,14 @@ void ImageLookupNoteVerified(const ImageLookupMemo::Stats& stats) {
 
 } // namespace
 
+TextureCache::LockBatch::LockBatch(TextureCache& cache): m_cache(Config::TextureLockBatchEnabled() ? &cache : nullptr) {
+	if (m_cache != nullptr) m_cache->m_lock.lock();
+}
+
+TextureCache::LockBatch::~LockBatch() {
+	if (m_cache != nullptr) m_cache->m_lock.unlock();
+}
+
 TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler,
                            PageManager& page_manager, BufferCache& buffer_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_page_manager(page_manager),

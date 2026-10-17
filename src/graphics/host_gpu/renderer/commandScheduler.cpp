@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/cache/uploadCopier.h"
 
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
@@ -451,6 +452,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	m_command.m_buffer = m_command_pool.Commit();
 	m_command.Begin();
 	m_dynamic_state.Invalidate();
+	m_push_cache.Invalidate();
 	return m_command;
 }
 
@@ -458,6 +460,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	Common::GpuPhase::Scope gpu_phase_submit(Common::GpuPhase::Phase::Submit);
 	Common::GpuPhase::NoteSubmit();
 	EXIT_IF(m_command.IsInvalid());
+	UploadCopier::FenceIfCreated(); // --async-upload-copies: the ring is complete before the GPU may read it
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 

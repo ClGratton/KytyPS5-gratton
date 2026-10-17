@@ -201,6 +201,16 @@ void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
 	});
 }
 
+bool MemoryTracker::NoteCpuStore(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	bool ok = true;
+	Iterate<false>(vaddr, size, [&ok](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		std::scoped_lock lock(manager->lock);
+		ok = manager->MarkCpuDirtyKeepProtected(manager->GetCpuAddr() + offset, bytes) && ok;
+	});
+	return ok;
+}
+
 void MemoryTracker::MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
