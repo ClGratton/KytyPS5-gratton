@@ -20982,6 +20982,7 @@ CoverageClass ClassifyOpcode(ShaderOpcode opcode,
   case Opcode::BUFFER_ATOMIC_UMAX:
   case Opcode::BUFFER_ATOMIC_AND:
   case Opcode::BUFFER_ATOMIC_AND_X2:
+  case Opcode::BUFFER_ATOMIC_SWAP_X2:
   case Opcode::BUFFER_ATOMIC_OR:
   case Opcode::BUFFER_ATOMIC_XOR:
   case Opcode::BUFFER_ATOMIC_FMIN:
@@ -26457,6 +26458,98 @@ TestCase VectorReadlaneSelectsTwoKeysWithinWave() {
   test.compute_info.threads_num[1] = 1;
   test.compute_info.threads_num[2] = 1;
   test.compute_info.wave_size = 32;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
+TestCase VectorReadlaneSelectBeyondWave32() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  AppendVMovU32(&code, 5, 1);
+  code.push_back(EncodeVop2(0x1a, 1, Vgpr(0), 5));         // v1 = 1 << lane
+  AppendVop3(&code, 0x360, 20, Vgpr(1), InlineU32(63));    // v_readlane_b32 s20, v1, 63
+  AppendVop3(&code, 0x360, 21, Vgpr(1), InlineU32(31));    // v_readlane_b32 s21, v1, 31
+  code.push_back(EncodeVop1(0x01, 2, 20));
+  code.push_back(EncodeVop2(0x1c, 2, 21, 2));               // v2 = s21 | s20
+  AppendStoreVgprAtLaneDwordOffset(&code, 2, 0, 0);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "VectorReadlaneSelectBeyondWave32";
+  test.code = std::move(code);
+  test.expected = std::vector<u32>(32, 0x80000000u);
+  test.opcodes = {O::V_MOV_B32, O::V_LSHLREV_B32, O::V_READLANE_B32, O::V_OR_B32,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.decoded_counts = {{"V_READLANE_B32", 2}};
+  test.compute_info.threads_num[0] = 32;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.wave_size = 32;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
+TestCase VectorReadlaneFromCulledLane() {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  code.push_back(EncodeVop2(0x25, 1, InlineU32(1), 0));   // v1 = lane + 1
+  code.push_back(EncodeVop2(0x25, 3, InlineU32(1), 1));   // v3 = lane + 2
+  code.push_back(EncodeVop2(0x0b, 2, Vgpr(1), 3));        // v2 = (lane + 1) * (lane + 2)
+  code.push_back(EncodeVop2(0x16, 2, InlineU32(1), 2));   // v2 = 1 + 2 + .. + (lane + 1)
+  AppendVop3(&code, 0x360, 20, Vgpr(2), InlineU32(31));   // v_readlane_b32 s20, v2, 31
+  code.push_back(EncodeVop1(0x01, 4, 20));
+  AppendStoreVgprAtLaneDwordOffset(&code, 4, 0, 0);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "VectorReadlaneFromCulledLane";
+  test.code = std::move(code);
+  test.expected = std::vector<u32>(28, 28u * 29u / 2u);
+  test.opcodes = {O::V_ADD_NC_U32, O::V_MUL_U32_U24, O::V_LSHRREV_B32, O::V_READLANE_B32,
+                  O::V_MOV_B32,    O::V_LSHLREV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.decoded_counts = {{"V_READLANE_B32", 1}};
+  test.compute_info.threads_num[0] = 28;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.wave_size = 32;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
+// v_readfirstlane_b32 with EXEC = 0 names lane 0 on RDNA 2 (it writes its scalar destination whatever
+// EXEC is). The emitter answered lane 31 (FindILsb(0) = -1, plus 32 in the wave64 path): measured on
+// the device, exec = 0 returned 0x1f in all lanes. Here the lanes are 100 + lane, so lane 0 gives 100.
+TestCase VectorReadfirstlaneWithEmptyExec(u32 wave_size) {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  code.push_back(EncodeVop2(0x25, 1, InlineU32(0), 0));            // v1 = lane
+  AppendVMovU32(&code, 2, 100);
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(2), 1));                  // v1 = 100 + lane
+  code.push_back(EncodeSop1(0x04, 12, 126));                        // s[12:13] = exec
+  code.push_back(EncodeSop1(0x04, 126, InlineU32(0)));              // exec = 0
+  code.push_back(EncodeVop1(0x02, 20, Vgpr(1)));                    // v_readfirstlane_b32 s20, v1
+  code.push_back(EncodeSop1(0x04, 126, 12));                        // exec = s[12:13]
+  code.push_back(EncodeVop1(0x01, 4, 20));
+  AppendStoreVgprAtLaneDwordOffset(&code, 4, 0, 0);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = wave_size == 32 ? "VectorReadfirstlaneWithEmptyExecWave32"
+                              : "VectorReadfirstlaneWithEmptyExecWave64";
+  test.code = std::move(code);
+  test.expected = std::vector<u32>(wave_size, 100u);
+  test.opcodes = {O::V_ADD_NC_U32, O::V_MOV_B32, O::S_MOV_B64, O::V_READFIRSTLANE_B32,
+                  O::V_LSHLREV_B32, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.compute_info.threads_num[0] = wave_size;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.wave_size = wave_size;
   test.compute_info.thread_ids_num = 1;
   test.has_compute_info = true;
   return test;
@@ -35037,7 +35130,10 @@ void CheckWave64WholeWaveResults() {
           tools.Disassemble(native.spirv, &native_text) &&
               tools.Disassemble(emulated.spirv, &emulated_text),
           "failed to disassemble whole-wave operations");
-  const auto ballots = CountText(native_text, "OpGroupNonUniformBallot ");
+  // Each READFIRSTLANE / READLANE also splits the ballot and takes FindUMsb of two halves (an empty
+  // EXEC or a missing lane names a defined lane); those ballots are not the ones under test.
+  const auto ballots = CountText(native_text, "OpGroupNonUniformBallot ") -
+                       CountText(native_text, "FindUMsb") / 2;
   Require(test.name, "whole-wave ballot reuse",
           ballots != 0 &&
               CountText(emulated_text, "OpGroupNonUniformBallot ") == ballots * 2,
@@ -35046,6 +35142,56 @@ void CheckWave64WholeWaveResults() {
   Require(test.name, "whole-wave first-lane reuse",
           CountText(emulated_text, "OpGroupNonUniformShuffle ") == 6,
           "emulated halves repeated the first-active-lane broadcast");
+}
+
+// A wave64 pixel shader on a host subgroup that lacks some of its lanes (a 32-wide subgroup runs it
+// without split halves; helper invocations and partly filled subgroups are missing lanes too): the
+// per-tile light-list walk with the WaveActiveMin idiom (DPP row_shr min, v_permlanex16,
+// v_readlane 31 / 63) read undefined lanes and looped for ever on an RTX 3060 Ti. Checks the
+// SPIR-V shape of the guards; the fallbacks are best-effort, see MayLackLanes in spirvEmitterFlow.cpp.
+// Ported from upstream KytyPS5 PR #1515 (fozter, co-authored by overlordxrz-source), GPL-2.0.
+void CheckPixelCrossLaneMissingLanes() {
+  using O = ShaderOpcode;
+  constexpr const char *name = "PixelCrossLaneMissingLanes";
+  std::vector<u32> code;
+  code.push_back(EncodeVop1(0x01, 1, 250)); // v_mov_b32_dpp v1, v0 row_shr:1
+  code.push_back(EncodeVop1Dpp(0, 0x111));
+  code.push_back(EncodeSMovB32(0, InlineU32(1)));
+  code.push_back(EncodeSMovB32(1, InlineU32(0)));
+  AppendVop3(&code, 0x378, 2, Vgpr(0), 0, 1);          // v_permlanex16_b32 v2, v0, s0, s1
+  AppendVop3(&code, 0x360, 4, Vgpr(1), InlineU32(63)); // v_readlane_b32 s4, v1, 63
+  code.push_back(EncodeVop1(0x01, 3, 4));
+  code.push_back(EncodeExp0(0x00, 0xf));
+  code.push_back(EncodeExp1(1, 2, 3, 3));
+  AppendEnd(&code);
+
+  GraphicsCase test;
+  test.name = name;
+  test.fragment_code = code;
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B32, O::V_PERMLANEX16_B32,
+                  O::V_READLANE_B32, O::EXP, O::S_ENDPGM};
+  const auto pixel = CompileFragmentCase(test);
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+  std::string text;
+  Require(name, "disassembly", tools.Disassemble(pixel.spirv, &text),
+          "failed to disassemble the pixel shader");
+  Require(name, "wave64 readlane wrap",
+          text.find("BuiltIn SubgroupSize") != std::string::npos,
+          "lane 63 was not wrapped to the host subgroup size");
+  Require(name, "missing readlane source", CountText(text, "FindUMsb") >= 2u,
+          "a missing readlane source does not fall back to a live lane");
+  Require(name, "missing DPP and permlane sources",
+          CountText(text, "OpGroupNonUniformBallot ") >= 5u,
+          "DPP or permlane reads are not guarded by the present-lane ballot");
+
+  // A wave32 compute shader has no lanes beyond the host subgroup: no SubgroupSize wrap.
+  const auto compute = CompileCase(VectorReadlaneSelectsTwoKeysWithinWave());
+  std::string compute_text;
+  Require(name, "compute disassembly", tools.Disassemble(compute.spirv, &compute_text),
+          "failed to disassemble the compute shader");
+  Require(name, "wave64-only wrap",
+          compute_text.find("BuiltIn SubgroupSize") == std::string::npos,
+          "the wave64 readlane wrap leaked into a wave32 compute shader");
 }
 
 TestCase Wave64RawMasksAndScalarBranch() {
@@ -35381,6 +35527,43 @@ TestCase BufferAtomicAndX2GlcAndExec() {
   test.opcodes = {O::V_MOV_B32, O::S_MOV_B64, O::BUFFER_ATOMIC_AND_X2,
                   O::BUFFER_STORE_DWORD, O::S_ENDPGM};
   test.required_spirv = {"OpAtomicAnd %ulong", "Int64Atomics"};
+  return test;
+}
+
+// A coherent (GLC) BUFFER_LOAD_DWORDX2 observes a 64-bit buffer atomic as one value on the GPU. In a
+// shader that already uses 64-bit buffer atomics the load must be one 64-bit atomic load, not two
+// 32-bit loads: decoupled look-back scans publish a (flag, value) pair with BUFFER_ATOMIC_SWAP_X2
+// and poll it with GLC dwordx2, and a torn read gives the new flag with the old value (prefix sums
+// that drop at block boundaries, then loops that never end). Ported from TheCruZ/KytyPS5-GTA@c29bcb321.
+TestCase BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(bool glc, bool int64_atomics) {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = glc ? (int64_atomics ? "BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad"
+                                   : "BufferLoadDwordx2GlcWithoutInt64AtomicsStaysPlain")
+                  : "BufferLoadDwordx2WithoutGlcStaysPlain";
+  auto &code = test.code;
+  AppendVMovU32(&code, 20, 0);
+  AppendVMovLiteral(&code, 2, 0xaaaa0001u);
+  AppendVMovLiteral(&code, 3, 0xbbbb0002u);
+  if (int64_atomics) {
+    AppendBufferStoreOpcode(&code, 0x50, 2, 20, false); // buffer_atomic_swap_x2, no return
+  } else {
+    AppendBufferStoreOpcode(&code, 0x1d, 2, 20, false); // buffer_store_dwordx2
+  }
+  code.push_back(EncodeMubuf0(0x0du, 0, false, true, glc));
+  code.push_back(EncodeMubuf1(4, 12, 20));
+  AppendStoreVgpr(&code, 4, 2);
+  AppendStoreVgpr(&code, 5, 3);
+  AppendEnd(&code);
+  test.initial = {0x12345678u, 0x87654321u, 0, 0};
+  test.expected = {0xaaaa0001u, 0xbbbb0002u, 0xaaaa0001u, 0xbbbb0002u};
+  test.opcodes = {O::V_MOV_B32, int64_atomics ? O::BUFFER_ATOMIC_SWAP_X2 : O::BUFFER_STORE_DWORDX2,
+                  O::BUFFER_LOAD_DWORDX2, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  if (glc && int64_atomics) {
+    test.required_spirv = {"OpAtomicLoad %ulong", "OpAtomicExchange %ulong"};
+  } else {
+    test.forbidden_spirv = {"OpAtomicLoad"};
+  }
   return test;
 }
 
@@ -38702,6 +38885,63 @@ TestCase ImageAtomicGlc0DoesNotReturnOldValue() {
   return test;
 }
 
+void AppendWave64Minimum(std::vector<u32> &code) {
+  code.insert(code.end(), {EncodeSop1(0x04, 24, 126), // Save contributing lanes.
+                          EncodeSop1(0x28, 106, 126)});
+  AppendVop3(&code, 0x101, 13, 193, Vgpr(13), 24); // Inactive lanes contribute UINT_MAX.
+  for (u32 shift : {1u, 2u, 4u, 8u}) {
+    code.push_back(EncodeVop2(0x13, 13, 250, 13));
+    code.push_back(EncodeVop2Dpp(13, 0x110u + shift));
+  }
+  // Exact RDNA2 wave64 reduction from PS 964747887d898821, PCs 0x224..0x244.
+  code.insert(code.end(), {0xd778100cu, 0x0305830du,
+      EncodeVop2(0x13, 13, Vgpr(13), 12), EncodeSop1(0x04, 126, 106),
+      0xd7600006u, 0x00013f0du, 0xd7600007u, 0x00017f0du,
+      EncodeSop2(0x07, 8, 6, 7), EncodeVop1(0x01, 0, 8)});
+}
+
+GraphicsCase GraphicsSparseWaveMinimum() {
+  GraphicsCase test;
+  test.name = "GraphicsSparseWaveMinimum";
+  auto &code = test.fragment_code;
+  code = {EncodeVintrp(0x02, 13, 0, 0, 2)};
+  AppendWave64Minimum(code);
+  code.insert(code.end(), {EncodeExp0(0x00, 0xf), EncodeExp1(0, 0, 0, 0)});
+  AppendEnd(&code);
+  test.pixel_interpolator_settings = {0x00000400u};
+  test.expected_pixel = {0x3e800000u, 0x3e800000u, 0x3e800000u, 0x3e800000u};
+  test.opcodes = {ShaderOpcode::V_MIN_U32, ShaderOpcode::V_PERMLANEX16_B32,
+                  ShaderOpcode::V_READLANE_B32, ShaderOpcode::S_MIN_U32};
+  return test;
+}
+
+TestCase ComputeWave64Minimum(bool masked) {
+  TestCase test;
+  test.name = masked ? "ComputeWave64MinimumMasked" : "ComputeWave64Minimum";
+  auto &code = test.code;
+  code = {EncodeVop2(0x1a, 20, InlineU32(2), 0)};
+  AppendVMovU32(&code, 13, 100);
+  code.push_back(EncodeVop2(0x26, 13, Vgpr(13), 0)); // 100 - lane: minimum is in the upper half.
+  if (masked) {
+    AppendSMovLiteral(&code, 126, 0xfffffffeu);
+    AppendSMovLiteral(&code, 127, 0x7fffffffu);
+  }
+  AppendWave64Minimum(code);
+  AppendBufferStoreDword(&code, 0, 20);
+  AppendEnd(&code);
+  test.initial.assign(64, 0xa5a5a5a5u);
+  test.expected.assign(64, masked ? 38u : 37u);
+  if (masked) test.expected.front() = test.expected.back() = 0xa5a5a5a5u;
+  test.compute_info.threads_num[0] = 64;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.wave_size = 64;
+  test.has_compute_info = true;
+  test.opcodes = {ShaderOpcode::V_MIN_U32, ShaderOpcode::V_PERMLANEX16_B32,
+                  ShaderOpcode::V_READLANE_B32, ShaderOpcode::S_MIN_U32};
+  return test;
+}
+
 GraphicsCase GraphicsInterpolationExport() {
   using O = ShaderOpcode;
 
@@ -38928,6 +39168,47 @@ GraphicsCase GraphicsAncillarySampleId() {
                   ShaderOpcode::V_MOV_B32, ShaderOpcode::EXP, ShaderOpcode::S_ENDPGM};
   // Average samples 0..3, their signed low two bits, and their second bit.
   test.expected_pixel = {0x3fc00000u, 0xbf000000u, 0x3f000000u, 0x3f800000u};
+  return test;
+}
+
+GraphicsCase GraphicsWave64WholeWaveCount(u32 height, bool lanes_0_32) {
+  static const char *const names[2][2] = {
+      {"GraphicsWave64WholeWaveCount8x4Lanes31And63", "GraphicsWave64WholeWaveCount8x4Lanes0And32"},
+      {"GraphicsWave64WholeWaveCount8x8Lanes31And63", "GraphicsWave64WholeWaveCount8x8Lanes0And32"}};
+  GraphicsCase test;
+  test.name = names[height == 8u][lanes_0_32];
+  test.width = 8;
+  test.height = height;
+  auto &code = test.fragment_code;
+  code = {EncodeVop1(0x01, 13, InlineU32(1)),
+          EncodeSop1(0x10, 9, 126),
+          EncodeSop1(0x04, 24, 126),
+          EncodeSop1(0x28, 106, 126)};
+  AppendVop3(&code, 0x101, 13, InlineU32(0), Vgpr(13), 24);
+  for (u32 shift : {1u, 2u, 4u, 8u}) {
+    code.push_back(EncodeVop2(0x25, 13, 250, 13));
+    code.push_back(EncodeVop2Dpp(13, (lanes_0_32 ? 0x160u : 0x110u) + shift));
+  }
+  code.insert(code.end(), {0xd778100cu, 0x0305830du,
+                          EncodeVop2(0x25, 13, Vgpr(13), 12),
+                          EncodeSop1(0x04, 126, 106)});
+  AppendVop3(&code, 0x360, 6, Vgpr(13), InlineU32(lanes_0_32 ? 0u : 31u));
+  AppendVop3(&code, 0x360, 7, Vgpr(13), InlineU32(lanes_0_32 ? 32u : 63u));
+  code.insert(code.end(), {EncodeSop2(0x00, 8, 6, 7),
+                          EncodeSopc(0x06, 8, 9),
+                          EncodeSop2(0x0a, 10, 242, 128),
+                          EncodeSop2(0x03, 11, 8, 9),
+                          EncodeVop1(0x01, 0, 10), EncodeVop1(0x05, 1, 11),
+                          EncodeVop1(0x01, 2, InlineU32(0)), EncodeVop1(0x01, 3, 242),
+                          EncodeExp0(0x00, 0xf), EncodeExp1(0, 1, 2, 3)});
+  AppendEnd(&code);
+  for (u32 i = 0; i < 8u * height; i++) {
+    test.expected_pixel.insert(test.expected_pixel.end(),
+                               {0x3f800000u, 0u, 0u, 0x3f800000u});
+  }
+  test.opcodes = {ShaderOpcode::S_BCNT1_I32_B64, ShaderOpcode::V_ADD_NC_U32,
+                  ShaderOpcode::V_PERMLANEX16_B32, ShaderOpcode::V_READLANE_B32,
+                  ShaderOpcode::S_ADD_U32};
   return test;
 }
 
@@ -39502,6 +39783,10 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorReadlaneFromInactiveWrittenLane);
   AddCase(VectorLaneWave32RuntimeSelectorWraps);
   AddCase(VectorReadlaneSelectsTwoKeysWithinWave);
+  AddCase(VectorReadlaneSelectBeyondWave32);
+  AddCase(VectorReadlaneFromCulledLane);
+  cases.push_back(VectorReadfirstlaneWithEmptyExec(32));
+  cases.push_back(VectorReadfirstlaneWithEmptyExec(64));
   AddCase(VectorPermlanex16);
   AddCase(VectorPermlane16FetchInactiveZero);
   AddCase(VectorPermlane16FetchInactiveFi);
@@ -39513,6 +39798,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorDppRowXmask);
   cases.push_back(VectorDppRowShare(32));
   cases.push_back(VectorDppRowShare(64));
+  cases.push_back(ComputeWave64Minimum(false));
+  cases.push_back(ComputeWave64Minimum(true));
   AddCase(VectorDppBankMaskPreservesDestination);
   AddCase(VectorDppBoundsControlZeroPreservesDestination);
   AddCase(Vop3FmacF32NegatedSourceAccumulates);
@@ -39639,6 +39926,9 @@ std::vector<TestCase> MakeCases() {
   cases.push_back(BufferSubwordStoresAtHostOffset(2));
   cases.push_back(BufferSubwordStoresAtHostOffset(1));
   AddCase(BufferLoadDwordx2SnapshotsOverlappingAddress);
+  cases.push_back(BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(true, true));
+  cases.push_back(BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(false, true));
+  cases.push_back(BufferLoadDwordx2GlcAfterSwapX2IsOneAtomicLoad(true, false));
   AddCase(BufferLoadDwordx3SnapshotsOverlappingAddress);
   AddCase(BufferLoadDwordx4SnapshotsOverlappingAddress);
   AddCase(BufferLoadDwordx4ZeroesOnlyOutOfBoundsTail);
@@ -39889,8 +40179,93 @@ std::vector<TestCase> MakeCases() {
   return cases;
 }
 
+enum class WaveReduceOp { UMin, UMax, SMin, SMax, And, Or, Xor };
+
+GraphicsCase GraphicsWave64WholeWaveReduce(WaveReduceOp op, u32 height, bool butterfly) {
+  static const char *const op_names[] = {"UMin", "UMax", "SMin", "SMax", "And", "Or", "Xor"};
+  struct Encoding {
+    u32 vop2;
+    u32 sop2;
+    u32 identity;
+  };
+  static const Encoding encodings[] = {
+      {0x13, 0x07, 0xffffffffu}, {0x14, 0x09, 0u},          {0x11, 0x06, 0x7fffffffu},
+      {0x12, 0x08, 0x80000000u}, {0x1b, 0x0e, 0xffffffffu}, {0x1c, 0x10, 0u},
+      {0x1d, 0x12, 0u}};
+  const auto &enc = encodings[static_cast<u32>(op)];
+  static std::set<std::string> names;
+  GraphicsCase test;
+  test.name = names.insert(std::string("GraphicsWave64WholeWaveReduce") + op_names[static_cast<u32>(op)] +
+                           (height == 8u ? "8x8" : "8x4") + (butterfly ? "Butterfly" : "Scan"))
+                  .first->c_str();
+  test.width = 8;
+  test.height = height;
+  auto &code = test.fragment_code;
+  AppendVop3(&code, 0x365, 4, 193u, InlineU32(0));
+  AppendVop3(&code, 0x366, 4, 193u, Vgpr(4));
+  switch (op) {
+    case WaveReduceOp::UMin:
+    case WaveReduceOp::UMax: code.push_back(EncodeVop1(0x01, 13, Vgpr(4))); break;
+    case WaveReduceOp::SMin:
+    case WaveReduceOp::SMax: code.push_back(EncodeVop2(0x27, 13, InlineU32(32), 4)); break;
+    default:
+      code.push_back(EncodeVop2(0x1b, 5, InlineU32(31), 4));
+      code.push_back(EncodeVop1(0x01, 6, InlineU32(1)));
+      code.push_back(EncodeVop2(0x1a, 13, Vgpr(5), 6));
+      if (op == WaveReduceOp::And) code.push_back(EncodeVop1(0x37, 13, Vgpr(13)));
+      break;
+  }
+  code.insert(code.end(), {EncodeSop1(0x04, 24, 126),
+                           EncodeSop1(0x28, 106, 126),
+                           EncodeSop1(0x03, 30, 255), enc.identity});
+  AppendVop3(&code, 0x101, 13, 30, Vgpr(13), 24);
+  for (u32 shift : {1u, 2u, 4u, 8u}) {
+    code.push_back(EncodeVop2(enc.vop2, 13, 250, 13));
+    code.push_back(EncodeVop2Dpp(13, (butterfly ? 0x160u : 0x110u) + shift));
+  }
+  code.insert(code.end(), {0xd778100cu, 0x0305830du,
+                           EncodeVop2(enc.vop2, 13, Vgpr(13), 12),
+                           EncodeSop1(0x04, 126, 106)});
+  AppendVop3(&code, 0x360, 6, Vgpr(13), InlineU32(butterfly ? 0u : 31u));
+  AppendVop3(&code, 0x360, 7, Vgpr(13), InlineU32(butterfly ? 32u : 63u));
+  code.push_back(EncodeSop2(enc.sop2, 8, 6, 7));
+  switch (op) {
+    case WaveReduceOp::UMin: code.push_back(EncodeSop1(0x14, 9, 24)); break;
+    case WaveReduceOp::SMin:
+      code.push_back(EncodeSop1(0x14, 9, 24));
+      code.push_back(EncodeSop2(0x01, 9, 9, InlineU32(32)));
+      break;
+    case WaveReduceOp::UMax:
+      code.push_back(EncodeSop1(0x16, 9, 24));
+      code.push_back(EncodeSop2(0x01, 9, InlineU32(63), 9));
+      break;
+    case WaveReduceOp::SMax:
+      code.push_back(EncodeSop1(0x16, 9, 24));
+      code.push_back(EncodeSop2(0x01, 9, InlineU32(31), 9));
+      break;
+    case WaveReduceOp::Xor: code.push_back(EncodeSop2(0x12, 9, 24, 25)); break;
+    default:
+      code.push_back(EncodeSop2(0x10, 9, 24, 25));
+      if (op == WaveReduceOp::And) code.push_back(EncodeSop1(0x07, 9, 9));
+      break;
+  }
+  code.insert(code.end(), {EncodeSopc(0x06, 8, 9),
+                           EncodeSop2(0x0a, 10, 242, 128),
+                           EncodeSop2(0x03, 11, 8, 9),
+                           EncodeVop1(0x01, 0, 10), EncodeVop1(0x05, 1, 11),
+                           EncodeVop1(0x01, 2, InlineU32(0)), EncodeVop1(0x01, 3, 242),
+                           EncodeExp0(0x00, 0xf), EncodeExp1(0, 1, 2, 3)});
+  AppendEnd(&code);
+  for (u32 i = 0; i < 8u * height; i++) {
+    test.expected_pixel.insert(test.expected_pixel.end(), {0x3f800000u, 0u, 0u, 0x3f800000u});
+  }
+  test.opcodes = {ShaderOpcode::V_PERMLANEX16_B32, ShaderOpcode::V_READLANE_B32};
+  return test;
+}
+
 std::vector<GraphicsCase> MakeGraphicsCases() {
-  return {
+  std::vector<GraphicsCase> cases{
+      GraphicsSparseWaveMinimum(),
       GraphicsInterpolationExport(),
       GraphicsPositionWExport(),
       GraphicsPackedHalfCentroid(),
@@ -39914,7 +40289,21 @@ std::vector<GraphicsCase> MakeGraphicsCases() {
       GraphicsMrt0OffVmExportDiscardsInactiveExec(),
       GraphicsFinalVmExportSupersedesEarlierVmMask(),
       GraphicsBranchPathFinalVmExportDiscardsInactiveExec(),
+      GraphicsWave64WholeWaveCount(8, false),
+      GraphicsWave64WholeWaveCount(8, true),
+      GraphicsWave64WholeWaveCount(4, false),
+      GraphicsWave64WholeWaveCount(4, true),
   };
+  for (const auto op : {WaveReduceOp::UMin, WaveReduceOp::UMax, WaveReduceOp::SMin,
+                        WaveReduceOp::SMax, WaveReduceOp::And, WaveReduceOp::Or,
+                        WaveReduceOp::Xor}) {
+    for (const u32 height : {8u, 4u}) {
+      for (const bool butterfly : {false, true}) {
+        cases.push_back(GraphicsWave64WholeWaveReduce(op, height, butterfly));
+      }
+    }
+  }
+  return cases;
 }
 
 void CheckComputeLdsLimit(VulkanHarness &vulkan) {
@@ -45733,6 +46122,9 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--dpp-only") == 0) {
     VulkanHarness vulkan;
+    RunGraphicsCase(&vulkan, GraphicsSparseWaveMinimum());
+    RunCase(&vulkan, ComputeWave64Minimum(false));
+    RunCase(&vulkan, ComputeWave64Minimum(true));
     RunCase(&vulkan, VectorDpp8Captured(false));
     for (const u32 wave_size : {32u, 64u})
       for (const bool fi : {false, true})
@@ -46024,6 +46416,7 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--wave64-only") == 0) {
     CheckWave64WholeWaveResults();
+    CheckPixelCrossLaneMissingLanes();
     VulkanHarness vulkan;
     RunCase(&vulkan, Wave32VccMasksPreserveOtherHalf());
     RunCase(&vulkan, DsPermuteWave64UsesIndependentHalves());
@@ -46586,6 +46979,10 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--readlane-key-guard-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, VectorReadlaneSelectsTwoKeysWithinWave());
+    RunCase(&vulkan, VectorReadlaneSelectBeyondWave32());
+    RunCase(&vulkan, VectorReadlaneFromCulledLane());
+    RunCase(&vulkan, VectorReadfirstlaneWithEmptyExec(32));
+    RunCase(&vulkan, VectorReadfirstlaneWithEmptyExec(64));
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--rt1d-only") == 0) {
@@ -46748,6 +47145,7 @@ int main(int argc, char **argv) {
   CheckIndirectImageKeySwitch(vulkan);
   CheckFiniteInlineSamplerPhi(vulkan);
   CheckWave64WholeWaveResults();
+  CheckPixelCrossLaneMissingLanes();
   CheckPs5GameExampleImageClearRuntimeShape();
   vulkan.CheckSchedulerTimeline();
   vulkan.CheckGuestGpuTimestamps();
