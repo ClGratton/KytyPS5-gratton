@@ -535,6 +535,11 @@ add_executable(runtime_toggles_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(runtime_toggles_tests PRIVATE ${inc_headers})
 
+add_executable(thread_placement_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ThreadPlacementTests.cpp"
+)
+target_include_directories(thread_placement_tests PRIVATE ${inc_headers})
+
 add_executable(submit_coalescer_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SubmitCoalescerTests.cpp"
 )
@@ -991,6 +996,7 @@ if(BUILD_TESTING)
 	add_test(NAME texture_gc_policy COMMAND $<TARGET_FILE:texture_gc_policy_tests>)
 	add_test(NAME phase_timers COMMAND $<TARGET_FILE:phase_timers_tests>)
 	add_test(NAME runtime_toggles COMMAND $<TARGET_FILE:runtime_toggles_tests>)
+	add_test(NAME thread_placement COMMAND $<TARGET_FILE:thread_placement_tests>)
 	add_test(NAME submit_coalescer COMMAND $<TARGET_FILE:submit_coalescer_tests>)
 	add_test(NAME drain_causes COMMAND $<TARGET_FILE:drain_causes_tests>)
 	add_test(NAME barrier_elision COMMAND $<TARGET_FILE:barrier_elision_tests>)
@@ -1253,6 +1259,7 @@ if(BUILD_TESTING)
 		texture_gc_policy_tests
 		phase_timers_tests
 		runtime_toggles_tests
+		thread_placement_tests
 		submit_coalescer_tests
 		drain_causes_tests
 		barrier_elision_tests
