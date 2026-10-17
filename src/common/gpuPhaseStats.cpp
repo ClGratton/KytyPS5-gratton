@@ -3,6 +3,7 @@
 #include "common/benchInstrument.h"
 #include "common/logging/log.h"
 #include "common/phaseTimers.h"
+#include "common/shardedCounter.h"
 
 #include <tracy/Tracy.hpp>
 #include <tracy/TracyC.h>
@@ -60,23 +61,23 @@ std::atomic<uint32_t> g_interval_s {0};
 std::atomic<uint64_t> g_cut_requests {0};
 uint64_t              g_cuts_seen = 0; // GPU thread only
 std::atomic<bool>     g_phases {true};
-std::atomic<uint64_t> g_submits {0};
+ShardedCounter        g_submits;
 std::atomic<uint64_t> g_frames {0};
-std::atomic<uint64_t> g_barriers_emitted {0};
-std::atomic<uint64_t> g_barriers_elided {0};
-std::atomic<uint64_t> g_qr_calls {0};
-std::atomic<uint64_t> g_qr_flushed {0};
-std::atomic<uint64_t> g_qr_lag {0};
-std::atomic<uint64_t> g_clean_reads {0};
-std::atomic<uint64_t> g_direct_reads {0};
-std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
-std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownStore::Count)> g_known_stores {};
-std::array<std::atomic<uint64_t>, static_cast<size_t>(KnownCopy::Count)> g_known_copies {};
-std::array<std::atomic<uint64_t>, kCoalesce> g_coalesce {};
+ShardedCounter        g_barriers_emitted;
+ShardedCounter        g_barriers_elided;
+ShardedCounter        g_qr_calls;
+ShardedCounter        g_qr_flushed;
+ShardedCounter        g_qr_lag;
+ShardedCounter        g_clean_reads;
+ShardedCounter        g_direct_reads;
+std::array<ShardedCounter, static_cast<size_t>(KnownFill::Count)> g_known_fills {};
+std::array<ShardedCounter, static_cast<size_t>(KnownStore::Count)> g_known_stores {};
+std::array<ShardedCounter, static_cast<size_t>(KnownCopy::Count)> g_known_copies {};
+std::array<ShardedCounter, kCoalesce> g_coalesce {};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(Eager::Count)> g_eager {};
 std::array<std::atomic<uint64_t>, static_cast<size_t>(Future::Count)> g_future {};
 std::atomic<uint64_t> g_future_wait_ns {0};
-std::array<std::atomic<uint64_t>, static_cast<size_t>(IndirectDraw::Route::Count)>
+std::array<ShardedCounter, static_cast<size_t>(IndirectDraw::Route::Count)>
     g_indirect_routes {};
 std::atomic<uint32_t> g_indirect_logged {0};
 
@@ -300,7 +301,7 @@ void NoteKnownStore(KnownStore kind, uint64_t n) noexcept {
 void NoteIndirectDraw(IndirectDraw::Route route, uint32_t draws) noexcept {
 	const auto index = static_cast<size_t>(route);
 	g_indirect_routes[index].fetch_add(draws, std::memory_order_relaxed);
-	if (IndirectDraw::IsFallbackWorthLogging(route) &&
+	if (IndirectDraw::IsFallbackWorthLogging(route) && (g_indirect_logged.load(std::memory_order_relaxed) & (1u << index)) == 0 &&
 	    (g_indirect_logged.fetch_or(1u << index, std::memory_order_relaxed) & (1u << index)) == 0) {
 		std::printf("gpu-indirect-draws: %s (further draws of this kind are only counted)\n",
 		            IndirectDraw::kRouteNames[index]);

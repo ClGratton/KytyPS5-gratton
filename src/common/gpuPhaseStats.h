@@ -96,7 +96,8 @@ void RequestCut() noexcept;
 // Final report for the time since the last one (on the attached thread, at shutdown).
 void Finish();
 
-// Counters, always on (one relaxed atomic add): used for the "submits per frame" figure.
+// Counters, always on (a plain add into the calling thread's own block, no locked instruction; see shardedCounter.h): used for
+// the "submits per frame" figure.
 void NoteSubmit() noexcept;
 // Guest global barrier events: recorded, or left out by --elide-barriers.
 void NoteBarrier(bool elided) noexcept;

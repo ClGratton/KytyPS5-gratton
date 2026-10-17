@@ -703,6 +703,12 @@ add_executable(adaptive_lock_tests EXCLUDE_FROM_ALL
 target_include_directories(adaptive_lock_tests PRIVATE ${inc_headers})
 target_link_libraries(adaptive_lock_tests Threads::Threads)
 
+add_executable(sharded_counter_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ShardedCounterTests.cpp"
+)
+target_include_directories(sharded_counter_tests PRIVATE ${inc_headers})
+target_link_libraries(sharded_counter_tests Threads::Threads)
+
 add_executable(finished_prefix_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/FinishedPrefixTests.cpp"
 )
@@ -1085,6 +1091,7 @@ if(BUILD_TESTING)
 	add_test(NAME remembered_mapping COMMAND $<TARGET_FILE:remembered_mapping_tests>)
 	add_test(NAME page_presence COMMAND $<TARGET_FILE:page_presence_tests>)
 	add_test(NAME adaptive_lock COMMAND $<TARGET_FILE:adaptive_lock_tests>)
+	add_test(NAME sharded_counter COMMAND $<TARGET_FILE:sharded_counter_tests>)
 	add_test(NAME scalable_shared_mutex COMMAND $<TARGET_FILE:scalable_shared_mutex_tests>)
 	add_test(NAME finished_prefix COMMAND $<TARGET_FILE:finished_prefix_tests>)
 	add_test(NAME push_descriptor_cache COMMAND $<TARGET_FILE:push_descriptor_cache_tests>)
@@ -1320,6 +1327,7 @@ if(BUILD_TESTING)
 		remembered_mapping_tests
 		page_presence_tests
 		adaptive_lock_tests
+		sharded_counter_tests
 		scalable_shared_mutex_tests
 		finished_prefix_tests
 		push_descriptor_cache_tests
