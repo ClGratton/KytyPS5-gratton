@@ -95,6 +95,16 @@ private:
 	uint64_t                  m_bda_full          = 0;
 	uint64_t                  m_bda_skipped       = 0;
 	uint64_t                  m_bda_full_ns       = 0; // time spent in full passes
+	// --bda-dirty-log: the log is armed by a full pass and valid while the mapping generation is the one of
+	// that pass; the passes it replaced, the ranges it visited, and the full passes it fell back to.
+	bool                      m_bda_log_armed      = false;
+	uint64_t                  m_bda_log_mapped_gen = 0;
+	uint64_t                  m_bda_log_passes     = 0;
+	uint64_t                  m_bda_log_ranges     = 0;
+	uint64_t                  m_bda_log_falls      = 0; // full passes by overflow or a mapping change
+	uint64_t                  m_bda_log_verified   = 0;
+	void                      BdaFullPass();
+	void                      BdaVerifyLogPass();
 
 	Common::Mutex                        m_interrupt_mutex;
 	std::vector<InterruptEqRegistration> m_interrupt_eqs;

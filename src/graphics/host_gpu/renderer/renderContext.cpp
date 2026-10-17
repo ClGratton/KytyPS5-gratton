@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cinttypes>
 #include <fmt/format.h>
 
 namespace Libs::Graphics {
@@ -178,29 +179,115 @@ void RenderContext::PrepareBda(bool address_writes) {
 	// Generations are read before the pass, so a change that lands during it is seen next time.
 	const BdaSync::Generations now {BdaSync::g_cpu_dirty_generation.load(std::memory_order_acquire),
 	                                m_buffer_cache.BufferSetGeneration(), m_mapped_generation};
-	if (m_bda_sync_gate.CanSkip(Config::BdaSyncSkip(), now)) {
-		m_bda_skipped++;
+	if (Config::BdaDirtyLogEnabled()) {
+		// A pass that visits only the buffers overlapping a logged range (bdaDirtyLog.h). The log is armed
+		// by a full pass; a mapping change or an overflow of the log goes back to the full walk.
+		bool done = false;
+		if (m_bda_log_armed && m_bda_log_mapped_gen == m_mapped_generation) {
+			uint64_t ranges = 0;
+			if (BdaSync::g_dirty_log.Drain([&](uint64_t address, uint64_t size) {
+				    ranges++;
+				    m_buffer_cache.SynchronizeBuffersInRange(address, size);
+			    })) {
+				m_bda_log_passes++;
+				m_bda_log_ranges += ranges;
+				done = true;
+				if (Config::ResolvedDrawVerify()) {
+					BdaVerifyLogPass();
+				}
+			} else {
+				m_bda_log_falls++;
+			}
+		} else if (m_bda_log_armed) {
+			m_bda_log_falls++;
+		}
+		if (!done) {
+			// Arm before the walk: a range noted from now on is visited by the next pass, one noted
+			// earlier was dirty before the walk reads it.
+			BdaSync::g_dirty_log_active.store(true, std::memory_order_seq_cst);
+			BdaSync::g_dirty_log.Reset();
+			m_bda_log_mapped_gen = m_mapped_generation;
+			BdaFullPass();
+			m_bda_log_armed = true;
+		}
 	} else {
-		const auto pass_start = std::chrono::steady_clock::now();
-		m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
-			m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
-		});
-		m_bda_full_ns += static_cast<uint64_t>(
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(
-		        std::chrono::steady_clock::now() - pass_start)
-		        .count());
-		m_bda_sync_gate.RecordFullPass(now);
-		m_bda_full++;
+		if (m_bda_log_armed) {
+			m_bda_log_armed = false;
+			BdaSync::g_dirty_log_active.store(false, std::memory_order_seq_cst);
+		}
+		if (m_bda_sync_gate.CanSkip(Config::BdaSyncSkip(), now)) {
+			m_bda_skipped++;
+		} else {
+			BdaFullPass();
+			m_bda_sync_gate.RecordFullPass(now);
+		}
 	}
-	if (((m_bda_full + m_bda_skipped) & 0x3FFF) == 0) {
+	const auto calls = m_bda_full + m_bda_skipped + m_bda_log_passes;
+	if ((calls & 0x3FFF) == 0) {
 		Log::WriteToConsoleAndLog(
 		    fmt::format("GPU: BDA sync calls={} full={} skipped={} full_pass_ms={:.1f} "
-		                "(--bda-sync-skip {})\n",
-		                m_bda_full + m_bda_skipped, m_bda_full, m_bda_skipped,
-		                static_cast<double>(m_bda_full_ns) / 1e6,
-		                Config::BdaSyncSkip() ? "on" : "off"));
+		                "(--bda-sync-skip {}); dirty log: passes={} ranges={} fallbacks={} verified={} "
+		                "(--bda-dirty-log {})\n",
+		                calls, m_bda_full, m_bda_skipped, static_cast<double>(m_bda_full_ns) / 1e6,
+		                Config::BdaSyncSkip() ? "on" : "off", m_bda_log_passes, m_bda_log_ranges,
+		                m_bda_log_falls, m_bda_log_verified,
+		                Config::BdaDirtyLogEnabled() ? "on" : "off"));
 	}
 	m_fault_process_pending = true;
+}
+
+// Every buffer of every mapped range, the pass the log replaces (caller holds m_mapped_ranges_mutex).
+void RenderContext::BdaFullPass() {
+	const auto pass_start = std::chrono::steady_clock::now();
+	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
+		m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
+	});
+	m_bda_full_ns += static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - pass_start)
+	        .count());
+	m_bda_full++;
+}
+
+// --resolved-draw-verify: after a log pass the full walk must find nothing to upload, except what a guest
+// write dirtied after the drain (those ranges are in the log again by then).
+void RenderContext::BdaVerifyLogPass() {
+	std::vector<std::pair<uint64_t, uint64_t>> uploaded;
+	m_buffer_cache.SetUploadCapture(&uploaded);
+	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
+		m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
+	});
+	m_buffer_cache.SetUploadCapture(nullptr);
+	m_bda_log_verified++;
+	if (uploaded.empty()) {
+		return;
+	}
+	std::vector<std::pair<uint64_t, uint64_t>> noted;
+	const bool                                 intact = BdaSync::g_dirty_log.Drain(
+        [&](uint64_t address, uint64_t size) { noted.emplace_back(address, size); });
+	std::sort(noted.begin(), noted.end());
+	std::vector<std::pair<uint64_t, uint64_t>> merged; // [begin, end)
+	for (const auto& [n_address, n_size]: noted) {
+		const auto n_end = n_address + n_size < n_address ? ~uint64_t {0} : n_address + n_size;
+		if (!merged.empty() && n_address <= merged.back().second) {
+			merged.back().second = std::max(merged.back().second, n_end);
+		} else {
+			merged.emplace_back(n_address, n_end);
+		}
+	}
+	for (const auto& [address, bytes]: uploaded) {
+		bool covered = !intact; // an overflow since the drain makes any range legal
+		for (const auto& [begin, end]: merged) {
+			if (address >= begin && address + bytes <= end) {
+				covered = true;
+				break;
+			}
+		}
+		if (!covered) {
+			EXIT("bda dirty log: the full walk uploaded [0x%016" PRIx64 ", +0x%" PRIx64
+			     ") that the log never named\n",
+			     address, bytes);
+		}
+	}
 }
 
 void RenderContext::RunGarbageCollector() {

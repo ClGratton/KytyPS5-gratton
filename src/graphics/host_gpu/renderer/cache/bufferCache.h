@@ -186,6 +186,11 @@ public:
 	                                           bool last_round = false, uint64_t own_tick = 0);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
+	// Verification of --bda-dirty-log: while set, every range UploadDirtyRanges uploads is appended here
+	// (GPU thread only).
+	void               SetUploadCapture(std::vector<std::pair<uint64_t, uint64_t>>* capture) noexcept {
+		m_upload_capture = capture;
+	}
 	void               RunGarbageCollector();
 	// --mem-residency. GPU thread: the guest ranges of the registered buffers.
 	void CollectResidencyRanges(MemResidency::Snapshot& snapshot);
@@ -313,6 +318,7 @@ private:
 	static constexpr size_t kObtainMemoSlots = 512;
 	std::array<ObtainMemo, kObtainMemoSlots> m_obtain_memo {};
 	ObtainStats                              m_obtain_stats {};
+	std::vector<std::pair<uint64_t, uint64_t>>* m_upload_capture = nullptr;
 	// Cumulative garbage-collection counters (GPU thread only), logged under memory pressure.
 	struct GcStats {
 		uint64_t runs       = 0; // collector runs past the trigger

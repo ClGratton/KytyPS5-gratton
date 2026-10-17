@@ -181,7 +181,7 @@ static void PrintUsage() {
 	         "                                       safe performance flags it names (submit-coalesce,\n"
 	         "                                       elide-barriers, defer-draw-write-barriers,\n"
 	         "                                       overlap-dispatches,\n"
-	         "                                       bda-sync-skip, clean-guest-reads,\n"
+	         "                                       bda-sync-skip, bda-dirty-log, clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
 	         "                                       known-copies, gpu-indirect-draws, eager-readback,\n"
@@ -252,6 +252,11 @@ static void PrintUsage() {
 	         "                                       address memory through raw pointers while no page\n"
 	         "                                       became CPU-modified and no buffer or mapping changed\n"
 	         "                                       since the last full pass. Default: false.\n");
+	::printf("  --bda-dirty-log <true|false>         Before draws that address memory through raw pointers,\n"
+	         "                                       synchronize only the buffers that overlap a range that\n"
+	         "                                       became CPU-modified or got a buffer since the last\n"
+	         "                                       pass, instead of walking every buffer (exact).\n"
+	         "                                       Default: false.\n");
 	::printf("  --submit-coalesce <true|false>       Hold back the Vulkan submit of RELEASE_MEM end-of-pipe\n"
 	         "                                       events: submit after --submit-coalesce-max events or\n"
 	         "                                       when the oldest is older than --submit-coalesce-us,\n"
@@ -998,6 +1003,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.gc_clock_frames = true;
 			} else {
 				::printf("invalid gc clock (expected runs or frames): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--bda-dirty-log") {
+			if (!ParseBool(value, options.config.bda_dirty_log)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--bda-sync-skip") {

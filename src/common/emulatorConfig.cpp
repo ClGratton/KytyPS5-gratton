@@ -66,6 +66,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// flag flips.
 	registry.Register("overlap-dispatches", &g_config->overlap_dispatches, false);
 	registry.Register("bda-sync-skip", &g_config->bda_sync_skip, false);
+	// Read per PrepareBda call under the mapped-ranges lock; a pass that finds the log unarmed (the
+	// flag was off) runs the full walk and arms it, so a toggle at any time costs one full pass.
+	registry.Register("bda-dirty-log", &g_config->bda_dirty_log, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
 	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
 	// generation keeps moving whether or not the memo is consulted.
@@ -135,6 +138,10 @@ bool GcClockFrames() {
 
 bool BdaSyncSkip() {
 	return Common::RuntimeToggles::Read(g_config->bda_sync_skip);
+}
+
+bool BdaDirtyLogEnabled() {
+	return Common::RuntimeToggles::Read(g_config->bda_dirty_log);
 }
 
 bool SubmitCoalesceEnabled() {

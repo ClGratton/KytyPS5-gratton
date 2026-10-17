@@ -1,6 +1,7 @@
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
 #include "common/loopGuard.h"
+#include "graphics/host_gpu/bdaSyncGate.h"
 #include "graphics/host_gpu/renderer/cache/gcClock.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
@@ -115,6 +116,13 @@ void BufferCache::ChangeRegister(BufferId id) {
 	m_buffer_set_generation.fetch_add(1, std::memory_order_release); // K15
 	EnsureBdaPageTableInitialized();
 	auto& buffer = m_slot_buffers[id];
+	if constexpr (insert) {
+		// --bda-dirty-log: a new buffer may cover pages that were dirtied before it existed; the next
+		// BDA pass has to synchronize it whatever the log says about those pages.
+		if (BdaSync::g_dirty_log_active.load(std::memory_order_seq_cst)) {
+			BdaSync::g_dirty_log.Note(buffer.CpuAddress(), buffer.Size());
+		}
+	}
 	PageTable::PageRange pages {};
 	EXIT_IF(!(GuestRange {buffer.CpuAddress(), buffer.Size()}.Valid()) ||
 	        !PageTable::TryGetPageRange(buffer.CpuAddress(), buffer.Size(), pages));
@@ -1333,6 +1341,9 @@ void BufferCache::UploadDirtyRanges(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	    [&](uint64_t address, uint64_t bytes) noexcept {
 		    copies.emplace_back(total_size, buffer.Offset(address), bytes);
 		    total_size += bytes;
+		    if (m_upload_capture != nullptr) {
+			    m_upload_capture->emplace_back(address, bytes);
+		    }
 	    },
 	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
 	if (source) {

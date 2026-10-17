@@ -267,6 +267,10 @@ struct ConfigOptions {
 	// CPU-modified, no buffer was (un)registered and the mapping did not change since the last full
 	// pass (host_gpu/bdaSyncGate.h). Default off.
 	bool                   bda_sync_skip               = false;
+	// --bda-dirty-log: PrepareBda synchronizes only the buffers that overlap a range that became
+	// CPU-modified (or got a buffer) since its last pass, from a log kept by the region manager
+	// (host_gpu/bdaDirtyLog.h). Exact: the pass it replaces finds nothing else. Default off.
+	bool                   bda_dirty_log               = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -448,6 +452,7 @@ bool              TextureGcEnabled();
 bool              TextureGcLog();
 bool              SubmitCoalesceEnabled();
 bool              BdaSyncSkip();
+bool              BdaDirtyLogEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

@@ -228,6 +228,13 @@ QList<Option> BuildTable() {
 	             "pointers while no page changed since the last full pass. Under 1% in the "
 	             "measurements.",
 	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"bda_dirty_log", "--bda-dirty-log", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Synchronize only the buffers whose memory changed",
+	             "Before draws that address memory through raw pointers the GPU thread used to "
+	             "walk every buffer of every mapped range. With this it visits only the buffers "
+	             "that overlap a range the game wrote or that were just created, from a log kept "
+	             "by the memory tracker. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(bda_dirty_log)});
 	defs.append({"readback_queue", "--readback-queue", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Readbacks on a second queue",
 	             "GPU to guest buffer readbacks copy on a second queue and wait only for the work "
