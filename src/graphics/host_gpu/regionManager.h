@@ -150,7 +150,11 @@ public:
 
 	// Verifier: both mirrors equal their bits. Caller holds `lock`.
 	[[nodiscard]] bool MirrorsMatch() const {
-		return m_cpu_mirror.Matches(m_cpu_dirty) && m_gpu_mirror.Matches(m_gpu_dirty);
+		// Also the protection bookkeeping: the pages whose watcher was released are the CPU-dirty ones that are not
+		// kept protected, and a kept-protected page is CPU-dirty.
+		const RegionBits released = m_cpu_dirty & ~m_dirty_protected;
+		return m_cpu_mirror.Matches(m_cpu_dirty) && m_gpu_mirror.Matches(m_gpu_dirty) &&
+		       (m_dirty_protected & ~m_cpu_dirty).None() && (released ^ m_writable).None();
 	}
 
 	// --cp-direct-stores: the emulator itself wrote [vaddr, vaddr + size) (a label, a fence value) through the backing
