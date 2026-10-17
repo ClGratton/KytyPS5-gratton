@@ -401,7 +401,7 @@ public:
 		if (cache_on) {
 			const auto epoch = m_maps_epoch.load(std::memory_order_acquire);
 			for (const auto& r: remembered) {
-				if (r.store == this && r.epoch == epoch && vaddr >= r.lo && size <= r.hi - vaddr) {
+				if (r.store == this && r.epoch == epoch && vaddr >= r.lo && vaddr < r.hi && size <= r.hi - vaddr) {
 					const auto offset = vaddr + r.delta;
 					if (RangeOk(offset, size)) {
 						if (Config::ResolvedDrawVerify()) {
