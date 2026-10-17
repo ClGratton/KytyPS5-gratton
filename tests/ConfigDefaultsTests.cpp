@@ -51,6 +51,20 @@ void TestGpuTimestampsDefault() {
 // the buffer cache itself holds a share of the critical budget. Measured and left opt-in: with
 // --vram-paging (the default) it keeps more buffers resident and Astro Bot under a forced 5.7 GB
 // budget falls from 35 to 12.5 fps. The share is of the budget-derived mark, never a byte count.
+// Correctness: the data of an end-of-pipe packet (the fences a title polls) becomes visible when the GPU has
+// finished the work, not when the packet is parsed (an accurate emulation; off is the opt-out).
+void TestEopLabelsAtCompletionDefault() {
+	const Config::ConfigOptions options;
+	Check(options.eop_labels_at_completion, "eop_labels_at_completion defaults to on");
+	Apply(options);
+	Check(Config::EopLabelsAtCompletionEnabled(), "an unconfigured emulator publishes end-of-pipe labels at completion");
+
+	Config::ConfigOptions off;
+	off.eop_labels_at_completion = false;
+	Apply(off);
+	Check(!Config::EopLabelsAtCompletionEnabled(), "end-of-pipe labels can be published at parse time again");
+}
+
 void TestBufferGcOwnShare() {
 	namespace Gate = Libs::Graphics::BufferGcGate;
 	constexpr uint64_t MiB = 1024ull * 1024;
@@ -425,6 +439,7 @@ int main() {
 
 	TestSkipGuardDefaults();
 	TestGpuTimestampsDefault();
+	TestEopLabelsAtCompletionDefault();
 	TestBufferGcOwnShare();
 	TestReadbackLinearImagesStaysOff();
 	TestPipelineCacheKeyDefault();

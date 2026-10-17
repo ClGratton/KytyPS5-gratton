@@ -2471,6 +2471,98 @@ public:
                 m_timestamps_supported ? "gpu" : "fallback");
   }
 
+  // The default (--eop-labels-at-completion): the data of an end-of-pipe label
+  // reaches guest memory when the GPU has finished the command buffer that holds
+  // the packet, not when the packet is parsed. A GPU clock sample keeps its own
+  // timing, and the opt-out writes at parse time again.
+  void CheckEopLabelsAtCompletion() {
+    constexpr const char *name = "EopLabelsAtCompletion";
+    constexpr uintptr_t base = 0x0000000205200000ull;
+    constexpr uint64_t allocation_size = 0x10000;
+    constexpr uint64_t stale = 0x0123456789abcdefull;
+    Require(name, "default", Config::EopLabelsAtCompletionEnabled(),
+            "the harness config must start from labels at completion");
+
+    EnsureRuntimeContext();
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_size, 0, &direct_offset) == 0,
+            "label direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_size) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "label fixed direct-memory mapping failed");
+
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+
+    const auto read64 = [&](uint64_t offset) {
+      uint64_t value = 0;
+      std::memcpy(&value, reinterpret_cast<void *>(base + offset), sizeof(value));
+      return value;
+    };
+    const auto read32 = [&](uint64_t offset) {
+      uint32_t value = 0;
+      std::memcpy(&value, reinterpret_cast<void *>(base + offset), sizeof(value));
+      return value;
+    };
+    for (const uint64_t offset : {0x0ull, 0x10ull, 0x20ull, 0x30ull}) {
+      std::memcpy(reinterpret_cast<void *>(base + offset), &stale, sizeof(stale));
+    }
+
+    // Packets parsed into the current command buffer: nothing is visible yet.
+    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x0),
+                       0x1122334455667788ull, 8);
+    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x10),
+                       0xa5a5a5a5u, 4);
+    // A GPU clock sample is written by its own path: the label call stores it now.
+    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x20),
+                       0x00000000deadc10cull, 8, true);
+    Require(name, "hidden until completion",
+            read64(0x0) == stale && static_cast<uint32_t>(read64(0x10)) ==
+                static_cast<uint32_t>(stale) && read64(0x20) == 0xdeadc10cull,
+            "a label was visible before the GPU finished the work, or a clock sample was delayed");
+
+    scheduler.Finish();
+    scheduler.DrainPriorityOperations();
+    Require(name, "visible after completion",
+            read64(0x0) == 0x1122334455667788ull && read32(0x10) == 0xa5a5a5a5u &&
+                read64(0x20) == 0xdeadc10cull,
+            "a label never arrived, or arrived with the wrong value or size");
+
+    // The opt-out writes at parse time, as before.
+    Config::ConfigOptions parse_time;
+    parse_time.eop_labels_at_completion = false;
+    Config::Load(parse_time);
+    scheduler.Begin(registers, user_config, shaders);
+    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x30),
+                       0x0badc0de0badc0deull, 8);
+    Require(name, "opt-out is immediate", read64(0x30) == 0x0badc0de0badc0deull,
+            "--eop-labels-at-completion off did not write at parse time");
+    scheduler.Finish();
+    scheduler.DrainPriorityOperations();
+    Config::Load(Config::ConfigOptions{});
+
+    Require(name, "unmap",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "label memory unmap failed");
+    Require(name, "release",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "label direct-memory release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
   void CheckBdaFaultReadback() {
     constexpr const char *name = "BdaFaultReadback";
     constexpr uintptr_t base = 0x0000000200800000ull;
@@ -3334,8 +3426,11 @@ public:
   void CheckGpuCommandLane() {
     // The packets are scripted against one submission per cache event, GL2 writeback and interrupt boundary; --submit-coalesce
     // (on by default) holds those submissions back and merges them, which is its own contract (SubmitCoalescer tests).
+    // The labels in this test live in host variables and are checked right after their packet: the whole test also pins the
+    // parse-time behaviour of label packets (--eop-labels-at-completion=off). The default has its own test,
+    // CheckEopLabelsAtCompletion, on guest-mapped memory.
     EnsureConfigInitialized();
-    const PinFlagsOff stock_submissions({&Config::ConfigOptions::submit_coalesce});
+    const PinFlagsOff stock_submissions({&Config::ConfigOptions::submit_coalesce, &Config::ConfigOptions::eop_labels_at_completion});
     EnsureRuntimeContext();
     auto &context = Renderer();
     context.InitializeGpu(nullptr);
@@ -3567,6 +3662,7 @@ public:
                   static_cast<uint32_t>(gds_label) == 0,
               "RELEASE_MEM lost its required split/readback or retained a "
               "redundant GPU wait");
+
     }
 
     alignas(uint32_t) uint32_t packet_marker_a = 0;
@@ -4312,6 +4408,7 @@ public:
             !resources.IsMapped(empty_unmap_base, empty_unmap_size),
             "renderer retained mapped coverage after the GPU command lane stopped");
     context.ShutdownGpu();
+    Config::Load(Config::ConfigOptions{});
     std::printf("[host]    %-32s ok\n", "GpuCommandLane");
   }
 
@@ -48188,6 +48285,7 @@ int main(int argc, char **argv) {
   vulkan.CheckSchedulerTimeline();
   vulkan.CheckGuestGpuTimestamps();
   vulkan.CheckSchedulerIdlePolling();
+  vulkan.CheckEopLabelsAtCompletion();
   vulkan.CheckHostImageAllocation();
   vulkan.CheckDescriptorHeapLargeSet();
   vulkan.CheckGpuMappedRangeLifecycle();

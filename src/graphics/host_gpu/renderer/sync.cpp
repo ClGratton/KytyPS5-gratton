@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -11,6 +12,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/videoOut.h"
 #include "kernel/eventQueue.h"
+#include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
@@ -213,6 +215,25 @@ void TriggerEopEventAtEndOfPipe(CommandBuffer& buffer, int event_id, uint32_t co
 	EXIT_IF(!scheduler.Active() || &buffer != &scheduler.Current());
 	scheduler.DeferPriorityOperation(
 	    [&renderer, event_id, context_id] { renderer.TriggerInterrupt(event_id, context_id); });
+}
+
+bool PublishLabel(CommandBuffer& buffer, void* dst, uint64_t value, uint32_t size, bool gpu_clock_sample) {
+	EXIT_IF(dst == nullptr || (size != sizeof(uint32_t) && size != sizeof(uint64_t)));
+	buffer.AssertRecording();
+	auto& renderer  = buffer.GetContext();
+	auto& scheduler = renderer.GetCommandScheduler();
+	if (gpu_clock_sample || !Config::EopLabelsAtCompletionEnabled() || !scheduler.Active() ||
+	    &buffer != &scheduler.Current()) {
+		return false; // the caller writes it now, at parse time
+	}
+	// Published with the other completions of this command buffer (interrupts, flips), in the order they were
+	// parsed: the label first, then the interrupt of the same packet. Like a GPU timestamp rewrite or a read-back
+	// it goes through the backing view: a completion is not allowed to take a tracker fault, and memory the guest
+	// unmapped meanwhile simply has nothing to receive it (logged by WriteBacking).
+	scheduler.DeferPriorityOperation([dst, value, size] {
+		LibKernel::Memory::WriteBacking(reinterpret_cast<uint64_t>(dst), &value, size);
+	});
+	return true;
 }
 
 static void InterruptEventResetFunc(LibKernel::EventQueue::KernelEqueueEvent* event) {
