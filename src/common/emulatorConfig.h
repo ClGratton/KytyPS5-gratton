@@ -289,6 +289,12 @@ struct ConfigOptions {
 	// --image-pool: freed dedicated images are kept briefly and reused by the next image of the same shape
 	// (graphics/host_gpu/vma.cpp). Default off.
 	bool                   image_pool                  = false;
+	// --thread-placement: kyGpu (and the look-ahead sequencer on machines with eight or more physical cores) get
+	// a physical core of their own and every other thread stays off those cores (common/threadPlacement.h).
+	// Default off.
+	bool                   thread_placement            = false;
+	// --thread-placement-cores N: 0 = by core count, 1 = kyGpu only, 2 = kyGpu and the look-ahead sequencer.
+	uint32_t               thread_placement_cores      = 0;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -480,6 +486,8 @@ bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
+bool              ThreadPlacementEnabled();
+uint32_t          ThreadPlacementCores();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

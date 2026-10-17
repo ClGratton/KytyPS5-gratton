@@ -4,6 +4,7 @@
 #include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
+#include "common/threadPlacement.h"
 
 #include <chrono>
 #include <cstdio>
@@ -64,6 +65,7 @@ void detail::ApplyPending(uint64_t frame_idx) {
 		text.swap(g_state->text);
 	}
 	const auto changes = g_state->registry.ApplyText(text);
+	if (!changes.empty()) Common::ThreadPlacement::Refresh(); // --thread-placement acts on the next scan, not at the next poll
 	Common::GpuPhase::RequestCut();
 	const auto t_ns    = Bench::NowNs();
 	std::ofstream csv(g_state->applied_csv, std::ios::app);

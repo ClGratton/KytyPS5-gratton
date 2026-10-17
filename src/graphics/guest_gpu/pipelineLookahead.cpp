@@ -6,6 +6,7 @@
 #include "common/hangWatchdog.h"
 #include "common/guestRetirement.h"
 #include "common/speculation.h"
+#include "common/threadPlacement.h"
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
@@ -371,6 +372,7 @@ void PipelineLookahead::Run() {
 #if defined(__linux__)
 	pthread_setname_np(pthread_self(), "kyty-lookahead");
 #endif
+	Common::ThreadPlacement::SetCurrentThreadRole(Common::ThreadPlacement::Role::Sequencer);
 	Common::Speculation::Scope speculation;
 	for (;;) {
 		Item item;

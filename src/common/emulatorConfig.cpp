@@ -6,6 +6,7 @@
 #include "common/hangWatchdog.h"
 #include "common/hleTrace.h"
 #include "common/runtimeToggles.h"
+#include "common/threadPlacement.h"
 
 #include <algorithm>
 #include <memory>
@@ -22,6 +23,7 @@ void Initialize() {
 }
 
 void Shutdown() {
+	Common::ThreadPlacement::Stop();
 	Common::RuntimeToggles::Stop();
 	g_config.reset();
 }
@@ -51,6 +53,7 @@ void Load(const ConfigOptions& cfg) {
 	    .skip_log          = cfg.debug_skip_log,
 	});
 	Common::RuntimeToggles::Start(cfg.toggle_control.empty() ? std::string {} : cfg.toggle_control.string());
+	Common::ThreadPlacement::Start(!cfg.toggle_control.empty());
 }
 
 // The flags a harness may flip while the emulator runs (common/runtimeToggles.h). A flag is listed
@@ -83,6 +86,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
 	registry.Register("image-pool", &g_config->image_pool, false);
+	// Read by the placement thread on every scan; turning it off puts the threads back the next scan, and the
+	// scan runs whenever --toggle-control is on, so the flag can start off.
+	registry.Register("thread-placement", &g_config->thread_placement, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
 	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
 	// generation keeps moving whether or not the memo is consulted.
@@ -157,6 +163,14 @@ bool BdaSyncSkip() {
 
 bool ImagePoolEnabled() {
 	return Common::RuntimeToggles::Read(g_config->image_pool);
+}
+
+bool ThreadPlacementEnabled() {
+	return Common::RuntimeToggles::Read(g_config->thread_placement);
+}
+
+uint32_t ThreadPlacementCores() {
+	return g_config->thread_placement_cores;
 }
 
 bool ImagePresenceEnabled() {

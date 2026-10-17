@@ -238,6 +238,21 @@ QList<Option> BuildTable() {
 	             "up to a second and a half (at most 256 MiB) and handed to the next image of the "
 	             "same size and format. Exact; lowers CPU time on the GPU thread.",
 	             EMU_BOOL(image_pool)});
+	defs.append({"thread_placement", "--thread-placement", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Give the GPU thread a CPU core of its own",
+	             "The GPU thread is the slowest serial step of a frame. With this it gets a whole "
+	             "physical core (both hardware threads), and every other thread of the emulator "
+	             "stays off that core, so nothing shares its caches or its SMT sibling and it never "
+	             "migrates. The look-ahead thread gets a core too on CPUs with eight or more cores. "
+	             "Derived from the CPU topology; needs four or more physical cores. Does nothing "
+	             "on other platforms than Linux and Windows.",
+	             EMU_BOOL(thread_placement)});
+	defs.append({"thread_placement_cores", "--thread-placement-cores", Tab::Gpu, "CPU cost per draw", Kind::Int,
+	             "Cores kept for the GPU thread:",
+	             "How many physical cores the placement keeps for the GPU thread and the look-ahead "
+	             "thread. Auto: one per four cores, at most two. 1: the GPU thread only. 2: both."
+	             "\n\nNeeds Give the GPU thread a CPU core of its own.",
+	             EMU_INT(thread_placement_cores), {}, 0, 2, "Auto", ""});
 	defs.append({"image_presence", "--image-presence", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Skip the texture cache lock for memory no image covers",
 	             "Reading shader metadata and vertex tables, and every guest write fault on a "

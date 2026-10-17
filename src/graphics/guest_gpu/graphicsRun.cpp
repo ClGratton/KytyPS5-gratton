@@ -12,6 +12,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
+#include "common/threadPlacement.h"
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
@@ -623,6 +624,7 @@ void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("kyGpu");
+	Common::ThreadPlacement::SetCurrentThreadRole(Common::ThreadPlacement::Role::Gpu);
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
 	Common::GpuPhase::AttachGpuThread();

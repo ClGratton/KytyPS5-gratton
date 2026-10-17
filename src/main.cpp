@@ -183,7 +183,7 @@ static void PrintUsage() {
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
-	         "                                       image-presence, image-pool,\n"
+	         "                                       image-presence, image-pool, thread-placement,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
@@ -259,6 +259,16 @@ static void PrintUsage() {
 	         "                                       reuse them for the next image of the same shape instead of\n"
 	         "                                       a driver free and allocate (exact; the memory is not\n"
 	         "                                       cleared, as for a new image). Default: false.\n");
+	::printf("  --thread-placement <true|false>      Give the GPU thread (and, with eight or more physical\n"
+	         "                                       cores, the look-ahead sequencer) a physical core of its\n"
+	         "                                       own and keep every other thread of the process off it:\n"
+	         "                                       no migration, no SMT sibling to share with. Derived from\n"
+	         "                                       the CPU topology (Linux: /sys; Windows: processor\n"
+	         "                                       information), respects taskset/cpusets, needs four or\n"
+	         "                                       more physical cores. Default: false.\n");
+	::printf("  --thread-placement-cores <0-2>       With --thread-placement: dedicated cores. 0 = by core\n"
+	         "                                       count (one per four, at most two), 1 = GPU thread only,\n"
+	         "                                       2 = GPU thread and look-ahead sequencer. Default: 0.\n");
 	::printf("  --image-presence <true|false>        The texture cache answers whether an image covers a page\n"
 	         "                                       from per-page counts without its lock, for clean reads of\n"
 	         "                                       shader metadata and for guest write faults (exact).\n"
@@ -1042,6 +1052,18 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+		} else if (arg == "--thread-placement") {
+			if (!ParseBool(value, options.config.thread_placement)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--thread-placement-cores") {
+			uint64_t cores = 0;
+			if (!ParseUint64(value, cores) || cores > 2) {
+				::printf("invalid thread placement core count (expected 0-2): %s\n", value.c_str());
+				return false;
+			}
+			options.config.thread_placement_cores = static_cast<uint32_t>(cores);
 		} else if (arg == "--image-presence") {
 			if (!ParseBool(value, options.config.image_presence)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
