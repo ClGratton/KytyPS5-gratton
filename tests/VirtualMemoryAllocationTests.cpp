@@ -160,6 +160,7 @@ void InitSubsystems() {
 	options.mem_residency     = true;
 	// The remembered clamp answers are compared with the live ones for the whole suite.
 	options.mapping_memo         = true;
+	options.backing_read_cache   = true;
 	options.resolved_draw_verify = true;
 	Config::Load(options);
 

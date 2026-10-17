@@ -1,4 +1,5 @@
 #include "kernel/memory.h"
+#include "kernel/rememberedMapping.h"
 
 #include "common/profiler.h"
 

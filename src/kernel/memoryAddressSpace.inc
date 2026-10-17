@@ -390,27 +390,19 @@ public:
 
 		// --backing-read-cache: a read inside a mapping entry this thread has seen, while no mapping
 		// changed since (the epoch), is the entry's backing bytes: no map lock, no tree walk.
-		struct Remembered {
-			const GuestBackingStore* store = nullptr;
-			uint64_t                 epoch = 0, lo = 0, hi = 0, delta = 0;
-		};
-		constexpr size_t                           kRemembered = 8;
-		thread_local std::array<Remembered, kRemembered> remembered {};
-		thread_local size_t                        next_remembered = 0;
+		thread_local RememberedMappings<8> remembered;
 		const bool cache_on = Config::BackingReadCacheEnabled();
 		if (cache_on) {
 			const auto epoch = m_maps_epoch.load(std::memory_order_acquire);
-			for (const auto& r: remembered) {
-				if (r.store == this && r.epoch == epoch && vaddr >= r.lo && vaddr < r.hi && size <= r.hi - vaddr) {
-					const auto offset = vaddr + r.delta;
-					if (RangeOk(offset, size)) {
-						if (Config::ResolvedDrawVerify()) {
-							VerifyRememberedRead(vaddr, size, offset, epoch);
-						}
-						g_backing_read_cache_stats.hits++;
-						CopyFromBacking(static_cast<uint8_t*>(data), offset, size);
-						return true;
+			if (const auto* r = remembered.Find(this, epoch, vaddr, size); r != nullptr) {
+				const auto offset = vaddr + r->delta;
+				if (RangeOk(offset, size)) {
+					if (Config::ResolvedDrawVerify()) {
+						VerifyRememberedRead(vaddr, size, offset, epoch);
 					}
+					g_backing_read_cache_stats.hits++;
+					CopyFromBacking(static_cast<uint8_t*>(data), offset, size);
+					return true;
 				}
 			}
 			g_backing_read_cache_stats.misses++;
@@ -454,9 +446,8 @@ public:
 		if (cache_on && first->second.vaddr <= vaddr && end <= first->second.vaddr + first->second.size) {
 			// Remember the entry (the epoch cannot move while the shared lock is held).
 			const auto& entry = first->second;
-			remembered[next_remembered] = {this, m_maps_epoch.load(std::memory_order_relaxed), entry.vaddr,
-			                               entry.vaddr + entry.size, entry.backing_offset - entry.vaddr};
-			next_remembered = (next_remembered + 1) % kRemembered;
+			remembered.Remember(this, m_maps_epoch.load(std::memory_order_relaxed), entry.vaddr,
+			                    entry.vaddr + entry.size, entry.backing_offset);
 		}
 		return true;
 	}
