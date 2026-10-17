@@ -182,6 +182,7 @@ static void PrintUsage() {
 	         "                                       elide-barriers, defer-draw-write-barriers,\n"
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
+	         "                                       backing-read-cache,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
@@ -253,6 +254,11 @@ static void PrintUsage() {
 	         "                                       address memory through raw pointers while no page\n"
 	         "                                       became CPU-modified and no buffer or mapping changed\n"
 	         "                                       since the last full pass. Default: false.\n");
+	::printf("  --backing-read-cache <true|false>    Reads of the guest memory backing (shader resource walks,\n"
+	         "                                       vertex metadata, clear codes) use a mapping entry the\n"
+	         "                                       thread remembered while no mapping changed, instead of\n"
+	         "                                       taking the map lock and walking the tree (exact).\n"
+	         "                                       Default: false.\n");
 	::printf("  --lazy-op-poll <true|false>          The per-draw check for finished deferred operations asks\n"
 	         "                                       the GPU timeline at most every 100 microseconds instead\n"
 	         "                                       of at every draw, and leaves an operation queued instead\n"
@@ -1009,6 +1015,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.gc_clock_frames = true;
 			} else {
 				::printf("invalid gc clock (expected runs or frames): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--backing-read-cache") {
+			if (!ParseBool(value, options.config.backing_read_cache)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--lazy-op-poll") {

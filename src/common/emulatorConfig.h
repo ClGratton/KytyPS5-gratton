@@ -274,6 +274,9 @@ struct ConfigOptions {
 	// --lazy-op-poll: the per-draw poll for finished deferred operations queries the GPU timeline at
 	// most every 100 us and never waits for the priority-operations thread (commandScheduler.h). Default off.
 	bool                   lazy_op_poll                = false;
+	// --backing-read-cache: TryReadBacking remembers the mapping entry of a read per thread, valid while no
+	// mapping changed (kernel/memoryAddressSpace.inc), instead of taking the map lock and walking the tree. Default off.
+	bool                   backing_read_cache          = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -457,6 +460,7 @@ bool              SubmitCoalesceEnabled();
 bool              BdaSyncSkip();
 bool              BdaDirtyLogEnabled();
 bool              LazyOpPollEnabled();
+bool              BackingReadCacheEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

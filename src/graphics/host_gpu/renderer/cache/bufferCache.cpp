@@ -1689,6 +1689,9 @@ void BufferCache::LogRingStatsPeriodic() {
 	const auto mapping = LibKernel::Memory::GetMappingMemoStats();
 	Log::WriteToConsoleAndLog(fmt::format("[mapping-memo] gpu thread: hits={} misses={}\n", mapping.hits,
 	                                      mapping.misses));
+	const auto backing = LibKernel::Memory::GetBackingReadCacheStats();
+	Log::WriteToConsoleAndLog(fmt::format("[backing-read-cache] gpu thread: hits={} misses={}\n", backing.hits,
+	                                      backing.misses));
 }
 
 void BufferCache::RunGarbageCollector() {

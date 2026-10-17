@@ -143,6 +143,13 @@ struct MappingMemoStats {
 	uint64_t misses = 0;
 };
 [[nodiscard]] MappingMemoStats GetMappingMemoStats();
+// Reads of the guest backing (TryReadBacking) of the calling thread, with --backing-read-cache: served from a
+// remembered mapping entry (no map lock, no tree walk) and looked up under the lock.
+struct BackingReadCacheStats {
+	uint64_t hits   = 0;
+	uint64_t misses = 0;
+};
+[[nodiscard]] BackingReadCacheStats GetBackingReadCacheStats();
 // Whether guest mappings cover all of [vaddr, vaddr + size), and the parts they cover (as
 // (address, size), in order): what can be read or written of a range that reaches into memory the
 // guest unmapped.

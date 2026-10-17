@@ -235,6 +235,9 @@ static bool     g_mem_punch_on = false;
 static bool     g_mem_residency_on = false;
 static bool     g_mem_hole_reads_on = false;
 
+// --backing-read-cache: reads of the guest backing the calling thread served from a remembered mapping entry.
+static thread_local BackingReadCacheStats g_backing_read_cache_stats;
+
 // --mem-residency: reads of the guest backing through the writable alias (see BackingReadStats).
 struct BackingReadCounters {
 	struct Counts {
@@ -1270,6 +1273,10 @@ uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 
 MappingMemoStats GetMappingMemoStats() {
 	return g_mapping_memo_stats;
+}
+
+BackingReadCacheStats GetBackingReadCacheStats() {
+	return g_backing_read_cache_stats;
 }
 
 bool IsFullyMapped(uint64_t vaddr, uint64_t size) {

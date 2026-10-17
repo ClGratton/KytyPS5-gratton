@@ -388,6 +388,34 @@ public:
 			return false;
 		}
 
+		// --backing-read-cache: a read inside a mapping entry this thread has seen, while no mapping
+		// changed since (the epoch), is the entry's backing bytes: no map lock, no tree walk.
+		struct Remembered {
+			const GuestBackingStore* store = nullptr;
+			uint64_t                 epoch = 0, lo = 0, hi = 0, delta = 0;
+		};
+		constexpr size_t                           kRemembered = 8;
+		thread_local std::array<Remembered, kRemembered> remembered {};
+		thread_local size_t                        next_remembered = 0;
+		const bool cache_on = Config::BackingReadCacheEnabled();
+		if (cache_on) {
+			const auto epoch = m_maps_epoch.load(std::memory_order_acquire);
+			for (const auto& r: remembered) {
+				if (r.store == this && r.epoch == epoch && vaddr >= r.lo && size <= r.hi - vaddr) {
+					const auto offset = vaddr + r.delta;
+					if (RangeOk(offset, size)) {
+						if (Config::ResolvedDrawVerify()) {
+							VerifyRememberedRead(vaddr, size, offset, epoch);
+						}
+						g_backing_read_cache_stats.hits++;
+						CopyFromBacking(static_cast<uint8_t*>(data), offset, size);
+						return true;
+					}
+				}
+			}
+			g_backing_read_cache_stats.misses++;
+		}
+
 		std::shared_lock lock(m_mutex);
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 		if (g_test_backing_read != nullptr) {
@@ -423,7 +451,35 @@ public:
 			CopyFromBacking(destination + (current - vaddr), offset, bytes);
 			current += bytes;
 		}
+		if (cache_on && first->second.vaddr <= vaddr && end <= first->second.vaddr + first->second.size) {
+			// Remember the entry (the epoch cannot move while the shared lock is held).
+			const auto& entry = first->second;
+			remembered[next_remembered] = {this, m_maps_epoch.load(std::memory_order_relaxed), entry.vaddr,
+			                               entry.vaddr + entry.size, entry.backing_offset - entry.vaddr};
+			next_remembered = (next_remembered + 1) % kRemembered;
+		}
 		return true;
+	}
+
+	// --resolved-draw-verify: the entry a remembered read used is the live one (checked under the lock; skipped when
+	// a mapping changed in between, which is a legal order of the two events).
+	void VerifyRememberedRead(uint64_t vaddr, uint64_t size, uint64_t offset, uint64_t epoch) {
+		std::shared_lock lock(m_mutex);
+		if (m_maps_epoch.load(std::memory_order_relaxed) != epoch) {
+			return;
+		}
+		auto it = m_maps.upper_bound(vaddr);
+		bool ok = it != m_maps.begin();
+		if (ok) {
+			--it;
+			const auto& entry = it->second;
+			ok = vaddr >= entry.vaddr && vaddr + size <= entry.vaddr + entry.size &&
+			     entry.backing_offset + (vaddr - entry.vaddr) == offset;
+		}
+		if (!ok) {
+			EXIT("GuestBackingStore: a remembered read of 0x%016" PRIx64 "+0x%" PRIx64
+			     " differs from the live mapping\n", vaddr, size);
+		}
 	}
 
 	bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
@@ -572,6 +628,7 @@ public:
 		{
 			std::lock_guard lock(m_mutex);
 			EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
+			m_maps_epoch.fetch_add(1, std::memory_order_release);
 		}
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
@@ -586,6 +643,7 @@ public:
 		TrackMapUnlocked(backing_offset, size);
 		RemoveMappingsUnlocked(vaddr, size);
 		EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
+		m_maps_epoch.fetch_add(1, std::memory_order_release);
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
 #endif
@@ -673,6 +731,7 @@ public:
 					old = entry->second;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 					m_maps.erase(entry);
+					m_maps_epoch.fetch_add(1, std::memory_order_release);
 #endif
 				}
 			}
@@ -693,6 +752,7 @@ public:
 			if (!unmapped) {
 				std::lock_guard lock(m_mutex);
 				m_maps.emplace(old.vaddr, old);
+				m_maps_epoch.fetch_add(1, std::memory_order_release);
 				return false;
 			}
 			if (placeholder_preserved != nullptr) {
@@ -745,6 +805,7 @@ public:
 		}
 		std::lock_guard lock(m_mutex);
 		m_maps.emplace(old.vaddr, old);
+		m_maps_epoch.fetch_add(1, std::memory_order_release);
 		return false;
 #else
 		// Replace only the requested range so concurrent accesses and GPU watch
@@ -1153,6 +1214,7 @@ private:
 				                             old.backing_offset + end - old.vaddr, old.mode});
 			}
 		}
+		m_maps_epoch.fetch_add(1, std::memory_order_release);
 	}
 #endif
 
@@ -1342,6 +1404,9 @@ private:
 	uint64_t                     m_size         = 0;
 	std::shared_mutex            m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
+	// Moves (under the unique lock, after the change) whenever m_maps changes: a mapping entry remembered
+	// together with the epoch it was read at is still the entry while the epoch has not moved.
+	std::atomic<uint64_t>        m_maps_epoch {1};
 };
 
 class GuestAddressSpace {

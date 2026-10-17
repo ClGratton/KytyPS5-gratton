@@ -228,6 +228,13 @@ QList<Option> BuildTable() {
 	             "pointers while no page changed since the last full pass. Under 1% in the "
 	             "measurements.",
 	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"backing_read_cache", "--backing-read-cache", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Remember where guest memory is mapped between reads",
+	             "The GPU thread reads small pieces of guest memory all the time (shader resources, "
+	             "vertex metadata, clear codes). Each read took the memory-map lock and walked the "
+	             "mapping tree; with this it remembers the mapping entry it found until the map "
+	             "changes. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(backing_read_cache)});
 	defs.append({"lazy_op_poll", "--lazy-op-poll", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Ask the GPU timeline less often between draws",
 	             "Before each draw the GPU thread checks whether deferred operations (resource "
