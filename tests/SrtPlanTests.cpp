@@ -10,6 +10,12 @@
 #include <unordered_map>
 #include <vector>
 
+// srtPlan.cpp reads the emulator config for this; the test binary does not link it, and takes the deep-prefetch
+// path in Store::Take (a prefetch changes no result).
+bool Libs::Graphics::SrtPlan::Store::DeepPrefetchEnabled() {
+	return true;
+}
+
 namespace {
 
 using namespace Libs::Graphics::SrtPlan;

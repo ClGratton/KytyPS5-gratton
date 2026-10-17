@@ -453,8 +453,34 @@ private:
 	}
 	static uint64_t Pack(Position p) { return (p.seq << 24u) | std::min<uint32_t>(p.ordinal, 0xffffffu); }
 
-	// --plan-prefetch (srtPlan.cpp): every cache line of the plan's blocks, not the first line of five of them.
-	static void PrefetchPlanDeep(const Plan& p);
+	// --plan-prefetch (DeepPrefetchEnabled is in srtPlan.cpp, it reads the config): every cache line of the plan's
+	// blocks, not the first line of five of them.
+	// A plan is built by a lookahead worker out of a dozen heap blocks (descriptor vectors, user data, read set); kyGpu
+	// meets each of them cold, one dependent cache miss after another. Touching every line of every block while the
+	// previous plan is used turns those misses into parallel prefetches.
+	static void PrefetchPlanDeep(const Plan& p) {
+		const auto block = [](const auto& v) {
+			const auto* base  = reinterpret_cast<const char*>(v.data());
+			const auto  bytes = v.size() * sizeof(*v.data());
+			for (size_t offset = 0; offset < bytes && offset < 1024; offset += 64) {
+				__builtin_prefetch(base + offset, 0, 3);
+			}
+		};
+		const auto& s = p.snapshot;
+		block(s.buffers);
+		block(s.images);
+		block(s.samplers);
+		block(s.flattened_srt);
+		block(s.user_data);
+		block(s.specialization_reads);
+		block(s.read_hull.intervals);
+		block(p.specialization.buffers);
+		block(p.specialization.images);
+		block(p.workgroup_counts);
+		block(p.reads.windows);
+		block(p.reads.runs);
+		block(p.reads.values);
+	}
 	static bool DeepPrefetchEnabled();
 
 	static void PrefetchBody(const Plan& p) {
