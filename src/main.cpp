@@ -182,7 +182,7 @@ static void PrintUsage() {
 	         "                                       elide-barriers, defer-draw-write-barriers,\n"
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
-	         "                                       backing-read-cache,\n"
+	         "                                       backing-read-cache, write-fault-around,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
@@ -254,6 +254,11 @@ static void PrintUsage() {
 	         "                                       address memory through raw pointers while no page\n"
 	         "                                       became CPU-modified and no buffer or mapping changed\n"
 	         "                                       since the last full pass. Default: false.\n");
+	::printf("  --write-fault-around <true|false>    A guest write fault that continues a sequential run of\n"
+	         "                                       writes marks the clean pages ahead as modified with it,\n"
+	         "                                       so a streaming writer faults once per run instead of once\n"
+	         "                                       per page (exact: modified is a superset of written).\n"
+	         "                                       Default: false.\n");
 	::printf("  --backing-read-cache <true|false>    Reads of the guest memory backing (shader resource walks,\n"
 	         "                                       vertex metadata, clear codes) use a mapping entry the\n"
 	         "                                       thread remembered while no mapping changed, instead of\n"
@@ -1015,6 +1020,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.gc_clock_frames = true;
 			} else {
 				::printf("invalid gc clock (expected runs or frames): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--write-fault-around") {
+			if (!ParseBool(value, options.config.write_fault_around)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--backing-read-cache") {

@@ -228,6 +228,14 @@ QList<Option> BuildTable() {
 	             "pointers while no page changed since the last full pass. Under 1% in the "
 	             "measurements.",
 	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"write_fault_around", "--write-fault-around", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Take the pages ahead of a sequential writer in one fault",
+	             "The emulator write-protects the memory the GPU uses to learn when the game "
+	             "changes it, and every first write to a page is a fault (about 17,000 a frame in "
+	             "the heaviest scene tested). When a fault continues where the previous run ended, "
+	             "the clean pages ahead are marked modified with it, so a streaming writer faults "
+	             "once per run. Exact; costs a few redundant page uploads.",
+	             EMU_BOOL(write_fault_around)});
 	defs.append({"backing_read_cache", "--backing-read-cache", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Remember where guest memory is mapped between reads",
 	             "The GPU thread reads small pieces of guest memory all the time (shader resources, "

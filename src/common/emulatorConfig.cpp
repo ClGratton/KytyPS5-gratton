@@ -74,6 +74,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per guest-backing read; entries are checked against the map epoch on every use, so a toggle
 	// never leaves a stale entry usable (they are not consulted while off and are re-read after).
 	registry.Register("backing-read-cache", &g_config->backing_read_cache, false);
+	// Read per write fault; pages marked dirty ahead are uploaded like any dirty page and the real write is seen
+	// by the page protection again after the next upload, so a toggle needs no cleanup.
+	registry.Register("write-fault-around", &g_config->write_fault_around, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
 	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
 	// generation keeps moving whether or not the memo is consulted.
@@ -143,6 +146,10 @@ bool GcClockFrames() {
 
 bool BdaSyncSkip() {
 	return Common::RuntimeToggles::Read(g_config->bda_sync_skip);
+}
+
+bool WriteFaultAroundEnabled() {
+	return Common::RuntimeToggles::Read(g_config->write_fault_around);
 }
 
 bool BackingReadCacheEnabled() {

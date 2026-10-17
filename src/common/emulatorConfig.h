@@ -277,6 +277,9 @@ struct ConfigOptions {
 	// --backing-read-cache: TryReadBacking remembers the mapping entry of a read per thread, valid while no
 	// mapping changed (kernel/memoryAddressSpace.inc), instead of taking the map lock and walking the tree. Default off.
 	bool                   backing_read_cache          = false;
+	// --write-fault-around: a write fault that continues a sequential run marks the clean pages ahead CPU-dirty
+	// with it (graphics/host_gpu/regionManager.h, FaultRunAhead). Default off.
+	bool                   write_fault_around          = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -461,6 +464,7 @@ bool              BdaSyncSkip();
 bool              BdaDirtyLogEnabled();
 bool              LazyOpPollEnabled();
 bool              BackingReadCacheEnabled();
+bool              WriteFaultAroundEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

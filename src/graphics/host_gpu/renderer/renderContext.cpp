@@ -338,9 +338,10 @@ void RenderContext::LogFaultStatsPeriodic() {
 	}
 	m_fault_log_next = now + std::chrono::seconds(10);
 	Log::WriteToConsoleAndLog(fmt::format(
-	    "[faults] tracker page faults: writes={} (handler {:.1f} ms total, {} on the GPU thread) reads={}\n",
+	    "[faults] tracker page faults: writes={} (handler {:.1f} ms total, {} on the GPU thread) reads={}; "
+	    "run-ahead events={} pages={}\n",
 	    m_fault_writes.load(), static_cast<double>(m_fault_write_ns.load()) / 1e6, m_fault_gpu_thread.load(),
-	    m_fault_reads.load()));
+	    m_fault_reads.load(), g_fault_run_events.load(), g_fault_run_pages.load()));
 }
 
 void RenderContext::RunGarbageCollector() {

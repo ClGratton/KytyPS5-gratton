@@ -751,7 +751,8 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	                                  [this, vaddr, size] {
 		                                  ReadMemory(vaddr, size, true,
 		                                             Common::GpuPhase::DrainCause::ReadbackCpuWrite);
-	                                  });
+	                                  },
+	                                  Config::WriteFaultAroundEnabled());
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,

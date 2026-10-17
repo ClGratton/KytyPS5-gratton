@@ -49,8 +49,9 @@ public:
 	// that does not exist yet starts out CPU-dirty, so nothing about it can be remembered). Lock-free.
 	[[nodiscard]] uint32_t RangeEpochs(uint64_t vaddr, uint64_t size, uint32_t (&out)[2]) const noexcept;
 	// Removes protection from a range and flushes GPU-owned data when required.
+	// `run_ahead`: --write-fault-around (RegionManager::FaultRunAhead).
 	template <typename Flush>
-	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {
+	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush, bool run_ahead = false) noexcept {
 		static_assert(std::is_invocable_v<Flush&>);
 		CheckNotInUploadCallback();
 
@@ -63,7 +64,20 @@ public:
 				if (manager->IsModified<DirtySource::Gpu>(offset, bytes)) {
 					return true;
 				}
-				manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
+				// A write fault (one page): a sequential writer takes the pages ahead with it.
+				size_t extra_bytes = 0;
+				if (run_ahead && bytes <= TRACKER_PAGE_SIZE) {
+					const size_t page = offset / TRACKER_PAGE_SIZE;
+					const size_t extra = manager->FaultRunAhead(page);
+					extra_bytes        = extra * TRACKER_PAGE_SIZE;
+					if (extra != 0) {
+						g_fault_run_events.fetch_add(1, std::memory_order_relaxed);
+						g_fault_run_pages.fetch_add(extra, std::memory_order_relaxed);
+					}
+				}
+				manager->ChangeState<DirtySource::Cpu, true>(
+				    manager->GetCpuAddr() + offset,
+				    extra_bytes == 0 ? bytes : (TRACKER_PAGE_SIZE - offset % TRACKER_PAGE_SIZE) + extra_bytes);
 				return false;
 			}();
 			if (should_flush) {
