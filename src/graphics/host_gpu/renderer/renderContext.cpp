@@ -348,10 +348,10 @@ void RenderContext::LogFaultStatsPeriodic() {
 	    m_fault_reads.load(), g_fault_run_events.load(), g_fault_run_pages.load()));
 	const auto& churn = m_graphics.image_churn;
 	Log::WriteToConsoleAndLog(fmt::format(
-	    "[images] created={} ({} dedicated, {:.1f} MiB, {:.1f} ms) deleted={} ({:.1f} ms)\n", churn.creates.load(),
-	    churn.dedicated_creates.load(), static_cast<double>(churn.create_bytes.load()) / 1048576.0,
+	    "[images] created={} ({} dedicated, {:.1f} MiB, {:.1f} ms) deleted={} ({:.1f} ms); pool: {} reused, {} kept\n",
+	    churn.creates.load(), churn.dedicated_creates.load(), static_cast<double>(churn.create_bytes.load()) / 1048576.0,
 	    static_cast<double>(churn.create_ns.load()) / 1e6, churn.deletes.load(),
-	    static_cast<double>(churn.delete_ns.load()) / 1e6));
+	    static_cast<double>(churn.delete_ns.load()) / 1e6, churn.pool_hits.load(), churn.pool_puts.load()));
 }
 
 void RenderContext::RunGarbageCollector() {

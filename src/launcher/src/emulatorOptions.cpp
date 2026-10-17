@@ -231,6 +231,13 @@ QList<Option> BuildTable() {
 	             "pointers while no page changed since the last full pass. Under 1% in the "
 	             "measurements.",
 	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"image_pool", "--image-pool", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Reuse freed images instead of allocating new ones",
+	             "Render targets that the game recreates every frame cost a driver memory free and "
+	             "allocate (about 270 microseconds) each time. With this, freed images are kept for "
+	             "up to a second and a half (at most 256 MiB) and handed to the next image of the "
+	             "same size and format. Exact; lowers CPU time on the GPU thread.",
+	             EMU_BOOL(image_pool)});
 	defs.append({"image_presence", "--image-presence", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Skip the texture cache lock for memory no image covers",
 	             "Reading shader metadata and vertex tables, and every guest write fault on a "

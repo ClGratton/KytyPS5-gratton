@@ -286,6 +286,9 @@ struct ConfigOptions {
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
+	// --image-pool: freed dedicated images are kept briefly and reused by the next image of the same shape
+	// (graphics/host_gpu/vma.cpp). Default off.
+	bool                   image_pool                  = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -476,6 +479,7 @@ bool              BackingReadCacheEnabled();
 bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
 bool              ImagePresenceEnabled();
+bool              ImagePoolEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

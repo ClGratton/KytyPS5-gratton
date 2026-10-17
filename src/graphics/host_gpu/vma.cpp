@@ -15,6 +15,7 @@
 #endif
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/gpuPhaseStats.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -26,6 +27,8 @@
 #include <chrono>
 #include <cinttypes>
 #include <fmt/format.h>
+#include <mutex>
+#include <optional>
 #include <string>
 
 namespace Libs::Graphics {
@@ -189,9 +192,71 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
 }
 
+// A pooled image goes back to the driver: the accounting a delete does, then vmaDestroyImage.
+static void DestroyPooledImage(GraphicContext& graphics, const GraphicContext::PooledImage& pooled) {
+	graphics.AccountVram(pooled.vram_class, -static_cast<int64_t>(pooled.alloc_size));
+	graphics.dedicated_images.fetch_sub(1, std::memory_order_relaxed);
+	vmaDestroyImage(graphics.allocator, pooled.image, pooled.allocation);
+}
+
+void GraphicContext::FlushImagePool() {
+	std::vector<PooledImage> taken;
+	{
+		std::lock_guard lock(m_image_pool_mutex);
+		taken.swap(m_image_pool);
+		m_image_pool_bytes = 0;
+	}
+	for (const auto& pooled: taken) {
+		DestroyPooledImage(*this, pooled);
+	}
+}
+
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
 	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkAlloc);
 	KYTY_PROFILER_FUNCTION();
+	if (Config::ImagePoolEnabled()) {
+		std::optional<PooledImage> hit;
+		{
+			std::lock_guard lock(m_image_pool_mutex);
+			for (size_t i = 0; i < m_image_pool.size(); i++) {
+				const auto& p = m_image_pool[i];
+				if (p.format == image_info.format && p.image_type == image_info.imageType &&
+				    p.extent == image_info.extent && p.layers == image_info.arrayLayers &&
+				    p.mip_levels == image_info.mipLevels && p.samples == static_cast<uint32_t>(image_info.samples) &&
+				    p.usage == image_info.usage && p.flags == image_info.flags &&
+				    image_info.tiling == vk::ImageTiling::eOptimal && image_info.initialLayout == vk::ImageLayout::eUndefined) {
+					hit = p;
+					m_image_pool_bytes -= p.alloc_size;
+					m_image_pool.erase(m_image_pool.begin() + static_cast<std::ptrdiff_t>(i));
+					break;
+				}
+			}
+		}
+		if (hit) {
+			// The pooled image keeps its memory (and whatever it held); the first use transitions it from
+			// UNDEFINED like a new one. It was accounted when it was first created and still is.
+			image.image      = hit->image;
+			image.allocation = hit->allocation;
+			image.alloc_size = hit->alloc_size;
+			image.vram_class = hit->vram_class;
+			image.dedicated  = true;
+			image.format     = image_info.format;
+			image.image_type = image_info.imageType;
+			image.extent     = image_info.extent;
+			image.layers     = image_info.arrayLayers;
+			image.mip_levels = image_info.mipLevels;
+			image.samples    = static_cast<uint32_t>(image_info.samples);
+			image.usage      = image_info.usage;
+			image.flags      = image_info.flags;
+			image.state      = {.layout = image_info.initialLayout};
+			image.subresource_states.clear();
+			image_churn.pool_hits.fetch_add(1, std::memory_order_relaxed);
+			image_churn.creates.fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+	} else if (!m_image_pool.empty()) {
+		FlushImagePool();
+	}
 	const auto churn_start = std::chrono::steady_clock::now();
 	struct ChurnNote {
 		GraphicContext& graphics;
@@ -288,6 +353,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	    try_allocate,
 	    [&] {
 		    // Free what the caches can spare before trying once more.
+		    FlushImagePool(); // pooled images are the cheapest memory to give back
 		    in_reclaim = true;
 		    reclaim_memory();
 		    in_reclaim = false;
@@ -335,6 +401,48 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	EXIT_IF(allocator == nullptr || image.image == nullptr || image.allocation == nullptr);
 
 	const auto delete_start = std::chrono::steady_clock::now();
+	if (Config::ImagePoolEnabled() && image.dedicated && image.alloc_size >= (256u << 10u)) {
+		// Kept for the next image of this shape: still accounted, still counted as dedicated.
+		const auto cap = std::min<uint64_t>(256ull << 20u, GetTotalMemoryBudget() / 32u);
+		std::vector<PooledImage> expired;
+		bool                     pooled = false;
+		{
+			std::lock_guard lock(m_image_pool_mutex);
+			const auto now = std::chrono::steady_clock::now();
+			for (size_t i = 0; i < m_image_pool.size();) {
+				if (now - m_image_pool[i].since > std::chrono::milliseconds(1500)) {
+					m_image_pool_bytes -= m_image_pool[i].alloc_size;
+					expired.push_back(m_image_pool[i]);
+					m_image_pool.erase(m_image_pool.begin() + static_cast<std::ptrdiff_t>(i));
+				} else {
+					i++;
+				}
+			}
+			if (m_image_pool_bytes + image.alloc_size <= cap) {
+				PooledImage p;
+				p.format = image.format; p.image_type = image.image_type; p.extent = image.extent;
+				p.layers = image.layers; p.mip_levels = image.mip_levels; p.samples = image.samples;
+				p.usage = image.usage; p.flags = image.flags;
+				p.image = image.image; p.allocation = image.allocation; p.alloc_size = image.alloc_size;
+				p.vram_class = image.vram_class; p.since = now;
+				m_image_pool_bytes += p.alloc_size;
+				m_image_pool.push_back(p);
+				pooled = true;
+			}
+		}
+		for (const auto& e: expired) {
+			DestroyPooledImage(*this, e);
+		}
+		if (pooled) {
+			image.image      = nullptr;
+			image.allocation = nullptr;
+			image.alloc_size = 0;
+			image.dedicated  = false;
+			image_churn.pool_puts.fetch_add(1, std::memory_order_relaxed);
+			image_churn.deletes.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+	}
 	AccountVram(image.vram_class, -static_cast<int64_t>(image.alloc_size));
 	if (image.dedicated) {
 		dedicated_images.fetch_sub(1, std::memory_order_relaxed);

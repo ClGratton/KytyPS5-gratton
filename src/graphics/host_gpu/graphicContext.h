@@ -13,6 +13,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <chrono>
 #include <mutex>
 #include <tuple>
 #include <vector>
@@ -160,10 +161,31 @@ struct GraphicContext {
 	// Diagnostics (--vram-stats): driver objects that live in VRAM outside VMA.
 	std::atomic<uint32_t> dedicated_images {0};
 	std::atomic<uint32_t> host_fallback_images {0};
+	// --image-pool: freed dedicated images are kept (at most image_pool_cap bytes, at most a second and a half) and
+	// handed to the next image of the same shape instead of a vkFreeMemory + vkAllocateMemory pair (about 270 us).
+	struct PooledImage {
+		vk::Format           format      = vk::Format::eUndefined;
+		vk::ImageType        image_type  = vk::ImageType::e2D;
+		vk::Extent3D         extent      = {1, 1, 1};
+		uint32_t             layers      = 1;
+		uint32_t             mip_levels  = 1;
+		uint32_t             samples     = 1;
+		vk::ImageUsageFlags  usage       = {};
+		vk::ImageCreateFlags flags       = {};
+		vk::Image            image       = nullptr;
+		VmaAllocation        allocation  = nullptr;
+		uint64_t             alloc_size  = 0;
+		VramClass            vram_class  = VramClass::ImageTexture;
+		std::chrono::steady_clock::time_point since;
+	};
+	std::mutex               m_image_pool_mutex;
+	std::vector<PooledImage> m_image_pool;
+	uint64_t                 m_image_pool_bytes = 0;
+	void                     FlushImagePool();
 	// Image allocation churn (vma.cpp CreateImage / DeleteImage), for the periodic memory log.
 	struct ImageChurn {
 		std::atomic<uint64_t> creates {0}, create_bytes {0}, create_ns {0}, dedicated_creates {0};
-		std::atomic<uint64_t> deletes {0}, delete_ns {0};
+		std::atomic<uint64_t> deletes {0}, delete_ns {0}, pool_hits {0}, pool_puts {0};
 	} image_churn;
 	std::atomic<uint32_t> pipelines_graphics {0};
 	std::atomic<uint32_t> pipelines_compute {0};

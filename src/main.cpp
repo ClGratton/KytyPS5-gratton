@@ -183,7 +183,7 @@ static void PrintUsage() {
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
-	         "                                       image-presence,\n"
+	         "                                       image-presence, image-pool,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
@@ -255,6 +255,10 @@ static void PrintUsage() {
 	         "                                       address memory through raw pointers while no page\n"
 	         "                                       became CPU-modified and no buffer or mapping changed\n"
 	         "                                       since the last full pass. Default: false.\n");
+	::printf("  --image-pool <true|false>            Keep freed images (up to 256 MiB, a second and a half) and\n"
+	         "                                       reuse them for the next image of the same shape instead of\n"
+	         "                                       a driver free and allocate (exact; the memory is not\n"
+	         "                                       cleared, as for a new image). Default: false.\n");
 	::printf("  --image-presence <true|false>        The texture cache answers whether an image covers a page\n"
 	         "                                       from per-page counts without its lock, for clean reads of\n"
 	         "                                       shader metadata and for guest write faults (exact).\n"
@@ -1031,6 +1035,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.gc_clock_frames = true;
 			} else {
 				::printf("invalid gc clock (expected runs or frames): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--image-pool") {
+			if (!ParseBool(value, options.config.image_pool)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--image-presence") {
