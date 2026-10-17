@@ -412,6 +412,7 @@ function(configure_macos_guest_address_space target)
 endfunction()
 
 add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+add_kyty_full_emulator_test(dynamic_state_tests "${KYTY_TESTS_DIR}/DynamicStateTests.cpp")
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
@@ -482,6 +483,11 @@ add_executable(null_page_read_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/NullPageReadTests.cpp"
 )
 target_include_directories(null_page_read_tests PRIVATE ${inc_headers})
+
+add_executable(compare_view_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/CompareViewTests.cpp"
+)
+target_include_directories(compare_view_tests PRIVATE ${inc_headers})
 
 add_executable(mesh_dispatch_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/MeshDispatchTests.cpp"
@@ -644,6 +650,12 @@ target_include_directories(bda_sync_gate_tests PRIVATE ${inc_headers})
 find_package(Threads REQUIRED)
 target_link_libraries(bda_sync_gate_tests Threads::Threads)
 
+add_executable(driver_cache_checkpoint_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/DriverCacheCheckpointTests.cpp"
+)
+target_include_directories(driver_cache_checkpoint_tests PRIVATE ${inc_headers})
+target_link_libraries(driver_cache_checkpoint_tests Threads::Threads)
+
 add_executable(lds_span_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LdsSpanTests.cpp"
 )
@@ -703,6 +715,10 @@ add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_SOURCE_DIR}/libs/imeDialog.cpp"
 )
 target_include_directories(ime_dialog_tests PRIVATE ${inc_headers})
+
+add_executable(safe_call_flags_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SafeCallFlagsTests.cpp")
+target_link_libraries(safe_call_flags_tests PRIVATE common xbyak::xbyak)
+target_include_directories(safe_call_flags_tests PRIVATE ${inc_headers})
 
 add_executable(memory_tracker_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
@@ -907,9 +923,12 @@ if(BUILD_TESTING)
 	set_tests_properties(emulator_vram_paging_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
+	add_test(NAME dynamic_state COMMAND $<TARGET_FILE:dynamic_state_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
+	add_test(NAME safe_call_flags COMMAND $<TARGET_FILE:safe_call_flags_tests>)
+	set_tests_properties(safe_call_flags PROPERTIES TIMEOUT 10 RUN_SERIAL TRUE)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME mem_residency_ranges COMMAND $<TARGET_FILE:mem_residency_ranges_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
@@ -918,6 +937,8 @@ if(BUILD_TESTING)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME mesh_dispatch COMMAND $<TARGET_FILE:mesh_dispatch_tests>)
 	add_test(NAME null_page_read COMMAND $<TARGET_FILE:null_page_read_tests>)
+	add_test(NAME driver_cache_checkpoint COMMAND $<TARGET_FILE:driver_cache_checkpoint_tests>)
+	add_test(NAME compare_view COMMAND $<TARGET_FILE:compare_view_tests>)
 	add_test(NAME swapchain_extent COMMAND $<TARGET_FILE:swapchain_extent_tests>)
 	add_test(NAME playgo_api COMMAND $<TARGET_FILE:playgo_api_tests>)
 	add_test(NAME gds_copy_plan COMMAND $<TARGET_FILE:gds_copy_plan_tests>)
@@ -1126,6 +1147,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --known-stores-only)
 	add_test(NAME bda_page_table_initialization
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bda-page-table-init-only)
+	add_test(NAME null_texture_descriptors
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --null-descriptors-only)
 	add_test(NAME color_render_target_1d
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --rt1d-only)
 
@@ -1139,9 +1162,11 @@ if(BUILD_TESTING)
 	add_custom_target(kyty_tests DEPENDS
 		ime_dialog_tests
 		shader_cfg_tests
+		dynamic_state_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests
+		safe_call_flags_tests
 		page_manager_tests
 		mem_residency_ranges_tests
 		archive_file_tests
@@ -1150,6 +1175,8 @@ if(BUILD_TESTING)
 		bit_array_tests
 		mesh_dispatch_tests
 		null_page_read_tests
+		driver_cache_checkpoint_tests
+		compare_view_tests
 		swapchain_extent_tests
 		playgo_api_tests
 		gds_copy_plan_tests

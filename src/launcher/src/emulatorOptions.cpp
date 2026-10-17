@@ -111,6 +111,13 @@ QList<Option> BuildTable() {
 	             "hardware threads."
 	             "\n\nNeeds Async pipelines = stall or skip.",
 	             EMU_INT(pipeline_workers), {}, 0, 64, "Auto", "", true});
+	defs.append({"driver_cache_checkpoint_s", "--driver-cache-checkpoint", Tab::Shaders,
+	             "Pipeline compilation", Kind::Int, "Save the driver cache every:",
+	             "While pipelines are being compiled, a background thread writes the driver "
+	             "pipeline cache to disk this often, so a crash or hang does not lose what the "
+	             "session compiled and the next start does not compile it again. The game never "
+	             "waits for the file. Off = the cache is written only when the emulator exits.",
+	             EMU_INT(driver_cache_checkpoint_s), {}, 0, 3600, "Off", " s"});
 	defs.append({"spirv_robust_bounds", "--spirv-robust-bounds", Tab::Shaders, "Shader code",
 	             Kind::Bool, "Robust buffer bounds (shorter SPIR-V)",
 	             "Leaves storage-buffer loads to the GPU's robustBufferAccess2 instead of emitting a "

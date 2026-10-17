@@ -1,7 +1,8 @@
 // Internal memory address-space helpers included by memory.cpp.
 // Kept in the same translation unit because they depend on memory.cpp-local helpers.
 
-static constexpr uint64_t HOST_SYSTEM_MANAGED_MIN  = 0x0000040000ull;
+// The shader resource walk answers reads below this address with zeros (common/guestAddressSpace.h).
+static constexpr uint64_t HOST_SYSTEM_MANAGED_MIN  = Common::kGuestAddressSpaceStart;
 static constexpr uint64_t HOST_SYSTEM_MANAGED_MAX  = 0x07ffffbfffull;
 #if defined(__APPLE__) && (defined(__x86_64__) || defined(_M_X64))
 static constexpr uint64_t HOST_SYSTEM_RESERVED_MAX = 0x0fbfffffffull;

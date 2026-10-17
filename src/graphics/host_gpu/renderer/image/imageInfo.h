@@ -425,6 +425,11 @@ inline constexpr std::array<VideoOutFormatPolicy, 7> VIDEO_OUT_FORMAT_POLICIES {
 		                            (mantissa << 13u));
 	};
 	switch (format) {
+		case vk::Format::eB10G11R11UfloatPack32:
+			next.float32[0] = float16((packed & 0x7ffu) << 4u);
+			next.float32[1] = float16(((packed >> 11u) & 0x7ffu) << 4u);
+			next.float32[2] = float16((packed >> 22u) << 5u);
+			break;
 		case vk::Format::eR16G16Sfloat:
 			next.float32[1] = float16(packed >> 16u);
 			[[fallthrough]];

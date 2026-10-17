@@ -48,6 +48,7 @@ confirms them (forks/decision.md).
 | `--elide-barriers`, `--known-fills`, `--clean-guest-reads` | false (play: true) | drain cuts K14/K22/K20: fps +6.2 % (3 vs 3) |
 | `--readback-queue`, `--bda-sync-skip`, `--pipelines-unoptimized-first`, `--skip-ir-validation` | false | no gain / under 1 % / no gain on NVIDIA / 0.6 s per run |
 | `--pipeline-workers`, `--pipeline-lookahead-kinds`, `--submit-coalesce-max/-us` | auto, all, 16, 0 | tuning knobs |
+| `--driver-cache-checkpoint <seconds>` | 0 (off: the driver pipeline cache is written only at exit) | durability, not speed: a background thread writes the cache every N s while pipelines are created, so a crash or hang keeps them. 9-42 ms per write (11-34 MB), no frame-time difference at 1 vs 1, fresh and warm cache (bench/RESULTS.md, K122) |
 | `--shader-optimization-type` | None | compile time against shader speed |
 | `--mem-release-punch` | off | ram.md: only with a trace showing at least 1 GB released but resident |
 | `--fps-limit`, `--gpu-time-scale` | 0 (off), 1.0 | user controls |

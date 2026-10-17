@@ -184,6 +184,11 @@ struct ConfigOptions {
 	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
 	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.
 	uint32_t               pipeline_workers            = 0;
+	// --driver-cache-checkpoint <seconds>: while pipelines are being created, a background thread
+	// writes the driver pipeline cache to disk this often (and not at all while nothing new was
+	// compiled), so a crash or hang keeps what the session compiled. 0 = only at shutdown. Default
+	// off until measured.
+	uint32_t               driver_cache_checkpoint_s   = 0;
 	// --pipeline-lookahead: prefetch pipelines from submitted command buffers (needs
 	// --async-pipelines stall or skip). Default off.
 	bool                   pipeline_lookahead          = false;
@@ -390,6 +395,7 @@ PipelineCacheKey GetPipelineCacheKey();
 AsyncPipelineMode GetAsyncPipelineMode();
 // Resolved worker count (never 0).
 uint32_t          GetPipelineWorkerCount();
+uint32_t          GetDriverCacheCheckpointSeconds();
 bool              GetPipelineLookahead();
 // The flag, effective only with --async-pipelines on (the optimized rebuilds run on the pool).
 bool              GetPipelinesUnoptimizedFirst();

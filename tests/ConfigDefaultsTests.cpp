@@ -97,6 +97,20 @@ void TestPipelineCacheKeyDefault() {
 
 // --vram-paging used to switch on the VRAM stats log (every 5 s, and each pipeline compile).
 // Stats are diagnostics and have their own flag.
+// Performance/durability: the driver pipeline cache is written only at shutdown unless asked.
+void TestDriverCacheCheckpointDefaultsOff() {
+	const Config::ConfigOptions options;
+	Check(options.driver_cache_checkpoint_s == 0, "driver_cache_checkpoint_s defaults to off");
+	Apply(options);
+	Check(Config::GetDriverCacheCheckpointSeconds() == 0,
+	      "an unconfigured emulator does not checkpoint the driver pipeline cache");
+	Config::ConfigOptions on;
+	on.driver_cache_checkpoint_s = 60;
+	Apply(on);
+	Check(Config::GetDriverCacheCheckpointSeconds() == 60, "the checkpoint period reaches the config");
+	Apply(options);
+}
+
 void TestVramStatsAreIndependentOfPaging() {
 	Config::ConfigOptions options;
 	options.vram_paging = true;
@@ -296,6 +310,7 @@ int main() {
 	TestBufferGcOwnShare();
 	TestReadbackLinearImagesStaysOff();
 	TestPipelineCacheKeyDefault();
+	TestDriverCacheCheckpointDefaultsOff();
 	TestVramStatsAreIndependentOfPaging();
 	TestVramPagingDefault();
 	TestHostMemoryFeaturesDefaults();

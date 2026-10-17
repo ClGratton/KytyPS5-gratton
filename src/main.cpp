@@ -219,6 +219,12 @@ static void PrintUsage() {
 	         "                                       --async-pipelines stall|skip). Default: false.\n");
 	::printf("  --pipeline-workers <1-64>            Worker threads for --async-pipelines.\n"
 	         "                                       Default: min(8, hardware threads / 2).\n");
+	::printf("  --driver-cache-checkpoint <seconds>  Write the driver pipeline cache\n"
+	         "                                       (_PipelineCache/<TITLE>.bin) from a background thread\n"
+	         "                                       this often while new pipelines are being compiled (0 or\n"
+	         "                                       5-3600), so a crash or hang keeps them; the game never\n"
+	         "                                       waits for the file. 0 writes only at shutdown.\n"
+	         "                                       Default: 0.\n");
 	::printf("  --debug-texture-gc <true|false|log>  Debug: false disables the texture garbage collector;\n"
 	         "                                       log logs every free of a GPU-written image with\n"
 	         "                                       the flags that decided it. Default: true.\n");
@@ -1157,6 +1163,14 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.debug_dump_shaders.push_back(hash);
 				start = end + 1;
 			}
+		} else if (arg == "--driver-cache-checkpoint") {
+			uint64_t seconds = 0;
+			if (!ParseUint64(value, seconds) || (seconds != 0 && (seconds < 5 || seconds > 3600))) {
+				::printf("invalid driver cache checkpoint period (expected 0 or 5-3600): %s\n",
+				         value.c_str());
+				return false;
+			}
+			options.config.driver_cache_checkpoint_s = static_cast<uint32_t>(seconds);
 		} else if (arg == "--pipeline-workers") {
 			uint64_t workers = 0;
 			if (!ParseUint64(value, workers) || workers == 0 || workers > 64) {
