@@ -16,6 +16,8 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "kernel/eventQueue.h"
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <shared_mutex>
 #include <vector>
@@ -89,6 +91,13 @@ private:
 	bool                      m_fault_process_pending = false;
 	void                      SampleMemResidency();
 	bool                      m_bda_logged = false;
+	// Page faults of the tracker (HandleFault): counts and the time guest threads spend in the handler.
+	std::atomic<uint64_t>     m_fault_writes {0};
+	std::atomic<uint64_t>     m_fault_reads {0};
+	std::atomic<uint64_t>     m_fault_write_ns {0};
+	std::atomic<uint64_t>     m_fault_gpu_thread {0};
+	std::chrono::steady_clock::time_point m_fault_log_next {};
+	void                      LogFaultStatsPeriodic();
 	// PrepareBda skip gate (K15): the mapped-range generation changes under m_mapped_ranges_mutex.
 	BdaSync::SkipGate         m_bda_sync_gate;
 	uint64_t                  m_mapped_generation = 0;

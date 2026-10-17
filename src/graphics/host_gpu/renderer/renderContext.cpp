@@ -101,9 +101,19 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		}
 	}
 	if (access == PageFaultAccess::Write) {
+		const auto start = std::chrono::steady_clock::now();
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
+		m_fault_writes.fetch_add(1, std::memory_order_relaxed);
+		m_fault_write_ns.fetch_add(
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                              std::chrono::steady_clock::now() - start).count()),
+		    std::memory_order_relaxed);
+		if (GuestGpu::IsGpuThread()) {
+			m_fault_gpu_thread.fetch_add(1, std::memory_order_relaxed);
+		}
 	} else {
+		m_fault_reads.fetch_add(1, std::memory_order_relaxed);
 		if (GuestGpu::IsGpuThread()) {
 			Common::GpuPhase::NoteGpuThreadFault();
 		}
@@ -297,7 +307,23 @@ void RenderContext::BdaVerifyLogPass() {
 	}
 }
 
+void RenderContext::LogFaultStatsPeriodic() {
+	if (!Config::MemStatsEnabled()) {
+		return;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now < m_fault_log_next) {
+		return;
+	}
+	m_fault_log_next = now + std::chrono::seconds(10);
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[faults] tracker page faults: writes={} (handler {:.1f} ms total, {} on the GPU thread) reads={}\n",
+	    m_fault_writes.load(), static_cast<double>(m_fault_write_ns.load()) / 1e6, m_fault_gpu_thread.load(),
+	    m_fault_reads.load()));
+}
+
 void RenderContext::RunGarbageCollector() {
+	LogFaultStatsPeriodic();
 	Common::GpuPhase::Scope gpu_phase_gc(Common::GpuPhase::Phase::Gc);
 	if (m_fault_process_pending) {
 		m_fault_process_pending = false;
