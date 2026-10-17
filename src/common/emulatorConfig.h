@@ -289,6 +289,10 @@ struct ConfigOptions {
 	// --cp-direct-stores: the command processor's stores to guest memory (labels, fences, WRITE_DATA) go through the
 	// backing view and mark the tracker directly instead of taking a write fault on the GPU thread. Default off.
 	bool                   cp_direct_stores            = false;
+	// --draw-state-memo: per-draw work that is a pure function of the registers is not repeated while the registers' epochs
+	// (graphics/guest_gpu/hardwareContext.h) have not moved (graphics/host_gpu/renderer/renderDraw.cpp and neighbours).
+	// Default off.
+	bool                   draw_state_memo             = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -485,6 +489,7 @@ bool              BackingReadCacheEnabled();
 bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
 bool              CpDirectStoresEnabled();
+bool              DrawStateMemoEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();

@@ -1787,6 +1787,28 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 }
 
+// uc_check and hw_check only look at the registers (and log once what they accept), so registers whose epochs passed them once pass them
+// again: --draw-state-memo skips the repeat.
+static void CheckDrawRegisters(CommandBuffer& buffer) {
+	auto& ucfg = buffer.GetUserConfig();
+	auto& ctx  = buffer.GetRegisters();
+	if (!Config::DrawStateMemoEnabled()) {
+		uc_check(ucfg);
+		hw_check(buffer);
+		return;
+	}
+	static thread_local uint64_t passed_uc  = ~uint64_t {0};
+	static thread_local uint64_t passed_ctx = ~uint64_t {0};
+	if (passed_uc != ucfg.Epoch()) {
+		uc_check(ucfg);
+		passed_uc = ucfg.Epoch();
+	}
+	if (passed_ctx != ctx.Epoch()) {
+		hw_check(buffer);
+		passed_ctx = ctx.Epoch();
+	}
+}
+
 // Epoch check (always under --resolved-draw-verify, and with KYTY_DRAW_STATE_STATS=1 as statistics): when the epoch of the
 // context, the user config or the shader registers equals the one of the previous draw, the content must be equal too.
 // The converse is not required (a setter that wrote the same value moves the epoch). TEMPORARY statistics beside the check.
@@ -1892,10 +1914,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		     static_cast<uint32_t>(args.base_vertex), args.first_instance);
 	}
 
-	uc_check(ucfg);
-
-	hw_check(buffer);
-	NoteDrawStateRepeat(buffer);
+	CheckDrawRegisters(buffer);
 	NoteDrawStateRepeat(buffer);
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
@@ -2026,11 +2045,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		     args.vertex_count, args.instance_count, args.first_vertex, args.first_instance);
 	}
 
-	uc_check(ucfg);
-
-	hw_check(buffer);
-	NoteDrawStateRepeat(buffer);
-	NoteDrawStateRepeat(buffer);
+	CheckDrawRegisters(buffer);
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};

@@ -86,6 +86,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per store; a page marked dirty while still protected needs no cleanup when the flag goes off (the next guest write
 	// to it faults like any protected page, an upload clears it).
 	registry.Register("cp-direct-stores", &g_config->cp_direct_stores, false);
+	// Read per draw; the remembered results carry the epochs they were computed at, so turning it off and on needs no cleanup.
+	registry.Register("draw-state-memo", &g_config->draw_state_memo, false);
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
@@ -172,6 +174,10 @@ bool ImagePresenceEnabled() {
 
 bool PlanPrefetchEnabled() {
 	return Common::RuntimeToggles::Read(g_config->plan_prefetch);
+}
+
+bool DrawStateMemoEnabled() {
+	return Common::RuntimeToggles::Read(g_config->draw_state_memo);
 }
 
 bool CpDirectStoresEnabled() {

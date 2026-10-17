@@ -253,6 +253,12 @@ QList<Option> BuildTable() {
 	             "line of the next plan's blocks while it uses the current one. Only a hint to the "
 	             "CPU cache; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(plan_prefetch)});
+	defs.append({"draw_state_memo", "--draw-state-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Do not redo per-draw work while the GPU registers have not changed",
+	             "Most draws of a frame set the same GPU state as the draw before. With this the GPU thread "
+	             "remembers what it worked out from that state (checks, render targets, shader set-up) and "
+	             "reuses it while the state is unchanged. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(draw_state_memo)});
 	defs.append({"cp_direct_stores", "--cp-direct-stores", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Write the GPU's fence and label values without a page fault",
 	             "When a frame finishes the emulated GPU writes small values into game memory. Those pages "
