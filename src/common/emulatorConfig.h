@@ -321,6 +321,10 @@ struct ConfigOptions {
 	// --image-pool: freed dedicated images are kept briefly and reused by the next image of the same shape
 	// (graphics/host_gpu/vma.cpp). Default off.
 	bool                   image_pool                  = false;
+	// --ro-depth-access: a draw that writes no aspect of its depth target (a read-only layout) tracks the attachment with the read
+	// access only, and a transit between read-only accesses on the same layout, whose access types and stages an earlier
+	// barrier already covered, emits no barrier (graphics/host_gpu/renderer/image/image.cpp ReadAfterReadCovered). Default off.
+	bool                   ro_depth_access             = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -518,6 +522,7 @@ bool              TextureLockBatchEnabled();
 bool              PushDescriptorDeltaEnabled();
 bool              SmallCopyDedupEnabled();
 bool              ImagePresenceEnabled();
+bool              RoDepthAccessEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();

@@ -572,9 +572,21 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 			             ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
 			             : vk::ImageLayout::eGeneral;
 		}
-		// The attachment store writes even when guest depth/stencil tests do not.
-		const auto access = vk::AccessFlagBits2::eDepthStencilAttachmentRead |
-		                    vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+		// The attachment store writes even when guest depth/stencil tests do not. --ro-depth-access: not in a read-only layout
+		// (the draw writes no aspect, so the store writes back what the attachment holds): the image is only read, and a
+		// sampled use of it by this draw (descriptors.cpp) needs no barrier against the attachment use.
+		const bool read_only_layout = layout == vk::ImageLayout::eDepthReadOnlyOptimal ||
+		                              layout == vk::ImageLayout::eStencilReadOnlyOptimal ||
+		                              layout == vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+		// A draw that samples the image takes the sampled access in the same transit, so the one barrier before the draw covers
+		// both uses and descriptors.cpp finds nothing left to do.
+		const bool read_only_use = Config::RoDepthAccessEnabled() && !draw_writes && read_only_layout;
+		const auto access = read_only_use
+		                        ? vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+		                              (sampled_aspects ? vk::AccessFlagBits2::eShaderRead
+		                                               : vk::AccessFlags2 {})
+		                        : vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+		                              vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
 		image.binding.attachment_layout = layout;
 		image.binding.attachment_access = access;
 		const auto& view                = depth.desc.view_info;

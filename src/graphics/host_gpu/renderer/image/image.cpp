@@ -2,6 +2,7 @@
 
 #include "common/gpuPhaseStats.h"
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -119,6 +120,32 @@ vk::ImageAspectFlags Image::FullAspectMask(vk::Format format) noexcept {
 	}
 }
 
+namespace {
+
+// --ro-depth-access: accesses that only read an image. An access set with any other bit (a write, or one this list does not
+// name) is never treated as read-only.
+constexpr vk::AccessFlags2 kReadOnlyAccess =
+    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderSampledRead |
+    vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+    vk::AccessFlagBits2::eInputAttachmentRead | vk::AccessFlagBits2::eTransferRead;
+
+bool ReadOnlyAccessSet(vk::AccessFlags2 access) {
+	return access && !(access & ~kReadOnlyAccess);
+}
+
+// --ro-depth-access: the image is in the layout the transit wants, nothing has written it since the barrier that made it visible
+// (the tracked state is a read-only access set), the destination only reads it, and the destination's access types and stages are
+// all part of what that barrier already covered. A barrier here would order reads after reads.
+bool ReadAfterReadCovered(const VulkanImageState& state, vk::ImageLayout destination_layout,
+                          vk::AccessFlags2 destination_access,
+                          vk::PipelineStageFlags2 destination_stage) {
+	return Config::RoDepthAccessEnabled() && state.layout == destination_layout &&
+	       ReadOnlyAccessSet(state.access_mask) && ReadOnlyAccessSet(destination_access) &&
+	       !(destination_access & ~state.access_mask) && !(destination_stage & ~state.pl_stage);
+}
+
+} // namespace
+
 Image::Barriers Image::GetBarriers(vk::ImageLayout                      destination_layout,
                                    vk::AccessFlags2                     destination_access,
                                    vk::PipelineStageFlags2              destination_stage,
@@ -156,6 +183,10 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 				                              vk::AccessFlagBits2::eMemoryWrite;
 				const bool     repeated_write =
 				    static_cast<bool>(subresource_state.access_mask & write_access);
+				if (ReadAfterReadCovered(subresource_state, destination_layout, destination_access,
+				                         destination_stage)) {
+					continue;
+				}
 				if (subresource_state.layout != destination_layout ||
 				    subresource_state.access_mask != destination_access || repeated_write) {
 					vk::ImageMemoryBarrier2 barrier {};
@@ -189,6 +220,9 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 		const bool     repeated_write = static_cast<bool>(state.access_mask & write_access);
 		if (state.layout == destination_layout && state.access_mask == destination_access &&
 		    !repeated_write) {
+			return {};
+		}
+		if (ReadAfterReadCovered(state, destination_layout, destination_access, destination_stage)) {
 			return {};
 		}
 

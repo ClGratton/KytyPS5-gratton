@@ -106,6 +106,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
+	// Read per transit; a barrier skipped under the flag only ever stood between two reads, and the tracked state is not
+	// changed by the skip, so a toggle needs no cleanup.
+	registry.Register("ro-depth-access", &g_config->ro_depth_access, false);
 	registry.Register("image-pool", &g_config->image_pool, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
 	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
@@ -181,6 +184,10 @@ bool BdaSyncSkip() {
 
 bool ImagePoolEnabled() {
 	return Common::RuntimeToggles::Read(g_config->image_pool);
+}
+
+bool RoDepthAccessEnabled() {
+	return Common::RuntimeToggles::Read(g_config->ro_depth_access);
 }
 
 bool ImagePresenceEnabled() {
