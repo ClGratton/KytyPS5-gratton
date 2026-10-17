@@ -286,6 +286,9 @@ struct ConfigOptions {
 	// --tracker-sleeping-locks: a game thread that waits for a tracker lock (held across an mprotect) sleeps after a short
 	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default off.
 	bool                   tracker_sleeping_locks      = false;
+	// --cp-direct-stores: the command processor's stores to guest memory (labels, fences, WRITE_DATA) go through the
+	// backing view and mark the tracker directly instead of taking a write fault on the GPU thread. Default off.
+	bool                   cp_direct_stores            = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -481,6 +484,7 @@ bool              LazyOpPollEnabled();
 bool              BackingReadCacheEnabled();
 bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
+bool              CpDirectStoresEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();

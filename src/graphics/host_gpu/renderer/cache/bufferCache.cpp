@@ -755,6 +755,14 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	                                  Config::WriteFaultAroundEnabled());
 }
 
+bool BufferCache::NoteGuestStore(uint64_t vaddr, uint64_t size) {
+	if (!GuestRange {vaddr, size}.Valid()) {
+		return false;
+	}
+	ForgetKnownFills(vaddr, size);
+	return m_memory_tracker.NoteCpuStore(vaddr, size);
+}
+
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write,
                              Common::GpuPhase::DrainCause cause) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {

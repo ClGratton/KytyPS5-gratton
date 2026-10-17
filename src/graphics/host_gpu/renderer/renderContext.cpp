@@ -123,6 +123,18 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	return true;
 }
 
+bool RenderContext::StoreGuest(uint64_t vaddr, const void* data, uint64_t size) {
+	if (size == 0 || !Config::CpDirectStoresEnabled() || !IsMapped(vaddr, size)) {
+		return false;
+	}
+	if (!m_buffer_cache.NoteGuestStore(vaddr, size)) {
+		m_buffer_cache.InvalidateMemory(vaddr, size); // GPU-written pages: the fault path's readback first
+	}
+	const bool stored = LibKernel::Memory::TryWriteBacking(vaddr, data, size);
+	m_texture_cache.InvalidateMemory(vaddr, size);
+	return stored;
+}
+
 bool RenderContext::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!IsMapped(vaddr, size)) {
 		return false;

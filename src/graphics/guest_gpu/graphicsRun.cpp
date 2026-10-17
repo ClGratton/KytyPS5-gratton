@@ -457,12 +457,18 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	}
 
 	if (write_one_address) {
-		for (uint32_t i = 0; i < dw_num; i++) {
-			dst[0] = src[i];
-		}
+		// Every dword goes to the same address in turn: the last one is what stays.
+		StoreGuest(dst, &src[dw_num - 1], sizeof(uint32_t));
 	} else {
-		memcpy(dst, src, static_cast<size_t>(dw_num) * sizeof(uint32_t));
+		StoreGuest(dst, src, static_cast<size_t>(dw_num) * sizeof(uint32_t));
 	}
+}
+
+void CommandProcessor::StoreGuest(void* dst, const void* src, size_t bytes) {
+	if (!IsShadow() && m_renderer.StoreGuest(reinterpret_cast<uint64_t>(dst), src, bytes)) {
+		return;
+	}
+	std::memcpy(dst, src, bytes);
 }
 
 void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes) {
@@ -477,7 +483,7 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 	const auto value = GpuTimestamps::SampleGuestClock(
 	    CurrentBuffer(), reinterpret_cast<void*>(dst_address), num_bytes,
 	    GpuTimestamps::Point::TopOfPipe);
-	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
+	StoreGuest(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
 	if (clock_log_count.fetch_add(1) < 64) {
 		LOGF("\t copy_data reference clock: dst=0x%016" PRIx64 " value=0x%016" PRIx64
@@ -1493,7 +1499,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 	auto write32 = [&](bool with_writeback) {
 		auto* dst  = static_cast<uint32_t*>(dst_gpu_addr);
 		auto  data = static_cast<uint32_t>(value);
-		std::memcpy(dst, &data, sizeof(data));
+		StoreGuest(dst, &data, sizeof(data));
 
 		if (with_interrupt) {
 			if (with_writeback) {
@@ -1553,7 +1559,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 				}
 				auto write64 = [&](bool with_writeback) {
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
-					std::memcpy(dst, &value, sizeof(value));
+					StoreGuest(dst, &value, sizeof(value));
 
 					if (with_interrupt) {
 						if (with_writeback) {
@@ -1823,7 +1829,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 		     reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 	}
 
-	std::memcpy(dst_gpu_addr, &value, sizeof(value));
+	StoreGuest(dst_gpu_addr, &value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	GpuTimestamps::OnGuestFlip(command);
@@ -1853,7 +1859,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	if (eop_event_type != 0x00000004 || cache_action != 0x00000038) {
 		EXIT("unknown event type\n");
 	}
-	std::memcpy(dst_gpu_addr, &value, sizeof(value));
+	StoreGuest(dst_gpu_addr, &value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	GpuTimestamps::OnGuestFlip(command);

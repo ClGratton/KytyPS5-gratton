@@ -53,6 +53,10 @@ public:
 
 	[[nodiscard]] bool HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 	[[nodiscard]] bool InvalidateMemory(uint64_t vaddr, uint64_t size);
+	// --cp-direct-stores: the command processor's stores to guest memory (labels, fences, WRITE_DATA). Writes through the
+	// backing view and tells the caches what a write fault would have told them, without the fault and without an
+	// mprotect. False: not done, the caller stores to the guest address as before.
+	[[nodiscard]] bool StoreGuest(uint64_t vaddr, const void* data, uint64_t size);
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	// After a guest protection change: pages the tracker watches get the tracker's protection back.

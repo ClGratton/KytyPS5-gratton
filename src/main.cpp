@@ -184,6 +184,7 @@ static void PrintUsage() {
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
 	         "                                       tracker-sleeping-locks,\n"
+	         "                                       cp-direct-stores,\n"
 	         "                                       image-presence, image-pool,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
@@ -267,6 +268,10 @@ static void PrintUsage() {
 	::printf("  --plan-prefetch <true|false>         While the GPU thread uses one SRT plan it prefetches every\n"
 	         "                                       cache line of the next plan's blocks (a hint to the CPU\n"
 	         "                                       cache; needs --srt-plans). Default: false.\n");
+	::printf("  --cp-direct-stores <true|false>      The GPU command processor's stores to game memory (fence and\n"
+	         "                                       label writes) go through the backing view and mark the\n"
+	         "                                       memory tracker directly, instead of faulting on the GPU\n"
+	         "                                       thread. Default: false.\n");
 	::printf("  --tracker-sleeping-locks <true|false> A game thread that waits for a memory-tracking lock held across\n"
 	         "                                       a page-protection call sleeps after a short spin instead of\n"
 	         "                                       burning a core for the whole call. The GPU thread always\n"
@@ -1054,6 +1059,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--plan-prefetch") {
 			if (!ParseBool(value, options.config.plan_prefetch)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--cp-direct-stores") {
+			if (!ParseBool(value, options.config.cp_direct_stores)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

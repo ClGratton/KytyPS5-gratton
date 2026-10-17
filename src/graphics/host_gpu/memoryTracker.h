@@ -40,6 +40,9 @@ public:
 	[[nodiscard]] bool IsRegionCpuModifiedLockFree(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModifiedLockFree(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
+	// --cp-direct-stores: RegionManager::MarkCpuDirtyKeepProtected over the regions of the range that exist (memory
+	// no region covers is not watched by anything). False: a page is GPU-dirty, the caller takes the fault path.
+	[[nodiscard]] bool NoteCpuStore(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	// Releases the GPU's claim on the range's pages and gives them to the CPU in one critical

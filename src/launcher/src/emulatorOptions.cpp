@@ -253,6 +253,13 @@ QList<Option> BuildTable() {
 	             "line of the next plan's blocks while it uses the current one. Only a hint to the "
 	             "CPU cache; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(plan_prefetch)});
+	defs.append({"cp_direct_stores", "--cp-direct-stores", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Write the GPU's fence and label values without a page fault",
+	             "When a frame finishes the emulated GPU writes small values into game memory. Those pages "
+	             "are usually write-protected for tracking, so each write took a page fault on the GPU thread. "
+	             "With this the value is written through the emulator's own view of the memory and the tracker "
+	             "is told directly. Exact; lowers the GPU thread's CPU time per frame.",
+	             EMU_BOOL(cp_direct_stores)});
 	defs.append({"tracker_sleeping_locks", "--tracker-sleeping-locks", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Let waiting game threads sleep instead of spinning in the memory tracker",
 	             "The emulator write-protects game memory the GPU uses and unprotects a page on the game's first "

@@ -153,6 +153,33 @@ public:
 		return m_cpu_mirror.Matches(m_cpu_dirty) && m_gpu_mirror.Matches(m_gpu_dirty);
 	}
 
+	// --cp-direct-stores: the emulator itself wrote [vaddr, vaddr + size) (a label, a fence value) through the backing
+	// view. The pages become CPU-dirty exactly as a guest write fault would make them, but they stay write-protected:
+	// nobody is about to write them, so the unprotect (an mprotect under the address-space mutex) and the protect that
+	// follows the upload are saved. A real guest write to such a page faults as before; ChangeState<Cpu, true> then
+	// unprotects it. Returns false, changing nothing, when a page of the range is GPU-dirty (that store needs the
+	// readback of the fault path). Caller holds `lock`.
+	[[nodiscard]] bool MarkCpuDirtyKeepProtected(uint64_t vaddr, uint64_t size) {
+		const auto [start, end] = GetPageRange(vaddr, size);
+		if (RegionBits(m_gpu_dirty, start, end).Any()) {
+			return false;
+		}
+		bool changed = false;
+		for (size_t page = start; page < end; ++page) {
+			if (!m_cpu_dirty.Get(page)) {
+				m_cpu_dirty.SetRange(page, page + 1);
+				m_dirty_protected.SetRange(page, page + 1);
+				changed = true;
+			}
+		}
+		if (changed) {
+			m_cpu_mirror.Publish(m_cpu_dirty, start, end);
+			BdaSync::NoteCpuModified(m_cpu_addr + start * TRACKER_PAGE_SIZE, (end - start) * TRACKER_PAGE_SIZE);
+			m_epoch.fetch_add(1, std::memory_order_release);
+		}
+		return true;
+	}
+
 	template <DirtySource source, bool enable>
 	void ChangeState(uint64_t vaddr, uint64_t size) {
 		const auto [start, end] = GetPageRange(vaddr, size);
@@ -171,6 +198,9 @@ public:
 			bits.SetRange(start, end);
 		} else {
 			bits.UnsetRange(start, end);
+		}
+		if constexpr (source == DirtySource::Cpu) {
+			m_dirty_protected.UnsetRange(start, end); // a real change of the CPU state: the pages follow it
 		}
 		GetMirror<source>().Publish(bits, start, end);
 		if constexpr (source == DirtySource::Cpu && enable) {
@@ -197,6 +227,9 @@ public:
 		RegionBits mask(bits, start, end);
 		if constexpr (clear) {
 			bits.UnsetRange(start, end);
+			if constexpr (source == DirtySource::Cpu) {
+				m_dirty_protected.UnsetRange(start, end);
+			}
 			GetMirror<source>().Publish(bits, start, end);
 			if constexpr (source == DirtySource::Cpu) {
 				UpdateProtection<true, false>();
@@ -215,8 +248,10 @@ public:
 private:
 	template <bool track, bool is_read>
 	void UpdateProtection() {
-		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
-		auto&      previous   = is_read ? m_readable : m_writable;
+		// A page that is CPU-dirty but still protected (MarkCpuDirtyKeepProtected) has not given up its watcher yet:
+		// for the protection it counts as clean.
+		const RegionBits protection = is_read ? ~m_gpu_dirty : (m_cpu_dirty & ~m_dirty_protected);
+		auto&            previous   = is_read ? m_readable : m_writable;
 		auto       mask       = protection ^ previous;
 		if (mask.None()) {
 			return;
@@ -277,6 +312,8 @@ private:
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
 	RegionBits   m_writable;
+	// CPU-dirty pages whose watcher is still held (see MarkCpuDirtyKeepProtected); a subset of m_cpu_dirty.
+	RegionBits   m_dirty_protected;
 	RegionBits   m_readable;
 	// Lock-free copies of m_cpu_dirty / m_gpu_dirty, written under `lock` (see IsModifiedLockFree).
 	Common::AtomicBitMirror<TRACKER_REGION_PAGES> m_cpu_mirror;

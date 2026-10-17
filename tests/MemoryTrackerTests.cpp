@@ -884,6 +884,67 @@ void TestWriteFaultRunAhead() {
   Release(memory);
 }
 
+void TestCpuStoreKeepsProtection() {
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  auto &page_manager = harness.page_manager;
+  const auto ps = page_manager.GetPageSize();
+  auto *memory = Allocate(page_manager, 64);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto dirty = [&](uint64_t page) { return tracker.IsRegionCpuModified(address + page * ps, ps); };
+  tracker.ForEachUploadRange(address, ps * 64, false, [](uint64_t, uint64_t) noexcept {},
+                             []() noexcept {});
+  Check(!tracker.IsRegionCpuModified(address, ps * 64), "setup: the pages are not clean");
+  Check(Protection(memory + 5 * ps) == PAGE_READONLY, "setup: the pages are not protected");
+
+  // The emulator's own store: dirty, but still protected and no protection change.
+  ResetProtectionLog();
+  Check(tracker.NoteCpuStore(address + 5 * ps + 16, 8), "a store to a clean page was refused");
+  Check(dirty(5) && !dirty(4) && !dirty(6), "the store did not mark exactly its page");
+  Check(g_protection_calls == 0, "the store changed a protection");
+  Check(Protection(memory + 5 * ps) == PAGE_READONLY, "the store unprotected the page");
+  Check(tracker.NoteCpuStore(address + 5 * ps, 4), "a second store to the dirty page was refused");
+  Check(g_protection_calls == 0, "the second store changed a protection");
+
+  // A store across two pages marks both.
+  Check(tracker.NoteCpuStore(address + 9 * ps + ps - 4, 8), "a two-page store was refused");
+  Check(dirty(9) && dirty(10), "the two-page store missed a page");
+
+  // The upload takes the dirty page, finds nothing to unprotect and leaves it protected and clean.
+  uint64_t uploaded = 0;
+  ResetProtectionLog();
+  tracker.ForEachUploadRange(address, ps * 64, false,
+                             [&](uint64_t, uint64_t bytes) noexcept { uploaded += bytes; }, []() noexcept {});
+  Check(uploaded == 3 * ps, "the upload did not carry exactly the three marked pages");
+  Check(!dirty(5) && !dirty(9) && !dirty(10), "the upload left a page dirty");
+  Check(g_protection_calls == 0, "the upload changed the protection of pages that never lost it");
+  Check(Protection(memory + 5 * ps) == PAGE_READONLY, "the page lost its protection");
+
+  // A guest write fault on such a page is the ordinary fault: dirty and unprotected.
+  Check(tracker.NoteCpuStore(address + 20 * ps, 8), "store before the fault was refused");
+  ResetProtectionLog();
+  tracker.InvalidateRegion(address + 20 * ps + 8, 1, [] {});
+  Check(dirty(20), "the fault left the page clean");
+  Check(g_protection_calls == 1 && Protection(memory + 20 * ps) == PAGE_READWRITE,
+        "the fault did not unprotect the page it found dirty-protected");
+  tracker.ForEachUploadRange(address, ps * 64, false, [](uint64_t, uint64_t) noexcept {}, []() noexcept {});
+  Check(!dirty(20) && Protection(memory + 20 * ps) == PAGE_READONLY, "the upload did not protect the unprotected page again");
+
+  // A GPU-owned page refuses the direct store.
+  tracker.ForEachUploadRange(address + 30 * ps, ps, true, [](uint64_t, uint64_t) noexcept {},
+                             []() noexcept {});
+  Check(tracker.IsRegionGpuModified(address + 30 * ps, ps), "setup: page 30 is not GPU-owned");
+  Check(!tracker.NoteCpuStore(address + 30 * ps, 8), "a store to a GPU-owned page was taken");
+  Check(tracker.IsRegionGpuModified(address + 30 * ps, ps), "the refused store changed the GPU's claim");
+  tracker.UnmarkRegionAsGpuModified(address + 30 * ps, ps);
+
+  // Memory no region covers is not watched: nothing to do, and nothing created.
+  Check(tracker.NoteCpuStore(address + (Libs::Graphics::TRACKER_REGION_SIZE * 8), 8), "a store to untracked memory was refused");
+
+  tracker.UntrackMemory(address, ps * 64);
+  Release(memory);
+}
+
 void TestExactDirtyIntervalsSharingTrackerPage() {
   TrackerHarness harness;
   auto &tracker = harness.tracker;
@@ -1492,6 +1553,7 @@ int main(int argc, char **argv) {
   TestTakeGpuPagesForCpu();
   TestRangeEpochs();
   TestWriteFaultRunAhead();
+  TestCpuStoreKeepsProtection();
   TestExactDirtyIntervalsSharingTrackerPage();
   TestGpuDownloadProtectionMirrors();
   TestCrossRegionUpload();
