@@ -1726,7 +1726,46 @@ ShaderRecompiler::RobustBufferPolicy &TestRobustBufferPolicy() {
   return policy;
 }
 
+// Whether the device the cases run on has shaderSharedInt64Atomics (VulkanHarness sets it once the
+// device is selected). Native 64-bit LDS atomics (DS_ADD_U64, DS_OR_B64, ...) need it; without it
+// the emitter's storage-buffer LDS (ShaderComputeInputInfo::lds_storage) is the only SPIR-V it can
+// emit that the device may run, so CompileCase() routes those cases through it. CPU-only callers
+// (no device) keep the native shape.
+bool &HostSharedInt64Atomics() {
+  static bool available = true;
+  return available;
+}
+
+u32 &LdsStorageFallbackCases() {
+  static u32 cases = 0;
+  return cases;
+}
+
+// The same case with its LDS in a storage buffer instead of workgroup memory: no
+// WorkgroupMemoryExplicitLayoutKHR and no workgroup-class 64-bit atomics.
+TestCase WithLdsStorage(TestCase test) {
+  test.compute_info.lds_storage = true;
+  std::erase(test.required_spirv, "WorkgroupMemoryExplicitLayoutKHR");
+  test.required_spirv.push_back("StorageBuffer");
+  return test;
+}
+
+CompiledShader CompileCaseAsGiven(const TestCase &test, u32 host_subgroup_size);
+
+// Compiles a case for the device the harness runs on. Only a case that really contains a 64-bit
+// LDS atomic (the typed IR says so, not the test's name or opcode list) is rewritten, and only when
+// the device lacks shaderSharedInt64Atomics: every other case is compiled exactly as written.
 CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
+  auto compiled = CompileCaseAsGiven(test, host_subgroup_size);
+  if (HostSharedInt64Atomics() || !compiled.program.info.shared_int64_atomics ||
+      test.compute_info.lds_storage) {
+    return compiled;
+  }
+  ++LdsStorageFallbackCases();
+  return CompileCaseAsGiven(WithLdsStorage(test), host_subgroup_size);
+}
+
+CompiledShader CompileCaseAsGiven(const TestCase &test, u32 host_subgroup_size) {
   auto user_data =
       MakeNativeUserData(test.has_user_data ? &test.user_data : nullptr);
   const auto uses_image =
@@ -20552,6 +20591,8 @@ public:
 
 private:
   bool m_rasterization_supported = true;
+  // shaderSharedInt64Atomics of the selected device (native 64-bit LDS atomics).
+  bool m_shared_int64_atomics = false;
   // VK_EXT_calibrated_timestamps + hostQueryReset: the host GPU timestamps behind
   // --gpu-timestamps gpu (the emulator default).
   bool m_timestamps_supported = false;
@@ -20661,6 +20702,10 @@ private:
                                                   physical_devices.data()),
               "vkEnumeratePhysicalDevices");
 
+    // Prefer a device with native 64-bit LDS atomics. Only the cases that use them need the
+    // feature; without it they run through the storage-buffer LDS path (see CompileCase()), so a
+    // device that lacks just that (Intel Arc/Mesa ANV) is still a valid harness device.
+    for (const bool require_shared_int64 : {true, false}) {
     for (auto physical : physical_devices) {
       u32 queue_count = 0;
       physical.getQueueFamilyProperties(&queue_count, nullptr);
@@ -20693,7 +20738,7 @@ private:
               features12.shaderOutputViewportIndex != true ||
               features12.shaderBufferInt64Atomics != true ||
               features12.shaderSampledImageArrayNonUniformIndexing != true ||
-              features12.shaderSharedInt64Atomics != true ||
+              (require_shared_int64 && features12.shaderSharedInt64Atomics != true) ||
               image_atomic64.shaderImageInt64Atomics != true ||
               workgroup_layout.workgroupMemoryExplicitLayout != true ||
               features12.bufferDeviceAddress != true) {
@@ -20701,6 +20746,7 @@ private:
           }
           m_physical_device = physical;
           m_queue_family = i;
+          m_shared_int64_atomics = features12.shaderSharedInt64Atomics == true;
           break;
         }
       }
@@ -20708,8 +20754,18 @@ private:
         break;
       }
     }
+    if (m_physical_device != nullptr) {
+      break;
+    }
+    }
     Require("VulkanHarness", "dispatch", m_physical_device != nullptr,
-            "no Vulkan graphics+compute device with fragment barycentrics and 64-bit LDS/image atomics");
+            "no Vulkan graphics+compute device with fragment barycentrics and 64-bit buffer/image atomics");
+    HostSharedInt64Atomics() = m_shared_int64_atomics;
+    if (!m_shared_int64_atomics) {
+      std::printf(
+          "[host]    SharedInt64Atomics        unavailable, 64-bit LDS atomic cases run through "
+          "the storage-buffer LDS path\n");
+    }
     m_physical_device.getMemoryProperties(&m_memory_properties);
 
     vk::PhysicalDeviceFeatures available_features{};
@@ -20810,7 +20866,7 @@ private:
     device_info.pQueueCreateInfos = &queue_info;
     auto device_features11 = WindowContext::RequiredVulkan11Features();
     auto device_features12 = WindowContext::RequiredVulkan12Features();
-    device_features12.shaderSharedInt64Atomics = true;
+    device_features12.shaderSharedInt64Atomics = m_shared_int64_atomics;
     u32 device_extension_count = 0;
     (void)m_physical_device.enumerateDeviceExtensionProperties(
         nullptr, &device_extension_count, nullptr);
@@ -46806,11 +46862,8 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, DsWideLdsPartialBounds());
     RunCase(&vulkan, DsAtomic64Bounds(false));
     RunCase(&vulkan, DsAtomic64Bounds(true));
-    for (auto test : {DsWideLdsPartialBounds(), DsAtomic64Bounds(false), DsAtomic64Bounds(true)}) {
-      test.compute_info.lds_storage = true;
-      std::erase(test.required_spirv, "WorkgroupMemoryExplicitLayoutKHR");
-      test.required_spirv.push_back("StorageBuffer");
-      RunCase(&vulkan, test);
+    for (const auto &test : {DsWideLdsPartialBounds(), DsAtomic64Bounds(false), DsAtomic64Bounds(true)}) {
+      RunCase(&vulkan, WithLdsStorage(test));
     }
     vulkan.CheckNativeIndirectDispatch();
     return 0;
@@ -47973,6 +48026,11 @@ int main(int argc, char **argv) {
   if (vulkan.SkippedCaseCount() > 0) {
     std::printf("ShaderRecompilerComputeTests: %u graphics cases skipped\n",
                 vulkan.SkippedCaseCount());
+  }
+  if (LdsStorageFallbackCases() > 0) {
+    std::printf("ShaderRecompilerComputeTests: %u 64-bit LDS atomic cases ran through the "
+                "storage-buffer LDS path (no shaderSharedInt64Atomics on this device)\n",
+                LdsStorageFallbackCases());
   }
   std::printf("ShaderRecompilerComputeTests: all cases passed\n");
   return 0;
