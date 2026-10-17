@@ -727,6 +727,70 @@ void TestTakeGpuPagesForCpu() {
   Release(memory);
 }
 
+// --write-fault-around: a write fault that continues where the previous fault's run ended takes the clean pages
+// ahead with it (RegionManager::FaultRunAhead), in one protection change; it stops at a dirty page and at a
+// GPU-owned page; a fault elsewhere, or the flag off, takes one page.
+void TestWriteFaultRunAhead() {
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  auto &page_manager = harness.page_manager;
+  const auto ps = page_manager.GetPageSize();
+  auto *memory = Allocate(page_manager, 128);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto dirty = [&](uint64_t page) { return tracker.IsRegionCpuModified(address + page * ps, ps); };
+  const auto fault = [&](uint64_t page, bool run_ahead) {
+    tracker.InvalidateRegion(address + page * ps + 8, 1, [] {}, run_ahead);
+  };
+  tracker.ForEachUploadRange(address, ps * 128, false, [](uint64_t, uint64_t) noexcept {},
+                             []() noexcept {});
+  Check(!tracker.IsRegionCpuModified(address, ps * 128), "setup: the pages are not clean");
+
+  ResetProtectionLog();
+  fault(0, true);
+  Check(dirty(0) && !dirty(1), "the first fault takes one page");
+  fault(1, true); // continues the run: 2 pages ahead
+  Check(dirty(1) && dirty(2) && dirty(3) && !dirty(4), "a continued run takes two pages ahead");
+  fault(4, true); // doubled: 4 pages ahead
+  Check(dirty(4) && dirty(8) && !dirty(9), "the run doubles");
+  Check(g_protection_calls == 3, "each fault is one protection change, however many pages it takes");
+  Check(Protection(memory + 6 * ps) == PAGE_READWRITE && Protection(memory + 9 * ps) == PAGE_READONLY,
+        "the pages taken ahead are unprotected, the next one is not");
+
+  fault(40, true); // elsewhere: one page again
+  Check(dirty(40) && !dirty(41), "a fault that does not continue the run takes one page");
+  fault(41, true);
+  Check(dirty(43) && !dirty(44), "and the run starts again at two pages");
+
+  // The run stops at a page that is already dirty.
+  tracker.MarkRegionAsCpuModified(address + 68 * ps, ps);
+  fault(56, true); // single
+  fault(57, true); // 2 ahead: 58, 59
+  fault(60, true); // 4 ahead: 61..64
+  fault(65, true); // 8 ahead, but page 68 is dirty: 66 and 67 only
+  Check(dirty(65) && dirty(66) && dirty(67) && !dirty(69), "a run did not stop at a dirty page");
+  Check(Protection(memory + 69 * ps) == PAGE_READONLY, "a run unprotected a page behind a dirty page");
+
+  // A GPU-owned page is never taken: the run stops before it.
+  tracker.ForEachUploadRange(address + 90 * ps, ps, true, [](uint64_t, uint64_t) noexcept {},
+                             []() noexcept {});
+  Check(tracker.IsRegionGpuModified(address + 90 * ps, ps), "setup: page 90 is not GPU-owned");
+  fault(80, true);
+  fault(81, true); // 82, 83
+  fault(84, true); // 85..88
+  fault(89, true); // 8 ahead: page 90 is GPU-owned, nothing
+  Check(dirty(89) && !dirty(91), "a run crossed a GPU-owned page");
+  Check(tracker.IsRegionGpuModified(address + 90 * ps, ps), "a run took the GPU's claim");
+  tracker.UnmarkRegionAsGpuModified(address + 90 * ps, ps);
+
+  // The flag off: one page per fault, whatever came before.
+  fault(100, false);
+  fault(101, false);
+  Check(dirty(100) && dirty(101) && !dirty(102), "with the flag off a fault takes one page");
+
+  tracker.UntrackMemory(address, ps * 128);
+  Release(memory);
+}
+
 void TestExactDirtyIntervalsSharingTrackerPage() {
   TrackerHarness harness;
   auto &tracker = harness.tracker;
@@ -1333,6 +1397,7 @@ int main(int argc, char **argv) {
   TestGpuDirtyBits();
   TestTakeGpuPagesForCpu();
   TestRangeEpochs();
+  TestWriteFaultRunAhead();
   TestExactDirtyIntervalsSharingTrackerPage();
   TestGpuDownloadProtectionMirrors();
   TestCrossRegionUpload();
