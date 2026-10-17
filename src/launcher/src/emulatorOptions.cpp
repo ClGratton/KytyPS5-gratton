@@ -249,7 +249,7 @@ QList<Option> BuildTable() {
 	             Kind::Bool, "Let the GPU thread run on while a game thread waits for a readback",
 	             "A game thread's read of GPU-written memory no longer stops the GPU thread: it "
 	             "copies the bytes out and goes on, and only the reading thread waits for them. "
-	             "Exact; off until measured.",
+	             "Exact; part of Recommended for play.",
 	             EMU_BOOL(readback_futures)});
 	defs.append({"gpu_indirect_draws", "--gpu-indirect-draws", Tab::Gpu, "Draw path", Kind::Bool,
 	             "GPU-built indirect draws",
@@ -616,6 +616,8 @@ QVariantMap Recommended() {
 	values.insert(QStringLiteral("srt_plans"), true);
 	values.insert(QStringLiteral("image_lookup_memo"), true);
 	values.insert(QStringLiteral("texture_binding_reuse"), true);
+	values.insert(QStringLiteral("defer_draw_write_barriers"), true);
+	values.insert(QStringLiteral("readback_futures"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);
