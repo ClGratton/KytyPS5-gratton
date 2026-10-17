@@ -299,8 +299,12 @@ void RenderContext::BdaVerifyLogPass() {
 	if (uploaded.empty()) {
 		return;
 	}
+	// Notes made before the first drain were serviced by the pass; the walk's uploads are covered by the notes that
+	// are in the log now (made after the drain) or by an overflow.
 	std::vector<std::pair<uint64_t, uint64_t>> noted;
-	const bool                                 intact = BdaSync::g_dirty_log.Drain(
+	// Peek, do not drain: a note the verifier took would never reach a pass (the page it names was dirtied after
+	// the walk uploaded it).
+	const bool                                 intact = BdaSync::g_dirty_log.Peek(
         [&](uint64_t address, uint64_t size) { noted.emplace_back(address, size); });
 	std::sort(noted.begin(), noted.end());
 	std::vector<std::pair<uint64_t, uint64_t>> merged; // [begin, end)

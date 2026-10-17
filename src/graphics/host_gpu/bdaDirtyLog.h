@@ -81,6 +81,20 @@ public:
 		return !overflowed;
 	}
 
+	// The consumer looks at the notes in the log without taking them (the verifier: a note it took would never reach
+	// a pass). Calls f(address, size) for each published note; true when the log has not overflowed.
+	template <typename F>
+	[[nodiscard]] bool Peek(F&& f) const {
+		for (uint64_t pos = m_dequeue;; pos++) {
+			const Slot& slot = m_slots[pos & (kSlots - 1)];
+			if (slot.sequence.load(std::memory_order_acquire) != pos + 1) {
+				break;
+			}
+			f(slot.address, slot.size);
+		}
+		return !m_overflow.load(std::memory_order_acquire);
+	}
+
 	// The consumer discards the notes made so far (a full pass that starts now covers them).
 	void Reset() {
 		(void)Drain([](uint64_t, uint64_t) {});

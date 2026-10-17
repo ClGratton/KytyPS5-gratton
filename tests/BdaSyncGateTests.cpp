@@ -98,6 +98,19 @@ void TestLogDrainsInOrder() {
 	Check(log->Drain([&](uint64_t a, uint64_t n) { got.emplace_back(a, n); }) && got.empty(), "drained notes are gone");
 }
 
+void TestLogPeekDoesNotConsume() {
+	auto log = std::make_unique<DirtyLog>();
+	log->Note(0x1000, 0x1000);
+	log->Note(0x3000, 0x2000);
+	std::vector<uint64_t> seen;
+	Check(log->Peek([&](uint64_t a, uint64_t) { seen.push_back(a); }) && seen.size() == 2, "peek sees both notes");
+	Check(log->Pending() == 2, "peek leaves them in the log");
+	std::vector<uint64_t> drained;
+	Check(log->Drain([&](uint64_t a, uint64_t) { drained.push_back(a); }) && drained == seen,
+	      "the drain after a peek still delivers them");
+	Check(log->Peek([&](uint64_t, uint64_t) { Check(false, "nothing left to peek"); }), "empty peek");
+}
+
 void TestLogOverflowForcesAFullPassAndRecovers() {
 	auto log = std::make_unique<DirtyLog>();
 	for (size_t i = 0; i < DirtyLog::kSlots + 10; i++) {
@@ -176,6 +189,7 @@ void TestLogManyProducersOneConsumer() {
 
 int main() {
 	TestLogDrainsInOrder();
+	TestLogPeekDoesNotConsume();
 	TestLogOverflowForcesAFullPassAndRecovers();
 	TestLogResetDropsEarlierNotes();
 	TestNoteCpuModifiedLogsOnlyWhileActive();
