@@ -26,8 +26,16 @@ enum class Point {
 
 // The value to store at dst (size bytes, 4 or 8) now. In gpu mode a later rewrite of the 64-bit
 // value at dst with the GPU time may be queued on the command buffer's scheduler.
+//
+// With stored_later != nullptr and --eop-labels-at-completion on (default), gpu mode does what hardware
+// does: the timestamp is written ONCE, when the GPU has executed the point it was taken at, in GPU order
+// with the labels and interrupts of the same command buffer, and *stored_later is set: the caller must
+// not store the returned parse-time value (no placeholder that a guest could read and later see change).
+// If the device cannot give the GPU time the parse-time value is written at completion instead.
+// Legacy mode, an unsupported device and the option off leave *stored_later false: the caller stores the
+// returned value now.
 [[nodiscard]] uint64_t SampleGuestClock(CommandBuffer& command, void* dst, uint32_t size,
-                                        Point point);
+                                        Point point, bool* stored_later = nullptr);
 
 // A guest flip was recorded in command: the frame boundary the time scale stretches from.
 void OnGuestFlip(CommandBuffer& command);

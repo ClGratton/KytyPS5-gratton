@@ -2540,6 +2540,61 @@ public:
                 read64(0x20) == 0xdeadc10cull,
             "a label never arrived, or arrived with the wrong value or size");
 
+    // A GPU timestamp is written once, when the GPU has executed its point, in
+    // order with the labels: no parse-time stand-in that a guest could read and
+    // later see change.
+    {
+      scheduler.Begin(registers, user_config, shaders);
+      std::memcpy(reinterpret_cast<void *>(base + 0x40), &stale, sizeof(stale));
+      const auto clock_before = Sync::ReadReferenceClock();
+      bool stored_later = false;
+      (void)GpuTimestamps::SampleGuestClock(
+          scheduler.Current(), reinterpret_cast<void *>(base + 0x40), 8,
+          GpuTimestamps::Point::BottomOfPipe, &stored_later);
+      Require(name, "timestamp store owner",
+              stored_later == m_timestamps_supported,
+              "a GPU timestamp must be stored by the sampler exactly when the "
+              "device gives GPU time");
+      Require(name, "no stand-in", read64(0x40) == stale,
+              "a GPU timestamp was visible before the GPU executed its point");
+      scheduler.Finish();
+      scheduler.DrainPriorityOperations();
+      const auto clock_after = Sync::ReadReferenceClock();
+      if (m_timestamps_supported) {
+        constexpr uint64_t slack = 5000; // 50 us on the 100 MHz reference clock
+        const auto stamped = read64(0x40);
+        Require(name, "timestamp at completion",
+                stamped != stale && stamped + slack >= clock_before &&
+                    stamped <= clock_after + slack,
+                "a GPU timestamp never arrived or is outside the window the "
+                "command buffer ran in");
+      }
+
+      // Legacy mode and the opt-out leave the store to the caller (now).
+      Config::ConfigOptions legacy;
+      legacy.gpu_timestamps = Config::GpuTimestampMode::Legacy;
+      Config::Load(legacy);
+      scheduler.Begin(registers, user_config, shaders);
+      bool legacy_later = true;
+      (void)GpuTimestamps::SampleGuestClock(
+          scheduler.Current(), reinterpret_cast<void *>(base + 0x40), 8,
+          GpuTimestamps::Point::BottomOfPipe, &legacy_later);
+      Config::ConfigOptions no_labels_at_completion;
+      no_labels_at_completion.eop_labels_at_completion = false;
+      Config::Load(no_labels_at_completion);
+      bool opt_out_later = true;
+      (void)GpuTimestamps::SampleGuestClock(
+          scheduler.Current(), reinterpret_cast<void *>(base + 0x40), 8,
+          GpuTimestamps::Point::BottomOfPipe, &opt_out_later);
+      scheduler.Finish();
+      scheduler.DrainPriorityOperations();
+      Config::Load(Config::ConfigOptions{});
+      Require(name, "timestamp store by caller",
+              !legacy_later && !opt_out_later,
+              "legacy timestamps or the opt-out left the store to the "
+              "sampler");
+    }
+
     // The opt-out writes at parse time, as before.
     Config::ConfigOptions parse_time;
     parse_time.eop_labels_at_completion = false;
