@@ -703,6 +703,12 @@ add_executable(adaptive_lock_tests EXCLUDE_FROM_ALL
 target_include_directories(adaptive_lock_tests PRIVATE ${inc_headers})
 target_link_libraries(adaptive_lock_tests Threads::Threads)
 
+add_executable(finished_prefix_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/FinishedPrefixTests.cpp"
+)
+target_include_directories(finished_prefix_tests PRIVATE ${inc_headers})
+target_link_libraries(finished_prefix_tests Threads::Threads)
+
 add_executable(scalable_shared_mutex_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalableSharedMutexTests.cpp"
 )
@@ -1080,6 +1086,7 @@ if(BUILD_TESTING)
 	add_test(NAME page_presence COMMAND $<TARGET_FILE:page_presence_tests>)
 	add_test(NAME adaptive_lock COMMAND $<TARGET_FILE:adaptive_lock_tests>)
 	add_test(NAME scalable_shared_mutex COMMAND $<TARGET_FILE:scalable_shared_mutex_tests>)
+	add_test(NAME finished_prefix COMMAND $<TARGET_FILE:finished_prefix_tests>)
 	add_test(NAME push_descriptor_cache COMMAND $<TARGET_FILE:push_descriptor_cache_tests>)
 	add_test(NAME hardware_context_epoch COMMAND $<TARGET_FILE:hardware_context_epoch_tests>)
 	add_test(NAME sys_file_read COMMAND $<TARGET_FILE:sys_file_read_tests>)
@@ -1314,6 +1321,7 @@ if(BUILD_TESTING)
 		page_presence_tests
 		adaptive_lock_tests
 		scalable_shared_mutex_tests
+		finished_prefix_tests
 		push_descriptor_cache_tests
 		hardware_context_epoch_tests
 		sys_file_read_tests

@@ -298,6 +298,13 @@ QList<Option> BuildTable() {
 	             "the cache line moves between cores on every lookup. With this each thread counts in a line "
 	             "of its own. Exact; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(scalable_read_locks)});
+	defs.append({"submit_thread", "--submit-thread", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Submit command buffers from a thread of its own",
+	             "The GPU thread ends a command buffer at every batch boundary and then had to wait for the "
+	             "helper threads that copy the uploads before it could hand the buffer to the driver. With this "
+	             "a second thread does the waiting and the hand-over while the GPU thread records the next "
+	             "buffer. Exact; waits for the GPU still submit in line. Not for RenderDoc captures.",
+	             EMU_BOOL(submit_thread)});
 	defs.append({"write_fault_around", "--write-fault-around", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the pages ahead of a sequential writer in one fault",
 	             "The emulator write-protects the memory the GPU uses to learn when the game "

@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <atomic>
 #include <queue>
@@ -32,7 +33,9 @@ public:
 	void           FlushAndWait();
 	void           Finish();
 	CommandBuffer& BeginCommand();
-	uint64_t       Submit(SubmitInfo submit = {});
+	// `allow_async`: --submit-thread may hand the vkQueueSubmit to the submit thread (a flush at a batch boundary; the callers that
+	// are about to wait for the GPU submit in line).
+	uint64_t       Submit(SubmitInfo submit = {}, bool allow_async = false);
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
@@ -102,6 +105,26 @@ private:
 	};
 
 	void BeginNext();
+
+	// --submit-thread: what the submit thread needs to submit one command buffer that was ended on the GPU thread.
+	struct SubmitJob {
+		vk::CommandBuffer buffer;
+		uint64_t          tick            = 0;
+		uint64_t          copy_target     = 0; // UploadCopier copies 1..copy_target must be finished before the GPU may read the ring
+		uint32_t          debug_op        = 0;
+		uint64_t          debug_submit_id = 0;
+		uint32_t          debug_arg0      = 0;
+		uint32_t          debug_arg1      = 0;
+		uint32_t          debug_arg2      = 0;
+		uint32_t          debug_arg3      = 0;
+		uint64_t          debug_arg4      = 0;
+	};
+	static constexpr size_t kMaxSubmitJobs = 32;
+	uint64_t SubmitAsync(vk::CommandBuffer buffer);
+	void     SubmitThreadMain(std::stop_token stop);
+	// Returns when every job handed to the submit thread has been submitted (a no-op when none is outstanding).
+	void     DrainSubmitThread();
+	void     StopSubmitThread();
 	void PriorityOperationsThread(std::stop_token stop);
 	void QueueOperation(Common::UniqueFunction<void>&& operation, bool priority, uint64_t tick = 0);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
@@ -131,6 +154,13 @@ private:
 	bool                         m_priority_active      = false;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;
+	// --submit-thread. Jobs are submitted in the order of their ticks: the tick is taken and the job queued under m_submit_mutex,
+	// and the thread takes them from the front. A job stays at the front until its vkQueueSubmit returned.
+	std::mutex                   m_submit_mutex;
+	std::condition_variable      m_submit_cv;
+	std::deque<SubmitJob>        m_submit_jobs;
+	std::atomic<uint32_t>        m_submit_outstanding {0}; // queued or being submitted
+	std::jthread                 m_submit_thread;          // last: destroyed first
 };
 
 } // namespace Libs::Graphics

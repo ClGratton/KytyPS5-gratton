@@ -160,6 +160,7 @@ void CommandScheduler::Shutdown() {
 		Submit();
 	}
 	m_master.Wait(CurrentTick() - 1);
+	StopSubmitThread();
 	PopPendingOperations();
 	DrainPriorityOperations();
 	m_priority_thread.request_stop();
@@ -205,7 +206,7 @@ void CommandScheduler::Flush() {
 }
 
 void CommandScheduler::Flush(SubmitInfo& submit) {
-	Submit(submit);
+	Submit(submit, true);
 	BeginNext();
 }
 
@@ -456,11 +457,18 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	return m_command;
 }
 
-uint64_t CommandScheduler::Submit(SubmitInfo submit) {
+uint64_t CommandScheduler::Submit(SubmitInfo submit, bool allow_async) {
 	Common::GpuPhase::Scope gpu_phase_submit(Common::GpuPhase::Phase::Submit);
 	Common::GpuPhase::NoteSubmit();
 	EXIT_IF(m_command.IsInvalid());
-	UploadCopier::FenceIfCreated(); // --async-upload-copies: the ring is complete before the GPU may read it
+	// --submit-thread: a flush with no semaphores leaves the vkQueueSubmit, and the wait for the upload helpers before it, to the
+	// submit thread. Everything else submits in line, after the jobs already handed over, so submissions keep their order.
+	const bool async = allow_async && Config::SubmitThreadEnabled() && submit.num_wait_semaphores == 0 &&
+	                   submit.num_signal_semaphores == 0;
+	if (!async) {
+		DrainSubmitThread();
+		UploadCopier::FenceIfCreated(); // --async-upload-copies: the ring is complete before the GPU may read it
+	}
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
@@ -468,6 +476,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);
+	if (async) {
+		return SubmitAsync(buffer);
+	}
 
 	vk::Result result;
 	uint64_t   tick;
@@ -505,6 +516,102 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 
 	m_command.m_buffer = nullptr;
 	return tick;
+}
+
+// --submit-thread. GPU thread: the buffer has been ended. Takes its tick, queues the job and returns; the thread waits for the upload
+// copies up to the newest one queued so far, then submits. Waits here only while kMaxSubmitJobs jobs are already queued.
+uint64_t CommandScheduler::SubmitAsync(vk::CommandBuffer buffer) {
+	if (!m_submit_thread.joinable()) {
+		m_submit_thread = std::jthread([this](std::stop_token stop) { SubmitThreadMain(stop); });
+	}
+	SubmitJob job;
+	job.buffer          = buffer;
+	job.copy_target     = UploadCopier::SubmittedCountIfCreated();
+	job.debug_op        = m_command.m_debug_op;
+	job.debug_submit_id = m_command.m_debug_submit_id;
+	job.debug_arg0      = m_command.m_debug_arg0;
+	job.debug_arg1      = m_command.m_debug_arg1;
+	job.debug_arg2      = m_command.m_debug_arg2;
+	job.debug_arg3      = m_command.m_debug_arg3;
+	job.debug_arg4      = m_command.m_debug_arg4;
+	{
+		std::unique_lock lock(m_submit_mutex);
+		m_submit_cv.wait(lock, [this] { return m_submit_jobs.size() < kMaxSubmitJobs; });
+		job.tick = m_master.NextTick();
+		m_submit_jobs.push_back(job);
+		m_submit_outstanding.fetch_add(1, std::memory_order_release);
+	}
+	m_submit_cv.notify_all();
+	m_command.m_buffer = nullptr;
+	return job.tick;
+}
+
+void CommandScheduler::SubmitThreadMain(std::stop_token stop) {
+	KYTY_PROFILER_THREAD("kySubmit");
+	auto& graphics = m_graphics;
+	for (;;) {
+		SubmitJob job;
+		{
+			std::unique_lock lock(m_submit_mutex);
+			m_submit_cv.wait(lock, [this, &stop] { return !m_submit_jobs.empty() || stop.stop_requested(); });
+			if (m_submit_jobs.empty()) {
+				return; // stop requested and nothing left to submit
+			}
+			job = m_submit_jobs.front();
+		}
+		UploadCopier::FenceUpToIfCreated(job.copy_target);
+
+		const vk::Semaphore signal_semaphore = m_master.Handle();
+		const uint64_t      signal_tick      = job.tick;
+		vk::TimelineSemaphoreSubmitInfo timeline_info {};
+		timeline_info.signalSemaphoreValueCount = 1;
+		timeline_info.pSignalSemaphoreValues    = &signal_tick;
+
+		vk::SubmitInfo submit_info {};
+		submit_info.pNext                = &timeline_info;
+		submit_info.commandBufferCount   = 1;
+		submit_info.pCommandBuffers      = &job.buffer;
+		submit_info.signalSemaphoreCount = 1;
+		submit_info.pSignalSemaphores    = &signal_semaphore;
+
+		vk::Result result;
+		{
+			Common::LockGuard lock(graphics.queue_mutex);
+			result = graphics.queue.submit(1, &submit_info, nullptr);
+		}
+		if (result != vk::Result::eSuccess) {
+			ReportVulkanFatal("vkQueueSubmit", result, job.tick, job.debug_op, job.debug_submit_id, job.debug_arg0, job.debug_arg1,
+			                  job.debug_arg2, job.debug_arg3, job.debug_arg4);
+		}
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+		{
+			std::lock_guard lock(m_submit_mutex);
+			m_submit_jobs.pop_front();
+			m_submit_outstanding.fetch_sub(1, std::memory_order_release);
+		}
+		m_submit_cv.notify_all();
+	}
+}
+
+void CommandScheduler::DrainSubmitThread() {
+	if (m_submit_outstanding.load(std::memory_order_acquire) == 0) {
+		return;
+	}
+	std::unique_lock lock(m_submit_mutex);
+	m_submit_cv.wait(lock, [this] { return m_submit_jobs.empty(); });
+}
+
+void CommandScheduler::StopSubmitThread() {
+	DrainSubmitThread();
+	if (!m_submit_thread.joinable()) {
+		return;
+	}
+	m_submit_thread.request_stop();
+	{
+		std::lock_guard lock(m_submit_mutex); // the thread either waits (and gets the notification) or has not looked yet (and sees the stop)
+	}
+	m_submit_cv.notify_all();
+	m_submit_thread.join();
 }
 
 void CommandScheduler::BeginNext() {

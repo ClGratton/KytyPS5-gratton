@@ -87,6 +87,9 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("tracker-sleeping-locks", &g_config->tracker_sleeping_locks, false);
 	// Read per lock acquisition; each acquisition releases through the guard that took it, and a writer excludes both kinds.
 	registry.Register("scalable-read-locks", &g_config->scalable_read_locks, false);
+	// Read per flush; a flush under the flag leaves its job on the submit thread's queue, and the next submit made in line (or a
+	// flush with the flag off) waits for the queue to empty first, so the order of submissions never changes.
+	registry.Register("submit-thread", &g_config->submit_thread, false);
 	// Read per store; a page marked dirty while still protected needs no cleanup when the flag goes off (the next guest write
 	// to it faults like any protected page, an upload clears it).
 	registry.Register("cp-direct-stores", &g_config->cp_direct_stores, false);
@@ -184,6 +187,10 @@ bool ImagePresenceEnabled() {
 
 bool PlanPrefetchEnabled() {
 	return Common::RuntimeToggles::Read(g_config->plan_prefetch);
+}
+
+bool SubmitThreadEnabled() {
+	return Common::RuntimeToggles::Read(g_config->submit_thread);
 }
 
 bool AsyncUploadCopiesEnabled() {

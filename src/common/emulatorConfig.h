@@ -290,6 +290,10 @@ struct ConfigOptions {
 	// only to a cache line of their own (common/scalableSharedMutex.h), instead of the one shared reader count that the GPU
 	// thread and the look-ahead workers fight over on every draw. Exact. Default off.
 	bool                   scalable_read_locks         = false;
+	// --submit-thread: a flush at a batch boundary ends the command buffer on the GPU thread and hands the vkQueueSubmit, and the wait for the
+	// upload copy helpers that must come first, to a thread of its own, so the GPU thread goes on recording while they happen
+	// (graphics/host_gpu/renderer/commandScheduler.h). A wait for the GPU still submits in line. Exact. Default off.
+	bool                   submit_thread               = false;
 	// --cp-direct-stores: the command processor's stores to guest memory (labels, fences, WRITE_DATA) go through the
 	// backing view and mark the tracker directly instead of taking a write fault on the GPU thread. Default off.
 	bool                   cp_direct_stores            = false;
@@ -504,6 +508,7 @@ bool              PlanPrefetchEnabled();
 bool              CpDirectStoresEnabled();
 bool              DrawStateMemoEnabled();
 bool              AsyncUploadCopiesEnabled();
+bool              SubmitThreadEnabled();
 bool              TextureLockBatchEnabled();
 bool              PushDescriptorDeltaEnabled();
 bool              ImagePresenceEnabled();

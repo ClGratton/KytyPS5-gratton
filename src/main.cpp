@@ -184,6 +184,7 @@ static void PrintUsage() {
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
 	         "                                       tracker-sleeping-locks, scalable-read-locks,\n"
+         "                                       submit-thread,\n"
 	         "                                       cp-direct-stores, draw-state-memo,\n"
 	         "                                       async-upload-copies, texture-lock-batch,\n"
 	         "                                       push-descriptor-delta,\n"
@@ -295,6 +296,9 @@ static void PrintUsage() {
 	         "                                       readers do not write to a cache line shared with the other\n"
 	         "                                       threads (the GPU thread and the look-ahead workers looked\n"
 	         "                                       them up on every draw). Exact. Default: false.\n");
+	::printf("  --submit-thread <true|false>         A flush at a batch boundary hands vkQueueSubmit, and the wait for\n"
+	         "                                       the upload copy helpers before it, to a thread of its own\n"
+	         "                                       instead of the GPU thread. Exact. Default: false.\n");
 	::printf("  --write-fault-around <true|false>    A guest write fault that continues a sequential run of\n"
 	         "                                       writes marks the clean pages ahead as modified with it,\n"
 	         "                                       so a streaming writer faults once per run instead of once\n"
@@ -1113,6 +1117,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--scalable-read-locks") {
 			if (!ParseBool(value, options.config.scalable_read_locks)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--submit-thread") {
+			if (!ParseBool(value, options.config.submit_thread)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

@@ -5,6 +5,7 @@
 #include "kernel/memory.h"
 
 #include <cstring>
+#include <thread>
 #include <emmintrin.h>
 
 namespace Libs::Graphics {
@@ -33,6 +34,22 @@ void UploadCopier::FenceIfCreated() {
 	}
 }
 
+uint64_t UploadCopier::SubmittedCountIfCreated() {
+	if (auto* existing = g_instance.load(std::memory_order_acquire)) {
+		return existing->m_submitted.load(std::memory_order_acquire);
+	}
+	return 0;
+}
+
+void UploadCopier::FenceUpToIfCreated(uint64_t seq) {
+	if (seq == 0) {
+		return;
+	}
+	if (auto* existing = g_instance.load(std::memory_order_acquire)) {
+		existing->FenceUpTo(seq);
+	}
+}
+
 UploadCopier::UploadCopier() {
 	for (size_t i = 0; i < kThreads; ++i) {
 		m_threads.emplace_back([this] { Run(); });
@@ -41,10 +58,22 @@ UploadCopier::UploadCopier() {
 }
 
 void UploadCopier::Submit(const Item* items, size_t count) {
+	// Stay inside the ring of finished marks: wait for the prefix to come within kRing of the copies about to be queued.
+	// (Only reached when this many copies are in flight; the fence of each submit keeps it far below.)
+	for (uint32_t spins = 0; m_submitted.load(std::memory_order_relaxed) + count - m_prefix.Prefix() >= kRing; ++spins) {
+		if (spins < 200) {
+			_mm_pause();
+		} else {
+			std::this_thread::yield();
+		}
+	}
 	{
 		std::lock_guard lock(m_mutex);
+		uint64_t        seq = m_submitted.load(std::memory_order_relaxed);
 		for (size_t i = 0; i < count; ++i) {
-			m_queue.push_back(items[i]);
+			Item item = items[i];
+			item.seq  = ++seq;
+			m_queue.push_back(item);
 		}
 	}
 	m_pending.fetch_add(static_cast<uint32_t>(count), std::memory_order_release);
@@ -89,13 +118,29 @@ void UploadCopier::Run() {
 		}
 		_mm_sfence(); // write-combined stores are visible before the count says so
 		m_done.fetch_add(1, std::memory_order_release);
+		m_prefix.Mark(item.seq);
 	}
+}
+
+void UploadCopier::FenceUpTo(uint64_t seq) {
+	for (uint32_t spins = 0; m_prefix.Prefix() < seq; ++spins) {
+		if (spins < 200) {
+			_mm_pause();
+		} else {
+			std::this_thread::yield();
+		}
+	}
+	RedoFailed();
 }
 
 void UploadCopier::Fence() {
 	while (m_done.load(std::memory_order_acquire) != m_submitted.load(std::memory_order_relaxed)) {
 		_mm_pause();
 	}
+	RedoFailed();
+}
+
+void UploadCopier::RedoFailed() {
 	std::vector<Item> failed;
 	{
 		std::lock_guard lock(m_mutex);
