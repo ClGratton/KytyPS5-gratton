@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
+#include <array>
 #include <atomic>
 #include <cinttypes>
 
@@ -39,6 +40,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstdlib>
@@ -572,59 +574,19 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 	return false;
 }
 
-TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
-                                              const ShaderRecompiler::IR::DescriptorValue& value,
-                                              PreparedBindings::ImageSource*               source) {
-	if (source != nullptr) {
-		source->generation = 0;
-	}
-	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
-		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
-	}
-	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
-	const bool storage = resource.written;
-	if (storage) {
-		ValidateStorageImageResource(resource);
-	}
+namespace {
 
-	auto& texture_cache = m_context.GetTextureCache();
-	if (descriptor.IsNull()) {
-		return {.layout = vk::ImageLayout::eGeneral};
-	}
+// What ResolveTexture works out from a texture descriptor before it asks the texture cache: a pure function of the shader's image resource and
+// the descriptor dwords (it is also where an unsupported descriptor stops the emulator).
+struct DecodedTexture {
+	TextureCache::ImageDesc desc;
+	bool                    shader_conversion = false;
+	vk::Format              pixel_format      = vk::Format::eUndefined;
+	vk::Format              view_format       = vk::Format::eUndefined;
+};
 
-	// Binding resolves every texture a shader references, and while a level loads some slots still
-	// hold stale descriptors that the draw never samples (the GPU does not read them). A sampled
-	// view of eight dwords that cannot describe an image at all (a base mip above the last, a
-	// format with no texel layout) is bound as the null image, loudly; a storage view is written
-	// back and still has to be exact. A well-formed descriptor of an unsupported feature is not
-	// this case and keeps its fatal report.
-	if (!storage) {
-		const char* invalid = nullptr;
-		if (!IsMultisampledTexture(TextureType(descriptor)) &&
-		    descriptor.BaseLevel() > descriptor.LastLevel()) {
-			invalid = "base mip above last mip";
-		} else if (TileTextureElementLayout element {};
-		           !TileGetTextureElementLayout(descriptor.Format(), element)) {
-			invalid = "format without a texel layout";
-		}
-		if (invalid != nullptr) {
-			static std::atomic<uint32_t> reported {0};
-			const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
-			if (count <= 32) {
-				std::printf("Texture: sampled descriptor is not an image (%s), bound as null: "
-				            "addr=0x%016" PRIx64 " format=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,"
-				            "%08x,%08x (%" PRIu32 " so far)\n",
-				            invalid, descriptor.Base40(),
-				            static_cast<uint32_t>(descriptor.Format()), descriptor.fields[0],
-				            descriptor.fields[1], descriptor.fields[2], descriptor.fields[3],
-				            descriptor.fields[4], descriptor.fields[5], descriptor.fields[6],
-				            descriptor.fields[7], count);
-				std::fflush(stdout);
-			}
-			return {.layout = vk::ImageLayout::eGeneral};
-		}
-	}
-
+void DecodeTextureDescriptor(const ShaderRecompiler::IR::ImageResource& resource,
+                             const ShaderTextureResource& descriptor, bool storage, DecodedTexture& out) {
 	const auto address         = descriptor.Base40();
 	const auto width           = static_cast<uint32_t>(descriptor.Width5()) + 1u;
 	const auto height          = static_cast<uint32_t>(descriptor.Height5()) + 1u;
@@ -698,7 +660,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	                                     ? storage_view_format
 	                                     : pixel_format;
 	const auto block_bytes         = Prospero::BlockCompressedBytesPerBlock(format);
-	TextureCache::ImageDesc desc {};
+	auto& desc = out.desc;
+	desc = {};
 	desc.info.data         = {address, 0};
 	desc.info.pixel_format = pixel_format;
 	desc.info.guest_format = format;
@@ -742,6 +705,144 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.view_info.base_level = view_base;
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 
+	out.shader_conversion = shader_conversion;
+	out.pixel_format      = pixel_format;
+	out.view_format       = view_format;
+}
+
+// --draw-state-memo: descriptors repeat (a texture is bound by many draws, and every frame again), so the last decodes are kept, found by the
+// descriptor dwords and compared with the resource they were decoded for.
+struct DecodeMemoEntry {
+	bool                                         valid = false;
+	ShaderRecompiler::IR::ImageResource          resource;
+	ShaderRecompiler::IR::DescriptorValue        value;
+	bool                                         storage = false;
+	DecodedTexture                               decoded;
+};
+
+bool SameDecodedDesc(const TextureCache::ImageDesc& a, const TextureCache::ImageDesc& b) {
+	const auto& x = a.info;
+	const auto& y = b.info;
+	bool same = a.type == b.type && a.view_info == b.view_info && x.data == y.data && x.stencil == y.stencil &&
+	            x.extent == y.extent && x.resources == y.resources && x.pixel_format == y.pixel_format &&
+	            x.guest_format == y.guest_format && x.bytes_per_block == y.bytes_per_block && x.samples == y.samples &&
+	            x.tile_mode == y.tile_mode && x.type == y.type && x.pitch == y.pitch && x.bgra16 == y.bgra16 &&
+	            x.metadata.range == y.metadata.range && x.metadata.kind == y.metadata.kind &&
+	            x.metadata.dcc_alpha_msb == y.metadata.dcc_alpha_msb;
+	for (uint32_t level = 0; same && level < x.resources.levels && level < x.mip_layout.size(); ++level) {
+		same = x.mip_layout[level] == y.mip_layout[level];
+	}
+	return same;
+}
+
+} // namespace
+
+TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
+                                              const ShaderRecompiler::IR::DescriptorValue& value,
+                                              PreparedBindings::ImageSource*               source) {
+	if (source != nullptr) {
+		source->generation = 0;
+	}
+	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
+		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
+	}
+	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
+	const bool storage = resource.written;
+	if (storage) {
+		ValidateStorageImageResource(resource);
+	}
+
+	auto& texture_cache = m_context.GetTextureCache();
+	if (descriptor.IsNull()) {
+		return {.layout = vk::ImageLayout::eGeneral};
+	}
+
+	// Binding resolves every texture a shader references, and while a level loads some slots still
+	// hold stale descriptors that the draw never samples (the GPU does not read them). A sampled
+	// view of eight dwords that cannot describe an image at all (a base mip above the last, a
+	// format with no texel layout) is bound as the null image, loudly; a storage view is written
+	// back and still has to be exact. A well-formed descriptor of an unsupported feature is not
+	// this case and keeps its fatal report.
+	if (!storage) {
+		const char* invalid = nullptr;
+		if (!IsMultisampledTexture(TextureType(descriptor)) &&
+		    descriptor.BaseLevel() > descriptor.LastLevel()) {
+			invalid = "base mip above last mip";
+		} else if (TileTextureElementLayout element {};
+		           !TileGetTextureElementLayout(descriptor.Format(), element)) {
+			invalid = "format without a texel layout";
+		}
+		if (invalid != nullptr) {
+			static std::atomic<uint32_t> reported {0};
+			const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (count <= 32) {
+				std::printf("Texture: sampled descriptor is not an image (%s), bound as null: "
+				            "addr=0x%016" PRIx64 " format=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,"
+				            "%08x,%08x (%" PRIu32 " so far)\n",
+				            invalid, descriptor.Base40(),
+				            static_cast<uint32_t>(descriptor.Format()), descriptor.fields[0],
+				            descriptor.fields[1], descriptor.fields[2], descriptor.fields[3],
+				            descriptor.fields[4], descriptor.fields[5], descriptor.fields[6],
+				            descriptor.fields[7], count);
+				std::fflush(stdout);
+			}
+			return {.layout = vk::ImageLayout::eGeneral};
+		}
+	}
+
+	TextureCache::ImageDesc desc;
+	bool                    shader_conversion = false;
+	vk::Format              pixel_format      = vk::Format::eUndefined;
+	vk::Format              view_format       = vk::Format::eUndefined;
+	{
+		static thread_local std::array<DecodeMemoEntry, 256> memo;
+		const bool use_memo = Config::DrawStateMemoEnabled();
+		DecodeMemoEntry* entry = nullptr;
+		if (use_memo) {
+			uint64_t hash = 0x9e3779b97f4a7c15ull ^ static_cast<uint64_t>(storage);
+			for (uint32_t i = 0; i < 8; ++i) {
+				hash = (hash ^ value.dwords[i]) * 0x100000001b3ull;
+			}
+			hash ^= reinterpret_cast<uintptr_t>(&resource) >> 3u;
+			entry = &memo[(hash ^ (hash >> 29u)) % memo.size()];
+		}
+		if (entry != nullptr && entry->valid && entry->storage == storage && entry->value == value &&
+		    entry->resource == resource) {
+			desc              = entry->decoded.desc;
+			shader_conversion = entry->decoded.shader_conversion;
+			pixel_format      = entry->decoded.pixel_format;
+			view_format       = entry->decoded.view_format;
+			if (Config::ResolvedDrawVerify()) {
+				DecodedTexture fresh;
+				DecodeTextureDescriptor(resource, descriptor, storage, fresh);
+				if (!SameDecodedDesc(fresh.desc, desc) || fresh.shader_conversion != shader_conversion ||
+				    fresh.pixel_format != pixel_format || fresh.view_format != view_format) {
+					EXIT("draw state memo: a remembered texture decode differs from a fresh one, address=0x%016" PRIx64 "\n",
+					     descriptor.Base40());
+				}
+				static std::atomic<uint64_t> verified {0};
+				if ((verified.fetch_add(1, std::memory_order_relaxed) + 1) % (1u << 20) == 0) {
+					std::printf("DrawStateMemo verify: %" PRIu64 " remembered texture decodes agree with a fresh decode\n",
+					            verified.load(std::memory_order_relaxed));
+					std::fflush(stdout);
+				}
+			}
+		} else {
+			DecodedTexture decoded;
+			DecodeTextureDescriptor(resource, descriptor, storage, decoded);
+			desc              = decoded.desc;
+			shader_conversion = decoded.shader_conversion;
+			pixel_format      = decoded.pixel_format;
+			view_format       = decoded.view_format;
+			if (entry != nullptr) {
+				entry->valid    = true;
+				entry->resource = resource;
+				entry->value    = value;
+				entry->storage  = storage;
+				entry->decoded  = std::move(decoded);
+			}
+		}
+	}
 	const auto metadata_base_layer = desc.view_info.base_layer;
 	uint64_t   generation          = 0;
 	const bool record_source       = source != nullptr && Config::TextureBindingReuseEnabled();
