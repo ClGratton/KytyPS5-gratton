@@ -181,7 +181,8 @@ static void PrintUsage() {
 	         "                                       safe performance flags it names (submit-coalesce,\n"
 	         "                                       elide-barriers, defer-draw-write-barriers,\n"
 	         "                                       overlap-dispatches,\n"
-	         "                                       bda-sync-skip, bda-dirty-log, clean-guest-reads,\n"
+	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
+	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
 	         "                                       known-copies, gpu-indirect-draws, eager-readback,\n"
@@ -252,6 +253,10 @@ static void PrintUsage() {
 	         "                                       address memory through raw pointers while no page\n"
 	         "                                       became CPU-modified and no buffer or mapping changed\n"
 	         "                                       since the last full pass. Default: false.\n");
+	::printf("  --lazy-op-poll <true|false>          The per-draw check for finished deferred operations asks\n"
+	         "                                       the GPU timeline at most every 100 microseconds instead\n"
+	         "                                       of at every draw (operations run a few draws later;\n"
+	         "                                       exact). Default: false.\n");
 	::printf("  --bda-dirty-log <true|false>         Before draws that address memory through raw pointers,\n"
 	         "                                       synchronize only the buffers that overlap a range that\n"
 	         "                                       became CPU-modified or got a buffer since the last\n"
@@ -1003,6 +1008,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				options.config.gc_clock_frames = true;
 			} else {
 				::printf("invalid gc clock (expected runs or frames): %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--lazy-op-poll") {
+			if (!ParseBool(value, options.config.lazy_op_poll)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
 		} else if (arg == "--bda-dirty-log") {

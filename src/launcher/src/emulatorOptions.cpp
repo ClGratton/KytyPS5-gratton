@@ -228,6 +228,13 @@ QList<Option> BuildTable() {
 	             "pointers while no page changed since the last full pass. Under 1% in the "
 	             "measurements.",
 	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"lazy_op_poll", "--lazy-op-poll", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Ask the GPU timeline less often between draws",
+	             "Before each draw the GPU thread checks whether deferred operations (resource "
+	             "releases, readback publication) have finished, which costs a driver call while "
+	             "any are in flight. With this it asks at most every 100 microseconds; the "
+	             "operations run a few draws later. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(lazy_op_poll)});
 	defs.append({"bda_dirty_log", "--bda-dirty-log", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Synchronize only the buffers whose memory changed",
 	             "Before draws that address memory through raw pointers the GPU thread used to "

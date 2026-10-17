@@ -37,6 +37,10 @@ public:
 	void                      Shutdown();
 	void                      Wait(uint64_t tick);
 	void                      PopPendingOperations();
+	// The per-draw form: with --lazy-op-poll an operation that is not known to be done is looked at again
+	// (one vkGetSemaphoreCounterValue, 0.5-1 us on the driver) at most every 100 us, instead of at every draw.
+	// Operations only release resources or publish results, so running one a few draws later is exact.
+	void                      PopPendingOperationsLazy();
 	void                      DrainPriorityOperations();
 	void                      WaitPriorityOperations(uint64_t tick);
 	// Non-blocking form: true when every priority operation deferred at or before `tick` has run.
@@ -107,6 +111,8 @@ private:
 	DynamicState                 m_dynamic_state;
 	std::queue<PendingOperation> m_pending_operations;
 	std::atomic<uint32_t>        m_pending_count {0}; // size of m_pending_operations, readable without the lock
+	bool                         m_lazy_poll    = false; // GPU thread: this Pop is the throttled per-draw form
+	uint64_t                     m_last_poll_ns = 0;     // GPU thread: when the throttled form last polled
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;
 	std::condition_variable      m_operation_available;

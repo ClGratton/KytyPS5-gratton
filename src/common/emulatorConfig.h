@@ -271,6 +271,9 @@ struct ConfigOptions {
 	// CPU-modified (or got a buffer) since its last pass, from a log kept by the region manager
 	// (host_gpu/bdaDirtyLog.h). Exact: the pass it replaces finds nothing else. Default off.
 	bool                   bda_dirty_log               = false;
+	// --lazy-op-poll: the per-draw poll for finished deferred operations queries the GPU timeline at
+	// most every 100 us (commandScheduler.h). Default off.
+	bool                   lazy_op_poll                = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -453,6 +456,7 @@ bool              TextureGcLog();
 bool              SubmitCoalesceEnabled();
 bool              BdaSyncSkip();
 bool              BdaDirtyLogEnabled();
+bool              LazyOpPollEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

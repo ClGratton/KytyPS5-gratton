@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <optional>
 
@@ -254,6 +255,12 @@ void CommandScheduler::Wait(uint64_t tick) {
 	}
 }
 
+void CommandScheduler::PopPendingOperationsLazy() {
+	m_lazy_poll = Config::LazyOpPollEnabled();
+	PopPendingOperations();
+	m_lazy_poll = false;
+}
+
 void CommandScheduler::PopPendingOperations() {
 	// Resolved draw: nothing is queued (the common case), so there is no lock to take and nothing a fresh
 	// timeline value could release. The value is read again by every wait, so no one sees a stale tick as free.
@@ -273,6 +280,15 @@ void CommandScheduler::PopPendingOperations() {
 				// The timeline is polled once, and not for the open tick: it is not submitted yet.
 				if (refreshed || tick >= CurrentTick()) {
 					return;
+				}
+				if (m_lazy_poll) {
+					const auto now = static_cast<uint64_t>(
+					    std::chrono::duration_cast<std::chrono::nanoseconds>(
+					        std::chrono::steady_clock::now().time_since_epoch()).count());
+					if (now - m_last_poll_ns < 100'000u) {
+						return;
+					}
+					m_last_poll_ns = now;
 				}
 			} else {
 				operation = std::move(m_pending_operations.front());
