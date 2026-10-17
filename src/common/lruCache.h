@@ -1,6 +1,8 @@
 #ifndef EMULATOR_SRC_COMMON_LRUCACHE_H_
 #define EMULATOR_SRC_COMMON_LRUCACHE_H_
 
+#include "common/chunkedStorage.h"
+
 #include <cstddef>
 #include <deque>
 #include <type_traits>
@@ -70,7 +72,7 @@ private:
 	[[nodiscard]] size_t Build() {
 		if (m_free.empty()) {
 			const auto id = m_items.size();
-			m_items.emplace_back();
+			(void)m_items.emplace_back();
 			return id;
 		}
 		const auto id = m_free.front();
@@ -107,7 +109,7 @@ private:
 		}
 	}
 
-	std::deque<Item>   m_items;
+	ChunkedStorage<Item> m_items;
 	std::deque<size_t> m_free;
 	Item*              m_first = nullptr;
 	Item*              m_last  = nullptr;

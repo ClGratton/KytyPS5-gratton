@@ -3,10 +3,10 @@
 
 #include "common/assert.h"
 #include "common/abi.h"
+#include "common/chunkedStorage.h"
 
 #include <compare>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <limits>
 #include <new>
@@ -71,8 +71,7 @@ public:
 		uint32_t index = 0;
 		if (m_free_list.empty()) {
 			index = static_cast<uint32_t>(m_values.size());
-			m_values.emplace_back();
-			m_values.back().emplace(std::forward<Args>(args)...);
+			m_values.emplace_back().emplace(std::forward<Args>(args)...);
 		} else {
 			index = m_free_list.back();
 			m_free_list.pop_back();
@@ -142,7 +141,7 @@ private:
 		}
 	};
 
-	std::deque<Slot>             m_values;
+	ChunkedStorage<Slot>         m_values;
 	std::vector<uint32_t>        m_free_list;
 	size_t                       m_size = 0;
 };

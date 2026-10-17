@@ -1,3 +1,4 @@
+#include "common/chunkedStorage.h"
 #include "common/slotVector.h"
 
 #include <cstdint>
@@ -93,11 +94,43 @@ void TestManySlots() {
 	Check(slots.capacity() == 5001, "a new slot is made once the freed ones are used");
 }
 
+// ChunkedStorage: elements keep their address while it grows, indexing reaches every element, and chunks are filled in order.
+void TestChunkedStorage() {
+	struct Small {
+		uint32_t value = 0;
+	};
+	struct Big {
+		uint32_t value = 0;
+		char     padding[5000] = {};
+	};
+	const auto run = [](auto& storage, size_t count) {
+		std::vector<void*> addresses;
+		for (size_t i = 0; i < count; ++i) {
+			auto& element = storage.emplace_back();
+			Check(storage.size() == i + 1, "size follows emplace_back");
+			Check(&element == &storage[i] && &element == &storage.back(), "emplace_back returns the new element");
+			element.value = static_cast<uint32_t>(i * 7 + 1);
+			addresses.push_back(&element);
+		}
+		for (size_t i = 0; i < count; ++i) {
+			Check(&storage[i] == addresses[i], "an element keeps its address while the storage grows");
+			Check(storage[i].value == static_cast<uint32_t>(i * 7 + 1), "an element keeps its value");
+		}
+	};
+	Common::ChunkedStorage<Small> small;
+	run(small, 100000);
+	Common::ChunkedStorage<Big> big;
+	run(big, 300);
+	const Common::ChunkedStorage<Small>& const_small = small;
+	Check(const_small[99999].value == 99999u * 7 + 1, "const indexing");
+}
+
 } // namespace
 
 int main() {
 	TestInsertEraseReuse();
 	TestManySlots();
+	TestChunkedStorage();
 	Check(g_alive == 0, "values leaked");
 	std::printf("SlotVectorTests: ok\n");
 	return 0;
