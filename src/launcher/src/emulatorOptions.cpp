@@ -215,6 +215,24 @@ QList<Option> BuildTable() {
 	             "GPU to guest buffer readbacks copy on a second queue and wait only for the work "
 	             "that wrote the data. No gain measured.",
 	             EMU_BOOL(readback_queue)});
+	defs.append({"poll_before_wait_us", "--poll-before-wait", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Int, "Poll the GPU before blocking:",
+	             "Microseconds to poll the GPU timeline before blocking in a wait. Small readbacks "
+	             "finish in tens of microseconds; a blocking wait adds the sleep and wake-up. Off "
+	             "until measured.",
+	             EMU_INT(poll_before_wait_us), {}, 0, 1000, "Off", " us"});
+	defs.append({"eager_readback", "--eager-readback", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Bool, "Write back pages the game reads right after the GPU writes them",
+	             "Pages a game thread read-faulted on are copied out in the command buffer about to "
+	             "be submitted and written back to guest memory when it completes, so the next read "
+	             "needs no fault and no GPU drain. Off until measured.",
+	             EMU_BOOL(eager_readback)});
+	defs.append({"readback_futures", "--readback-futures", Tab::Gpu, "Barriers and readbacks",
+	             Kind::Bool, "Let the GPU thread run on while a game thread waits for a readback",
+	             "A game thread's read of GPU-written memory no longer stops the GPU thread: it "
+	             "copies the bytes out and goes on, and only the reading thread waits for them. "
+	             "Exact; off until measured.",
+	             EMU_BOOL(readback_futures)});
 	defs.append({"gpu_indirect_draws", "--gpu-indirect-draws", Tab::Gpu, "Draw path", Kind::Bool,
 	             "GPU-built indirect draws",
 	             "Indirect draws whose argument block a GPU pass wrote are built on the GPU instead "
@@ -408,6 +426,11 @@ QList<Option> BuildTable() {
 	             "With the draw key cache, also runs the full lookup on every memo hit and stops if "
 	             "the two disagree.",
 	             EMU_BOOL(draw_key_verify)});
+	defs.append({"eager_readback_verify", "--debug-eager-readback-verify", Tab::Debug, "Diagnostics",
+	             Kind::Bool, "Verify eager write-backs (slow)",
+	             "With eager readback, re-reads every page from the GPU (a full drain) before it is "
+	             "unprotected and reports any difference.",
+	             EMU_BOOL(eager_readback_verify)});
 	defs.append({"srt_plan_shadow", "--srt-plan-shadow", Tab::Debug, "Diagnostics", Kind::Bool,
 	             "Measure SRT plans (needs look-ahead)",
 	             "The look-ahead thread keeps the shader resource tables it materializes as plans and "

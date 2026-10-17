@@ -12,8 +12,10 @@
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/knownCopies.h"
+#include "graphics/host_gpu/renderer/cache/hotPages.h"
 #include "graphics/host_gpu/renderer/cache/knownFills.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
+#include "graphics/host_gpu/renderer/cache/readbackFuture.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <atomic>
@@ -155,6 +157,26 @@ public:
 	// A shader that may store through raw addresses into any buffer was recorded in the current
 	// command buffer (so a second-queue readback must wait for it).
 	void NoteAddressWrites() noexcept;
+	// --eager-readback: before a submit, copies the pending GPU writes of the hot pages (pages a
+	// game thread read-faulted on) out in the open command buffer; the bytes are written to guest
+	// memory when it completes, after which the page is unprotected. GPU thread only.
+	void               WriteBackHotPages();
+	// --readback-futures (notes/frame-pipelining.md section 3). The faulting game thread runs
+	// ReadMemoryFuture (it returns false when the old synchronous path must serve the fault); the
+	// other two are the steps that run on the GPU thread and never wait for the GPU: StartReadFuture
+	// copies the GPU-written bytes of the range out, queues `release` behind their write-back and
+	// submits; FinishReadFuture, once `release` fired, unprotects the pages (true) unless a newer GPU
+	// write kept one protected (false).
+	// `is_write`: the thread writes (a CPU write over GPU-written pages): the pages are claimed for
+	// the CPU once the bytes landed, as the synchronous path does.
+	[[nodiscard]] bool        ReadMemoryFuture(uint64_t vaddr, uint64_t size, bool is_write = false);
+	[[nodiscard]] FutureStart StartReadFuture(uint64_t vaddr, uint64_t size,
+	                                          const std::shared_ptr<FutureRelease>& release,
+	                                          bool is_write = false);
+	// `last_round`: the thread has no round left, so pages that stay protected are marked contended.
+	// `own_tick`: the release's tick (FutureRelease::tick), 0 when the caller has none.
+	[[nodiscard]] bool        FinishReadFuture(uint64_t vaddr, uint64_t size, bool is_write = false,
+	                                           bool last_round = false, uint64_t own_tick = 0);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
@@ -201,6 +223,20 @@ private:
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// --eager-readback. Only the GPU thread touches these.
+	[[nodiscard]] Buffer* FindExistingBuffer(uint64_t vaddr);
+	[[nodiscard]] bool    EagerDownload(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// Finishes the eager copies of hot pages in [vaddr, vaddr + size): those that completed are
+	// unprotected; with `wait` the others are waited for first.
+	void                  RetireHotPages(uint64_t vaddr, uint64_t size, bool wait);
+	[[nodiscard]] bool    VerifyWrittenBack(uint64_t page);
+	// Schedules the eager copy of one hot page that has GPU-written bytes and no copy in flight.
+	[[nodiscard]] bool    ScheduleEagerPage(uint64_t page, HotPageSet::Entry& entry);
+	// True while an eager copy has taken bytes of the range out of m_gpu_modified_ranges and has not
+	// written them to guest memory yet (the guest copy of those bytes is stale).
+	[[nodiscard]] bool    HasEagerPending(uint64_t vaddr, uint64_t size);
+	void CollectDownloadCopies(uint64_t buffer_address, uint64_t vaddr, uint64_t size,
+	                           std::vector<vk::BufferCopy>& copies, uint64_t& total_size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
@@ -217,6 +253,11 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	HotPageSet                                        m_hot_pages;
+	// --readback-futures: pages whose rounds were exhausted, page -> value of m_future_starts then.
+	std::map<uint64_t, uint64_t>                      m_future_contended;
+	uint64_t                                          m_future_starts = 0;
+	RangeSet                                          m_eager_pending_ranges;
 	// --readback-queue: copy on the second queue after a timeline wait on the producer's tick.
 	[[nodiscard]] bool ReadbackOnSecondQueue(const Buffer& buffer, uint64_t buffer_tick,
 	                                         const std::vector<vk::BufferCopy>& copies,

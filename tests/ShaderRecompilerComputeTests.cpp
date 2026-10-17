@@ -220,6 +220,12 @@ struct BufferCacheTestAccess {
   }
 };
 
+struct DescriptorHeapTestAccess {
+  static vk::DescriptorPool CurrentPool(const DescriptorHeap &heap) {
+    return heap.m_current_pool;
+  }
+};
+
 struct StreamBufferTestAccess {
   static bool NormalizeReservation(bool coherent, uint64_t atom, uint64_t &size,
                                    uint64_t &alignment) {
@@ -2727,6 +2733,131 @@ public:
             reentrant == 2 && concurrent_completed.load(),
             "shutdown lost reentrant or concurrent deferred work");
     std::printf("[host]    %-32s ok\n", "SchedulerTimeline");
+  }
+
+  void CheckSchedulerIdlePolling() {
+    constexpr const char *name = "SchedulerIdlePolling";
+    EnsureRuntimeContext();
+    CommandScheduler scheduler(Renderer(), m_runtime_context);
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    auto &master = scheduler.GetMasterSemaphore();
+    // Waits on the device only, leaving the scheduler's known GPU tick behind.
+    const auto WaitOnDevice = [&](uint64_t tick) {
+      const auto semaphore = master.Handle();
+      vk::SemaphoreWaitInfo wait{};
+      wait.sType = vk::StructureType::eSemaphoreWaitInfo;
+      wait.semaphoreCount = 1;
+      wait.pSemaphores = &semaphore;
+      wait.pValues = &tick;
+      Require(name, "device wait",
+              m_runtime_context.device.waitSemaphores(&wait, UINT64_MAX) ==
+                  vk::Result::eSuccess,
+              "vkWaitSemaphores failed");
+    };
+
+    const auto first = scheduler.CurrentTick();
+    scheduler.Flush();
+    WaitOnDevice(first);
+    const auto known = master.KnownGpuTick();
+    scheduler.PopPendingOperations();
+    Require(name, "empty queue",
+            known < first && master.KnownGpuTick() == known,
+            "an empty operation queue polled the timeline");
+
+    bool released = false;
+    const auto open = scheduler.CurrentTick();
+    scheduler.DeferOperation([&released] { released = true; });
+    scheduler.PopPendingOperations();
+    Require(name, "open tick",
+            !released && master.KnownGpuTick() == known,
+            "an operation of the unsubmitted tick polled the timeline");
+
+    scheduler.Flush();
+    WaitOnDevice(open);
+    scheduler.PopPendingOperations();
+    Require(name, "submitted tick",
+            released && master.KnownGpuTick() >= open,
+            "a completed operation was not released by the next poll");
+
+    // A submitted tick that has not completed is polled once, then left for a
+    // later call.
+    vk::SemaphoreTypeCreateInfo timeline_type{};
+    timeline_type.sType = vk::StructureType::eSemaphoreTypeCreateInfo;
+    timeline_type.semaphoreType = vk::SemaphoreType::eTimeline;
+    vk::SemaphoreCreateInfo timeline_create{};
+    timeline_create.sType = vk::StructureType::eSemaphoreCreateInfo;
+    timeline_create.pNext = &timeline_type;
+    vk::Semaphore gate = nullptr;
+    RequireVk(name, "gate",
+              m_runtime_context.device.createSemaphore(&timeline_create, nullptr,
+                                                       &gate),
+              "vkCreateSemaphore");
+    bool gated_released = false;
+    const auto gated = scheduler.CurrentTick();
+    scheduler.DeferOperation([&gated_released] { gated_released = true; });
+    SubmitInfo gated_submit;
+    gated_submit.AddWait(gate, 1);
+    scheduler.Flush(gated_submit);
+    scheduler.PopPendingOperations();
+    Require(name, "running tick", !gated_released && !master.IsFree(gated),
+            "an operation was released before its tick completed");
+    vk::SemaphoreSignalInfo signal{};
+    signal.sType = vk::StructureType::eSemaphoreSignalInfo;
+    signal.semaphore = gate;
+    signal.value = 1;
+    RequireVk(name, "gate signal", m_runtime_context.device.signalSemaphore(&signal),
+              "vkSignalSemaphore");
+    WaitOnDevice(gated);
+    scheduler.PopPendingOperations();
+    Require(name, "completed tick", gated_released,
+            "a completed operation was not released by the next poll");
+    m_runtime_context.device.destroySemaphore(gate, nullptr);
+
+    // A descriptor pool retired before the poll is reused once its tick completed.
+    vk::DescriptorSetLayoutBinding binding{};
+    binding.descriptorType = vk::DescriptorType::eStorageBuffer;
+    binding.descriptorCount = 1;
+    binding.stageFlags = vk::ShaderStageFlagBits::eCompute;
+    vk::DescriptorSetLayoutCreateInfo create{};
+    create.sType = vk::StructureType::eDescriptorSetLayoutCreateInfo;
+    create.bindingCount = 1;
+    create.pBindings = &binding;
+    vk::DescriptorSetLayout layout = nullptr;
+    RequireVk(name, "layout",
+              m_runtime_context.device.createDescriptorSetLayout(&create, nullptr,
+                                                                 &layout),
+              "vkCreateDescriptorSetLayout");
+    {
+      DescriptorHeap heap(m_runtime_context, master);
+      const auto Rollover = [&] {
+        const auto pool = DescriptorHeapTestAccess::CurrentPool(heap);
+        for (uint32_t i = 0; i < 4096; i++) {
+          Require(name, "descriptor set", heap.Commit(layout) != nullptr,
+                  "the descriptor heap could not allocate a set");
+          if (DescriptorHeapTestAccess::CurrentPool(heap) != pool) {
+            return;
+          }
+        }
+        Require(name, "pool rollover", false, "the descriptor pool never filled");
+      };
+      const auto retired = DescriptorHeapTestAccess::CurrentPool(heap);
+      const auto retired_tick = scheduler.CurrentTick();
+      Rollover();
+      scheduler.Flush();
+      WaitOnDevice(retired_tick);
+      const auto stale = master.KnownGpuTick();
+      Rollover();
+      Require(name, "pool reuse",
+              stale < retired_tick &&
+                  DescriptorHeapTestAccess::CurrentPool(heap) == retired,
+              "the descriptor heap created a pool instead of reusing a completed one");
+      scheduler.Finish();
+    }
+    m_runtime_context.device.destroyDescriptorSetLayout(layout, nullptr);
+    std::printf("[host]    %-32s ok\n", name);
   }
 
   void CheckGpuMappedRangeLifecycle() {
@@ -5637,6 +5768,501 @@ public:
             Libs::LibKernel::Memory::KernelReleaseDirectMemory(
                 direct_offset, allocation_size) == 0,
             "dirty-GC direct-memory allocation release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  // --eager-readback: a page a game thread read-faulted on is written back to guest memory right after
+  // the GPU wrote it, so the next guest read needs no fault and no drain. The guest copy of bytes an
+  // eager copy has taken out of the GPU-modified ranges is stale until the write-back has run, and every
+  // "is guest memory authoritative" test must know that.
+  void CheckBufferCacheEagerReadback() {
+    constexpr const char *name = "BufferCacheEagerReadback";
+    constexpr uintptr_t base = 0x0000000208400000ull;
+    constexpr uint64_t allocation_size = 0x100000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t hot_offset = 0x1100;
+    constexpr uint64_t cold_offset = 0x5100;
+    constexpr uint32_t stale = 0x0badf00du;
+    constexpr uint32_t first_value = 0x11223344u;
+    constexpr uint32_t second_value = 0x55667788u;
+    constexpr uint32_t third_value = 0x99aabbccu;
+    constexpr uint32_t newer_value = 0xddeeff00u;
+    constexpr uint32_t fourth_value = 0x0f1e2d3cu;
+
+    EnsureRuntimeContext();
+    Config::ConfigOptions eager;
+    eager.eager_readback = true;
+    Config::Load(eager);
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "eager-readback direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "eager-readback fixed direct-memory mapping failed");
+    auto *memory = static_cast<uint8_t *>(mapped);
+    std::memcpy(memory + hot_offset, &stale, sizeof(stale));
+    std::memcpy(memory + cold_offset, &stale, sizeof(stale));
+
+    {
+      auto &cache = context.GetBufferCache();
+      context.MapMemory(base, allocation_size);
+      const auto GpuWrite = [&](uint64_t offset, uint32_t value) {
+        auto allocation = cache.ObtainBuffer(base + offset, sizeof(value), true, false);
+        Require(name, "dirty allocation", allocation.first != nullptr,
+                "eager-readback buffer allocation failed");
+        cache.FillBuffer(base + offset, sizeof(value), value, false);
+      };
+      const auto Backing = [&](uint64_t offset) {
+        uint32_t value = 0;
+        Libs::LibKernel::Memory::TryReadBacking(base + offset, &value, sizeof(value));
+        return value;
+      };
+      const auto Settle = [&] {
+        scheduler.Flush();
+        scheduler.Finish();
+        scheduler.DrainPriorityOperations();
+      };
+      const auto GameThreadFault = [&](uint64_t offset) {
+        cache.ReadMemory(base + offset, 1, false, Common::GpuPhase::DrainCause::ReadbackFault);
+      };
+      const auto CleanRead = [&](uint64_t offset) {
+        uint32_t value = 0;
+        return cache.TryReadCleanBytes(base + offset, &value, sizeof(value));
+      };
+
+      // 1. The first read of a page is an ordinary fault; it makes the page hot.
+      GpuWrite(hot_offset, first_value);
+      GpuWrite(cold_offset, first_value);
+      Require(name, "stale before the first read",
+              Backing(hot_offset) == stale && cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "the GPU write reached guest memory before any read");
+      GameThreadFault(hot_offset);
+      Require(name, "first fault reads back",
+              Backing(hot_offset) == first_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  Backing(cold_offset) == stale,
+              "the first fault did not behave like an ordinary readback");
+
+      // 2. A later GPU write to the hot page is copied out before the guest reads it. Until the copy
+      // has landed the guest copy is stale, and nothing may treat it as authoritative.
+      GpuWrite(hot_offset, second_value);
+      GpuWrite(cold_offset, second_value);
+      cache.WriteBackHotPages();
+      Require(name, "pending eager copy is not authoritative",
+              Backing(hot_offset) == first_value && cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  !CleanRead(hot_offset),
+              "bytes an eager copy took out of the GPU-modified ranges looked clean before they landed");
+      Settle();
+      Require(name, "eager copy lands and the page is released",
+              Backing(hot_offset) == second_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  !cache.IsRegionGpuModified(base + hot_offset, 4) && CleanRead(hot_offset),
+              "the eager write-back did not leave the hot page readable without a fault");
+      Require(name, "cold page is left alone",
+              Backing(cold_offset) == stale && cache.HasGpuDirtyBytes(base + cold_offset, 4),
+              "a page nobody faulted on was written back eagerly");
+
+      // 3. A GPU write that reaches the page after the copy was recorded keeps it protected, and its
+      // bytes are read back on demand.
+      GpuWrite(hot_offset, third_value);
+      cache.WriteBackHotPages();
+      GpuWrite(hot_offset, newer_value);
+      Settle();
+      Require(name, "newer write keeps the page protected",
+              Backing(hot_offset) == third_value && cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  cache.IsRegionGpuModified(base + hot_offset, 4),
+              "a page with a newer GPU write was unprotected by an older eager copy");
+      GameThreadFault(hot_offset);
+      Require(name, "newer write is read back on demand",
+              Backing(hot_offset) == newer_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "the newer GPU write was lost");
+
+      // 4. A guest read that arrives while the copy is in flight waits for it.
+      GpuWrite(hot_offset, fourth_value);
+      cache.WriteBackHotPages();
+      GameThreadFault(hot_offset);
+      Require(name, "read waits for the copy in flight",
+              Backing(hot_offset) == fourth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "a guest read saw the stale copy while an eager write-back was in flight");
+
+      // 5. --eager-readback can be switched off at run time (--toggle-control): a copy already in
+      // flight is still retired (by the next submit, or by a read fault), and no new copy is scheduled.
+      constexpr uint32_t fifth_value = 0x13572468u;
+      constexpr uint32_t sixth_value = 0x2468ace0u;
+      GpuWrite(hot_offset, fifth_value);
+      cache.WriteBackHotPages();
+      Config::Load(Config::ConfigOptions{});
+      Settle();
+      cache.WriteBackHotPages();
+      Require(name, "copy in flight is retired after the flag went off",
+              Backing(hot_offset) == fifth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4) &&
+                  !cache.IsRegionGpuModified(base + hot_offset, 4),
+              "an eager copy in flight when the flag was switched off was never retired");
+      GpuWrite(hot_offset, sixth_value);
+      cache.WriteBackHotPages();
+      Settle();
+      Require(name, "no new copy with the flag off",
+              Backing(hot_offset) == fifth_value && cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "an eager copy was scheduled with the flag off");
+      GameThreadFault(hot_offset);
+      Require(name, "fault reads back on demand with the flag off",
+              Backing(hot_offset) == sixth_value && !cache.HasGpuDirtyBytes(base + hot_offset, 4),
+              "the GPU write was lost with the flag off");
+      Config::Load(eager);
+
+      cache.ReadMemory(base + cold_offset, sizeof(uint32_t));
+      Require(name, "cold page reads back on demand",
+              Backing(cold_offset) == second_value,
+              "the cold page lost its GPU write");
+
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+    context.ShutdownGpu();
+    Config::Load(Config::ConfigOptions{});
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "eager-readback direct-memory mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "eager-readback direct-memory allocation release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  // --readback-futures: a game thread's read fault does not stop the GPU thread; the copy is recorded
+  // and submitted by the first step, the thread waits for its landing, the second step unprotects. A
+  // GPU write that reaches the page after the copy keeps it protected (the bytes of the copy are
+  // older than the page), and the next round reads the newer bytes.
+  void CheckBufferCacheReadbackFuture() {
+    constexpr const char *name = "BufferCacheReadbackFuture";
+    constexpr uintptr_t base = 0x0000000208800000ull;
+    constexpr uint64_t allocation_size = 0x100000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t offset = 0x1100;
+    constexpr uint64_t clean_offset = 0x9100;
+    constexpr uint32_t stale = 0x0badf00du;
+    constexpr uint32_t first_value = 0x11223344u;
+    constexpr uint32_t second_value = 0x55667788u;
+    constexpr uint32_t third_value = 0x99aabbccu;
+    constexpr uint32_t fourth_value = 0xddeeff00u;
+
+    EnsureRuntimeContext();
+    Config::ConfigOptions futures;
+    futures.readback_futures = true;
+    Config::Load(futures);
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "readback-future direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "readback-future fixed direct-memory mapping failed");
+    auto *memory = static_cast<uint8_t *>(mapped);
+    std::memcpy(memory + offset, &stale, sizeof(stale));
+    std::memcpy(memory + clean_offset, &stale, sizeof(stale));
+
+    {
+      auto &cache = context.GetBufferCache();
+      context.MapMemory(base, allocation_size);
+      const auto GpuWrite = [&](uint64_t at, uint32_t value) {
+        auto allocation = cache.ObtainBuffer(base + at, sizeof(value), true, false);
+        Require(name, "dirty allocation", allocation.first != nullptr,
+                "readback-future buffer allocation failed");
+        cache.FillBuffer(base + at, sizeof(value), value, false);
+      };
+      const auto Backing = [&](uint64_t at) {
+        uint32_t value = 0;
+        Libs::LibKernel::Memory::TryReadBacking(base + at, &value, sizeof(value));
+        return value;
+      };
+      const auto Fault = [&](uint64_t at) {
+        cache.ReadMemory(base + at, 1, false, Common::GpuPhase::DrainCause::ReadbackFault);
+      };
+      const auto CleanRead = [&](uint64_t at) {
+        uint32_t value = 0;
+        return cache.TryReadCleanBytes(base + at, &value, sizeof(value));
+      };
+      using Common::GpuPhase::Future;
+
+      // 1. A fault through the whole path: the bytes arrive, the page is released, and the future
+      // (not the synchronous path) served it.
+      GpuWrite(offset, first_value);
+      Require(name, "stale before the read",
+              Backing(offset) == stale && cache.HasGpuDirtyBytes(base + offset, 4),
+              "the GPU write reached guest memory before any read");
+      const auto started_before = Common::GpuPhase::FutureCount(Future::Started);
+      Fault(offset);
+      Require(name, "fault reads back through the future",
+              Backing(offset) == first_value && !cache.HasGpuDirtyBytes(base + offset, 4) &&
+                  !cache.IsRegionGpuModified(base + offset, 4) && CleanRead(offset) &&
+                  Common::GpuPhase::FutureCount(Future::Started) == started_before + 1,
+              "the future did not serve the fault, or left the page protected");
+
+      // 2. Step by step. After the first step the guest copy is stale and not authoritative; a newer
+      // GPU write then keeps the page protected after the copy landed; the second round reads it.
+      GpuWrite(offset, second_value);
+      auto release = std::make_shared<FutureRelease>();
+      Require(name, "first step schedules a wait",
+              cache.StartReadFuture(base + offset, 1, release) == FutureStart::Wait,
+              "a GPU-written page did not start a readback future");
+      Require(name, "pending copy is not authoritative",
+              Backing(offset) == first_value && cache.HasGpuDirtyBytes(base + offset, 4) &&
+                  !CleanRead(offset) && cache.IsRegionGpuModified(base + offset, 4),
+              "bytes taken out by a readback future looked clean before they landed");
+      GpuWrite(offset, third_value);
+      release->Wait();
+      Require(name, "the copy landed", Backing(offset) == second_value,
+              "the release fired before the write-back ran");
+      Require(name, "a newer write keeps the page protected",
+              !cache.FinishReadFuture(base + offset, 1, false, false, release->tick) && Backing(offset) == second_value &&
+                  cache.IsRegionGpuModified(base + offset, 4) &&
+                  cache.HasGpuDirtyBytes(base + offset, 4),
+              "a page with a newer GPU write was unprotected by an older copy");
+      auto second_release = std::make_shared<FutureRelease>();
+      Require(name, "second round schedules a wait",
+              cache.StartReadFuture(base + offset, 1, second_release) == FutureStart::Wait,
+              "the newer write was not copied in the next round");
+      second_release->Wait();
+      Require(name, "second round releases the page",
+              cache.FinishReadFuture(base + offset, 1, false, false, second_release->tick) && Backing(offset) == third_value &&
+                  !cache.HasGpuDirtyBytes(base + offset, 4) &&
+                  !cache.IsRegionGpuModified(base + offset, 4),
+              "the second round did not deliver the newer bytes");
+
+      // 3. Nothing GPU-written and nothing in flight: the old path decides.
+      auto idle_release = std::make_shared<FutureRelease>();
+      Require(name, "idle page uses the old path",
+              cache.StartReadFuture(base + clean_offset, 1, idle_release) == FutureStart::Sync,
+              "a page with nothing to copy started a future");
+
+      // 4. A second reader of a page whose copy is in flight waits for that copy.
+      GpuWrite(offset, fourth_value);
+      auto reader_a = std::make_shared<FutureRelease>();
+      auto reader_b = std::make_shared<FutureRelease>();
+      Require(name, "reader A starts the copy",
+              cache.StartReadFuture(base + offset, 1, reader_a) == FutureStart::Wait,
+              "reader A did not start a copy");
+      Require(name, "reader B waits for the same copy",
+              cache.StartReadFuture(base + offset, 1, reader_b) == FutureStart::Wait,
+              "reader B did not wait for the copy in flight");
+      // An event held back by the submit coalescer sits in the priority queue at the open tick,
+      // ahead of reader C's release: C's first step must submit, or C waits for ever.
+      scheduler.DeferPriorityOperation([] {});
+      auto reader_c = std::make_shared<FutureRelease>();
+      Require(name, "reader C waits for the same copy",
+              cache.StartReadFuture(base + offset, 1, reader_c) == FutureStart::Wait,
+              "reader C did not wait for the copy in flight");
+      Require(name, "reader C is released although an event is held back",
+              reader_c->WaitFor(5000),
+              "a release queued behind an unsubmitted event never fired (deadlock)");
+      reader_a->Wait();
+      reader_b->Wait();
+      Require(name, "both readers see the bytes",
+              cache.FinishReadFuture(base + offset, 1, false, false, reader_a->tick) && Backing(offset) == fourth_value &&
+                  cache.FinishReadFuture(base + offset, 1, false, false, reader_b->tick) &&
+                  cache.FinishReadFuture(base + offset, 1, false, false, reader_c->tick),
+              "a reader of a copy in flight did not get the bytes");
+
+      // 4b. A CPU write over a GPU-written page: the GPU's bytes land in guest memory first, then the
+      // page is claimed for the CPU (the write can proceed without a second fault).
+      GpuWrite(offset, second_value);
+      cache.InvalidateMemory(base + offset, 1);
+      Require(name, "cpu write: bytes landed, page claimed for the CPU",
+              Backing(offset) == second_value && !cache.HasGpuDirtyBytes(base + offset, 4) &&
+                  !cache.IsRegionGpuModified(base + offset, 4) &&
+                  cache.IsRegionCpuModified(base + offset, 4),
+              "a CPU write over GPU data did not get the GPU's bytes and the page");
+
+      // 4c. A page the GPU rewrote through the last round is contended: the next first step does not
+      // try (the synchronous path serves it), so a hot rewritten page does not burn rounds.
+      GpuWrite(offset, third_value);
+      auto loser = std::make_shared<FutureRelease>();
+      Require(name, "contended: round starts",
+              cache.StartReadFuture(base + offset, 1, loser) == FutureStart::Wait,
+              "the round did not start");
+      GpuWrite(offset, fourth_value);
+      loser->Wait();
+      Require(name, "contended: last round lost to a newer write",
+              !cache.FinishReadFuture(base + offset, 1, false, true, loser->tick),
+              "the newer write did not keep the page protected");
+      const auto contended_before = Common::GpuPhase::FutureCount(Future::Contended);
+      auto skipped = std::make_shared<FutureRelease>();
+      Require(name, "contended: the next first step defers to the synchronous path",
+              cache.StartReadFuture(base + offset, 1, skipped) == FutureStart::Sync &&
+                  Common::GpuPhase::FutureCount(Future::Contended) == contended_before + 1,
+              "a contended page started another future");
+      Fault(offset); // contended: served synchronously
+      Require(name, "contended page still reads back",
+              Backing(offset) == fourth_value && !cache.IsRegionGpuModified(base + offset, 4),
+              "the synchronous path lost the newer bytes");
+
+      // 5. Flag off at run time: a fault takes the synchronous path.
+      Config::Load(Config::ConfigOptions{});
+      GpuWrite(offset, first_value);
+      const auto started_off = Common::GpuPhase::FutureCount(Future::Started);
+      Fault(offset);
+      Require(name, "flag off: synchronous path",
+              Backing(offset) == first_value && !cache.HasGpuDirtyBytes(base + offset, 4) &&
+                  Common::GpuPhase::FutureCount(Future::Started) == started_off,
+              "a fault used the future with the flag off");
+
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+    context.ShutdownGpu();
+    Config::Load(Config::ConfigOptions{});
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "readback-future direct-memory mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "readback-future direct-memory allocation release failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  // --readback-futures under load: three game threads fault on two hot pages while the GPU thread
+  // keeps rewriting them (and submitting). Every thread must get through (a hang here is a deadlock
+  // of the protocol), and the values a thread reads never go backwards.
+  void CheckBufferCacheReadbackFutureStress() {
+    constexpr const char *name = "BufferCacheReadbackFutureStress";
+    constexpr uintptr_t base = 0x0000000208a00000ull;
+    constexpr uint64_t allocation_size = 0x100000;
+    constexpr uint64_t allocation_alignment = 0x10000;
+    constexpr uint64_t page_a = 0x1100;
+    constexpr uint64_t page_b = 0x5100;
+
+    EnsureRuntimeContext();
+    Config::ConfigOptions futures;
+    futures.readback_futures = true;
+    Config::Load(futures);
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+    auto &gpu = context.GetGpu();
+
+    int64_t direct_offset = -1;
+    Require(name, "direct allocation",
+            Libs::LibKernel::Memory::KernelAllocateDirectMemory(
+                0, Libs::LibKernel::Memory::KernelGetDirectMemorySize(),
+                allocation_size, allocation_alignment, 0, &direct_offset) == 0,
+            "stress direct-memory allocation failed");
+    void *mapped = reinterpret_cast<void *>(base);
+    Require(name, "direct mapping",
+            Libs::LibKernel::Memory::KernelMapDirectMemory(
+                &mapped, allocation_size, 0x3, 0x10, direct_offset,
+                allocation_alignment) == 0 &&
+                mapped == reinterpret_cast<void *>(base),
+            "stress fixed direct-memory mapping failed");
+
+    {
+      auto &cache = context.GetBufferCache();
+      context.MapMemory(base, allocation_size);
+      std::atomic<uint32_t> counter{0};
+      std::atomic<bool> stop{false};
+      std::atomic<uint64_t> reads{0};
+      std::atomic<bool> backwards{false};
+      const auto GpuWrite = [&](uint64_t at, uint32_t value) {
+        auto allocation = cache.ObtainBuffer(base + at, sizeof(value), true, false);
+        Require(name, "dirty allocation", allocation.first != nullptr,
+                "stress buffer allocation failed");
+        cache.FillBuffer(base + at, sizeof(value), value, false);
+      };
+      std::thread writer([&] {
+        while (!stop.load()) {
+          gpu.SendCommandSync([&] {
+            const uint32_t value = counter.fetch_add(1) + 1;
+            GpuWrite(page_a, value);
+            GpuWrite(page_b, value);
+            // Like an end-of-pipe event whose submit the coalescer holds back.
+            scheduler.DeferPriorityOperation([] {});
+            if (value % 5 == 0) {
+              scheduler.Flush();
+            }
+          });
+        }
+      });
+      std::vector<std::thread> readers;
+      for (int index = 0; index < 3; index++) {
+        readers.emplace_back([&, index] {
+          const uint64_t at = index == 2 ? page_b : page_a;
+          uint32_t last = 0;
+          while (!stop.load()) {
+            cache.ReadMemory(base + at, 1, false, Common::GpuPhase::DrainCause::ReadbackFault);
+            uint32_t value = 0;
+            Libs::LibKernel::Memory::TryReadBacking(base + at, &value, sizeof(value));
+            if (value < last) {
+              backwards.store(true);
+            }
+            last = value;
+            reads.fetch_add(1);
+          }
+        });
+      }
+      // A deadlock shows as reads that stop advancing.
+      uint64_t last_reads = 0;
+      for (int second = 0; second < 4; second++) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const auto now = reads.load();
+        Require(name, "reads advance", now > last_reads,
+                "the readback future stopped making progress (deadlock)");
+        last_reads = now;
+      }
+      stop.store(true);
+      writer.join();
+      for (auto &reader: readers) {
+        reader.join();
+      }
+      Require(name, "values never go backwards", !backwards.load(),
+              "a reader saw an older GPU value after a newer one");
+      std::printf("[host]    %-32s %llu reads, %u GPU writes\n", name,
+                  static_cast<unsigned long long>(reads.load()), counter.load());
+      scheduler.Finish();
+      scheduler.DrainPriorityOperations();
+      context.UnmapMemory(base, allocation_size);
+      scheduler.Finish();
+    }
+    context.ShutdownGpu();
+    Config::Load(Config::ConfigOptions{});
+    Require(name, "unmap direct backing",
+            Libs::LibKernel::Memory::KernelMunmap(base, allocation_size) == 0,
+            "stress direct-memory mapping release failed");
+    Require(name, "release direct backing",
+            Libs::LibKernel::Memory::KernelReleaseDirectMemory(
+                direct_offset, allocation_size) == 0,
+            "stress direct-memory allocation release failed");
     std::printf("[host]    %-32s ok\n", name);
   }
 
@@ -46643,6 +47269,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--scheduler-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckSchedulerTimeline();
+    vulkan.CheckSchedulerIdlePolling();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--host-image-allocation-only") == 0) {
@@ -47072,6 +47699,21 @@ int main(int argc, char **argv) {
     vulkan.CheckBufferCacheDirtyGarbageCollection();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-eager-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBufferCacheEagerReadback();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-future-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBufferCacheReadbackFuture();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-future-stress-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckBufferCacheReadbackFutureStress();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-cache-prt-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckBufferCachePrtHoleUpload();
@@ -47274,6 +47916,7 @@ int main(int argc, char **argv) {
   CheckPs5GameExampleImageClearRuntimeShape();
   vulkan.CheckSchedulerTimeline();
   vulkan.CheckGuestGpuTimestamps();
+  vulkan.CheckSchedulerIdlePolling();
   vulkan.CheckHostImageAllocation();
   vulkan.CheckDescriptorHeapLargeSet();
   vulkan.CheckGpuMappedRangeLifecycle();
@@ -47305,6 +47948,8 @@ int main(int argc, char **argv) {
     vulkan.CheckRasterization(false, Prospero::BufferFormat::k11_11_10Float);
     vulkan.CheckRasterization(false, Prospero::BufferFormat::k10_10_10_2UScaled);
     vulkan.CheckBufferCacheDirtyGarbageCollection();
+    vulkan.CheckBufferCacheEagerReadback();
+    vulkan.CheckBufferCacheReadbackFuture();
   } else {
     skipped_device_checks = true;
   }

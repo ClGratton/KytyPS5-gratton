@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
 #include "common/gpuPhaseStats.h"
+#include "common/hangWatchdog.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
@@ -104,9 +105,31 @@ CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graph
       m_command_pool(graphics, m_master), m_command(*this),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {
 	GpuOps::Initialize(graphics, m_master, Config::GetGpuOpsMode());
+	// A hang report shows the state of the operation queues (never blocks on their mutex).
+	m_hang_provider_name = "command_scheduler@" + std::to_string(reinterpret_cast<uintptr_t>(this));
+	Common::Hang::RegisterProvider(m_hang_provider_name.c_str(), [this] {
+		std::string text = "tick current=" + std::to_string(m_master.CurrentTick()) +
+		                   " known_gpu=" + std::to_string(m_master.KnownGpuTick());
+		std::unique_lock lock(m_operation_mutex, std::try_to_lock);
+		if (!lock.owns_lock()) {
+			return text + " (operation mutex busy)";
+		}
+		text += " | priority ops=" + std::to_string(m_priority_operations.size());
+		if (!m_priority_operations.empty()) {
+			text += " front_tick=" + std::to_string(m_priority_operations.front().tick) +
+			        " back_tick=" + std::to_string(m_priority_operations.back().tick);
+		}
+		text += " active=" + std::to_string(m_priority_active ? m_priority_active_tick : 0) +
+		        " | pending ops=" + std::to_string(m_pending_operations.size());
+		if (!m_pending_operations.empty()) {
+			text += " front_tick=" + std::to_string(m_pending_operations.front().tick);
+		}
+		return text;
+	});
 }
 
 CommandScheduler::~CommandScheduler() {
+	Common::Hang::UnregisterProvider(m_hang_provider_name.c_str());
 	Shutdown();
 }
 
@@ -231,17 +254,29 @@ void CommandScheduler::Wait(uint64_t tick) {
 }
 
 void CommandScheduler::PopPendingOperations() {
-	m_master.Refresh();
+	bool refreshed = false;
 	for (;;) {
 		PendingOperation operation;
 		{
 			std::lock_guard lock(m_operation_mutex);
-			if (m_pending_operations.empty() ||
-			    !m_master.IsFree(m_pending_operations.front().tick)) {
+			if (m_pending_operations.empty()) {
 				return;
 			}
-			operation = std::move(m_pending_operations.front());
-			m_pending_operations.pop();
+			const auto tick = m_pending_operations.front().tick;
+			if (!m_master.IsFree(tick)) {
+				// The timeline is polled once, and not for the open tick: it is not submitted yet.
+				if (refreshed || tick >= CurrentTick()) {
+					return;
+				}
+			} else {
+				operation = std::move(m_pending_operations.front());
+				m_pending_operations.pop();
+			}
+		}
+		if (!operation.callback) {
+			m_master.Refresh();
+			refreshed = true;
+			continue;
 		}
 		WaitPriorityOperations(operation.tick);
 		RunOperation(std::move(operation.callback));
@@ -256,13 +291,30 @@ void CommandScheduler::DeferPriorityOperation(Common::UniqueFunction<void>&& ope
 	QueueOperation(std::move(operation), true);
 }
 
-void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, bool priority) {
+bool CommandScheduler::HasOpenTickPriorityOperation() {
+	std::lock_guard lock(m_operation_mutex);
+	// An operation is queued with the tick of the command buffer that is open at the time; once that
+	// buffer is submitted the current tick moves past it.
+	return !m_priority_operations.empty() && m_max_priority_tick >= m_master.CurrentTick();
+}
+
+void CommandScheduler::DeferPriorityOperationAt(Common::UniqueFunction<void>&& operation,
+                                                uint64_t                        tick) {
+	QueueOperation(std::move(operation), true, tick);
+}
+
+void CommandScheduler::QueueOperation(Common::UniqueFunction<void>&& operation, bool priority,
+                                      uint64_t tick) {
 	CheckActive();
 	EXIT_IF(!operation);
 	std::unique_lock lock(m_operation_mutex);
 	if (m_operation_state == OperationState::Open) {
 		auto& queue = priority ? m_priority_operations : m_pending_operations;
-		queue.push({std::move(operation), CurrentTick()});
+		const uint64_t op_tick = tick != 0 ? tick : CurrentTick();
+		if (priority) {
+			m_max_priority_tick = std::max(m_max_priority_tick, op_tick);
+		}
+		queue.push({std::move(operation), op_tick});
 		lock.unlock();
 		if (priority) {
 			m_operation_available.notify_one();
@@ -328,6 +380,14 @@ void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 		    !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
 		return !active_before_or_at && !queued_before_or_at;
 	});
+}
+
+bool CommandScheduler::PriorityOperationsDone(uint64_t tick) {
+	std::lock_guard lock(m_operation_mutex);
+	const bool active_before_or_at = m_priority_active && m_priority_active_tick <= tick;
+	const bool queued_before_or_at =
+	    !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
+	return !active_before_or_at && !queued_before_or_at;
 }
 
 void CommandScheduler::RunOperation(Common::UniqueFunction<void>&& operation) {

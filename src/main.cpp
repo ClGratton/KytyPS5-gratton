@@ -183,12 +183,15 @@ static void PrintUsage() {
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
-	         "                                       srt-plans, readback-queue,\n"
-	         "                                       heap-trim) at the next presented frame; applied changes\n"
-	         "                                       are logged and appended\n"
+	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
+	         "                                       known-copies, gpu-indirect-draws, eager-readback,\n"
+	         "                                       readback-futures,\n"
+	         "                                       poll-before-wait) at the next\n"
+	         "                                       presented frame; applied changes are logged and appended\n"
 	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
-	         "                                       (srt-plans, readback-queue, heap-trim) can only be turned\n"
-	         "                                       on again if it was on at start. Default: off.\n");
+	         "                                       (srt-plans, readback-queue, heap-trim, poll-before-wait)\n"
+	         "                                       can only be turned on again if it was on at start.\n"
+	         "                                       Default: off.\n");
 	::printf("  --bench-exit-after-frames <N>        Cleanly exit after N presented frames. Default: off.\n");
 	::printf("  --pipeline-cache-key <value>         schema (default) or revision. schema keys the driver\n"
 	         "                                       pipeline cache on a schema version + GPU/driver ids,\n"
@@ -335,6 +338,22 @@ static void PrintUsage() {
 	::printf("  --texture-binding-reuse <true|false> A draw keeps the image binding of a shader slot while its\n"
 	         "                                       descriptor and the set of cached images are unchanged\n"
 	         "                                       (exact, less GPU-thread CPU per draw). Default: false.\n");
+	::printf("  --eager-readback <true|false>        Pages a game thread read-faulted on are written back to guest\n"
+	         "                                       memory right after the GPU writes them (copied in the\n"
+	         "                                       command buffer about to be submitted), so the next read\n"
+	         "                                       needs no fault and no GPU drain. Default: false.\n");
+	::printf("  --readback-futures <true|false>      A game thread's read fault on GPU-written memory does not\n"
+	         "                                       stop the GPU thread: it copies the bytes out, submits and\n"
+	         "                                       goes on, and only the faulting thread waits for the copy to\n"
+	         "                                       land (frame pipelining). Default: false.\n");
+	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback or --readback-futures,\n"
+	         "                                       re-read every page from the GPU (a full drain) before it\n"
+	         "                                       is unprotected and report any difference. Slow.\n"
+	         "                                       Default: false.\n");
+	::printf("  --poll-before-wait <0-1000>          Microseconds to poll the GPU timeline before blocking in\n"
+	         "                                       vkWaitSemaphores (small readbacks finish in tens of\n"
+	         "                                       microseconds; a blocking wait adds the kernel sleep and\n"
+	         "                                       wake-up). 0 blocks at once. Default: 0.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -1059,6 +1078,28 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--clean-guest-reads") {
 			if (!ParseBool(value, options.config.clean_guest_reads)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--poll-before-wait") {
+			uint64_t us = 0;
+			if (!ParseUint64(value, us) || us > 1000) {
+				::printf("invalid poll-before-wait (expected 0-1000 us): %s\n", value.c_str());
+				return false;
+			}
+			options.config.poll_before_wait_us = static_cast<uint32_t>(us);
+		} else if (arg == "--eager-readback") {
+			if (!ParseBool(value, options.config.eager_readback)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--readback-futures") {
+			if (!ParseBool(value, options.config.readback_futures)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--debug-eager-readback-verify") {
+			if (!ParseBool(value, options.config.eager_readback_verify)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
