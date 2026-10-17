@@ -185,6 +185,7 @@ static void PrintUsage() {
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
 	         "                                       tracker-sleeping-locks,\n"
 	         "                                       cp-direct-stores, draw-state-memo,\n"
+	         "                                       async-upload-copies,\n"
 	         "                                       image-presence, image-pool,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
@@ -268,6 +269,10 @@ static void PrintUsage() {
 	::printf("  --plan-prefetch <true|false>         While the GPU thread uses one SRT plan it prefetches every\n"
 	         "                                       cache line of the next plan's blocks (a hint to the CPU\n"
 	         "                                       cache; needs --srt-plans). Default: false.\n");
+	::printf("  --async-upload-copies <true|false>   The copy of a large buffer upload from game memory into the\n"
+	         "                                       upload ring runs on two helper threads instead of the GPU\n"
+	         "                                       thread; the ring is complete before the next submit.\n"
+	         "                                       Default: false.\n");
 	::printf("  --draw-state-memo <true|false>       The GPU thread does not repeat work that is a function of the\n"
 	         "                                       GPU registers while the registers have not changed since the\n"
 	         "                                       draw it was done for (exact). Default: false.\n");
@@ -1062,6 +1067,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--plan-prefetch") {
 			if (!ParseBool(value, options.config.plan_prefetch)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--async-upload-copies") {
+			if (!ParseBool(value, options.config.async_upload_copies)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

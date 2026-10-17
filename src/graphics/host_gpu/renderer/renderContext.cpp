@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/memResidency.h"
+#include "graphics/host_gpu/renderer/cache/uploadCopier.h"
 #include "graphics/presentation/videoOut.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
@@ -165,6 +166,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		     vaddr, size);
 	}
 	const auto unmap = [this, vaddr, size] {
+		UploadCopier::FenceIfCreated(); // --async-upload-copies: no helper reads the range while it goes away
 		// Check cache ownership on the GPU thread. Guest-memory callbacks can still
 		// access a range with no cached data, so they must finish before it is unmapped.
 		if (m_command_scheduler.Active() &&

@@ -253,6 +253,12 @@ QList<Option> BuildTable() {
 	             "line of the next plan's blocks while it uses the current one. Only a hint to the "
 	             "CPU cache; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(plan_prefetch)});
+	defs.append({"async_upload_copies", "--async-upload-copies", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Copy uploaded game memory to the GPU on helper threads",
+	             "Data the game wrote is copied into a staging area for the GPU before it is drawn with. "
+	             "With this two helper threads do the copy while the GPU thread goes on, and the staging area "
+	             "is complete before the work is handed to the GPU. Exact; lowers the GPU thread's CPU time.",
+	             EMU_BOOL(async_upload_copies)});
 	defs.append({"draw_state_memo", "--draw-state-memo", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Do not redo per-draw work while the GPU registers have not changed",
 	             "Most draws of a frame set the same GPU state as the draw before. With this the GPU thread "

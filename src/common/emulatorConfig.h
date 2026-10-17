@@ -293,6 +293,9 @@ struct ConfigOptions {
 	// (graphics/guest_gpu/hardwareContext.h) have not moved (graphics/host_gpu/renderer/renderDraw.cpp and neighbours).
 	// Default off.
 	bool                   draw_state_memo             = false;
+	// --async-upload-copies: the guest-to-ring memcpy of a large buffer upload runs on helper threads
+	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default off.
+	bool                   async_upload_copies         = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -490,6 +493,7 @@ bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
 bool              CpDirectStoresEnabled();
 bool              DrawStateMemoEnabled();
+bool              AsyncUploadCopiesEnabled();
 bool              ImagePresenceEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();
