@@ -638,6 +638,8 @@ public:
 		return result;
 	}
 
+	[[nodiscard]] uint64_t Epoch() const { return m_epoch.load(std::memory_order_acquire); }
+
 	// [lo, hi) of the run of contiguous committed ranges that holds `addr` (which is committed).
 	std::pair<uint64_t, uint64_t> CommittedExtentUnlocked(uint64_t addr) {
 		auto vma = std::upper_bound(
@@ -1277,6 +1279,10 @@ MappingMemoStats GetMappingMemoStats() {
 
 BackingReadCacheStats GetBackingReadCacheStats() {
 	return g_backing_read_cache_stats;
+}
+
+uint64_t MappingEpoch() {
+	return g_virtual_ranges != nullptr ? g_virtual_ranges->Epoch() : 0;
 }
 
 bool IsFullyMapped(uint64_t vaddr, uint64_t size) {

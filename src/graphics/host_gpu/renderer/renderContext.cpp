@@ -7,6 +7,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/memResidency.h"
 #include "graphics/presentation/videoOut.h"
+#include "kernel/memory.h"
 #include "libs/errno.h"
 
 #include <algorithm>
@@ -183,7 +184,12 @@ void RenderContext::PrepareBda(bool address_writes) {
 		// A pass that visits only the buffers overlapping a logged range (bdaDirtyLog.h). The log is armed
 		// by a full pass; a mapping change or an overflow of the log goes back to the full walk.
 		bool done = false;
-		if (m_bda_log_armed && m_bda_log_mapped_gen == m_mapped_generation) {
+		// What the sync pass reads as mapped is the kernel's committed ranges, which can change without any page
+		// becoming CPU-modified (memory committed under dirty pages of an existing buffer): its epoch is part
+		// of the log's validity.
+		const auto map_epoch = LibKernel::Memory::MappingEpoch();
+		if (m_bda_log_armed && m_bda_log_mapped_gen == m_mapped_generation &&
+		    m_bda_log_map_epoch == map_epoch) {
 			uint64_t ranges = 0;
 			if (BdaSync::g_dirty_log.Drain([&](uint64_t address, uint64_t size) {
 				    ranges++;
@@ -207,6 +213,7 @@ void RenderContext::PrepareBda(bool address_writes) {
 			BdaSync::g_dirty_log_active.store(true, std::memory_order_seq_cst);
 			BdaSync::g_dirty_log.Reset();
 			m_bda_log_mapped_gen = m_mapped_generation;
+			m_bda_log_map_epoch  = map_epoch;
 			BdaFullPass();
 			m_bda_log_armed = true;
 		}

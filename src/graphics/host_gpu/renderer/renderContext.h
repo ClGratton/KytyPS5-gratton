@@ -99,6 +99,7 @@ private:
 	// that pass; the passes it replaced, the ranges it visited, and the full passes it fell back to.
 	bool                      m_bda_log_armed      = false;
 	uint64_t                  m_bda_log_mapped_gen = 0;
+	uint64_t                  m_bda_log_map_epoch  = 0;
 	uint64_t                  m_bda_log_passes     = 0;
 	uint64_t                  m_bda_log_ranges     = 0;
 	uint64_t                  m_bda_log_falls      = 0; // full passes by overflow or a mapping change

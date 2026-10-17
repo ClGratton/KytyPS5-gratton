@@ -150,6 +150,9 @@ struct BackingReadCacheStats {
 	uint64_t misses = 0;
 };
 [[nodiscard]] BackingReadCacheStats GetBackingReadCacheStats();
+// Moves whenever the guest's committed ranges change (map, unmap, commit, decommit, protect of a range): what
+// IsFullyMapped / MappedParts / ClampRangeSize answer is the same while it has not moved.
+[[nodiscard]] uint64_t MappingEpoch();
 // Whether guest mappings cover all of [vaddr, vaddr + size), and the parts they cover (as
 // (address, size), in order): what can be read or written of a range that reaches into memory the
 // guest unmapped.
