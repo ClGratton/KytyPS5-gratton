@@ -453,6 +453,10 @@ private:
 	}
 	static uint64_t Pack(Position p) { return (p.seq << 24u) | std::min<uint32_t>(p.ordinal, 0xffffffu); }
 
+	// --plan-prefetch (srtPlan.cpp): every cache line of the plan's blocks, not the first line of five of them.
+	static void PrefetchPlanDeep(const Plan& p);
+	static bool DeepPrefetchEnabled();
+
 	static void PrefetchBody(const Plan& p) {
 		__builtin_prefetch(p.snapshot.user_data.data(), 0, 3);
 		__builtin_prefetch(p.workgroup_counts.data(), 0, 3);
@@ -526,6 +530,17 @@ private:
 		plan         = std::move(entries[i].plan);
 		local.cursor = i + 1;
 		// The next plans are checked next: pull their cache lines in while this one is used.
+		if (DeepPrefetchEnabled()) {
+			// The plan is spread over a dozen heap blocks written by another core: the Plan struct (and so the
+			// vector headers) two plans ahead, all the blocks one plan ahead.
+			if (i + 1 < entries.size() && entries[i + 1].plan) PrefetchPlanDeep(*entries[i + 1].plan);
+			for (size_t j = i + 2; j <= i + 3 && j < entries.size(); ++j) {
+				if (!entries[j].plan) continue;
+				const auto* base = reinterpret_cast<const char*>(entries[j].plan.get());
+				for (size_t o = 0; o < sizeof(Plan); o += 64) __builtin_prefetch(base + o, 0, 3);
+			}
+			return true;
+		}
 		if (i + 1 < entries.size() && entries[i + 1].plan) PrefetchBody(*entries[i + 1].plan);
 		if (i + 2 < entries.size() && entries[i + 2].plan) __builtin_prefetch(entries[i + 2].plan.get(), 0, 3);
 		return true;

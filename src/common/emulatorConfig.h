@@ -280,6 +280,9 @@ struct ConfigOptions {
 	// --write-fault-around: a write fault that continues a sequential run marks the clean pages ahead CPU-dirty
 	// with it (graphics/host_gpu/regionManager.h, FaultRunAhead). Default off.
 	bool                   write_fault_around          = false;
+	// --plan-prefetch: kyGpu prefetches every cache line of the next SRT plan's blocks while it uses the current
+	// one (srtPlan.cpp). Default off.
+	bool                   plan_prefetch               = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -465,6 +468,7 @@ bool              BdaDirtyLogEnabled();
 bool              LazyOpPollEnabled();
 bool              BackingReadCacheEnabled();
 bool              WriteFaultAroundEnabled();
+bool              PlanPrefetchEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();
 uint32_t          GetSubmitCoalesceUs();

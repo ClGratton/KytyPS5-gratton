@@ -228,6 +228,13 @@ QList<Option> BuildTable() {
 	             "pointers while no page changed since the last full pass. Under 1% in the "
 	             "measurements.",
 	             EMU_BOOL(bda_sync_skip)});
+	defs.append({"plan_prefetch", "--plan-prefetch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Prefetch the next draw's precomputed data",
+	             "The pipeline lookahead builds each draw's plan on another core out of many small "
+	             "memory blocks; the GPU thread meets each one cold. With this it touches every "
+	             "line of the next plan's blocks while it uses the current one. Only a hint to the "
+	             "CPU cache; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(plan_prefetch)});
 	defs.append({"write_fault_around", "--write-fault-around", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the pages ahead of a sequential writer in one fault",
 	             "The emulator write-protects the memory the GPU uses to learn when the game "

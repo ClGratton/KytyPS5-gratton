@@ -77,6 +77,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per write fault; pages marked dirty ahead are uploaded like any dirty page and the real write is seen
 	// by the page protection again after the next upload, so a toggle needs no cleanup.
 	registry.Register("write-fault-around", &g_config->write_fault_around, false);
+	// A hint to the CPU's cache only; read per plan taken.
+	registry.Register("plan-prefetch", &g_config->plan_prefetch, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
 	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
 	// generation keeps moving whether or not the memo is consulted.
@@ -146,6 +148,10 @@ bool GcClockFrames() {
 
 bool BdaSyncSkip() {
 	return Common::RuntimeToggles::Read(g_config->bda_sync_skip);
+}
+
+bool PlanPrefetchEnabled() {
+	return Common::RuntimeToggles::Read(g_config->plan_prefetch);
 }
 
 bool WriteFaultAroundEnabled() {

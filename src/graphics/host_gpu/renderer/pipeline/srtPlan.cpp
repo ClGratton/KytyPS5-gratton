@@ -13,6 +13,37 @@
 
 namespace Libs::Graphics::SrtPlan {
 
+bool Store::DeepPrefetchEnabled() {
+	return Config::PlanPrefetchEnabled();
+}
+
+// A plan is built by a lookahead worker out of a dozen heap blocks (descriptor vectors, user data, read set); kyGpu
+// meets each of them cold, one dependent cache miss after another. Touching every line of every block while the
+// previous plan is used turns those misses into parallel prefetches.
+void Store::PrefetchPlanDeep(const Plan& p) {
+	const auto block = [](const auto& v) {
+		const auto* base  = reinterpret_cast<const char*>(v.data());
+		const auto  bytes = v.size() * sizeof(*v.data());
+		for (size_t offset = 0; offset < bytes && offset < 1024; offset += 64) {
+			__builtin_prefetch(base + offset, 0, 3);
+		}
+	};
+	const auto& s = p.snapshot;
+	block(s.buffers);
+	block(s.images);
+	block(s.samplers);
+	block(s.flattened_srt);
+	block(s.user_data);
+	block(s.specialization_reads);
+	block(s.read_hull.intervals);
+	block(p.specialization.buffers);
+	block(p.specialization.images);
+	block(p.workgroup_counts);
+	block(p.reads.windows);
+	block(p.reads.runs);
+	block(p.reads.values);
+}
+
 namespace {
 
 // The queue holds about two frames of a busy level (12k plans per frame); beyond that the lookahead
