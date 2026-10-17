@@ -458,6 +458,20 @@ struct DrawRenderState {
 	PipelineCache::GraphicsPrograms programs;
 };
 
+// DrawRenderState is 17 KB (eight RenderColorInfo of 1,160 B, three ShaderVertexInputInfo of 2,088 B, the depth info) and used to be zeroed for
+// every draw. --draw-state-memo reuses one: what a draw reads is written first (colour entries by the describe step up to color_count, vertex
+// entry 0 and the pixel info by the program step; entries 1 and 2 only exist for tessellation, which fills all three).
+static DrawRenderState& FreshDrawRenderState() {
+	static thread_local DrawRenderState state;
+	state.depth_info          = {};
+	state.color_count         = 0;
+	state.ps_active           = true;
+	state.programs            = {};
+	state.ps_input_info       = {};
+	state.vertex_info[0]      = {};
+	return state;
+}
+
 struct DrawCallInfo {
 	CommandBufferDebugOp debug_op       = CommandBufferDebugOp::DrawIndex;
 	uint32_t             index_count    = 0;
@@ -1960,7 +1974,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count,
 	                        args.instance_count, args.first_instance, args.indirect_args};
-	DrawRenderState state {};
+	std::optional<DrawRenderState> local_state;
+	DrawRenderState&               state = Config::DrawStateMemoEnabled() ? FreshDrawRenderState() : local_state.emplace();
 	gpu_phase_checks.End();
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
@@ -2055,7 +2070,8 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		ResetBindings();
 		return;
 	}
-	DrawRenderState state {};
+	std::optional<DrawRenderState> local_state;
+	DrawRenderState&               state = Config::DrawStateMemoEnabled() ? FreshDrawRenderState() : local_state.emplace();
 	gpu_phase_checks.End();
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
