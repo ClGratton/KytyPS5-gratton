@@ -286,9 +286,10 @@ struct ConfigOptions {
 	// --tracker-sleeping-locks: a game thread that waits for a tracker lock (held across an mprotect) sleeps after a short
 	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default off.
 	bool                   tracker_sleeping_locks      = false;
-	// --scalable-read-locks: the pipeline map and the program table are read under a reader-writer lock whose readers write
-	// only to a cache line of their own (common/scalableSharedMutex.h), instead of the one shared reader count that the GPU
-	// thread and the look-ahead workers fight over on every draw. Exact. Default off.
+	// --scalable-read-locks: the pipeline map and the program table are read without a lock and without a locked instruction
+	// (a published index, common/publishedIndex.h; a miss repeats the lookup under a reader lock whose readers write only to a
+	// cache line of their own, common/scalableSharedMutex.h). A locked instruction on the GPU thread waits for its earlier
+	// stores; the lookup follows the vertex and index copies of the draw. Exact. Default off.
 	bool                   scalable_read_locks         = false;
 	// --submit-thread: a flush at a batch boundary ends the command buffer on the GPU thread and hands the vkQueueSubmit, and the wait for the
 	// upload copy helpers that must come first, to a thread of its own, so the GPU thread goes on recording while they happen

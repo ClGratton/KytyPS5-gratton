@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/publishedIndex.h"
 #include "common/scalableSharedMutex.h"
 #include "graphics/host_gpu/renderer/pipeline/asyncPipelineCompiler.h"
 #include "graphics/host_gpu/renderer/pipeline/variantStore.h"
@@ -432,10 +433,24 @@ private:
 	// Guarded by m_pipelines_mutex whenever m_async_mode != Off (workers publish into them).
 	// Pipeline objects are heap nodes that are never erased while the cache lives, so a returned
 	// Pipeline& / Pipeline* stays valid after the lock is dropped.
-	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
-	                                                        m_graphics_pipelines;
-	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
+	using GraphicsPipelineMap = std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>;
+	using ComputePipelineMap  = std::unordered_map<uint64_t, std::unique_ptr<Pipeline>>;
+	GraphicsPipelineMap                                     m_graphics_pipelines;
+	ComputePipelineMap                                      m_compute_pipelines;
 	Common::ScalableSharedMutex                             m_pipelines_mutex;
+	// --scalable-read-locks: the lock-free read side of the two maps (common/publishedIndex.h). Maintained always, by
+	// the publishing thread under the exclusive lock; read only while the flag is on.
+	struct GraphicsNodeKey {
+		const GraphicsPipelineKey& operator()(const GraphicsPipelineMap::value_type& node) const noexcept { return node.first; }
+	};
+	struct ComputeNodeKey {
+		uint64_t operator()(const ComputePipelineMap::value_type& node) const noexcept { return node.first; }
+	};
+	Common::PublishedIndex<GraphicsPipelineMap::value_type, GraphicsPipelineKey, GraphicsNodeKey, GraphicsPipelineKeyHash,
+	                       std::equal_to<GraphicsPipelineKey>>
+	    m_graphics_index;
+	Common::PublishedIndex<ComputePipelineMap::value_type, uint64_t, ComputeNodeKey, std::hash<uint64_t>, std::equal_to<uint64_t>>
+	    m_compute_index;
 
 	// --draw-key-cache (GPU thread only): the last few graphics pipelines found, compared by key
 	// before the hash and map lookup. Pipeline nodes are never erased while the cache lives.

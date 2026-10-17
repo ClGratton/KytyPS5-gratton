@@ -292,11 +292,12 @@ QList<Option> BuildTable() {
 	             "cores to the GPU thread and the draw workers.",
 	             EMU_BOOL(tracker_sleeping_locks)});
 	defs.append({"scalable_read_locks", "--scalable-read-locks", Tab::Gpu, "CPU cost per draw", Kind::Bool,
-	             "Look up pipelines and programs without a shared reader count",
+	             "Look up pipelines and programs without any lock",
 	             "Every draw looks its pipeline and shader program up in tables that the GPU thread and the "
-	             "look-ahead workers all read. With the usual reader-writer lock they share one counter and "
-	             "the cache line moves between cores on every lookup. With this each thread counts in a line "
-	             "of its own. Exact; lowers the GPU thread's CPU time per draw.",
+	             "look-ahead workers all read. The reader-writer lock costs a locked instruction per lookup, "
+	             "which waits for the thread's earlier memory writes to finish. With this the lookup reads an "
+	             "index that the thread that adds a pipeline publishes, with plain loads. Exact; lowers the "
+	             "GPU thread's CPU time per draw.",
 	             EMU_BOOL(scalable_read_locks)});
 	defs.append({"submit_thread", "--submit-thread", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Submit command buffers from a thread of its own",

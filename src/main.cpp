@@ -292,10 +292,9 @@ static void PrintUsage() {
 	         "                                       a page-protection call sleeps after a short spin instead of\n"
 	         "                                       burning a core for the whole call. The GPU thread always\n"
 	         "                                       spins. Default: false.\n");
-	::printf("  --scalable-read-locks <true|false>   The pipeline map and the program table are read under a lock whose\n"
-	         "                                       readers do not write to a cache line shared with the other\n"
-	         "                                       threads (the GPU thread and the look-ahead workers looked\n"
-	         "                                       them up on every draw). Exact. Default: false.\n");
+	::printf("  --scalable-read-locks <true|false>   The pipeline map and the program table are read without a lock\n"
+	         "                                       and without any locked instruction (published index; a miss\n"
+	         "                                       repeats the lookup under the lock). Exact. Default: false.\n");
 	::printf("  --submit-thread <true|false>         A flush at a batch boundary hands vkQueueSubmit, and the wait for\n"
 	         "                                       the upload copy helpers before it, to a thread of its own\n"
 	         "                                       instead of the GPU thread. Exact. Default: false.\n");

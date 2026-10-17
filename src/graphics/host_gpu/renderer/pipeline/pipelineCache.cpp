@@ -2014,6 +2014,12 @@ struct PipelineCache::ProgramCache {
 	}
 
 	[[nodiscard]] SourceEntry* FindEntry(const ProgramKey& key) {
+		// --scalable-read-locks: no lock and no locked instruction on a hit; a miss repeats the lookup under the lock.
+		if (Common::ScalableLocksEnabled()) {
+			if (const auto* node = programs_index.Find(key)) {
+				return const_cast<SourceEntry*>(&node->second);
+			}
+		}
 		Common::ScalableSharedMutex::SharedGuard lock(programs_mutex);
 		const auto                               iter = programs.find(key);
 		return iter != programs.end() ? &iter->second : nullptr;
@@ -2024,11 +2030,21 @@ struct PipelineCache::ProgramCache {
 	SourceEntry* InsertEntry(const ProgramKey& key, ShaderRecompiler::IR::ResourcePlan plan,
 	                         std::unique_ptr<ShaderRecompiler::ShaderSource> call_source) {
 		Common::ScalableSharedMutex::ExclusiveGuard lock(programs_mutex);
-		return &programs.try_emplace(key, std::move(plan), std::move(call_source)).first->second;
+		auto [iter, inserted] = programs.try_emplace(key, std::move(plan), std::move(call_source));
+		if (inserted) {
+			programs_index.Insert(&*iter);
+		}
+		return &iter->second;
 	}
 
 	Common::ScalableSharedMutex                                 programs_mutex;
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
+	struct ProgramNodeKey {
+		const ProgramKey& operator()(const std::pair<const ProgramKey, SourceEntry>& node) const noexcept { return node.first; }
+	};
+	// The lock-free read side of `programs` (common/publishedIndex.h); see FindEntry.
+	Common::PublishedIndex<std::pair<const ProgramKey, SourceEntry>, ProgramKey, ProgramNodeKey, ProgramKeyHash, std::equal_to<ProgramKey>>
+	    programs_index;
 	// In-flight --async-pipelines program jobs, keyed by (program, specialization, push cursor).
 	InFlightRegistry<ProgramJobKey, ProgramJobKeyHash>          program_jobs;
 	vk::Device                                                  device;
@@ -2402,6 +2418,12 @@ void PipelineCache::ShutdownAsync() {
 }
 
 PipelineCache::Pipeline* PipelineCache::FindGraphicsPipeline(const GraphicsPipelineKey& key) {
+	// --scalable-read-locks: no lock and no locked instruction on a hit; a miss repeats the lookup under the lock.
+	if (m_async_mode != Config::AsyncPipelineMode::Off && Common::ScalableLocksEnabled()) {
+		if (const auto* node = m_graphics_index.Find(key)) {
+			return node->second.get();
+		}
+	}
 	std::optional<Common::ScalableSharedMutex::SharedGuard> lock;
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
 		lock.emplace(m_pipelines_mutex);
@@ -2445,6 +2467,11 @@ PipelineCache::Pipeline* PipelineCache::FindGraphicsPipelineMemo(const GraphicsP
 }
 
 PipelineCache::Pipeline* PipelineCache::FindComputePipeline(uint64_t program_id) {
+	if (m_async_mode != Config::AsyncPipelineMode::Off && Common::ScalableLocksEnabled()) {
+		if (const auto* node = m_compute_index.Find(program_id)) {
+			return node->second.get();
+		}
+	}
 	std::optional<Common::ScalableSharedMutex::SharedGuard> lock;
 	if (m_async_mode != Config::AsyncPipelineMode::Off) {
 		lock.emplace(m_pipelines_mutex);
@@ -2464,6 +2491,7 @@ PipelineCache::Pipeline* PipelineCache::PublishGraphicsPipeline(const GraphicsPi
 	inserted                  = was_inserted;
 	if (was_inserted) {
 		iter->second = std::move(pipeline);
+		m_graphics_index.Insert(&*iter); // after the node is complete
 	}
 	return iter->second.get();
 }
@@ -2479,6 +2507,7 @@ PipelineCache::Pipeline* PipelineCache::PublishComputePipeline(uint64_t program_
 	inserted                  = was_inserted;
 	if (was_inserted) {
 		iter->second = std::move(pipeline);
+		m_compute_index.Insert(&*iter);
 	}
 	return iter->second.get();
 }
