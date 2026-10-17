@@ -283,6 +283,9 @@ struct ConfigOptions {
 	// --plan-prefetch: kyGpu prefetches every cache line of the next SRT plan's blocks while it uses the current
 	// one (srtPlan.cpp). Default off.
 	bool                   plan_prefetch               = false;
+	// --tracker-sleeping-locks: a game thread that waits for a tracker lock (held across an mprotect) sleeps after a short
+	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default off.
+	bool                   tracker_sleeping_locks      = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;

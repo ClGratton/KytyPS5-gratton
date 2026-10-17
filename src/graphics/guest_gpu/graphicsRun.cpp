@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "common/adaptiveLock.h"
 #include "graphics/host_gpu/renderer/skipDepsHooks.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
 
@@ -624,6 +625,7 @@ void GuestGpu::ThreadRun(void* data) {
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("kyGpu");
 	g_gpu_thread = true;
+	Common::t_spin_only_thread = true;
 	g_gpu_state  = gpu;
 	Common::GpuPhase::AttachGpuThread();
 

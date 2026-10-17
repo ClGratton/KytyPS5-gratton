@@ -1,4 +1,5 @@
 #include "common/emulatorConfig.h"
+#include "common/adaptiveLock.h"
 
 #include "common/assert.h"
 #include "common/benchInstrument.h"
@@ -34,6 +35,7 @@ void Load(const ConfigOptions& cfg) {
 	        cfg.pad_speaker_volume > 100);
 
 	*g_config = cfg;
+	Common::g_sleeping_locks_field = &g_config->tracker_sleeping_locks;
 	g_config->gpu_indirect_draws_request = cfg.gpu_indirect_draws;
 	g_config->poll_before_wait_on = cfg.poll_before_wait_us != 0;
 
@@ -79,6 +81,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("write-fault-around", &g_config->write_fault_around, false);
 	// A hint to the CPU's cache only; read per plan taken.
 	registry.Register("plan-prefetch", &g_config->plan_prefetch, false);
+	// Read per lock acquisition; a waiter that already spins or sleeps finishes its wait either way.
+	registry.Register("tracker-sleeping-locks", &g_config->tracker_sleeping_locks, false);
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.

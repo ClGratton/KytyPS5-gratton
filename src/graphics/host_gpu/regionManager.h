@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_REGIONMANAGER_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_REGIONMANAGER_H_
 
+#include "common/adaptiveLock.h"
 #include "common/assert.h"
 #include "common/atomicBitMirror.h"
 #include "graphics/host_gpu/bdaSyncGate.h"
@@ -41,18 +42,11 @@ inline std::atomic<uint64_t> g_fault_run_pages {0};
 class TrackingSpinLock final {
 public:
 	void lock() noexcept {
-		const auto thread = CurrentThread();
-		while (m_lock.test_and_set(std::memory_order_acquire)) {
-			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
-#if defined(__x86_64__) || defined(_M_X64)
-			_mm_pause();
-#elif defined(_M_ARM64)
-			__yield();
-#elif defined(__aarch64__)
-			asm volatile("yield");
-#endif
+		if (!m_lock.TryLock()) {
+			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == CurrentThread());
+			m_lock.Lock();
 		}
-		m_owner.store(thread, std::memory_order_relaxed);
+		m_owner.store(CurrentThread(), std::memory_order_relaxed);
 	}
 	[[nodiscard]] bool HeldByCurrentThread() const noexcept {
 		return m_owner.load(std::memory_order_relaxed) == CurrentThread();
@@ -60,7 +54,7 @@ public:
 	void unlock() noexcept {
 		EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) != CurrentThread());
 		m_owner.store(0, std::memory_order_relaxed);
-		m_lock.clear(std::memory_order_release);
+		m_lock.Unlock();
 	}
 
 private:
@@ -80,7 +74,7 @@ private:
 #endif
 	}
 
-	std::atomic_flag     m_lock = ATOMIC_FLAG_INIT;
+	Common::AdaptiveLock m_lock;
 	std::atomic_uint32_t m_owner {0};
 };
 

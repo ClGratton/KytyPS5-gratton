@@ -253,6 +253,13 @@ QList<Option> BuildTable() {
 	             "line of the next plan's blocks while it uses the current one. Only a hint to the "
 	             "CPU cache; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(plan_prefetch)});
+	defs.append({"tracker_sleeping_locks", "--tracker-sleeping-locks", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Let waiting game threads sleep instead of spinning in the memory tracker",
+	             "The emulator write-protects game memory the GPU uses and unprotects a page on the game's first "
+	             "write to it. Many game threads do that at once, and the ones that wait for the page lock spin "
+	             "on a core for the whole protection call. With this they sleep after a short spin, which leaves "
+	             "cores to the GPU thread and the draw workers.",
+	             EMU_BOOL(tracker_sleeping_locks)});
 	defs.append({"write_fault_around", "--write-fault-around", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the pages ahead of a sequential writer in one fault",
 	             "The emulator write-protects the memory the GPU uses to learn when the game "

@@ -183,6 +183,7 @@ static void PrintUsage() {
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
+	         "                                       tracker-sleeping-locks,\n"
 	         "                                       image-presence, image-pool,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
@@ -266,6 +267,10 @@ static void PrintUsage() {
 	::printf("  --plan-prefetch <true|false>         While the GPU thread uses one SRT plan it prefetches every\n"
 	         "                                       cache line of the next plan's blocks (a hint to the CPU\n"
 	         "                                       cache; needs --srt-plans). Default: false.\n");
+	::printf("  --tracker-sleeping-locks <true|false> A game thread that waits for a memory-tracking lock held across\n"
+	         "                                       a page-protection call sleeps after a short spin instead of\n"
+	         "                                       burning a core for the whole call. The GPU thread always\n"
+	         "                                       spins. Default: false.\n");
 	::printf("  --write-fault-around <true|false>    A guest write fault that continues a sequential run of\n"
 	         "                                       writes marks the clean pages ahead as modified with it,\n"
 	         "                                       so a streaming writer faults once per run instead of once\n"
@@ -1049,6 +1054,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--plan-prefetch") {
 			if (!ParseBool(value, options.config.plan_prefetch)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--tracker-sleeping-locks") {
+			if (!ParseBool(value, options.config.tracker_sleeping_locks)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

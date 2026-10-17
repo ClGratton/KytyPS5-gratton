@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/pageManager.h"
 
+#include "common/adaptiveLock.h"
 #include "common/alignment.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -66,22 +67,12 @@ constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 
 class SpinGuard final {
 public:
-	explicit SpinGuard(std::atomic_flag& lock): m_lock(lock) {
-		while (m_lock.test_and_set(std::memory_order_acquire)) {
-#if defined(__x86_64__) || defined(_M_X64)
-			_mm_pause();
-#elif defined(_M_ARM64)
-			__yield();
-#elif defined(__aarch64__)
-			asm volatile("yield");
-#endif
-		}
-	}
-	~SpinGuard() { m_lock.clear(std::memory_order_release); }
+	explicit SpinGuard(Common::AdaptiveLock& lock): m_lock(lock) { m_lock.Lock(); }
+	~SpinGuard() { m_lock.Unlock(); }
 	KYTY_CLASS_NO_COPY(SpinGuard);
 
 private:
-	std::atomic_flag& m_lock;
+	Common::AdaptiveLock& m_lock;
 };
 
 void ValidateRange(uint64_t vaddr, uint64_t size) {
@@ -144,7 +135,7 @@ struct PageManager::Impl {
 	static_assert(sizeof(PageState) == 1);
 
 	struct Region {
-		std::atomic_flag                    lock = ATOMIC_FLAG_INIT;
+		Common::AdaptiveLock                lock;
 		std::array<PageState, REGION_PAGES> pages;
 		// --mem-residency read probes: one bit per page, under `lock`.
 		std::array<uint64_t, REGION_PAGES / 64> probes {};
