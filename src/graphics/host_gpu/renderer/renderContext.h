@@ -106,6 +106,8 @@ private:
 	uint64_t                  m_bda_full_ns       = 0; // time spent in full passes
 	// --bda-dirty-log: the log is armed by a full pass and valid while the mapping generation is the one of
 	// that pass; the passes it replaced, the ranges it visited, and the full passes it fell back to.
+	std::vector<std::pair<uint64_t, uint64_t>> m_bda_log_runs; // scratch of the log pass: merged [begin, end)
+	uint64_t                  m_bda_log_runs_total = 0;
 	bool                      m_bda_log_armed      = false;
 	uint64_t                  m_bda_log_mapped_gen = 0;
 	uint64_t                  m_bda_log_map_epoch  = 0;

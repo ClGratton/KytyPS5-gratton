@@ -201,12 +201,33 @@ void RenderContext::PrepareBda(bool address_writes) {
 		if (m_bda_log_armed && m_bda_log_mapped_gen == m_mapped_generation &&
 		    m_bda_log_map_epoch == map_epoch) {
 			uint64_t ranges = 0;
+			auto& runs = m_bda_log_runs;
+			runs.clear();
 			if (BdaSync::g_dirty_log.Drain([&](uint64_t address, uint64_t size) {
 				    ranges++;
-				    m_buffer_cache.SynchronizeBuffersInRange(address, size);
+				    runs.emplace_back(address, address + size < address ? ~uint64_t {0} : address + size);
 			    })) {
+				// Pages dirtied one after another by a streaming writer are noted one by one: merge the notes
+				// that touch or lie within 64 KiB of each other, so that one buffer sync (one upload, one
+				// protection change) serves the whole run instead of one per page.
+				std::sort(runs.begin(), runs.end());
+				size_t out = 0;
+				for (size_t i = 1; i < runs.size(); i++) {
+					if (runs[i].first <= runs[out].second + 0x10000) {
+						runs[out].second = std::max(runs[out].second, runs[i].second);
+					} else {
+						runs[++out] = runs[i];
+					}
+				}
+				if (!runs.empty()) {
+					runs.resize(out + 1);
+				}
+				for (const auto& [begin, end]: runs) {
+					m_buffer_cache.SynchronizeBuffersInRange(begin, end - begin);
+				}
 				m_bda_log_passes++;
 				m_bda_log_ranges += ranges;
+				m_bda_log_runs_total += runs.size();
 				done = true;
 				if (Config::ResolvedDrawVerify()) {
 					BdaVerifyLogPass();
@@ -243,11 +264,11 @@ void RenderContext::PrepareBda(bool address_writes) {
 	if ((calls & 0x3FFF) == 0) {
 		Log::WriteToConsoleAndLog(
 		    fmt::format("GPU: BDA sync calls={} full={} skipped={} full_pass_ms={:.1f} "
-		                "(--bda-sync-skip {}); dirty log: passes={} ranges={} fallbacks={} verified={} "
+		                "(--bda-sync-skip {}); dirty log: passes={} ranges={} runs={} fallbacks={} verified={} "
 		                "(--bda-dirty-log {})\n",
 		                calls, m_bda_full, m_bda_skipped, static_cast<double>(m_bda_full_ns) / 1e6,
 		                Config::BdaSyncSkip() ? "on" : "off", m_bda_log_passes, m_bda_log_ranges,
-		                m_bda_log_falls, m_bda_log_verified,
+		                m_bda_log_runs_total, m_bda_log_falls, m_bda_log_verified,
 		                Config::BdaDirtyLogEnabled() ? "on" : "off"));
 	}
 	m_fault_process_pending = true;
