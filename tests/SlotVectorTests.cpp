@@ -84,10 +84,13 @@ void TestManySlots() {
 		}
 	}
 	Check(slots.size() == static_cast<size_t>(live), "size after the erasures");
-	for (int i = 0; i < 1700; ++i) {
+	const int freed = (5000 + 2) / 3; // the indices 0, 3, 6, ...
+	for (int i = 0; i < freed; ++i) {
 		(void)slots.insert(-i);
 	}
 	Check(slots.capacity() == 5000, "freed slots were not reused first");
+	(void)slots.insert(-1);
+	Check(slots.capacity() == 5001, "a new slot is made once the freed ones are used");
 }
 
 } // namespace
