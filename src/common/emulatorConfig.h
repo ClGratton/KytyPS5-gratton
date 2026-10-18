@@ -230,8 +230,8 @@ struct ConfigOptions {
 	bool                   lookahead_adaptive          = true;
 	// --skip-ir-validation: skip the shader IR consistency checks in release translations (about a
 	// fifth of translate time; the output is byte-identical). Debug builds always validate and
-	// KYTY_IR_VALIDATE forces it on. Default off (= validate, stock behaviour).
-	bool                   skip_ir_validation          = false;
+	// KYTY_IR_VALIDATE forces it on. Default on (--skip-ir-validation false validates, as stock).
+	bool                   skip_ir_validation          = true;
 	// --spirv-robust-bounds: leave storage-buffer loads to robustBufferAccess2 instead of emitting
 	// an `if (index < OpArrayLength)` block around each one (shorter SPIR-V, less driver compile
 	// time; an out-of-bounds load reads zero either way). Stores and atomics keep their checks.
@@ -398,9 +398,9 @@ struct ConfigOptions {
 	// Exact (only where the memory comes from changes); default on.
 	bool                   plan_pool = true;
 	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
-	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
+	// key before the hash and map lookup. Default on. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.
-	bool                   draw_key_cache              = false;
+	bool                   draw_key_cache              = true;
 	// --srt-table-walk: refresh a native-eligible shader's flattened SRT from a table through the
 	// guest-memory callback instead of walking the value graph. Default on.
 	bool                   srt_table_walk              = true;

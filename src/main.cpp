@@ -380,7 +380,7 @@ static void PrintUsage() {
 	::printf("  --draw-key-cache <true|false>        Per-draw lookup fast paths: remember the graphics pipelines of\n"
 	         "                                       the last few draws and find them by comparing keys, and\n"
 	         "                                       refresh shader SRT tables from a table (--srt-table-walk).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --srt-table-walk <true|false>        Refresh a shader's flattened SRT (pointer tree reads) from a\n"
 	         "                                       precomputed table instead of walking the value graph.\n"
 	         "                                       Default: true.\n");
@@ -477,7 +477,7 @@ static void PrintUsage() {
 	::printf("  --skip-ir-validation <true|false>    Skip the shader IR consistency checks in release\n"
 	         "                                       translations (cuts translate time; output is\n"
 	         "                                       identical). KYTY_IR_VALIDATE=1 forces them on.\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --debug-lookahead-verify <true|false> Debug: recompile every prefetched program before\n"
 	         "                                       its first use and compare the SPIR-V. Default: false.\n");
 	::printf("  --pipeline-lookahead-kinds <all|graphics|compute|none>\n"
