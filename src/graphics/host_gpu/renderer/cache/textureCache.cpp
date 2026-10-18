@@ -1552,6 +1552,43 @@ bool TextureCache::RefindImage(ImageId id, uint64_t generation, const ImageDesc&
 	return true;
 }
 
+static bool IsColorMetadata(ImageMetadataKind kind) {
+	return kind == ImageMetadataKind::Dcc || kind == ImageMetadataKind::Cmask;
+}
+
+bool TextureCache::ReplayKeptImage(ImageId id, uint64_t generation, const ImageDesc& desc, KeptStamp& stamp) {
+	if (generation == 0 || __atomic_load_n(&m_image_set_generation, __ATOMIC_ACQUIRE) != generation ||
+	    desc.type != BindingType::Texture || IsColorMetadata(desc.info.metadata.kind)) {
+		return false;
+	}
+	auto& image = m_slot_images[id];
+	// FinishFind returns before doing anything unless the binding carries colour metadata or the image holds a fast-clear that a
+	// texture view of it sees (MaterializeColorClear's binding_metadata / use_target).
+	if (!image.registered || (IsColorMetadata(image.info.metadata.kind) && image.info.metadata.clear_register_valid)) {
+		return false;
+	}
+	const auto tick = m_scheduler.CurrentTick();
+	if (stamp.access_tick != tick) {
+		image.tick_accessed_last = tick;
+		stamp.access_tick        = tick;
+	}
+	if (stamp.touch_tick != m_gc_tick) {
+		std::scoped_lock lock {m_lock};
+		TouchImage(image);
+		stamp.touch_tick = m_gc_tick;
+	}
+	return true;
+}
+
+bool TextureCache::KeptImageNeedsNoWork(ImageId id, uint64_t generation) const {
+	if (generation == 0 || __atomic_load_n(&m_image_set_generation, __ATOMIC_ACQUIRE) != generation) {
+		return false;
+	}
+	const auto& image = m_slot_images[id];
+	return image.registered && !image.binding.needs_rebind && !image.depth_id && !image.info.HasStencil() &&
+	       !image.info.metadata.clear_register_valid && image.RefreshIsNoop();
+}
+
 void TextureCache::FinishFind(ImageId id, const ImageDesc& desc, uint32_t metadata_base_layer) {
 	MaterializeColorClear(id, desc, metadata_base_layer);
 	if (desc.type == BindingType::VideoOut &&

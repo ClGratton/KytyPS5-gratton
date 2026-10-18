@@ -72,6 +72,20 @@ public:
 	// image set changed since.
 	[[nodiscard]] bool          RefindImage(ImageId id, uint64_t generation, const ImageDesc& desc,
 	                                        uint32_t metadata_base_layer);
+	// --incremental-draw: the stamps of a binding kept from an earlier draw. Both are monotonic, so an LRU touch or an access-tick
+	// store that would repeat the one already made is skipped.
+	struct KeptStamp {
+		uint64_t touch_tick  = 0; // GC tick of the last LRU touch
+		uint64_t access_tick = 0; // scheduler tick of the last tick_accessed_last store
+	};
+	// RefindImage for a binding that a draw before kept (the same request, resolved to `id` under `generation`), without the cache lock
+	// unless the LRU needs a touch. True: the image set is unchanged and nothing makes the repeat do work (no colour metadata to
+	// materialize), and the bookkeeping is done. False: nothing was touched; the caller takes the ordinary path.
+	[[nodiscard]] bool          ReplayKeptImage(ImageId id, uint64_t generation, const ImageDesc& desc, KeptStamp& stamp);
+	// Whether MaterializeViewClear, FindTexture and the rebind checks of RenderExecutor::RebindImages are all no-ops for a kept sampled
+	// colour texture (`id`, kept under `generation`): the set is unchanged, the image is registered with nothing to rebind, has no
+	// fast-clear to materialize, and RefreshImage has nothing to do (tracked as it should be, no pending guest write).
+	[[nodiscard]] bool          KeptImageNeedsNoWork(ImageId id, uint64_t generation) const;
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);

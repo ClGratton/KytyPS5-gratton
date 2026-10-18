@@ -244,6 +244,8 @@ private:
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value,
 	                                            PreparedBindings::ImageSource* source = nullptr);
+	void VerifyKeptSlot(const TextureBinding& kept, const ShaderRecompiler::IR::ImageResource& resource,
+	                    const ShaderRecompiler::IR::DescriptorValue& value);
 	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                             std::span<RenderColorInfo> colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,

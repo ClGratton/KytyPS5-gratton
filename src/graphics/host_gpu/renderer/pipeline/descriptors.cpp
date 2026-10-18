@@ -28,6 +28,7 @@
 #include "graphics/host_gpu/renderer/image/compareView.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/incrementalDraw.h"
 #include "graphics/host_gpu/renderer/pipeline/resolvedDrawStats.h"
 #include "graphics/host_gpu/renderer/pipeline/scalarReadHazard.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -744,6 +745,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
                                               PreparedBindings::ImageSource*               source) {
 	if (source != nullptr) {
 		source->generation = 0;
+		source->kept       = false;
 	}
 	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
@@ -1005,12 +1007,45 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.shader_data.clear();
 	prepared.image_sources.resize(program.info.images.size());
 	const bool reuse_bindings = Config::TextureBindingReuseEnabled();
+	const bool incremental    = Config::IncrementalDrawEnabled();
 	std::optional<TextureCache::LockBatch> texture_batch;
 	texture_batch.emplace(m_context.GetTextureCache());
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		// Consecutive draws mostly bind the same textures: keep the slot's binding while the
 		// descriptor, the shader's image resource and the image set are unchanged.
 		Common::GpuPhase::Scope gpu_phase_reuse(Common::GpuPhase::Phase::SrtReuse);
+		auto& slot = prepared.image_sources[i];
+		slot.replayed = false;
+		if (incremental) {
+			// --incremental-draw: a slot kept whole by the draw before is replayed (view and layout stay in place) when its inputs
+			// are the same and the image has nothing to redo; RebindImages then skips it too.
+			auto& stats = IncrementalDraw::Stats();
+			stats.slots++;
+			if (slot.kept) {
+				stats.kept_offered++;
+				auto& kept = prepared.images[i];
+				if (!(slot.generation != 0 && slot.value == snapshot.images[i] &&
+				      (slot.resource_address == &program.info.images[i] || slot.resource == program.info.images[i]))) {
+					stats.miss_input++;
+					slot.kept = false;
+				} else if (!m_context.GetTextureCache().ReplayKeptImage(kept.image_id, slot.generation, kept.desc, slot.stamp)) {
+					stats.miss_replay++;
+					slot.kept = false;
+				} else {
+					stats.replayed++;
+					if (IncrementalDraw::VerifyEnabled() &&
+					    !ReuseTexture(m_context.GetTextureCache(), slot, kept, program.info.images[i], snapshot.images[i])) {
+						EXIT("incremental draw: a replayed image slot is not reusable (stage %u slot %u)\n",
+						     static_cast<uint32_t>(program.stage), i);
+					}
+					BindImage(kept.image_id, false);
+					slot.replayed = true;
+					if (IncrementalDraw::StatsEnabled()) IncrementalDraw::MaybePrint(stats);
+					continue;
+				}
+			}
+			if (IncrementalDraw::StatsEnabled()) IncrementalDraw::MaybePrint(stats);
+		}
 		if (reuse_bindings && ReuseTexture(m_context.GetTextureCache(), prepared.image_sources[i],
 		                                   prepared.images[i], program.info.images[i],
 		                                   snapshot.images[i])) {
@@ -1161,8 +1196,23 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	prepared.image_sources.resize(images.size());
 	auto& texture_cache = m_context.GetTextureCache();
 	const TextureCache::LockBatch texture_batch(texture_cache);
+	const bool incremental = Config::IncrementalDrawEnabled();
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+		auto& slot = prepared.image_sources[i];
+		if (slot.replayed) {
+			// --incremental-draw: PrepareBindings replayed this slot. Its view is still the right one when nothing in the cache moved
+			// since and the image has nothing to rebind, materialize, refresh or track; else the ordinary path below redoes it.
+			slot.replayed = false;
+			auto& stats   = IncrementalDraw::Stats();
+			if (images[i].image_id && texture_cache.KeptImageNeedsNoWork(images[i].image_id, slot.generation)) {
+				stats.rebind_skipped++;
+				if (IncrementalDraw::VerifyEnabled()) VerifyKeptSlot(images[i], program.info.images[i], snapshot.images[i]);
+				continue;
+			}
+			stats.rebind_fell_back++;
+			slot.kept = false;
+		}
 		if (!images[i].image_id) continue;
 		const auto old_image = texture_cache.m_slot_images.try_get(images[i].image_id);
 		if (old_image == nullptr || !old_image->registered ||
@@ -1203,7 +1253,46 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		const bool storage = binding.desc.type == TextureCache::BindingType::Storage;
 		image.usage.storage |= storage;
 		image.usage.texture |= !storage;
+		if (incremental) {
+			// Keep a plain sampled colour texture whole for the next draw: one view, no stencil or depth association, no
+			// comparison sampling, and the set unchanged since the lookup that resolved it.
+			auto& stats      = IncrementalDraw::Stats();
+			const bool keep  = !storage && !resource.written && !resource.atomic && !resource.depth_compare &&
+			                   resource.mip_mode != ShaderRecompiler::IR::ImageMipMode::Dynamic && binding.mip_views.empty() &&
+			                   binding.desc.type == TextureCache::BindingType::Texture && binding.image_id == slot.found &&
+			                   !image.info.IsDepth() && !image.depth_id && !image.info.HasStencil() && image.registered &&
+			                   slot.generation != 0 && slot.generation == texture_cache.m_image_set_generation;
+			slot.kept = keep;
+			if (keep) {
+				slot.stamp = {texture_cache.m_gc_tick, 0};
+				stats.keep_set++;
+			} else {
+				stats.keep_refused++;
+			}
+		}
 	}
+}
+
+// KYTY_DRAW_VERIFY: the ordinary path's answer for a slot that was replayed.
+void RenderExecutor::VerifyKeptSlot(const TextureBinding& kept, const ShaderRecompiler::IR::ImageResource& resource,
+                                    const ShaderRecompiler::IR::DescriptorValue& value) {
+	auto&      texture_cache = m_context.GetTextureCache();
+	const auto fresh         = ResolveTexture(resource, value);
+	if (fresh.image_id != kept.image_id) {
+		EXIT("incremental draw: a replayed image slot found image %u/%u, a fresh lookup finds %u/%u\n", kept.image_id.index,
+		     kept.image_id.generation, fresh.image_id.index, fresh.image_id.generation);
+	}
+	const auto view = texture_cache.FindTexture(fresh.image_id, fresh.desc);
+	if (view != kept.image_view) {
+		EXIT("incremental draw: a replayed image slot keeps view %p, a fresh lookup finds %p (image %u/%u)\n",
+		     static_cast<const void*>(static_cast<VkImageView>(kept.image_view)), static_cast<const void*>(static_cast<VkImageView>(view)),
+		     kept.image_id.index, kept.image_id.generation);
+	}
+	if (!SameDecodedDesc(fresh.desc, kept.desc) || kept.desc.type != TextureCache::BindingType::Texture || !kept.mip_views.empty()) {
+		EXIT("incremental draw: a replayed image slot keeps a description that differs from a fresh decode (image %u/%u)\n",
+		     kept.image_id.index, kept.image_id.generation);
+	}
+	IncrementalDraw::Stats().verified++;
 }
 
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,

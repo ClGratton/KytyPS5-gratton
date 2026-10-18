@@ -44,6 +44,12 @@ struct PreparedBindings {
 		ImageId                               found;              // FindImage's result
 		uint64_t                              generation = 0;     // 0: not reusable
 		uint32_t                              metadata_base_layer = 0;
+		// --incremental-draw (incrementalDraw.h): the slot's binding (image, view, desc) was left complete by a full rebind as a
+		// plain sampled colour texture, and the next draw that finds the same inputs replays it without a lookup. `replayed`
+		// marks the draw that did, until its rebind step has run; `stamp` says which LRU touch and access-tick store are done.
+		bool                                  kept     = false;
+		bool                                  replayed = false;
+		TextureCache::KeptStamp               stamp;
 	};
 
 	// The draw owns the immutable compiled-program/runtime-snapshot association through commit.
