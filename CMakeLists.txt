@@ -1429,6 +1429,25 @@ add_dependencies(kyty_emulator kyty_trophy_sound)
 install(FILES "${KYTY_TROPHY_UNLOCK_SOUND}" DESTINATION assets/sounds)
 
 target_link_libraries(kyty_emulator ${kyty_emulator_link_libraries})
+# jemalloc (BSD-2-Clause, compatible with the GPL-2.0 of this project) replaces the host allocator. The look-ahead workers and the
+# GPU thread allocate and free across threads all the time; measured with the library preloaded into the whole process (level,
+# warm, 3 vs 3): GPU-thread CPU about -1.6 ms per frame, fps about +3 %, host CPU about -9 core-ms per frame (notes/CHANGES.md,
+# "Host CPU: glibc malloc tunables, and jemalloc"). The static archive is preferred (no runtime dependency); a system that has only
+# the shared library gets a libjemalloc.so.2 dependency. Without the library the build uses the system malloc and says so.
+# -DKYTY_USE_JEMALLOC=OFF keeps the system malloc. Not with the sampling heap profiler, which is a malloc replacement itself.
+if(LINUX)
+	option(KYTY_USE_JEMALLOC "Link the system jemalloc into kyty_emulator (Linux)" ON)
+	if(KYTY_USE_JEMALLOC AND NOT KYTY_HEAP_PROFILE)
+		find_library(KYTY_JEMALLOC_LIBRARY NAMES libjemalloc.a jemalloc)
+		if(KYTY_JEMALLOC_LIBRARY)
+			message(STATUS "jemalloc: ${KYTY_JEMALLOC_LIBRARY}")
+			target_link_libraries(kyty_emulator ${KYTY_JEMALLOC_LIBRARY})
+			target_compile_definitions(kyty_emulator PRIVATE KYTY_HOST_JEMALLOC=1)
+		else()
+			message(STATUS "jemalloc: not found, kyty_emulator uses the system malloc")
+		endif()
+	endif()
+endif()
 if (WIN32)
 	target_link_libraries(kyty_emulator opengl32)
 	target_link_libraries(kyty_emulator iphlpapi)

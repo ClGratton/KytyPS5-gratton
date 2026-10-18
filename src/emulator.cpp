@@ -32,7 +32,26 @@
 #include <filesystem>
 #include <thread>
 
+#if defined(KYTY_HOST_JEMALLOC)
+// jemalloc's control interface (the library is linked in CMakeLists.txt, KYTY_USE_JEMALLOC).
+extern "C" int mallctl(const char* name, void* oldp, size_t* oldlenp, void* newp, size_t newlen);
+#endif
+
 namespace Emulator {
+
+// The allocator behind malloc/new in this process: the system's, or the jemalloc the build linked in.
+static std::string HostAllocatorName() {
+#if defined(KYTY_HOST_JEMALLOC)
+	const char* version = nullptr;
+	size_t      length  = sizeof(version);
+	if (mallctl("version", &version, &length, nullptr, 0) == 0 && version != nullptr) {
+		return std::string("jemalloc ") + version;
+	}
+	return "jemalloc";
+#else
+	return "system";
+#endif
+}
 
 static void PrintSystemInfo() {
 	const Common::SystemInfo info = Common::GetSystemInfo();
@@ -52,9 +71,10 @@ static void PrintSystemInfo() {
 	     "Host\n"
 	     "  os:      %s\n"
 	     "  cpu:     %s\n"
-	     "  threads: %u\n\n",
+	     "  threads: %u\n"
+	     "  malloc:  %s\n\n",
 	     KYTY_BUILD_LABEL, platform_name, info.ProcessorName.c_str(),
-	     std::thread::hardware_concurrency());
+	     std::thread::hardware_concurrency(), HostAllocatorName().c_str());
 }
 
 static void KytyClose() {
