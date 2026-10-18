@@ -772,6 +772,16 @@ QVariantMap Recommended() {
 	values.insert(QStringLiteral("async_upload_copies"), true);
 	values.insert(QStringLiteral("texture_lock_batch"), true);
 	values.insert(QStringLiteral("push_descriptor_delta"), true);
+	// gratton-play-30 (2026-10-18): the measured exact cuts that were not in the preset yet, integrated as one stack.
+	// --scalable-read-locks and --submit-thread (CHANGES M1, M2: kyGpu -1.0 ms), --small-copy-dedup (D4/D8: 4-way, byte
+	// exact, kyGpu -0.66 ms), --ro-depth-access (D7: GPU busy 30.66 -> 23.89 ms), --compute-image-copy (D12: GPU busy
+	// 23.85 -> 21.23 ms, kyGpu -0.69 ms), --overlap-dispatches (D14: GPU busy 21.28 -> 20.52 ms). The engine defaults stay off.
+	values.insert(QStringLiteral("scalable_read_locks"), true);
+	values.insert(QStringLiteral("submit_thread"), true);
+	values.insert(QStringLiteral("small_copy_dedup"), true);
+	values.insert(QStringLiteral("ro_depth_access"), true);
+	values.insert(QStringLiteral("compute_image_copy"), true);
+	values.insert(QStringLiteral("overlap_dispatches"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);
