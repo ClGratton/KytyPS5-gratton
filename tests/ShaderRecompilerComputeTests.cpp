@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "common/subsystems.h"
 #include "common/threads.h"
+#include "common/runtimeToggles.h"
 #include "gpu_test_shaders/gpu_test_ms_depth_spv.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
@@ -1039,6 +1040,28 @@ Config::ConfigOptions &BaselineOptions() {
 // Several flows were scripted against the stock flow: exact submission counts, the run-counted GC clock, the transfer-path
 // reference of a copy. A flow whose script depends on how a default-on flag changes that behaviour pins the flag off for its
 // duration and says why at the use; everything else in the suite runs with the shipped defaults.
+// KYTY_TEST_FLAGS_OFF=name,name (registered runtime-toggle names, e.g. compute-image-copy): switches those flags off after every
+// configuration load of this suite, to find which default-on flag a failing flow depends on (bisect: one run per half of the
+// list). Unset in ctest.
+static void ApplyFlagsOffFromEnvironment() {
+  if (const char *list = std::getenv("KYTY_TEST_FLAGS_OFF")) {
+    Common::RuntimeToggles::Registry registry;
+    Config::RegisterRuntimeToggles(registry);
+    std::string text(list);
+    size_t pos = 0;
+    while (pos <= text.size()) {
+      auto end = text.find(',', pos);
+      if (end == std::string::npos) end = text.size();
+      const auto name = text.substr(pos, end - pos);
+      pos = end + 1;
+      if (!name.empty()) {
+        std::printf("[flags-off] %s: %s\n", name.c_str(),
+                    Common::RuntimeToggles::ResultName(registry.Set(name, false)));
+      }
+    }
+  }
+}
+
 class PinFlagsOff {
 public:
   PinFlagsOff(std::initializer_list<bool Config::ConfigOptions::*> flags) {
@@ -1047,10 +1070,11 @@ public:
       options.*flag = false;
     }
     Config::Load(options);
+    ApplyFlagsOffFromEnvironment();
   }
   PinFlagsOff(const PinFlagsOff &) = delete;
   PinFlagsOff &operator=(const PinFlagsOff &) = delete;
-  ~PinFlagsOff() { Config::Load(BaselineOptions()); }
+  ~PinFlagsOff() { Config::Load(BaselineOptions()); ApplyFlagsOffFromEnvironment(); }
 };
 
 void EnsureConfigInitialized() {
@@ -1090,6 +1114,7 @@ void EnsureConfigInitialized() {
     }
     BaselineOptions() = options;
     Config::Load(options);
+    ApplyFlagsOffFromEnvironment();
     subsystems.Initialize<Log::Lifecycle>();
     subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
     ShaderInit();
@@ -16094,8 +16119,16 @@ public:
               "raw image synchronization should be disabled by default");
       for (const auto [sync_raw, formatted] :
            {std::pair{false, false}, {true, false}, {false, true}, {true, true}}) {
-        Config::Load({.sync_raw_image_buffers = sync_raw});
+        auto sync_options = BaselineOptions();
+        sync_options.sync_raw_image_buffers = sync_raw;
+        Config::Load(sync_options);
+        ApplyFlagsOffFromEnvironment();
         const bool sync_image = sync_raw || formatted;
+        // The synchronization is an image-to-buffer copy: the transfer path leaves the image in TransferSrc, the compute copy
+        // (--compute-image-copy, on by default) in General. Without it the image keeps the clear's TransferDst.
+        const auto synced_layout =
+            !sync_image ? vk::ImageLayout::eTransferDstOptimal
+            : Config::ComputeImageCopyEnabled() ? vk::ImageLayout::eGeneral : vk::ImageLayout::eTransferSrcOptimal;
         const uint32_t before = 0x13579bd0u | (uint32_t(sync_raw) << 1u) | uint32_t(formatted);
         constexpr uint32_t guard = 0x2468ace0u;
         constexpr uint32_t after = 0xa1b2c3d4u;
@@ -16137,9 +16170,7 @@ public:
                 target.image_id == expanded_array_id &&
                     buffer.range == buffer_size &&
                     buffer_bindings.images.empty() &&
-                    texture_cache.GetImage(target.image_id).backing.state.layout ==
-                        (sync_image ? vk::ImageLayout::eTransferSrcOptimal
-                                    : vk::ImageLayout::eTransferDstOptimal),
+                    texture_cache.GetImage(target.image_id).backing.state.layout == synced_layout,
                 "image-to-buffer synchronization ignored its setting or formatted reads");
         auto readback = CreateHostBuffer(name, 2 * sizeof(uint32_t),
                                         vk::BufferUsageFlagBits::eTransferDst, {0, 0});
@@ -16189,7 +16220,8 @@ public:
                 "attachment rendering lost its new color or changed the untouched array layer");
         RenderExecutorTestAccess::ResetBindings(executor);
       }
-      Config::Load({});
+      Config::Load(BaselineOptions());
+      ApplyFlagsOffFromEnvironment();
 
       auto colliding_msaa_texture = array_texture;
       colliding_msaa_texture.fields[3] =
