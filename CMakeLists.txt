@@ -697,6 +697,12 @@ add_executable(page_presence_tests EXCLUDE_FROM_ALL
 target_include_directories(page_presence_tests PRIVATE ${inc_headers})
 target_link_libraries(page_presence_tests Threads::Threads)
 
+add_executable(meta_mirror_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/MetaMirrorTests.cpp"
+)
+target_include_directories(meta_mirror_tests PRIVATE ${inc_headers})
+target_link_libraries(meta_mirror_tests Threads::Threads)
+
 add_executable(hardware_context_epoch_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/HardwareContextEpochTests.cpp"
 )
@@ -1111,6 +1117,7 @@ if(BUILD_TESTING)
 	add_test(NAME bda_sync_gate COMMAND $<TARGET_FILE:bda_sync_gate_tests>)
 	add_test(NAME remembered_mapping COMMAND $<TARGET_FILE:remembered_mapping_tests>)
 	add_test(NAME page_presence COMMAND $<TARGET_FILE:page_presence_tests>)
+	add_test(NAME meta_mirror COMMAND $<TARGET_FILE:meta_mirror_tests>)
 	add_test(NAME adaptive_lock COMMAND $<TARGET_FILE:adaptive_lock_tests>)
 	add_test(NAME sharded_counter COMMAND $<TARGET_FILE:sharded_counter_tests>)
 	add_test(NAME scalable_shared_mutex COMMAND $<TARGET_FILE:scalable_shared_mutex_tests>)
@@ -1352,6 +1359,7 @@ if(BUILD_TESTING)
 		bda_sync_gate_tests
 		remembered_mapping_tests
 		page_presence_tests
+		meta_mirror_tests
 		adaptive_lock_tests
 		sharded_counter_tests
 		scalable_shared_mutex_tests
