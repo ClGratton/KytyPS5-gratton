@@ -79,6 +79,26 @@ public:
 	// Sequencer: waits for a free slot (collecting finished ones meanwhile). Null when stopping or
 	// the speculation guard switched the lookahead off.
 	Task* Acquire() {
+		// --incremental-draw: plans are read once, by kyGpu, in order. Made two frames early (the queue held 38.7 MB against a
+		// 32 MB L3) every plan line has been evicted to DRAM by then; made a fraction of a frame early they are still in the cache.
+		// A bounded wait (1 ms per task at most) keeps the sequencer, and so the pipeline look-ahead, moving.
+		if (Config::IncrementalDrawEnabled()) {
+			static const uint64_t lead = [] {
+				const char* text = std::getenv("KYTY_PLAN_LEAD");
+				return text != nullptr ? std::strtoull(text, nullptr, 10) : uint64_t {3000};
+			}();
+			if (lead != 0 && (m_tail.load(std::memory_order_relaxed) & 7u) == 0) {
+				const auto t0 = Bench::NowNs();
+				while (SrtPlan::GetStore().GetCounters().queued > lead && Bench::NowNs() - t0 < 1'000'000) {
+					if (m_stopping.load(std::memory_order_acquire) || Common::Speculation::Aborted()) {
+						return nullptr;
+					}
+					Collect();
+					std::this_thread::sleep_for(std::chrono::microseconds(20));
+				}
+				m_owner.m_stats.sequencer_stall_ns.fetch_add(Bench::NowNs() - t0, std::memory_order_relaxed);
+			}
+		}
 		const auto tail = m_tail.load(std::memory_order_relaxed);
 		if (tail - m_head.load(std::memory_order_relaxed) >= kCapacity) {
 			const auto t0 = Bench::NowNs();
