@@ -154,6 +154,17 @@ public:
 		return IsGpuModified() && !IsBufferModified() && !IsCpuDirty();
 	}
 	[[nodiscard]] bool IsTracked() const noexcept { return track_addr != 0 && track_addr_end != 0; }
+	// TextureCache::RefreshImage does nothing for this image: its whole range is tracked, no guest write is pending (definite or
+	// possible) and no buffer write overlapped it. The flags are written under the cache lock by other threads; the GPU thread reads
+	// them without it, as the order of a guest write and this draw is free (a write after the read is a write after the draw).
+	[[nodiscard]] bool RefreshIsNoop() const noexcept {
+		return !__atomic_load_n(&m_cpu_dirty, __ATOMIC_RELAXED) && !__atomic_load_n(&m_maybe_cpu_dirty, __ATOMIC_RELAXED) &&
+		       !__atomic_load_n(&m_buffer_modified, __ATOMIC_RELAXED) && track_addr == info.data.address &&
+		       track_addr_end == info.data.End() && info.metadata.compression == VideoOutCompression::Uncompressed;
+	}
+	// Transit(destination_layout, destination_access, range) would record nothing and leave the tracked state as it is.
+	[[nodiscard]] bool TransitRecordsNothing(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+	                                 const std::optional<ImageSubresourceRange>& range) const;
 	[[nodiscard]] uint64_t AccountedSize() const noexcept {
 		return backing.image == nullptr ? 0 : Common::AlignUp(info.data.size, 1024);
 	}

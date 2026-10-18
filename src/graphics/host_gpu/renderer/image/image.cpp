@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/imageCopyKernels.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/incrementalDraw.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "kernel/memory.h"
@@ -145,7 +146,51 @@ bool ReadAfterReadCovered(const VulkanImageState& state, vk::ImageLayout destina
 	       !(destination_access & ~state.access_mask) && !(destination_stage & ~state.pl_stage);
 }
 
+// The stages Transit names for an access set.
+vk::PipelineStageFlags2 DestinationStage(vk::AccessFlags2 destination_access) {
+	const auto transfer_access =
+	    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite;
+	vk::PipelineStageFlags2 destination_stage {};
+	if (static_cast<bool>(destination_access & transfer_access)) {
+		destination_stage |= vk::PipelineStageFlagBits2::eTransfer;
+	}
+	if (!destination_access ||
+	    static_cast<bool>(destination_access & ~vk::AccessFlags2 {transfer_access})) {
+		destination_stage |=
+		    vk::PipelineStageFlagBits2::eAllGraphics | vk::PipelineStageFlagBits2::eComputeShader;
+	}
+	return destination_stage;
+}
+
+constexpr auto kWriteAccess = vk::AccessFlagBits2::eTransferWrite | vk::AccessFlagBits2::eShaderWrite |
+                              vk::AccessFlagBits2::eMemoryWrite;
+
 } // namespace
+
+bool Image::TransitRecordsNothing(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+                          const std::optional<ImageSubresourceRange>& range) const {
+	// The whole-image path of GetBarriers: a partial range or per-subresource states walk the subresources.
+	if (!backing.subresource_states.empty()) {
+		return false;
+	}
+	if (range) {
+		auto checked = *range;
+		if (info.IsVolume()) {
+			checked.base_layer  = 0;
+			checked.layer_count = 1;
+		}
+		if (checked.base_level != 0 || checked.level_count != info.resources.levels || checked.base_layer != 0 ||
+		    checked.layer_count != info.resources.layers) {
+			return false;
+		}
+	}
+	const auto& state = backing.state;
+	if (state.layout == destination_layout && state.access_mask == destination_access &&
+	    !static_cast<bool>(state.access_mask & kWriteAccess)) {
+		return true;
+	}
+	return ReadAfterReadCovered(state, destination_layout, destination_access, DestinationStage(destination_access));
+}
 
 Image::Barriers Image::GetBarriers(vk::ImageLayout                      destination_layout,
                                    vk::AccessFlags2                     destination_access,
@@ -251,18 +296,27 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 
 void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
                     std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer) {
+	// --incremental-draw: most transits repeat the state the image is in (a texture sampled by one draw after another): proven to
+	// record nothing, they skip the barrier computation. KYTY_DRAW_VERIFY runs it anyway and checks.
+	const bool incremental = Config::IncrementalDrawEnabled();
+	if (incremental) {
+		auto& stats = Libs::Graphics::IncrementalDraw::Stats();
+		stats.transit_called++;
+		if (TransitRecordsNothing(destination_layout, destination_access, range)) {
+			if (Libs::Graphics::IncrementalDraw::VerifyEnabled()) {
+				const auto before = backing.state;
+				const auto checked = GetBarriers(destination_layout, destination_access, DestinationStage(destination_access), range);
+				if (!checked.empty() || backing.state.layout != before.layout || backing.state.access_mask != before.access_mask ||
+				    backing.state.pl_stage != before.pl_stage) {
+					EXIT("incremental draw: a transit proved to record nothing recorded %zu barriers\n", checked.size());
+				}
+			}
+			stats.transit_skipped++;
+			return;
+		}
+	}
 	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
-	const auto transfer_access =
-	    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite;
-	vk::PipelineStageFlags2 destination_stage {};
-	if (static_cast<bool>(destination_access & transfer_access)) {
-		destination_stage |= vk::PipelineStageFlagBits2::eTransfer;
-	}
-	if (!destination_access ||
-	    static_cast<bool>(destination_access & ~vk::AccessFlags2 {transfer_access})) {
-		destination_stage |=
-		    vk::PipelineStageFlagBits2::eAllGraphics | vk::PipelineStageFlagBits2::eComputeShader;
-	}
+	const auto destination_stage = DestinationStage(destination_access);
 	const auto barriers =
 	    GetBarriers(destination_layout, destination_access, destination_stage, range);
 	if (barriers.empty()) {
