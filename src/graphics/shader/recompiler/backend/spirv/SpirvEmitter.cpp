@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
@@ -224,10 +225,25 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	const bool loop_guard = loop_limit != 0 && ProgramHasGuardableLoop(program);
 	program.info.uses_loop_guard = loop_guard;
 	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
-	state.lane_count =
-	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
-	        ? 2u
-	        : 1u;
+	bool split_halves =
+	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u;
+	// A wave64 compute program whose lanes never look at each other (no cross-lane operation, no
+	// lane masks as integers, no lane index, no LDS: a wave-synchronous LDS exchange between the
+	// two halves would need them in one invocation) gives the same result as two independent 32-lane
+	// subgroups, so it is emitted once for the workgroup's own invocations instead of twice per
+	// invocation: the SPIR-V is about half the size and the driver compile time tracks its size.
+	// KYTY_WAVE64_UNSPLIT=1 enables it (experiment, off until measured).
+	static const bool unsplit_enabled = [] {
+		const char* env = std::getenv("KYTY_WAVE64_UNSPLIT");
+		return env != nullptr && env[0] == '1';
+	}();
+	if (split_halves && unsplit_enabled && program.stage == ShaderType::Compute &&
+	    !program.info.uses_lds && !program.info.uses_gds && !program.info.bvh && !program.info.function_lds && !program.info.subgroup_ballot && !program.info.subgroup_barrier &&
+	    !program.info.subgroup_shuffle && !program.info.subgroup_arithmetic &&
+	    !program.info.subgroup_local_invocation_id) {
+		split_halves = false;
+	}
+	state.lane_count = split_halves ? 2u : 1u;
 	DefineModule(state);
 	ValidateNativeProgram(program, program.stage == ShaderType::Compute &&
 	                                   input_info.compute != nullptr && input_info.compute->lds_storage,
