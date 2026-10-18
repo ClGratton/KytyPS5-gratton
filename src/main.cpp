@@ -196,6 +196,7 @@ static void PrintUsage() {
 	         "                                       known-copies, gpu-indirect-draws, eager-readback,\n"
 	         "                                       readback-futures, resolved-draw, mapping-memo,\n"
 	         "                                       srt-table-walk, tracker-lockfree, plan-pool,\n"
+	         "                                       lookahead-adaptive,\n"
 	         "                                       poll-before-wait) at the next\n"
 	         "                                       presented frame; applied changes are logged and appended\n"
 	         "                                       to <path>.applied.csv. A flag that needs start-up setup\n"
@@ -453,6 +454,10 @@ static void PrintUsage() {
 	         "                                       --srt-plans) with the capacity of their vectors\n"
 	         "                                       instead of allocating and freeing a dozen heap blocks\n"
 	         "                                       per plan across threads (exact). Default: false.\n");
+	::printf("  --lookahead-adaptive <true|false>    With --lookahead-workers: run only as many workers as\n"
+	         "                                       the GPU thread's plan lookups need (one is dropped after\n"
+	         "                                       a run of quiet windows, all return at the first window\n"
+	         "                                       with misses). Less host CPU, same plans. Default: false.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
@@ -1329,6 +1334,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--tracker-lockfree") {
 			if (!ParseBool(value, options.config.tracker_lockfree)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--lookahead-adaptive") {
+			if (!ParseBool(value, options.config.lookahead_adaptive)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

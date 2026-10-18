@@ -31,6 +31,8 @@ constexpr size_t kMaxBytes = 192u << 20u;
 constexpr int64_t kPeriodNs = 10'000'000'000;
 
 std::atomic<uint64_t> g_producer_events {0};
+std::atomic<uint64_t> g_lookup_events {0}; // single writer (kyGpu): plain read-modify-write, relaxed
+std::atomic<uint64_t> g_lookup_misses {0};
 // The producer's counters are per thread (several prefetch workers produce plans at once, and one
 // shared counter per plan would bounce between their caches); the summary adds the shards up. A shard is
 // written by its own thread only and never freed.
@@ -235,6 +237,18 @@ bool Enabled() {
 
 AdoptTotals& Adopting() {
 	return Consumer().adopt_window;
+}
+
+void NoteLookup(Outcome outcome) {
+	if (outcome == Outcome::SubDraw || outcome == Outcome::NewSource) return;
+	g_lookup_events.store(g_lookup_events.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+	if (outcome == Outcome::NotReady || outcome == Outcome::Late || outcome == Outcome::Missing) {
+		g_lookup_misses.store(g_lookup_misses.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+	}
+}
+
+LookupCounts LookupSnapshot() {
+	return {g_lookup_events.load(std::memory_order_relaxed), g_lookup_misses.load(std::memory_order_relaxed)};
 }
 
 void RecyclePlan(std::unique_ptr<Plan> plan) {

@@ -234,6 +234,9 @@ QList<Option> BuildTable() {
 	defs.append({"tracker_lockfree", "--tracker-lockfree", Tab::Gpu, "CPU cost per draw", Kind::Bool, "Answer tracker queries without locks",
 	             "The buffer cache asks whether a guest range is CPU- or GPU-modified through lock-free copies of the dirty bits instead of taking the tracker's region locks. Exact; lowers the GPU thread's CPU time per buffer binding.",
 	             EMU_BOOL(tracker_lockfree)});
+	defs.append({"lookahead_adaptive", "--lookahead-adaptive", Tab::Shaders, "Pipeline compilation", Kind::Bool, "Run only the look-ahead workers that are needed",
+	             "With look-ahead workers, the emulator drops one worker after a quiet stretch in which the GPU thread found every plan ready, and brings all of them back at the first stretch where plans were late. Each worker slows the others down a little, so fewer workers cost less CPU. The plans are the same.",
+	             EMU_BOOL(lookahead_adaptive)});
 	defs.append({"plan_pool", "--plan-pool", Tab::Gpu, "CPU cost per draw", Kind::Bool, "Reuse the look-ahead's finished plans",
 	             "The look-ahead threads reuse the plans the GPU thread has finished with (and the memory of their vectors) instead of allocating a dozen heap blocks per plan on one thread and freeing them on another. Exact; lowers the host CPU time of the look-ahead and less allocator contention for the GPU thread.",
 	             EMU_BOOL(plan_pool)});

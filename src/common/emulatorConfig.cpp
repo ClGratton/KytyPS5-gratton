@@ -130,6 +130,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Plans taken from or given to the pool follow the flag at each call; a plan made while it was off is
 	// pooled when it comes back, one made while it was on is freed when it comes back after it was turned off.
 	registry.Register("plan-pool", &g_config->plan_pool, false);
+	// The governor reads the flag every few tasks; turning it off puts every worker back at once.
+	registry.Register("lookahead-adaptive", &g_config->lookahead_adaptive, false);
 	// Plan keys resync at the next submission; the adopt path validates every plan, so a change in
 	// the middle of a submission costs plans (misses), never a wrong draw.
 	registry.Register("srt-plans", &g_config->srt_plans, true);
@@ -329,6 +331,10 @@ bool ResolvedDrawVerify() {
 
 bool TrackerLockfreeEnabled() {
 	return Common::RuntimeToggles::Read(g_config->tracker_lockfree);
+}
+
+bool LookaheadAdaptiveEnabled() {
+	return Common::RuntimeToggles::Read(g_config->lookahead_adaptive);
 }
 
 bool PlanPoolEnabled() {

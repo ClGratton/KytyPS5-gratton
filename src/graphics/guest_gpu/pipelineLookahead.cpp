@@ -6,6 +6,7 @@
 #include "common/hangWatchdog.h"
 #include "common/guestRetirement.h"
 #include "common/speculation.h"
+#include "graphics/guest_gpu/lookaheadGovernor.h"
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
@@ -68,7 +69,8 @@ public:
 		std::atomic<bool>                           done {false};
 	};
 
-	Pool(PipelineLookahead& owner, uint32_t workers): m_owner(owner), m_ring(new Task[kCapacity]) {
+	Pool(PipelineLookahead& owner, uint32_t workers)
+	    : m_owner(owner), m_ring(new Task[kCapacity]), m_governor(workers), m_active(workers) {
 		for (uint32_t i = 0; i < workers; ++i) {
 			m_threads.emplace_back([this, i] { WorkerLoop(i); });
 		}
@@ -106,8 +108,11 @@ public:
 		auto       peak  = m_owner.m_stats.max_ring.load(std::memory_order_relaxed);
 		while (depth > peak && !m_owner.m_stats.max_ring.compare_exchange_weak(peak, depth, std::memory_order_relaxed)) {
 		}
-		m_owner.m_stats.tasks.fetch_add(1, std::memory_order_relaxed);
+		const auto tasks = m_owner.m_stats.tasks.fetch_add(1, std::memory_order_relaxed) + 1;
 		m_cv.notify_one();
+		if ((tasks & 63u) == 0) {
+			Govern();
+		}
 	}
 
 	// Sequencer: moves finished slots, in order, into the plan store.
@@ -152,6 +157,7 @@ public:
 			m_stopping.store(true, std::memory_order_release);
 		}
 		m_cv.notify_all();
+		m_cv_idle.notify_all();
 	}
 
 	// Stops the workers; stragglers (a worker parked by a speculative abort, or waiting for a
@@ -162,6 +168,7 @@ public:
 			m_stopping.store(true, std::memory_order_release);
 		}
 		m_cv.notify_all();
+		m_cv_idle.notify_all();
 		for (int i = 0; i < 400 && m_exited.load(std::memory_order_acquire) < m_threads.size() &&
 		                !Common::Speculation::Aborted();
 		     i++) {
@@ -185,19 +192,55 @@ private:
 			Task* task = nullptr;
 			{
 				std::unique_lock lock(m_mutex);
-				m_cv.wait(lock, [this] {
-					return m_stopping.load(std::memory_order_relaxed) ||
-					       m_claim < m_tail.load(std::memory_order_relaxed);
-				});
-				if (m_stopping.load(std::memory_order_relaxed)) {
+				// A worker the governor has stood down waits on its own condition variable, so the wake-up
+				// of a published task (notify_one) always reaches a worker that may take it.
+				while (task == nullptr && !m_stopping.load(std::memory_order_relaxed)) {
+					if (index >= m_active.load(std::memory_order_relaxed)) {
+						m_cv_idle.wait(lock);
+					} else if (m_claim < m_tail.load(std::memory_order_relaxed)) {
+						task = &m_ring[m_claim++ & (kCapacity - 1)];
+					} else {
+						m_cv.wait(lock);
+					}
+				}
+				if (task == nullptr) {
 					break;
 				}
-				task = &m_ring[m_claim++ & (kCapacity - 1)];
 			}
 			Run(*task);
 			task->done.store(true, std::memory_order_release);
 		}
 		m_exited.fetch_add(1, std::memory_order_release);
+	}
+
+	// Sequencer, every 64 tasks: --lookahead-adaptive sizes the set of running workers from the GPU thread's
+	// plan lookups (lookaheadGovernor.h); off, every worker runs.
+	void Govern() {
+		const auto now    = Bench::NowNs();
+		const auto counts = SrtPlan::LookupSnapshot();
+		uint32_t   wanted = m_governor.Active();
+		if (Config::LookaheadAdaptiveEnabled()) {
+			wanted = m_governor.Update(now, counts.events, counts.misses);
+		} else if (wanted != m_governor.Max()) {
+			wanted = m_governor.Reset(now, counts.events, counts.misses);
+		}
+		const auto before = m_active.load(std::memory_order_relaxed);
+		if (wanted == before) {
+			return;
+		}
+		{
+			std::lock_guard lock(m_mutex);
+			m_active.store(wanted, std::memory_order_relaxed);
+		}
+		// Workers that were standing down or are now stood down re-read the level; the ones waiting for a
+		// task re-check whether they still may take it.
+		m_cv.notify_all();
+		m_cv_idle.notify_all();
+		m_owner.m_stats.governor_changes.fetch_add(1, std::memory_order_relaxed);
+		if (Config::LookaheadAdaptiveEnabled()) {
+			std::fprintf(stderr, "Pipeline lookahead: %u of %u workers (was %u), plan misses %.2f%% of the last window\n",
+			             wanted, m_governor.Max(), before, 100.0 * m_governor.LastMissRate());
+		}
 	}
 
 	void Run(Task& task) {
@@ -238,6 +281,9 @@ private:
 	std::unique_ptr<Task[]>  m_ring;
 	std::mutex               m_mutex;
 	std::condition_variable  m_cv;
+	std::condition_variable  m_cv_idle; // workers the governor has stood down
+	LookaheadGovernor        m_governor; // sequencer only
+	std::atomic<uint32_t>    m_active;   // workers 0..m_active-1 take tasks (written under m_mutex)
 	std::atomic<uint64_t>    m_head {0}; // sequencer: next slot to collect
 	std::atomic<uint64_t>    m_tail {0}; // sequencer: next slot to fill
 	uint64_t                 m_claim = 0; // under m_mutex: next slot a worker takes
@@ -343,7 +389,7 @@ std::string PipelineLookahead::SummaryText() const {
 	    "items={};items_late={};draws={};dispatches={};max_queue={};busy_ms={};draw_ms={};dispatch_ms={};"
 	    "aborted={};abandoned={};stale={};retire_signals={};dropped={};workers={};tasks={};worker_busy_ms={};"
 	    "sequencer_stall_ms={};max_ring={};tasks_stale={};tasks_run={};replay_tasks={};replay_ms={};sizeof_ctx={};sizeof_ucfg={};"
-	    "sizeof_sh={};sizeof_vsinfo={};sizeof_psinfo={}",
+	    "sizeof_sh={};sizeof_vsinfo={};sizeof_psinfo={};governor_changes={}",
 	    m_stats.items.load(), m_stats.items_late.load(), m_stats.draws.load(),
 	    m_stats.dispatches.load(), m_stats.max_queue.load(), m_stats.busy_ns.load() / 1000000,
 	    m_stats.draw_ns.load() / 1000000, m_stats.dispatch_ns.load() / 1000000,
@@ -353,7 +399,7 @@ std::string PipelineLookahead::SummaryText() const {
 	    m_stats.worker_busy_ns.load() / 1000000, m_stats.sequencer_stall_ns.load() / 1000000,
 	    m_stats.max_ring.load(), m_stats.tasks_stale.load(), m_stats.tasks_run.load(), m_stats.replay_tasks.load(),
 	    m_stats.replay_ns.load() / 1000000, sizeof(HW::Context), sizeof(HW::UserConfig), sizeof(HW::Shader),
-	    sizeof(ShaderVertexInputInfo), sizeof(ShaderPixelInputInfo));
+	    sizeof(ShaderVertexInputInfo), sizeof(ShaderPixelInputInfo), m_stats.governor_changes.load());
 }
 
 CommandProcessor& PipelineLookahead::Shadow(uint32_t queue_id) {

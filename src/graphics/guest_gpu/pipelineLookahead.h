@@ -77,6 +77,7 @@ public:
 		std::atomic<int64_t>  sequencer_stall_ns {0};
 		std::atomic<uint64_t> max_ring {0};
 		std::atomic<uint64_t> tasks_stale {0}; // dropped by a worker: the guest retired the item meanwhile
+		std::atomic<uint64_t> governor_changes {0}; // --lookahead-adaptive: times the number of running workers changed
 		// KYTY_LOOKAHEAD_REPLAY=K (debug, needs workers): each submission is decoded K-1 more times
 		// and its tasks are run with the plans discarded, to measure what the workers can do.
 		std::atomic<uint64_t> tasks_run {0};    // tasks a worker actually ran (not dropped as stale)

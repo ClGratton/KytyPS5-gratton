@@ -440,6 +440,7 @@ std::unique_ptr<SrtPlan::Plan> TakeAdoptablePlan(const SrtPlan::Key& key, bool n
 	const auto decision = SrtPlan::Decide(SrtPlan::GetStore(), key, nested, stage, shader_hash, inputs,
 	                                      ShadowRead, ShadowDirty, plan);
 	SrtPlan::Adopting().Note(decision);
+	SrtPlan::NoteLookup(decision.outcome);
 	if (decision.Adopted()) return plan;
 	if (plan) SrtPlan::RecyclePlan(std::move(plan));
 	return nullptr;

@@ -1136,6 +1136,17 @@ void NoteProduceCost(int64_t ns);          // recording + finishing the plan
 [[nodiscard]] bool ShadowEnabled();         // --srt-plan-shadow
 [[nodiscard]] AdoptTotals& Adopting();      // the counters of the current window (folded into the total at Poll)
 void RecyclePlan(std::unique_ptr<Plan> plan); // batches finished plans back to the lookahead thread
+// kyGpu thread: one plan lookup and how it ended, for the look-ahead governor (--lookahead-adaptive). A miss
+// is a plan that was not there in time: not ready, its whole submission was started before the look-ahead
+// looked at it, or the look-ahead passed the draw without a plan (workers that cannot keep up drop tasks
+// as stale, which is what overloaded workers look like). Draws that are never planned (nested draws, a
+// shader seen for the first time) do not count.
+void NoteLookup(Outcome outcome);
+struct LookupCounts {
+	uint64_t events = 0;
+	uint64_t misses = 0;
+};
+[[nodiscard]] LookupCounts LookupSnapshot(); // any thread
 void Record(const Sample& sample);
 void NoteDrain();
 void Poll();

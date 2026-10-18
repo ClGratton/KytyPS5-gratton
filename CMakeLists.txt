@@ -595,6 +595,10 @@ add_executable(srt_plan_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SrtPlanTests.cpp"
 )
 target_include_directories(srt_plan_tests PRIVATE ${inc_headers})
+add_executable(lookahead_governor_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/LookaheadGovernorTests.cpp"
+)
+target_include_directories(lookahead_governor_tests PRIVATE ${inc_headers})
 add_executable(scalar_read_hazard_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarReadHazardTests.cpp"
 )
@@ -1049,6 +1053,7 @@ if(BUILD_TESTING)
 	add_test(NAME draw_key_memo COMMAND $<TARGET_FILE:draw_key_memo_tests>)
 	add_test(NAME image_lookup_memo COMMAND $<TARGET_FILE:image_lookup_memo_tests>)
 	add_test(NAME srt_plan COMMAND $<TARGET_FILE:srt_plan_tests>)
+	add_test(NAME lookahead_governor COMMAND $<TARGET_FILE:lookahead_governor_tests>)
 	add_test(NAME emulator_srt_plan_shadow_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --srt-plan-shadow true)
 	add_test(NAME emulator_srt_plan_shadow_invalid
@@ -1321,6 +1326,7 @@ if(BUILD_TESTING)
 		draw_key_memo_tests
 		image_lookup_memo_tests
 		srt_plan_tests
+		lookahead_governor_tests
 		scalar_read_hazard_tests
 		indirect_draw_args_tests
 		indirect_draw_policy_tests

@@ -220,6 +220,9 @@ struct ConfigOptions {
 	// N > 0 makes that thread a sequencer that decodes the PM4 stream and hands each draw, with a
 	// copy of its registers, to N prefetch workers (notes/resolved-draw.md). Default 0.
 	uint32_t               lookahead_workers           = 0;
+	// --lookahead-adaptive: with --lookahead-workers, only as many workers run as the GPU thread's plan lookups
+	// need (graphics/guest_gpu/lookaheadGovernor.h). Scheduling only; default off until measured.
+	bool                   lookahead_adaptive          = false;
 	// --skip-ir-validation: skip the shader IR consistency checks in release translations (about a
 	// fifth of translate time; the output is byte-identical). Debug builds always validate and
 	// KYTY_IR_VALIDATE forces it on. Default off (= validate, stock behaviour).
@@ -509,6 +512,7 @@ bool              GetPrecompileOnLoad();
 bool              GetPipelineVariantsReplay();
 uint32_t          GetPipelineLookaheadKinds();
 uint32_t          GetLookaheadWorkers();
+bool              LookaheadAdaptiveEnabled();
 uint32_t          GetGpuOpsMode();
 uint32_t          GetShaderLoopLimit();
 bool              DebugDumpShaderMatches(uint64_t shader_hash);
