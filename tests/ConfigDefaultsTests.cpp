@@ -6,6 +6,7 @@
 #include "common/runtimeToggles.h"
 #include "graphics/host_gpu/renderer/cache/bufferGcGate.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <chrono>
@@ -370,8 +371,56 @@ void TestSkipGuardDefaults() {
 	Check(Config::SkipGuardEnabled() && !Config::SkipGuardBdaEnabled(), "the 64-bit rule can be off");
 }
 
+// gratton-play-31 (docs/defaults.md): every exact performance flag with a measured gain starts on, and keeps its opt-out. The flags
+// that stay off are the ones with an open correctness question (the exact chain, --eop-labels-at-completion, --occlusion-queries)
+// and the ones whose gain was not measured.
+void TestPerformanceFlagsDefaultOn() {
+	const Config::ConfigOptions o;
+	Check(o.async_pipelines == Config::AsyncPipelineMode::Stall && o.pipeline_lookahead, "async pipelines stall + look-ahead");
+	Check(o.submit_coalesce && o.gc_clock_frames, "submit coalescing with the frame GC clock");
+	Check(o.elide_barriers && o.known_fills && o.clean_guest_reads && o.defer_draw_write_barriers && o.overlap_dispatches,
+	      "the drain and barrier cuts");
+	Check(o.srt_plans && o.srt_table_walk && o.resolved_draw && o.mapping_memo && o.readback_futures, "the draw path");
+	Check(o.image_lookup_memo && o.texture_binding_reuse && o.draw_state_memo && o.push_descriptor_delta && o.draw_key_cache,
+	      "the memo flags");
+	Check(o.bda_dirty_log && o.lazy_op_poll && o.backing_read_cache && o.write_fault_around && o.plan_prefetch &&
+	          o.tracker_lockfree && o.tracker_sleeping_locks && o.image_presence && o.image_pool,
+	      "the perf-stack");
+	Check(o.scalable_read_locks && o.submit_thread && o.small_copy_dedup && o.async_upload_copies && o.texture_lock_batch,
+	      "the threading and copy cuts");
+	Check(o.ro_depth_access && o.compute_image_copy, "the GPU-time cuts");
+	Check(o.plan_pool && o.lookahead_adaptive && o.desc_commit_diet && o.skip_ir_validation, "the host-CPU and diet cuts");
+	Check(o.lookahead_workers == 4 && !o.lookahead_workers_explicit, "four look-ahead workers by default");
+
+	Check(!o.known_stores && !o.known_copies && !o.gpu_indirect_draws, "the exact chain stays off");
+	Check(!o.cp_direct_stores && !o.bda_sync_skip && !o.readback_queue && !o.eager_readback, "flags without a measured gain stay off");
+
+	// The opt-outs reach the config and the accessors.
+	Apply(o);
+	Check(Config::SubmitThreadEnabled() && Config::GetPipelineLookahead(), "an unconfigured emulator runs the recommended set");
+	Config::ConfigOptions off;
+	off.submit_thread = off.pipeline_lookahead = false;
+	off.async_pipelines = Config::AsyncPipelineMode::Off;
+	Apply(off);
+	Check(!Config::SubmitThreadEnabled() && !Config::GetPipelineLookahead(), "the opt-outs still switch them off");
+
+	// A count given on the command line is used as given; the default scales with the host.
+	Config::ConfigOptions workers;
+	workers.lookahead_workers          = 12;
+	workers.lookahead_workers_explicit = true;
+	Apply(workers);
+	Check(Config::GetLookaheadWorkers() == 12, "an explicit --lookahead-workers count is not scaled");
+	const auto hardware = std::thread::hardware_concurrency();
+	Apply(o);
+	Check(Config::GetLookaheadWorkers() == (hardware == 0 ? 4u : std::min(4u, hardware / 4u)),
+	      "the default count is a quarter of the hardware threads, at most 4");
+	Apply(Config::ConfigOptions {});
+}
+
 int main() {
 	Config::Initialize();
+
+	TestPerformanceFlagsDefaultOn();
 
 	TestSkipGuardDefaults();
 	TestGpuTimestampsDefault();
