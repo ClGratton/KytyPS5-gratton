@@ -6,6 +6,7 @@
 #include "common/slotVector.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
+#include "graphics/host_gpu/renderer/image/transitNoop.h"
 
 #include <compare>
 #include <limits>
@@ -60,6 +61,21 @@ public:
 	                                   std::optional<ImageSubresourceRange> range);
 	void Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
 	             std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer);
+	// True when Transit with these arguments would record nothing and change no state (--desc-commit-diet,
+	// transitNoop.h): the whole image is addressed, it has no per-subresource states and is already in the
+	// destination layout and access with no write bit.
+	[[nodiscard]] bool TransitIsNoop(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+	                                 const std::optional<ImageSubresourceRange>& range) const {
+		constexpr auto write_access = vk::AccessFlagBits2::eTransferWrite |
+		                              vk::AccessFlagBits2::eShaderWrite |
+		                              vk::AccessFlagBits2::eMemoryWrite;
+		TransitRange r;
+		if (range) r = {range->base_level, range->level_count, range->base_layer, range->layer_count};
+		return Libs::Graphics::TransitIsNoop(backing.state, backing.subresource_states,
+		                                     info.resources.levels, info.resources.layers, info.IsVolume(),
+		                                     range ? &r : nullptr, destination_layout, destination_access,
+		                                     vk::AccessFlags2 {write_access});
+	}
 	void Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
 	            uint64_t size);
 	// Sets every level and layer of a color image to zero, in place of an Upload of an all-zero
