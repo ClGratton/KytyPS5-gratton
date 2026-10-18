@@ -82,6 +82,9 @@ All have tests and measurements in `bench/RESULTS.md`; the recommended play set 
 | `--fps-limit`, `--gpu-time-scale` | 0 (off), 1.0 | user controls |
 | `--gc-texture-*-mb`, `--gc-buffer-*-mb` | 0 = derived from the device budget | tunable thresholds, never per-game |
 
+## Playability options (off, they change what is shown)
+`--full-speed` (launcher: "Full speed (skip drawing frames when behind)", runtime-toggleable): below the target frame rate a title that advances one simulation step per flip runs in slow motion. With this option the flips keep their rate and frames the emulator cannot afford are skipped for drawing only: dispatches, copies, labels and flips still run, draws are no-ops, the flip of a skipped frame completes early and the last rendered image stays on screen. The shown frame rate drops, effects that blend with earlier frames can ghost, and the game cannot run faster than its own CPU work (measured about 55 flips per second on the reference PC even with every draw skipped). Experimental: see notes/tracks/full-speed.md for the open safety filter.
+
 ## Debug and measurement (off)
 `--vulkan-validation`, `--debug-sync-validation` (synchronization validation, hazards logged as `[Vulkan]` lines, never fatal), `--shader-validation`, `--gpu-assisted-validation`, `--command-buffer-dump*`,
 `--graphics-debug-dump`, `--printf-direction/-output-file`, `--shader-log-*`, `--spirv-debug-printf`,
