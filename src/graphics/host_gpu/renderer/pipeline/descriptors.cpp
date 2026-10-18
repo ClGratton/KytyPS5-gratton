@@ -1524,6 +1524,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			    image.binding.is_target &&
 			    image.binding.attachment_layout == vk::ImageLayout::eUndefined;
 			if (target_without_attachment) {
+				Bench::NoteDiag(Bench::Diag::TargetFallback);
 				const auto count = g_target_fallback_count.fetch_add(1, std::memory_order_relaxed) + 1;
 				if (count <= kTargetFallbackLogLimit) {
 					VRAM_LOG("Texture: image flagged as render target is not an attachment of this "

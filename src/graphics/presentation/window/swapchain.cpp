@@ -353,7 +353,7 @@ public:
 		}
 		m_mapped = static_cast<const uint8_t*>(mapped.pMappedData);
 		std::fprintf(m_file, "t_ns,presented,guest_flips,mean,dark_cells,min_cell,max_cell,"
-		                     "null_tex_zero,null_tex_invalid,null_buf\n");
+		                     "null_tex_zero,null_tex_invalid,null_buf,img_insert,img_delete,img_upload,img_refresh,tgt_fallback,gc_free\n");
 		std::fflush(m_file);
 		Bench::EnableDiag();
 		LOGF("KYTY_FLIP_LUMA: writing %s\n", path);
@@ -454,12 +454,18 @@ public:
 			hi = std::max(hi, l);
 		}
 		const double mean = static_cast<double>(sum) / (kW * kH);
-		std::fprintf(m_file, "%lld,%llu,%llu,%.2f,%u,%u,%u,%llu,%llu,%llu\n",
+		std::fprintf(m_file, "%lld,%llu,%llu,%.2f,%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
 		             static_cast<long long>(t_ns), static_cast<unsigned long long>(presented),
 		             static_cast<unsigned long long>(Bench::GuestFlips()), mean, dark, lo, hi,
 		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullTextureZero)),
 		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullTextureInvalid)),
-		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullBuffer)));
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullBuffer)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::ImageInsert)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::ImageDelete)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::ImageUpload)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::ImageRefresh)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::TargetFallback)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::GcFree)));
 		std::fflush(m_file);
 		if (m_grid != nullptr) {
 			const int64_t  t64 = t_ns;
