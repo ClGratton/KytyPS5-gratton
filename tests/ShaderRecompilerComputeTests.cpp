@@ -1030,6 +1030,29 @@ bool RobustBoundsRequested() {
   return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
+// The options the suite started with (set by EnsureConfigInitialized; the env variants of the ctest runs included).
+Config::ConfigOptions &BaselineOptions() {
+  static Config::ConfigOptions options;
+  return options;
+}
+
+// Several flows were scripted against the stock flow: exact submission counts, the run-counted GC clock, the transfer-path
+// reference of a copy. A flow whose script depends on how a default-on flag changes that behaviour pins the flag off for its
+// duration and says why at the use; everything else in the suite runs with the shipped defaults.
+class PinFlagsOff {
+public:
+  PinFlagsOff(std::initializer_list<bool Config::ConfigOptions::*> flags) {
+    auto options = BaselineOptions();
+    for (const auto flag : flags) {
+      options.*flag = false;
+    }
+    Config::Load(options);
+  }
+  PinFlagsOff(const PinFlagsOff &) = delete;
+  PinFlagsOff &operator=(const PinFlagsOff &) = delete;
+  ~PinFlagsOff() { Config::Load(BaselineOptions()); }
+};
+
 void EnsureConfigInitialized() {
   static bool config_initialized = false;
   if (!config_initialized) {
@@ -1065,6 +1088,7 @@ void EnsureConfigInitialized() {
       }
       options.pipeline_workers = 4;
     }
+    BaselineOptions() = options;
     Config::Load(options);
     subsystems.Initialize<Log::Lifecycle>();
     subsystems.Initialize<Libs::LibKernel::Memory::Lifecycle>();
@@ -3283,6 +3307,10 @@ public:
   }
 
   void CheckGpuCommandLane() {
+    // The packets are scripted against one submission per cache event, GL2 writeback and interrupt boundary; --submit-coalesce
+    // (on by default) holds those submissions back and merges them, which is its own contract (SubmitCoalescer tests).
+    EnsureConfigInitialized();
+    const PinFlagsOff stock_submissions({&Config::ConfigOptions::submit_coalesce});
     EnsureRuntimeContext();
     auto &context = Renderer();
     context.InitializeGpu(nullptr);
@@ -4720,6 +4748,8 @@ public:
 
   void CheckBufferCacheDirtyGarbageCollection() {
     constexpr const char *name = "BufferCacheDirtyGarbageCollection";
+    EnsureConfigInitialized();
+    const PinFlagsOff run_counted_gc({&Config::ConfigOptions::gc_clock_frames});
     constexpr uintptr_t base = 0x0000000200700000ull;
     constexpr uint64_t allocation_size = 0x5000000;
     constexpr uint64_t allocation_alignment = 0x10000;
@@ -6536,6 +6566,10 @@ public:
 
   void CheckUnifiedTextureCacheFlow() {
     constexpr const char *name = "UnifiedTextureCacheFlow";
+    // The GC steps below are counted in collector runs (ages 16/80/160, GcClock::Mode::Runs); the frame clock (on by default,
+    // ages in presented frames) is covered by GcClockTests.
+    EnsureConfigInitialized();
+    const PinFlagsOff run_counted_gc({&Config::ConfigOptions::gc_clock_frames});
     constexpr uintptr_t base = 0x0000000200600000ull;
     constexpr uint64_t allocation_size = 0x3000000;
     constexpr uint64_t allocation_alignment = 0x200000;
@@ -15851,10 +15885,15 @@ public:
             stencil_write
                 ? vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
                 : vk::ImageLayout::eDepthStencilReadOnlyOptimal;
+        // A draw that writes no aspect leaves the image in a read-only layout; --ro-depth-access (on by default) then takes
+        // the attachment read and the sampled read in the one transit and no attachment write.
         const auto expected_access =
-            vk::AccessFlagBits2::eShaderRead |
-            vk::AccessFlagBits2::eDepthStencilAttachmentRead |
-            vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+            !stencil_write && Config::RoDepthAccessEnabled()
+                ? vk::AccessFlagBits2::eShaderRead |
+                      vk::AccessFlagBits2::eDepthStencilAttachmentRead
+                : vk::AccessFlagBits2::eShaderRead |
+                      vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+                      vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
         const auto &vertex_image = shared_bindings.vertex[0].images[0];
         Require(name, "sampled depth and stencil attachment layout",
                 shared_depth.image_id == phased_depth.image_id &&
@@ -19311,6 +19350,10 @@ public:
   // texels with layers, padded buffer rows, a sub-rectangle, a nonzero buffer offset and a mip level.
   void CheckImageCopyKernels() {
     constexpr const char *name = "ImageCopyKernels";
+    // The reference side of every case is the transfer path (Image::Upload / Download). With --compute-image-copy (on by
+    // default) those calls would go through the renderer's own kernels and scheduler instead of this test's.
+    EnsureConfigInitialized();
+    const PinFlagsOff transfer_reference({&Config::ConfigOptions::compute_image_copy});
     EnsureRuntimeContext();
     CommandScheduler scheduler(Renderer(), m_runtime_context);
     HW::Context registers{};
