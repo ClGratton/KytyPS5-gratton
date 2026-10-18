@@ -636,6 +636,9 @@ private:
 		block(p.reads.values);
 	}
 	static bool DeepPrefetchEnabled();
+	// --incremental-draw: the guest bytes a plan's buffer descriptors point at (srtPlan.cpp).
+	static bool GuestDataPrefetchEnabled();
+	static void PrefetchGuestData(const Plan& p);
 
 	static void PrefetchBody(const Plan& p) {
 		__builtin_prefetch(p.snapshot.user_data.data(), 0, 3);
@@ -709,6 +712,10 @@ private:
 		if (i >= entries.size() || !(entries[i].key == key) || !entries[i].plan) return false;
 		plan         = std::move(entries[i].plan);
 		local.cursor = i + 1;
+		// The plan's blocks were prefetched one plan ago; the guest constants, vertex and structured data its buffer
+		// descriptors point at are cold (the guest wrote them a frame ago, other cores' caches) and the draw copies or
+		// reads them a few microseconds from now, one dependent DRAM miss at a time: start those fills now.
+		if (GuestDataPrefetchEnabled()) PrefetchGuestData(*plan);
 		// The next plans are checked next: pull their cache lines in while this one is used.
 		if (DeepPrefetchEnabled()) {
 			// The plan is spread over a dozen heap blocks written by another core: the Plan struct (and so the

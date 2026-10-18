@@ -17,6 +17,39 @@ bool Store::DeepPrefetchEnabled() {
 	return Config::PlanPrefetchEnabled();
 }
 
+bool Store::GuestDataPrefetchEnabled() {
+	return Config::IncrementalDrawEnabled();
+}
+
+// A V# is base[47:0], stride[29:16] of dword 1 and the record count of dword 2 (bytes when the stride is 0). Prefetching
+// is advisory: an unmapped or garbage address is harmless. The first 1 KiB covers the small constant ranges the draw
+// path copies into the stream buffer whole; the hardware prefetcher follows a longer range once it starts.
+void Store::PrefetchGuestData(const Plan& p) {
+	constexpr uint64_t kMaxBytes = 1024;
+	for (const auto& d: p.snapshot.buffers) {
+		if (d.dword_count < 4) continue;
+		const uint64_t base = (d.dwords[0] | (static_cast<uint64_t>(d.dwords[1]) << 32u)) & 0xFFFFFFFFFFFFull;
+		if (base == 0) continue;
+		const uint64_t stride  = (d.dwords[1] >> 16u) & 0x3FFFu;
+		const uint64_t bytes   = std::min<uint64_t>(stride != 0 ? stride * d.dwords[2] : d.dwords[2], kMaxBytes);
+		const uint64_t first   = base & ~uint64_t {63};
+		const uint64_t last    = (base + std::max<uint64_t>(bytes, 1) - 1) | 63u;
+		for (uint64_t at = first; at <= last; at += 64) {
+			__builtin_prefetch(reinterpret_cast<const void*>(at), 0, 3);
+		}
+	}
+	// Validation re-reads the recorded windows one after the other; with every line requested up front the misses overlap.
+	uint32_t lines = 0;
+	for (const auto& w: p.reads.windows) {
+		if (w.address == 0 || w.bytes == 0) continue;
+		const uint64_t first = w.address & ~uint64_t {63};
+		const uint64_t last  = (w.address + w.bytes - 1) | 63u;
+		for (uint64_t at = first; at <= last && lines < 48; at += 64, ++lines) {
+			__builtin_prefetch(reinterpret_cast<const void*>(at), 0, 3);
+		}
+	}
+}
+
 bool PoolEnabled() {
 	return Config::PlanPoolEnabled();
 }
