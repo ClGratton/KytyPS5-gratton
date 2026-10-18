@@ -44,8 +44,6 @@ namespace Libs::Graphics {
 
 namespace {
 
-constexpr uint64_t NumFramesBeforeRemoval = 32;
-
 // KYTY_IMAGE_LOOKUP_VERIFY=1: every hit of the --image-lookup-memo runs the full lookup too and
 // aborts on a disagreement; a line with the counts goes to stdout every 2^20 verified hits.
 [[nodiscard]] bool ImageLookupVerifyEnabled() {
@@ -805,8 +803,11 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	}
 	auto&      cached       = *owner;
 	const auto current_tick = m_scheduler.CurrentTick();
-	const bool safe_to_delete =
-	    current_tick - std::min(current_tick, cached.tick_accessed_last) > NumFramesBeforeRemoval;
+	// Idle for a while (GcClock::OverlapIdle): scheduler ticks stock, presented frames with --gc-clock frames, so that the gate does
+	// not depend on how often the title submits (one tick per submit; --submit-coalesce off gives a tenth of a frame per 32 ticks).
+	const bool safe_to_delete = GcClock::OverlapIdle(
+	    Config::GcClockFrames() ? GcClock::Mode::Frames : GcClock::Mode::Runs, current_tick,
+	    cached.tick_accessed_last, Common::GpuPhase::Frames(), cached.frame_accessed_last);
 
 	const uint32_t requested_block = requested.bytes_per_block * requested.samples;
 	const uint32_t cached_block    = cached.info.bytes_per_block * cached.info.samples;
@@ -1535,7 +1536,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format, uint64_t* un
 		if (view_layer >= 0) {
 			desc.view_info.base_layer = static_cast<uint32_t>(view_layer);
 		}
-		image.tick_accessed_last = m_scheduler.CurrentTick();
+		image.tick_accessed_last  = m_scheduler.CurrentTick();
+		image.frame_accessed_last = Common::GpuPhase::Frames();
 		TouchImage(image);
 	}
 	FinishFind(result, desc, metadata_base_layer);
@@ -1550,7 +1552,8 @@ bool TextureCache::RefindImage(ImageId id, uint64_t generation, const ImageDesc&
 			return false;
 		}
 		auto& image              = m_slot_images[id];
-		image.tick_accessed_last = m_scheduler.CurrentTick();
+		image.tick_accessed_last  = m_scheduler.CurrentTick();
+		image.frame_accessed_last = Common::GpuPhase::Frames();
 		TouchImage(image);
 	}
 	FinishFind(id, desc, metadata_base_layer);

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 
 namespace {
 
@@ -54,6 +55,22 @@ void TestAgeReached() {
 	Check(AgeReached(Mode::Frames, 60, 60), "and applies it at the age");
 }
 
+void TestOverlapIdle() {
+	// Stock: more than 32 scheduler ticks, whatever the frame count says.
+	Check(!OverlapIdle(Mode::Runs, 100, 68, 50, 0), "runs mode: 32 ticks are not yet idle");
+	Check(OverlapIdle(Mode::Runs, 100, 67, 5, 5), "runs mode: 33 ticks are idle");
+	Check(!OverlapIdle(Mode::Runs, 10, 500, 0, 0), "runs mode: a tick in the future clamps to zero idle");
+	// Frames mode: a whole frame idle, however many submits a frame holds (3 or 345).
+	for (const uint64_t ticks_per_frame: {3ull, 36ull, 345ull}) {
+		Check(!OverlapIdle(Mode::Frames, 10 * ticks_per_frame, 10 * ticks_per_frame - 1, 10, 10), "used a tick ago: not idle");
+		Check(!OverlapIdle(Mode::Frames, 11 * ticks_per_frame, 10 * ticks_per_frame, 11, 10), "used in the previous frame: not yet idle");
+		Check(OverlapIdle(Mode::Frames, 12 * ticks_per_frame, 10 * ticks_per_frame, 12, 10), "idle for a whole frame");
+	}
+	// No presents (a loading screen): the tick fallback, 512 ticks per frame step.
+	Check(!OverlapIdle(Mode::Frames, 16384, 0, 7, 7), "no presents: not idle at 32 * 512 ticks");
+	Check(OverlapIdle(Mode::Frames, 16385, 0, 7, 7), "no presents: idle past 32 * 512 ticks");
+}
+
 } // namespace
 
 int main() {
@@ -61,6 +78,7 @@ int main() {
 	TestStockAgesUnchanged();
 	TestFrameAgesScaleWithRefresh();
 	TestAgeReached();
+	TestOverlapIdle();
 	std::printf("GcClockTests: all passed\n");
 	return 0;
 }

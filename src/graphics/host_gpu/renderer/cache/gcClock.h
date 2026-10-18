@@ -60,6 +60,25 @@ struct BufferAges {
 	return {5 * second, 5 * second / 2};
 }
 
+// TextureCache::ResolveOverlap frees an aliased cached image of another layout only once it has been idle for a while;
+// freeing a used one makes the title's next access create, upload and refresh it again. Stock counts the idle time in scheduler
+// ticks (more than 32), and a tick is one submit: with a submit per end-of-pipe event (about 345 a frame in one measured title)
+// the same 32 ticks are a tenth of a frame, the aliased images are freed and rebuilt every frame (image inserts, uploads and
+// refreshes about 4x higher in a measured title scene), while with coalesced submits the gate is about a frame. Frames mode
+// counts presented frames like the collector: idle for one whole frame (accessed at least two frame counts ago). A stretch without
+// presents (a loading screen) falls back to scheduler ticks, 512 per frame step like Tick().
+constexpr uint64_t OverlapIdleTicks         = 32;
+constexpr uint64_t OverlapIdleFallbackTicks = OverlapIdleTicks * RunsPerFallbackStep;
+
+[[nodiscard]] constexpr bool OverlapIdle(Mode mode, uint64_t tick_now, uint64_t tick_last, uint64_t frame_now,
+                                         uint64_t frame_last) {
+	const uint64_t ticks_idle = tick_now - (tick_last < tick_now ? tick_last : tick_now);
+	if (mode == Mode::Runs) {
+		return ticks_idle > OverlapIdleTicks;
+	}
+	return frame_now >= frame_last + 2 || ticks_idle > OverlapIdleFallbackTicks;
+}
+
 // Whether the age threshold can be applied yet: in Frames mode nothing is old enough before `age`
 // ticks have passed (Runs mode clamps the age to the tick, as before).
 [[nodiscard]] constexpr bool AgeReached(Mode mode, uint64_t tick, uint64_t age) {

@@ -172,6 +172,8 @@ public:
 	// The current stencil plane's mapping into the depth image, also retained by its association.
 	ImageSubresourceRange stencil_subresources;
 	uint64_t         tick_accessed_last = 0;
+	// Presented-frame count at the last access (Common::GpuPhase::Frames()), for the frame-clock overlap gate.
+	uint64_t         frame_accessed_last = 0;
 	size_t           lru_id             = 0;
 
 private:
