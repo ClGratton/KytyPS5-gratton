@@ -32,6 +32,7 @@ held back for a pad play session. Every flag keeps its opt-out (`--<flag> false`
 | `--scalable-read-locks`, `--submit-thread`, `--small-copy-dedup`, `--ro-depth-access`, `--compute-image-copy` | false | **true** | kyGpu -1.0 ms (locks, submit thread), -0.66 ms (dedup); GPU busy 30.7 to 23.9 ms (read-only depth), -2.6 ms (compute image copy) |
 | `--plan-pool`, `--lookahead-adaptive` | false | **true** | look-ahead host CPU -8.7 and -8.1 core-ms per frame; kyGpu and fps not worse |
 | `--desc-commit-diet` | false | **true** | kyGpu -0.58 ms per level frame |
+| `--lockfree-image-checks` | false | **true** | kyGpu busy -0.97 ms per level frame (38.66 vs 39.63), fps +1.8 % (21.86 vs 21.48, 95 % CI +0.6 to +2.8, one in-run ABAB), exact (`KYTY_LOCKFREE_VERIFY=1`: 4.9 M + 7.2 M answers checked, 0 differences) |
 | `--skip-ir-validation` | false | **true** | shader translation -23 %, output byte-identical; the check only ever stops the emulator (`KYTY_IR_VALIDATE=1` runs it) |
 
 `--lookahead-workers` defaults to 4 on a host with 16 hardware threads and to a quarter of the hardware threads below that; a count

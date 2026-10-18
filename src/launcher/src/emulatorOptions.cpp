@@ -824,6 +824,10 @@ QVariantMap Recommended() {
 	values.insert(QStringLiteral("desc_commit_diet"), true);
 	values.insert(QStringLiteral("draw_key_cache"), true);
 	values.insert(QStringLiteral("skip_ir_validation"), true);
+	// draw-path track (2026-10-18): the GPU thread's image-path checks without the texture cache lock (CHANGES D16: kyGpu
+	// -0.97 ms per level frame, +1.8 % fps in one in-run ABAB). Exact (KYTY_LOCKFREE_VERIFY=1: 4.9 M overlap answers and 7.2 M
+	// metadata answers equal the locked ones, 0 differences).
+	values.insert(QStringLiteral("lockfree_image_checks"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);

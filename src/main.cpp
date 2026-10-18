@@ -306,7 +306,7 @@ static void PrintUsage() {
 	         "                                       test of a depth target's clear metadata from a lock-free copy\n"
 	         "                                       of the metadata table, instead of a walk under the texture\n"
 	         "                                       cache lock; a stage without images takes no lock (exact).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"
 	         "                                       (exact). Default: true.\n");

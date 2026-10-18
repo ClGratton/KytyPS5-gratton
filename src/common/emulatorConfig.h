@@ -337,8 +337,10 @@ struct ConfigOptions {
 	bool                   image_presence              = true;
 	// --lockfree-image-checks: HasGpuModifiedImage (the GPU thread's "may I read this guest range as it is" test) is answered from
 	// per-page counts of registered GPU-modified images (common/pagePresence.h) instead of a page-table walk under the texture
-	// cache lock. Exact: the counts equal the walk (KYTY_LOCKFREE_VERIFY=1 compares them on every call). Default off.
-	bool                   lockfree_image_checks       = false;
+	// cache lock; IsMeta/IsMetaCleared are answered from a lock-free copy of the metadata table, and a shader stage without images
+	// takes no texture cache lock for an empty batch. Exact: the counts equal the walk (KYTY_LOCKFREE_VERIFY=1 compares them on
+	// every call). Default on.
+	bool                   lockfree_image_checks       = true;
 	// --image-pool: freed dedicated images are kept briefly and reused by the next image of the same shape
 	// (graphics/host_gpu/vma.cpp). Default on.
 	bool                   image_pool                  = true;

@@ -391,6 +391,7 @@ void TestPerformanceFlagsDefaultOn() {
 	      "the threading and copy cuts");
 	Check(o.ro_depth_access && o.compute_image_copy, "the GPU-time cuts");
 	Check(o.plan_pool && o.lookahead_adaptive && o.desc_commit_diet && o.skip_ir_validation, "the host-CPU and diet cuts");
+	Check(o.lockfree_image_checks, "the lock-free image checks");
 	Check(o.lookahead_workers == 4 && !o.lookahead_workers_explicit, "four look-ahead workers by default");
 
 	Check(!o.known_stores && !o.known_copies && !o.gpu_indirect_draws, "the exact chain stays off");

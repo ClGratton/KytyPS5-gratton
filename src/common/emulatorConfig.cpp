@@ -110,7 +110,7 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
-	registry.Register("lockfree-image-checks", &g_config->lockfree_image_checks, false);
+	registry.Register("lockfree-image-checks", &g_config->lockfree_image_checks, true);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
 	// Read per transit; a barrier skipped under the flag only ever stood between two reads, and the tracked state is not
 	// changed by the skip, so a toggle needs no cleanup.

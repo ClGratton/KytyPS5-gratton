@@ -6825,7 +6825,7 @@ public:
                 !texture_cache.HasGpuModifiedImage(base + 0x600000, 0x4000) &&
                     Agree(base + 0x600000, 0x4000),
                 "a count survived the deletion");
-        options.lockfree_image_checks = false;
+        options.lockfree_image_checks = BaselineOptions().lockfree_image_checks;
         Config::Load(options);
         ApplyFlagsOffFromEnvironment();
       }
