@@ -2520,14 +2520,21 @@ public:
       std::memcpy(reinterpret_cast<void *>(base + offset), &stale, sizeof(stale));
     }
 
-    // Packets parsed into the current command buffer: nothing is visible yet.
-    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x0),
-                       0x1122334455667788ull, 8);
-    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x10),
-                       0xa5a5a5a5u, 4);
-    // A GPU clock sample is written by its own path: the label call stores it now.
-    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x20),
-                       0x00000000deadc10cull, 8, true);
+    // Packets parsed into the current command buffer: queued for completion (true), nothing is visible yet.
+    const bool queued64 = Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x0),
+                                             0x1122334455667788ull, 8);
+    const bool queued32 = Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x10),
+                                             0xa5a5a5a5u, 4);
+    Require(name, "labels queued", queued64 && queued32,
+            "a label packet of the current command buffer was not queued for completion");
+    // A GPU clock sample is written by its own path: PublishLabel declines it (false) and the caller, here the
+    // test, stores it now, as the packet handler does.
+    constexpr uint64_t clock_sample = 0x00000000deadc10cull;
+    const bool clock_queued = Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x20),
+                                                 clock_sample, 8, true);
+    Require(name, "clock sample declined", !clock_queued,
+            "a GPU clock sample must be left to its own store path, not queued as a label");
+    std::memcpy(reinterpret_cast<void *>(base + 0x20), &clock_sample, sizeof(clock_sample));
     Require(name, "hidden until completion",
             read64(0x0) == stale && static_cast<uint32_t>(read64(0x10)) ==
                 static_cast<uint32_t>(stale) && read64(0x20) == 0xdeadc10cull,
@@ -2600,9 +2607,14 @@ public:
     parse_time.eop_labels_at_completion = false;
     Config::Load(parse_time);
     scheduler.Begin(registers, user_config, shaders);
-    Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x30),
-                       0x0badc0de0badc0deull, 8);
-    Require(name, "opt-out is immediate", read64(0x30) == 0x0badc0de0badc0deull,
+    constexpr uint64_t parse_time_label = 0x0badc0de0badc0deull;
+    const bool opt_out_queued = Sync::PublishLabel(scheduler.Current(), reinterpret_cast<void *>(base + 0x30),
+                                                   parse_time_label, 8);
+    Require(name, "opt-out declined", !opt_out_queued,
+            "--eop-labels-at-completion off must leave the label to the caller");
+    // The caller (the packet handler) writes it at parse time.
+    std::memcpy(reinterpret_cast<void *>(base + 0x30), &parse_time_label, sizeof(parse_time_label));
+    Require(name, "opt-out is immediate", read64(0x30) == parse_time_label,
             "--eop-labels-at-completion off did not write at parse time");
     scheduler.Finish();
     scheduler.DrainPriorityOperations();
