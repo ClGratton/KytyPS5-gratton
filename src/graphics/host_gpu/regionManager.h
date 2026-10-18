@@ -39,10 +39,17 @@ namespace Libs::Graphics {
 inline std::atomic<uint64_t> g_fault_run_events {0};
 inline std::atomic<uint64_t> g_fault_run_pages {0};
 
+// Per-thread lock traffic (KYTY_DRAW_STATS prints the GPU thread's): outermost acquisitions of a ReentrantTrackingLock, nested ones
+// (a depth count), and acquisitions that found the lock taken.
+inline thread_local uint64_t t_lock_outer     = 0;
+inline thread_local uint64_t t_lock_nested    = 0;
+inline thread_local uint64_t t_lock_contended = 0;
+
 class TrackingSpinLock final {
 public:
 	void lock() noexcept {
 		if (!m_lock.TryLock()) {
+			++t_lock_contended;
 			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == CurrentThread());
 			m_lock.Lock();
 		}
@@ -88,9 +95,11 @@ public:
 	void lock() noexcept {
 		if (m_lock.HeldByCurrentThread()) {
 			++m_depth;
+			++t_lock_nested;
 			return;
 		}
 		m_lock.lock();
+		++t_lock_outer;
 		m_depth = 1;
 	}
 	void unlock() noexcept {

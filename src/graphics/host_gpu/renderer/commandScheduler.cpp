@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/uploadCopier.h"
 
 #include "common/emulatorConfig.h"
@@ -465,6 +466,12 @@ void MaybePrintBoundary() {
 	if (now - last < 5'000'000'000ull || !g_boundary.last_ns.compare_exchange_strong(last, now)) return;
 	const double secs = static_cast<double>(now - last) / 1e9;
 	const uint64_t e = g_boundary.ends.exchange(0), en = g_boundary.end_ns.exchange(0), b = g_boundary.begins.exchange(0), bn = g_boundary.begin_ns.exchange(0);
+	static uint64_t last_outer = 0, last_nested = 0, last_contended = 0;
+	const uint64_t lo = Libs::Graphics::t_lock_outer - last_outer, ln = Libs::Graphics::t_lock_nested - last_nested,
+	               lc = Libs::Graphics::t_lock_contended - last_contended;
+	last_outer = Libs::Graphics::t_lock_outer; last_nested = Libs::Graphics::t_lock_nested; last_contended = Libs::Graphics::t_lock_contended;
+	std::printf("[kygpu-locks] %.1f s: ReentrantTrackingLock outermost %llu (%.0f/s) nested %llu (%.0f/s), TrackingSpinLock found taken %llu (%.0f/s) (this thread)\n", secs,
+	            static_cast<unsigned long long>(lo), lo / secs, static_cast<unsigned long long>(ln), ln / secs, static_cast<unsigned long long>(lc), lc / secs);
 	const uint64_t su = g_boundary.submits.exchange(0), sn = g_boundary.submit_ns.exchange(0), sa = g_boundary.async_submits.exchange(0);
 	std::printf("[cmdbuf-boundary] %.1f s: vkEndCommandBuffer %llu (%.0f/s) %.2f ms/s, vkBeginCommandBuffer %llu %.2f ms/s, Submit() on kyGpu %llu (%.0f/s, async %llu) %.2f ms/s in total (includes End)\n", secs,
 	            static_cast<unsigned long long>(e), e / secs, en / 1e6 / secs, static_cast<unsigned long long>(b), bn / 1e6 / secs,
