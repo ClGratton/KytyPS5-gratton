@@ -9761,16 +9761,19 @@ public:
                                                 &gc_before_completion[index],
                                                 sizeof(uint32_t));
       }
+      const bool gc_none_left = std::ranges::none_of(
+          gc_images, [&](ImageId image) {
+            return TextureCacheTestAccess::Contains(texture_cache, image);
+          });
+      const bool gc_tick_kept = scheduler.CurrentTick() == gc_batch_tick;
+      const bool gc_stale_kept = gc_before_completion == gc_stale_values;
       Require(name, "batched image pressure retirement",
-              std::ranges::none_of(gc_images,
-                                   [&](ImageId image) {
-                                     return TextureCacheTestAccess::Contains(
-                                         texture_cache, image);
-                                   }) &&
-                  scheduler.CurrentTick() == gc_batch_tick &&
-                  gc_before_completion == gc_stale_values,
-              "GC submitted per image or published a readback before GPU "
-              "completion");
+              gc_none_left && gc_tick_kept && gc_stale_kept,
+              (std::string("GC submitted per image or published a readback before GPU "
+                           "completion (images retired ") +
+               (gc_none_left ? "yes" : "NO") + ", scheduler tick unchanged " +
+               (gc_tick_kept ? "yes" : "NO") + ", guest bytes untouched " +
+               (gc_stale_kept ? "yes" : "NO") + ")"));
       scheduler.Finish();
       scheduler.DrainPriorityOperations();
       auto refreshed_buffer_alias = resources.GetBufferCache().ObtainBuffer(
