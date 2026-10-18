@@ -310,7 +310,9 @@ private:
 // KYTY_FLIP_LUMA=<csv> (observation only, notes/tracks/correctness-1018.md): for every presented frame, blit the prepared
 // frame down to 64x36, wait for it and write the frame's brightness next to the diagnostic event counters, so a black
 // frame is found exactly (a screenshot loop misses most one-frame flashes) and can be matched with the events around it.
-// KYTY_FLIP_LUMA_DIR=<dir> also saves the 64x36 luma of every dark frame as a PGM. Off unless the variable is set.
+// KYTY_FLIP_LUMA_DIR=<dir> also saves the 64x36 luma of every dark frame as a PGM. KYTY_FLIP_LUMA_GRID=<file> appends the
+// 64x36 luma grid of EVERY presented frame (8 bytes t_ns, 8 bytes presented, 2304 bytes luma), for region-level analysis
+// (a one-frame flash of a small object is invisible in the whole-frame mean). Off unless the variable is set.
 class FlipLumaProbe final {
 public:
 	static constexpr uint32_t kW = 64;
@@ -329,6 +331,9 @@ public:
 		}
 		if (const char* dir = std::getenv("KYTY_FLIP_LUMA_DIR"); dir != nullptr && *dir != 0) {
 			m_dir = dir;
+		}
+		if (const char* grid = std::getenv("KYTY_FLIP_LUMA_GRID"); grid != nullptr && *grid != 0) {
+			m_grid = std::fopen(grid, "wb");
 		}
 		vk::BufferCreateInfo buffer {};
 		buffer.size  = kW * kH * 4;
@@ -356,6 +361,9 @@ public:
 	~FlipLumaProbe() {
 		if (m_file != nullptr) {
 			std::fclose(m_file);
+		}
+		if (m_grid != nullptr) {
+			std::fclose(m_grid);
 		}
 	}
 	KYTY_CLASS_NO_COPY(FlipLumaProbe);
@@ -453,6 +461,13 @@ public:
 		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullTextureInvalid)),
 		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullBuffer)));
 		std::fflush(m_file);
+		if (m_grid != nullptr) {
+			const int64_t  t64 = t_ns;
+			const uint64_t p64 = presented;
+			std::fwrite(&t64, sizeof(t64), 1, m_grid);
+			std::fwrite(&p64, sizeof(p64), 1, m_grid);
+			std::fwrite(luma, 1, sizeof(luma), m_grid);
+		}
 		if (!m_dir.empty() && m_dumped < 300 && (mean < 8.0 || dark * 4 >= kW * kH)) {
 			char name[512];
 			std::snprintf(name, sizeof(name), "%s/dark_%llu_%lld.pgm", m_dir.c_str(),
@@ -495,6 +510,7 @@ private:
 	WindowContext&     m_window;
 	CommandScheduler&  m_scheduler;
 	std::FILE*         m_file = nullptr;
+	std::FILE*         m_grid = nullptr;
 	std::string        m_dir;
 	VulkanImage        m_image;
 	VkBuffer           m_buffer     = VK_NULL_HANDLE;
