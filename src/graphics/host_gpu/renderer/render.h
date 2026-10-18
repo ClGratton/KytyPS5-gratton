@@ -155,6 +155,9 @@ public:
 	// Every access for recording counts as work (RecordedWork); sync code that only validates the
 	// buffer uses AssertRecording, which does not.
 	[[nodiscard]] vk::CommandBuffer Handle() const;
+	// Recording that writes nothing a guest read can observe (a timestamp query): it does not count as
+	// work, so a guest flush barrier after it still elides against the one before it.
+	[[nodiscard]] vk::CommandBuffer HandleNoMemoryWrite() const;
 	void                            AssertRecording() const;
 	[[nodiscard]] uint64_t          RecordedWork() const noexcept { return m_recorded_work; }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }

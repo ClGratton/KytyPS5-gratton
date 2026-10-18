@@ -153,7 +153,7 @@ public:
 	}
 
 	void Record(CommandBuffer& command, Point point, uint32_t slot) {
-		command.Handle().writeTimestamp(point == Point::BottomOfPipe
+		command.HandleNoMemoryWrite().writeTimestamp(point == Point::BottomOfPipe
 		                                    ? vk::PipelineStageFlagBits::eBottomOfPipe
 		                                    : vk::PipelineStageFlagBits::eTopOfPipe,
 		                                m_pool, slot);

@@ -44,6 +44,14 @@ vk::CommandBuffer CommandBuffer::Handle() const {
 	return m_buffer;
 }
 
+vk::CommandBuffer CommandBuffer::HandleNoMemoryWrite() const {
+	EXIT_IF(IsInvalid());
+	if (m_deferred_barrier && !m_deferred_joining) {
+		FlushDeferredBarrier();
+	}
+	return m_buffer;
+}
+
 CommandBuffer::DeferredJoin CommandBuffer::JoinDeferredBarrier(const DispatchAccess& access,
                                                                bool writes) const {
 	EXIT_IF(m_deferred_joining);
