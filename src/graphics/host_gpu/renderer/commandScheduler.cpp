@@ -7,6 +7,7 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/gpuOps.h"
+#include "graphics/host_gpu/renderer/incrementalDraw.h"
 #include "graphics/host_gpu/renderer/pipeline/srtPlan.h"
 
 #include "common/assert.h"
@@ -448,10 +449,40 @@ CommandBuffer& CommandScheduler::Current() {
 	return m_command;
 }
 
+// KYTY_DRAW_STATS=1: the driver cost of ending and beginning a command buffer, printed every 5 s.
+namespace {
+struct BoundaryStats {
+	std::atomic<uint64_t> ends {0}, end_ns {0}, begins {0}, begin_ns {0}, last_ns {0};
+};
+BoundaryStats g_boundary;
+uint64_t NowNs() {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+void MaybePrintBoundary() {
+	const uint64_t now = NowNs();
+	uint64_t       last = g_boundary.last_ns.load(std::memory_order_relaxed);
+	if (last == 0) { g_boundary.last_ns.store(now, std::memory_order_relaxed); return; }
+	if (now - last < 5'000'000'000ull || !g_boundary.last_ns.compare_exchange_strong(last, now)) return;
+	const double secs = static_cast<double>(now - last) / 1e9;
+	const uint64_t e = g_boundary.ends.exchange(0), en = g_boundary.end_ns.exchange(0), b = g_boundary.begins.exchange(0), bn = g_boundary.begin_ns.exchange(0);
+	std::printf("[cmdbuf-boundary] %.1f s: vkEndCommandBuffer %llu (%.0f/s) %.2f ms/s, vkBeginCommandBuffer %llu %.2f ms/s\n", secs,
+	            static_cast<unsigned long long>(e), e / secs, en / 1e6 / secs, static_cast<unsigned long long>(b), bn / 1e6 / secs);
+	std::fflush(stdout);
+}
+} // namespace
+
 CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
-	m_command.Begin();
+	if (IncrementalDraw::StatsEnabled()) {
+		const uint64_t t0 = NowNs();
+		m_command.Begin();
+		g_boundary.begin_ns.fetch_add(NowNs() - t0, std::memory_order_relaxed);
+		g_boundary.begins.fetch_add(1, std::memory_order_relaxed);
+		MaybePrintBoundary();
+	} else {
+		m_command.Begin();
+	}
 	m_dynamic_state.Invalidate();
 	m_push_cache.Invalidate();
 	return m_command;
@@ -472,7 +503,14 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool allow_async) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
-	m_command.End();
+	if (IncrementalDraw::StatsEnabled()) {
+		const uint64_t t0 = NowNs();
+		m_command.End();
+		g_boundary.end_ns.fetch_add(NowNs() - t0, std::memory_order_relaxed);
+		g_boundary.ends.fetch_add(1, std::memory_order_relaxed);
+	} else {
+		m_command.End();
+	}
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);
