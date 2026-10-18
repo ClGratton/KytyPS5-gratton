@@ -390,7 +390,6 @@ void TestPerformanceFlagsDefaultOn() {
 	Check(o.scalable_read_locks && o.submit_thread && o.small_copy_dedup && o.async_upload_copies && o.texture_lock_batch,
 	      "the threading and copy cuts");
 	Check(o.ro_depth_access && o.compute_image_copy, "the GPU-time cuts");
-	Check(o.incremental_draw, "the incremental draw path");
 	Check(o.plan_pool && o.lookahead_adaptive && o.desc_commit_diet && o.skip_ir_validation, "the host-CPU and diet cuts");
 	Check(o.lookahead_workers == 4 && !o.lookahead_workers_explicit, "four look-ahead workers by default");
 

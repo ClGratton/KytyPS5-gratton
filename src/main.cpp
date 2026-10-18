@@ -309,7 +309,7 @@ static void PrintUsage() {
 	::printf("  --incremental-draw <true|false>      The GPU thread keeps the image and buffer bindings a draw\n"
 	         "                                       resolved and, for the next draw, redoes only those whose\n"
 	         "                                       inputs changed (exact; KYTY_DRAW_VERIFY=1 checks every kept\n"
-	         "                                       binding against a fresh one). Default: true.\n");
+	         "                                       binding against a fresh one). Default: false.\n");
 	::printf("  --cp-direct-stores <true|false>      The GPU command processor's stores to game memory (fence and\n"
 	         "                                       label writes) go through the backing view and mark the\n"
 	         "                                       memory tracker directly, instead of faulting on the GPU\n"
