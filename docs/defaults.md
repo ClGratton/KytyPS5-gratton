@@ -23,7 +23,7 @@ held back for a pad play session. Every flag keeps its opt-out (`--<flag> false`
 | options | was | now | measured |
 |---|---|---|---|
 | `--async-pipelines`, `--pipeline-lookahead` | off, false | **stall**, **true** | stall + lookahead: GPU-thread wait on pipeline jobs 16.9 s to 8.4 s, first-play stutter about -50 % |
-| `--submit-coalesce`, `--gc-clock` | false, runs | **true**, **frames** | submits per frame 360 to 47, fps +5.8 % |
+| `--gc-clock` | runs | **frames** | ages follow presented frames, not collector runs (`--submit-coalesce` was switched on here and is off again, see gratton-play-32 below) |
 | `--elide-barriers`, `--known-fills`, `--clean-guest-reads`, `--defer-draw-write-barriers`, `--overlap-dispatches` | false | **true** | drain and barrier cuts: fps +6.2 % (3 vs 3), GPU busy -5 ms (defer), -0.8 ms (overlap) per level frame |
 | `--srt-plans`, `--srt-table-walk`, `--resolved-draw`, `--mapping-memo`, `--lookahead-workers`, `--readback-futures` | false, 0 | **true**, **4** | srt-adopt +32 %, resolved draw +5.5 %, mapping memo +4.0 %, readback futures +2.4 % to +3.7 % |
 | `--image-lookup-memo`, `--texture-binding-reuse`, `--draw-state-memo`, `--push-descriptor-delta`, `--draw-key-cache` | false | **true** | +12.0 %, level; the four memo flags +5.1 %; draw-key memo +0.9 % |
@@ -38,10 +38,17 @@ held back for a pad play session. Every flag keeps its opt-out (`--<flag> false`
 given on the command line is used as given. The Linux build links jemalloc by default (`-DKYTY_USE_JEMALLOC=OFF` keeps the system
 malloc; BSD-2-Clause, GPL-compatible): level fps about +3 %, GPU-thread CPU about -1.6 ms per frame. The startup log prints the allocator.
 
-Still off, on purpose: the exact chain (`--known-stores`, `--known-copies`, `--gpu-indirect-draws`), `--eop-labels-at-completion` and
-`--occlusion-queries` (open correctness questions), `--cp-direct-stores`, `--bda-sync-skip`, `--readback-queue`, `--eager-readback`,
+Still off, on purpose: the exact chain (`--known-stores`, `--known-copies`, `--gpu-indirect-draws`) and
+`--occlusion-queries` (open correctness questions), `--submit-coalesce` (gratton-play-32, below), `--cp-direct-stores`, `--bda-sync-skip`, `--readback-queue`, `--eager-readback`,
 `--poll-before-wait` (no measured gain), `--skip-guard` and `--async-pipelines skip` (not exact), `--pipeline-variants-replay`
 (needs a pad-play check), `--pipelines-unoptimized-first`, `--precompile-on-load` (no gain on NVIDIA).
+
+## Changed in gratton-play-32
+| options | was | now | why |
+|---|---|---|---|
+| `--eop-labels-at-completion` | not in gratton-play-31 (branch only) | **true** | correctness: the data of an end-of-pipe packet becomes visible to the guest when the GPU has finished the work before it, in order with the interrupt, not when the packet is parsed. The command processor keeps seeing the labels its own stream parsed (per-queue view), so its WAIT_REG_MEM on a label it wrote itself is met by stream order. Measured cost 0 at level scale (21.47 vs 21.48 fps, 8 ABAB cycles, frames at 4 vblanks or less 99.1 vs 99.2 %) |
+| `--submit-coalesce` | true (gratton-play-31) | **false** | correctness: with coalescing on, a measured title shows one-frame wrong-lighting flashes (3 to 11 per 20 s of title) and meshes that vanish in gameplay; off, 0 flashes in about 6,000 title frames and clean gameplay. It needs two or more end-of-pipe events in one open command buffer (`--submit-coalesce-max 1` gives 0 dips, 2 gives 1, 4 gives 4, 16 gives 3 to 6); the mechanism of the wrong frame is not pinpointed. The flag keeps its opt-out spelling (`--submit-coalesce true`) and the launcher entry |
+| `KYTY_FLIP_LUMA=<csv>` (+ `KYTY_FLIP_LUMA_GRID=<file>`, `KYTY_FLIP_LUMA_DIR`) | n/a | env probe, off unless set | observation only: the brightness of every presented frame plus event counters, so any run can check for flashes (`bench/tools/flip_luma_analyze.py` in the notes repo). One relaxed load per counter call site when off |
 
 ## Audited, stays off, with the measurement
 | option | default | category | decision |
@@ -70,7 +77,7 @@ All have tests and measurements in `bench/RESULTS.md`; the recommended play set 
 |---|---|---|
 | `--async-pipelines` | off (play: stall) | stall + lookahead: GPU-thread wait on pipeline jobs 16.9 s to 8.4 s, stutter after 30 s 13.1 s to 1.0 s |
 | `--pipeline-lookahead` | false (play: true) | as above; needs `--async-pipelines` stall or skip |
-| `--submit-coalesce`, `--gc-clock frames` | false, runs (play: true, frames) | K13+K43: submits per frame 360 to 47, fps +5.8 % |
+| `--submit-coalesce`, `--gc-clock frames` | false, runs (play: frames; coalescing off again in gratton-play-32) | K13+K43: submits per frame 360 to 47, fps +5.8 %; causes lighting flashes, see above |
 | `--elide-barriers`, `--known-fills`, `--clean-guest-reads` | false (play: true) | drain cuts K14/K22/K20: fps +6.2 % (3 vs 3) |
 | `--defer-draw-write-barriers` | false | keeps the render pass open after a draw whose shaders write buffers and records the barrier only when a later draw may touch the written bytes (guest-address ranges; any address-using shader, plain vs atomic mixes and order-dependent atomics keep it). Level frame GPU busy 35.8 -> 30.9 ms (in-run ABAB, paired -4.95 ms, 8 cycles, run twice), fps +1.9 % and +2.3 % (the frame is bound by the kyGpu thread, not the GPU), render passes 1004 -> 418 per frame |
 | `--overlap-dispatches` | false | independent consecutive dispatches run without a barrier between them (range sets of the bound buffers, deferred group barrier). GPU busy -0.4 ms per level frame (se 0.15), fps unchanged: not worth enabling today |
