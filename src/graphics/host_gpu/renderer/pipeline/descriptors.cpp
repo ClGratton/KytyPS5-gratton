@@ -1009,7 +1009,10 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	const bool reuse_bindings = Config::TextureBindingReuseEnabled();
 	const bool incremental    = Config::IncrementalDrawEnabled();
 	std::optional<TextureCache::LockBatch> texture_batch;
-	texture_batch.emplace(m_context.GetTextureCache());
+	// --lockfree-image-checks: a stage with no images does no texture-cache work in this scope, so it takes no lock for it.
+	if (!Config::LockFreeImageChecksEnabled() || !program.info.images.empty()) {
+		texture_batch.emplace(m_context.GetTextureCache());
+	}
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		// Consecutive draws mostly bind the same textures: keep the slot's binding while the
 		// descriptor, the shader's image resource and the image set are unchanged.
@@ -1195,7 +1198,11 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	// Bindings assembled without PrepareBindings have no recorded sources.
 	prepared.image_sources.resize(images.size());
 	auto& texture_cache = m_context.GetTextureCache();
-	const TextureCache::LockBatch texture_batch(texture_cache);
+	// --lockfree-image-checks: no images, no texture-cache work, no lock.
+	std::optional<TextureCache::LockBatch> texture_batch;
+	if (!Config::LockFreeImageChecksEnabled() || !images.empty()) {
+		texture_batch.emplace(texture_cache);
+	}
 	const bool incremental = Config::IncrementalDrawEnabled();
 	// Acquire each view before a later overlapping descriptor can replace its image.
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
@@ -1309,7 +1316,14 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	}
 	auto& cache = m_context.GetTextureCache();
 	std::optional<TextureCache::LockBatch> texture_batch;
-	texture_batch.emplace(cache);
+	// --lockfree-image-checks: the scope holds texture-cache work only when a target or a stage image needs it.
+	bool images_to_rebind = !colors.empty();
+	for (auto* stage: stages) {
+		images_to_rebind |= !stage->images.empty();
+	}
+	if (!Config::LockFreeImageChecksEnabled() || images_to_rebind) {
+		texture_batch.emplace(cache);
+	}
 	for (auto* stage: stages) {
 		RebindImages(*stage);
 	}

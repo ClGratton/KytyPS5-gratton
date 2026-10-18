@@ -302,8 +302,10 @@ static void PrintUsage() {
 	         "                                       --push-descriptor-delta) descriptor writes that did not\n"
 	         "                                       change (exact). Default: true.\n");
 	::printf("  --lockfree-image-checks <true|false> The GPU thread's test whether a guest range overlaps a\n"
-	         "                                       GPU-modified image is answered from per-page counts instead\n"
-	         "                                       of a page-table walk under the texture cache lock (exact).\n"
+	         "                                       GPU-modified image is answered from per-page counts, and its\n"
+	         "                                       test of a depth target's clear metadata from a lock-free copy\n"
+	         "                                       of the metadata table, instead of a walk under the texture\n"
+	         "                                       cache lock; a stage without images takes no lock (exact).\n"
 	         "                                       Default: false.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"

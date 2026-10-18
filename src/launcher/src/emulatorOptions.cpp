@@ -271,7 +271,8 @@ QList<Option> BuildTable() {
 	             "Before the GPU thread reads a block of game memory as it is, it asks the texture cache whether a "
 	             "GPU-written image overlaps the block, and the cache used to take its lock and walk its page "
 	             "table to answer. With this the cache keeps a count of such images per page and answers from "
-	             "the counts without the lock. Exact; lowers CPU time on the GPU thread.",
+	             "the counts without the lock. The same goes for the clear state of a depth target, and a shader stage "
+	             "without images no longer takes the lock for nothing. Exact; lowers CPU time on the GPU thread.",
 	             EMU_BOOL(lockfree_image_checks)});
 	defs.append({"plan_prefetch", "--plan-prefetch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Prefetch the next draw's precomputed data",
