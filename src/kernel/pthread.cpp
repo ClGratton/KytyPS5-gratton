@@ -3150,6 +3150,12 @@ bool PthreadHasPendingSignal(Pthread thread, int signum) {
 	return (thread->pending_signal_mask.load(std::memory_order_acquire) & mask) != 0;
 }
 
+// One plain load instead of one locked read-modify-write per signal number: the sleep and yield primitives poll this at every
+// call, and a pending signal is rare.
+bool PthreadHasAnyPendingSignal(Pthread thread) {
+	return thread != nullptr && thread->pending_signal_mask.load(std::memory_order_acquire) != 0;
+}
+
 bool PthreadTakePendingSignal(Pthread thread, int signum) {
 	if (thread == nullptr || signum < 0 || signum >= 64) {
 		return false;

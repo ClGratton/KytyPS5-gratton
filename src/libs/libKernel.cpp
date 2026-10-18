@@ -1067,8 +1067,8 @@ static void SignalApcHandler(void* arg1, void* arg2, void* /*arg3*/, PCONTEXT co
 
 void KernelDispatchPendingSignalForCurrentThread() {
 	Pthread current = PthreadSelfOrNull();
-	if (current == nullptr) {
-		return;
+	if (current == nullptr || !PthreadHasAnyPendingSignal(current)) {
+		return; // nothing pending: the loop below would take 64 locked bit-clears to find that out
 	}
 
 	for (int signum = 0; signum < static_cast<int>(std::size(g_exception_handlers)); signum++) {
