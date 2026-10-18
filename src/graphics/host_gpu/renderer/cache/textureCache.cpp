@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
+#include "graphics/host_gpu/renderer/incrementalDraw.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "kernel/memory.h"
 
@@ -30,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <unordered_map>
 #include <limits>
 #include <map>
 #include <string>
@@ -1089,6 +1091,28 @@ void TextureCache::InitializeImage(ImageId id) {
 		return;
 	}
 	const bool upload = image.IsBufferModified() || image.IsCpuDirty();
+	if (upload && IncrementalDraw::StatsEnabled()) {
+		// KYTY_DRAW_STATS=1: how many images are created and filled from guest memory, and how often the same range again.
+		static thread_local struct {
+			uint64_t                                 inits = 0, uploads = 0, bytes = 0, repeats = 0, buffer_modified = 0, cpu_dirty = 0;
+			std::unordered_map<uint64_t, uint32_t>   seen;
+			std::chrono::steady_clock::time_point    last = std::chrono::steady_clock::now();
+		} u;
+		u.uploads++;
+		u.bytes += image.info.data.size;
+		u.buffer_modified += image.IsBufferModified();
+		u.cpu_dirty += image.IsCpuDirty();
+		if (u.seen[image.info.data.address * 0x9e3779b97f4a7c15ull ^ image.info.data.size]++ != 0) u.repeats++;
+		const auto now = std::chrono::steady_clock::now();
+		if (now - u.last >= std::chrono::seconds(5)) {
+			std::printf("[image-uploads] last 5 s: uploads %llu (%.1f MiB), repeats of a range seen before %llu, buffer-modified %llu cpu-dirty %llu, distinct ranges %zu\n",
+			            static_cast<unsigned long long>(u.uploads), u.bytes / 1048576.0, static_cast<unsigned long long>(u.repeats),
+			            static_cast<unsigned long long>(u.buffer_modified), static_cast<unsigned long long>(u.cpu_dirty), u.seen.size());
+			std::fflush(stdout);
+			u.uploads = u.bytes = u.repeats = u.buffer_modified = u.cpu_dirty = 0;
+			u.last = now;
+		}
+	}
 	if (upload) {
 		if (!TryUploadNeverWritten(image)) {
 			const auto [source, source_offset] =
