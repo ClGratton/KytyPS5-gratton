@@ -240,6 +240,24 @@ void Presenter::Frame::Transit(vk::CommandBuffer command, vk::ImageLayout layout
 void Presenter::Frame::CopyFrom(CommandBuffer& command_buffer, Image& source) {
 	command_buffer.EndRendering();
 	auto command = command_buffer.Handle();
+	// KYTY_PRESENT_FULL_BARRIER=1 (diagnostic, notes/tracks/correctness-1018.md): every earlier write of the command
+	// buffer is made visible to the frame copy, to tell a missing barrier in front of it from a frame that was
+	// rendered wrong.
+	static const bool full_barrier = [] {
+		const char* env = std::getenv("KYTY_PRESENT_FULL_BARRIER");
+		return env != nullptr && env[0] != '\0' && env[0] != '0';
+	}();
+	if (full_barrier) {
+		vk::MemoryBarrier2 memory {};
+		memory.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+		memory.srcAccessMask = vk::AccessFlagBits2::eMemoryWrite;
+		memory.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+		memory.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+		vk::DependencyInfo dependency {};
+		dependency.memoryBarrierCount = 1;
+		dependency.pMemoryBarriers    = &memory;
+		command.pipelineBarrier2(dependency);
+	}
 	source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
 	               command);
 	Transit(command, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
