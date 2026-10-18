@@ -78,10 +78,12 @@ void NoteSkippedDraw() noexcept {
 }
 
 void OnFlipParsed(uint64_t interval_ns) noexcept {
+	auto& s = Global();
 	if (!Config::FullSpeedEnabled()) {
+		s.skip.store(false, std::memory_order_relaxed);
+		s.next_scale.store(1.0, std::memory_order_relaxed);
 		return;
 	}
-	auto& s = Global();
 	s.ending_skipped.store(s.skip.load(std::memory_order_relaxed), std::memory_order_relaxed);
 	const uint64_t now  = NowNs();
 	bool           skip = s.policy.OnFlip(now, interval_ns);

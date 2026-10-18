@@ -161,6 +161,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per game-thread read fault; copies in flight are retired by the same code whether or not
 	// the flag is on (they share the eager copies' bookkeeping).
 	registry.Register("readback-futures", &g_config->readback_futures, false);
+	// --full-speed: read at every parsed flip; turning it off drops the skip state at the next flip.
+	registry.Register("full-speed", &g_config->full_speed, false);
 }
 
 PipelineCacheKey GetPipelineCacheKey() {
@@ -545,7 +547,7 @@ uint32_t GetFpsLimit() {
 }
 
 bool FullSpeedEnabled() {
-	return g_config->full_speed;
+	return Common::RuntimeToggles::Read(g_config->full_speed);
 }
 
 uint32_t GetConsoleLanguage() {
