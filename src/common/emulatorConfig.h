@@ -184,7 +184,9 @@ struct ConfigOptions {
 	std::filesystem::path  shader_timing_log;
 	bool                   bench_gpu_trace             = false;
 	PipelineCacheKey       pipeline_cache_key          = PipelineCacheKey::Schema;
-	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Off;
+	// --async-pipelines <off|stall|skip>: stall (default) runs shader translation and pipeline creation on workers and the draw
+	// waits for its pipeline (no visual difference from off); off is the synchronous stock behaviour.
+	AsyncPipelineMode      async_pipelines             = AsyncPipelineMode::Stall;
 	// --pipeline-workers: 0 = automatic, min(8, hardware threads / 2), at least 1.
 	uint32_t               pipeline_workers            = 0;
 	// --driver-cache-checkpoint <seconds>: while pipelines are being created, a background thread
@@ -193,8 +195,8 @@ struct ConfigOptions {
 	// off until measured.
 	uint32_t               driver_cache_checkpoint_s   = 0;
 	// --pipeline-lookahead: prefetch pipelines from submitted command buffers (needs
-	// --async-pipelines stall or skip). Default off.
-	bool                   pipeline_lookahead          = false;
+	// --async-pipelines stall or skip). Default on.
+	bool                   pipeline_lookahead          = true;
 	// --debug-hang-watchdog <seconds>: write a thread/pool/lookahead state report when no frame
 	// was presented for that long (common/hangWatchdog.h). 0 = off.
 	uint32_t               hang_watchdog_seconds       = 0;
@@ -218,8 +220,11 @@ struct ConfigOptions {
 	uint32_t               pipeline_lookahead_kinds    = 3;
 	// --lookahead-workers <0-16>: 0 runs the prefetch of every draw on the lookahead thread itself;
 	// N > 0 makes that thread a sequencer that decodes the PM4 stream and hands each draw, with a
-	// copy of its registers, to N prefetch workers (notes/resolved-draw.md). Default 0.
-	uint32_t               lookahead_workers           = 0;
+	// copy of its registers, to N prefetch workers (notes/resolved-draw.md). Default 4; unless the command line sets it, a host with
+	// fewer than 16 hardware threads runs min(4, hardware threads / 4) (Config::GetLookaheadWorkers).
+	uint32_t               lookahead_workers           = 4;
+	// Set by --lookahead-workers: the count is used as given, whatever the host.
+	bool                   lookahead_workers_explicit  = false;
 	// --lookahead-adaptive: with --lookahead-workers, only as many workers run as the GPU thread's plan lookups
 	// need (graphics/guest_gpu/lookaheadGovernor.h). Scheduling only; default on.
 	bool                   lookahead_adaptive          = true;
@@ -264,98 +269,98 @@ struct ConfigOptions {
 	// --submit-stats <seconds>: only the frame/submit/coalescing counters, no timers. 0 = off.
 	uint32_t               submit_stats_s              = 0;
 	// --submit-coalesce (K13): hold back the submit of RELEASE_MEM end-of-pipe events (up to
-	// submit_coalesce_max events, or an age derived from the vblank period). Default off.
-	bool                   submit_coalesce             = false;
+	// submit_coalesce_max events, or an age derived from the vblank period). Default on.
+	bool                   submit_coalesce             = true;
 	// --bda-sync-skip (K15): PrepareBda leaves out its walk over all buffers when no page became
 	// CPU-modified, no buffer was (un)registered and the mapping did not change since the last full
 	// pass (host_gpu/bdaSyncGate.h). Default off.
 	bool                   bda_sync_skip               = false;
 	// --bda-dirty-log: PrepareBda synchronizes only the buffers that overlap a range that became
 	// CPU-modified (or got a buffer) since its last pass, from a log kept by the region manager
-	// (host_gpu/bdaDirtyLog.h). Exact: the pass it replaces finds nothing else. Default off.
-	bool                   bda_dirty_log               = false;
+	// (host_gpu/bdaDirtyLog.h). Exact: the pass it replaces finds nothing else. Default on.
+	bool                   bda_dirty_log               = true;
 	// --lazy-op-poll: the per-draw poll for finished deferred operations queries the GPU timeline at
-	// most every 100 us and never waits for the priority-operations thread (commandScheduler.h). Default off.
-	bool                   lazy_op_poll                = false;
+	// most every 100 us and never waits for the priority-operations thread (commandScheduler.h). Default on.
+	bool                   lazy_op_poll                = true;
 	// --backing-read-cache: TryReadBacking remembers the mapping entry of a read per thread, valid while no
-	// mapping changed (kernel/memoryAddressSpace.inc), instead of taking the map lock and walking the tree. Default off.
-	bool                   backing_read_cache          = false;
+	// mapping changed (kernel/memoryAddressSpace.inc), instead of taking the map lock and walking the tree. Default on.
+	bool                   backing_read_cache          = true;
 	// --write-fault-around: a write fault that continues a sequential run marks the clean pages ahead CPU-dirty
-	// with it (graphics/host_gpu/regionManager.h, FaultRunAhead). Default off.
-	bool                   write_fault_around          = false;
+	// with it (graphics/host_gpu/regionManager.h, FaultRunAhead). Default on.
+	bool                   write_fault_around          = true;
 	// --plan-prefetch: kyGpu prefetches every cache line of the next SRT plan's blocks while it uses the current
-	// one (srtPlan.cpp). Default off.
-	bool                   plan_prefetch               = false;
+	// one (srtPlan.cpp). Default on.
+	bool                   plan_prefetch               = true;
 	// --tracker-sleeping-locks: a game thread that waits for a tracker lock (held across an mprotect) sleeps after a short
-	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default off.
-	bool                   tracker_sleeping_locks      = false;
+	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default on.
+	bool                   tracker_sleeping_locks      = true;
 	// --scalable-read-locks: the pipeline map and the program table are read without a lock and without a locked instruction
 	// (a published index, common/publishedIndex.h; a miss repeats the lookup under a reader lock whose readers write only to a
 	// cache line of their own, common/scalableSharedMutex.h). A locked instruction on the GPU thread waits for its earlier
-	// stores; the lookup follows the vertex and index copies of the draw. Exact. Default off.
-	bool                   scalable_read_locks         = false;
+	// stores; the lookup follows the vertex and index copies of the draw. Exact. Default on.
+	bool                   scalable_read_locks         = true;
 	// --submit-thread: a flush at a batch boundary ends the command buffer on the GPU thread and hands the vkQueueSubmit, and the wait for the
 	// upload copy helpers that must come first, to a thread of its own, so the GPU thread goes on recording while they happen
-	// (graphics/host_gpu/renderer/commandScheduler.h). A wait for the GPU still submits in line. Exact. Default off.
-	bool                   submit_thread               = false;
+	// (graphics/host_gpu/renderer/commandScheduler.h). A wait for the GPU still submits in line. Exact. Default on.
+	bool                   submit_thread               = true;
 	// --cp-direct-stores: the command processor's stores to guest memory (labels, fences, WRITE_DATA) go through the
 	// backing view and mark the tracker directly instead of taking a write fault on the GPU thread. Default off.
 	bool                   cp_direct_stores            = false;
 	// --draw-state-memo: per-draw work that is a pure function of the registers is not repeated while the registers' epochs
 	// (graphics/guest_gpu/hardwareContext.h) have not moved (graphics/host_gpu/renderer/renderDraw.cpp and neighbours).
-	// Default off.
-	bool                   draw_state_memo             = false;
+	// Default on.
+	bool                   draw_state_memo             = true;
 	// --async-upload-copies: the guest-to-ring memcpy of a large buffer upload runs on helper threads
-	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default off.
-	bool                   async_upload_copies         = false;
+	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default on.
+	bool                   async_upload_copies         = true;
 	// --texture-lock-batch: the GPU thread takes the texture cache lock once around a draw's runs of lookups instead of once
-	// per lookup (graphics/host_gpu/renderer/cache/textureCache.h LockBatch). Default off.
-	bool                   texture_lock_batch          = false;
+	// per lookup (graphics/host_gpu/renderer/cache/textureCache.h LockBatch). Default on.
+	bool                   texture_lock_batch          = true;
 	// --push-descriptor-delta: a graphics draw pushes only the descriptor bindings whose content differs from what the pushed
-	// set already holds (graphics/host_gpu/renderer/pipeline/pushDescriptorCache.h). Default off.
-	bool                   push_descriptor_delta       = false;
+	// set already holds (graphics/host_gpu/renderer/pipeline/pushDescriptorCache.h). Default on.
+	bool                   push_descriptor_delta       = true;
 	// --small-copy-dedup: a small CPU-written constant range whose bytes equal an earlier copy of the same guest range in the
 	// same scheduler tick is not copied into the stream ring again; the earlier ring offset is used
-	// (graphics/host_gpu/renderer/cache/smallCopyDedup.h). Default off.
-	bool                   small_copy_dedup            = false;
+	// (graphics/host_gpu/renderer/cache/smallCopyDedup.h). Default on.
+	bool                   small_copy_dedup            = true;
 	// --desc-commit-diet: CommitBindings leaves out the work that a repeated draw does for nothing: the image transit calls whose
 	// image is already in the wanted layout and access, the sort of the written-range index when the read hull answers, and
 	// (with --push-descriptor-delta) the descriptor write structures and content vectors of bindings that did not change. Exact.
 	// Default on.
 	bool                   desc_commit_diet            = true;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
-	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
-	bool                   image_presence              = false;
+	// lock (common/pagePresence.h) for clean reads and write faults. Default on.
+	bool                   image_presence              = true;
 	// --image-pool: freed dedicated images are kept briefly and reused by the next image of the same shape
-	// (graphics/host_gpu/vma.cpp). Default off.
-	bool                   image_pool                  = false;
+	// (graphics/host_gpu/vma.cpp). Default on.
+	bool                   image_pool                  = true;
 	// --ro-depth-access: a draw that writes no aspect of its depth target (a read-only layout) tracks the attachment with the read
 	// access only, and a transit between read-only accesses on the same layout, whose access types and stages an earlier
-	// barrier already covered, emits no barrier (graphics/host_gpu/renderer/image/image.cpp ReadAfterReadCovered). Default off.
-	bool                   ro_depth_access             = false;
+	// barrier already covered, emits no barrier (graphics/host_gpu/renderer/image/image.cpp ReadAfterReadCovered). Default on.
+	bool                   ro_depth_access             = true;
 	// --compute-image-copy: Image::Upload / Image::Download of colour images with 4, 8 or 16 byte texels and at least 16384 texels run as compute
 	// dispatches through an unsigned integer view of the image instead of vkCmdCopyBufferToImage / vkCmdCopyImageToBuffer
-	// (graphics/host_gpu/renderer/image/imageCopyKernels.cpp). Same bytes moved, same final layout. Default off.
-	bool                   compute_image_copy          = false;
+	// (graphics/host_gpu/renderer/image/imageCopyKernels.cpp). Same bytes moved, same final layout. Default on.
+	bool                   compute_image_copy          = true;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
-	// presented frames (renderer/cache/gcClock.h).
-	bool                   gc_clock_frames             = false;
+	// presented frames (renderer/cache/gcClock.h). Default frames.
+	bool                   gc_clock_frames             = true;
 	uint32_t               submit_coalesce_max         = 16;
 	// 0 = derive from the vblank frequency (period / 8); otherwise microseconds.
 	uint32_t               submit_coalesce_us          = 0;
 	// --elide-barriers (K14): leave out a guest global barrier when nothing was recorded since the
-	// previous one in the same command buffer. Default off.
-	bool                   elide_barriers              = false;
+	// previous one in the same command buffer. Default on.
+	bool                   elide_barriers              = true;
 	// --defer-draw-write-barriers: a draw whose shaders write buffers leaves the barrier that makes
 	// the writes visible pending (and keeps the render pass open) until something may read them
-	// (renderer/pendingWrites.h). Default off.
-	bool                   defer_draw_write_barriers   = false;
+	// (renderer/pendingWrites.h). Default on.
+	bool                   defer_draw_write_barriers   = true;
 	// --overlap-dispatches: consecutive direct compute dispatches whose bound resources do not
-	// conflict run without a barrier between them (renderer/dispatchHazard.h). Default off.
-	bool                   overlap_dispatches          = false;
+	// conflict run without a barrier between them (renderer/dispatchHazard.h). Default on.
+	bool                   overlap_dispatches          = true;
 	// --known-fills (K22): remember ranges last written by one GPU uniform fill, so color-metadata
-	// clear discovery needs no GPU->CPU readback for them. Default off.
-	bool                   known_fills                 = false;
+	// clear discovery needs no GPU->CPU readback for them. Default on.
+	bool                   known_fills                 = true;
 	// --known-stores (performance, exact): the GPU thread takes the value of a dword a dispatch
 	// stored as an immediate (queue headers, flags) from what the dispatch is proven to write
 	// (renderer/cache/knownStores.h) instead of draining the GPU when it has to read that dword
@@ -374,20 +379,20 @@ struct ConfigOptions {
 	// benchmark).
 	bool                   debug_known_verify_all      = false;
 	// --image-lookup-memo: FindImage remembers unique matches until the set of registered images
-	// changes (renderer/cache/imageLookupMemo.h). Exact; default off until measured.
-	bool                   image_lookup_memo           = false;
+	// changes (renderer/cache/imageLookupMemo.h). Exact; default on.
+	bool                   image_lookup_memo           = true;
 	// --texture-binding-reuse: a draw keeps a slot's image binding while the descriptor, the shader's
-	// image resource and the set of cached images are unchanged. Exact; default off until measured.
-	bool                   texture_binding_reuse       = false;
+	// image resource and the set of cached images are unchanged. Exact; default on.
+	bool                   texture_binding_reuse       = true;
 	// --resolved-draw: kyGpu takes the parts of a draw that the lookahead computed ahead of time
 	// (read hull, ...; notes/resolved-draw.md) after checking them; --resolved-draw-verify also
-	// computes each one inline and stops on a difference. Exact; default off until measured.
-	bool                   resolved_draw               = false;
+	// computes each one inline and stops on a difference. Exact; default on.
+	bool                   resolved_draw               = true;
 	bool                   resolved_draw_verify        = false;
-	bool                   mapping_memo                = false;
+	bool                   mapping_memo                = true;
 	// --tracker-lockfree: the buffer cache asks the memory tracker whether a range is CPU- or GPU-modified
-	// through lock-free mirrors of the dirty bits instead of the region locks. Exact; default off until measured.
-	bool                   tracker_lockfree = false;
+	// through lock-free mirrors of the dirty bits instead of the region locks. Exact; default on.
+	bool                   tracker_lockfree = true;
 	// --plan-pool: the lookahead's plans (--srt-plans) are reused after kyGpu is done with them, with the
 	// capacity of their vectors, instead of being allocated by a worker and freed by the sequencer thread.
 	// Exact (only where the memory comes from changes); default on.
@@ -397,8 +402,8 @@ struct ConfigOptions {
 	// full lookup on every memo hit and stops on a disagreement.
 	bool                   draw_key_cache              = false;
 	// --srt-table-walk: refresh a native-eligible shader's flattened SRT from a table through the
-	// guest-memory callback instead of walking the value graph. Default off.
-	bool                   srt_table_walk              = false;
+	// guest-memory callback instead of walking the value graph. Default on.
+	bool                   srt_table_walk              = true;
 	bool                   draw_key_verify             = false;
 	// --srt-plan-shadow (measurement only): the lookahead thread keeps the materialized SRT of
 	// every draw it looks at as a plan, and kyGpu compares each plan with its own result
@@ -406,8 +411,8 @@ struct ConfigOptions {
 	bool                   srt_plan_shadow             = false;
 	// --srt-plans (performance): kyGpu uses the plan the lookahead materialized for a draw, after a
 	// validity check, instead of materializing the draw's SRT itself; it falls back to its own path
-	// when the check fails or no plan is there. Needs --pipeline-lookahead. Default off.
-	bool                   srt_plans                   = false;
+	// when the check fails or no plan is there. Needs --pipeline-lookahead. Default on.
+	bool                   srt_plans                   = true;
 	// --skip-guard: with --async-pipelines skip, learn from the readers of the memory skipped draws
 	// should have written (descriptor-table walks, indirect arguments, CP DMA, CPU readbacks,
 	// index/vertex data); once one reads such memory, later draws that write it wait for their
@@ -419,8 +424,8 @@ struct ConfigOptions {
 	// tracker). Default on; needs --skip-guard.
 	bool                   skip_guard_bda              = true;
 	// --clean-guest-reads (K20): the GPU thread reads shader metadata and vertex tables through the
-	// guest backing, without faulting, when none of the bytes is GPU-written. Default off.
-	bool                   clean_guest_reads           = false;
+	// guest backing, without faulting, when none of the bytes is GPU-written. Default on.
+	bool                   clean_guest_reads           = true;
 	// --gpu-indirect-draws (K21): indirect draws whose argument block a GPU pass wrote are built on
 	// the GPU instead of being read on the CPU after a full drain: a one-thread argument pass, then
 	// vkCmdDrawIndexedIndirect (point/line/triangle lists) or vkCmdDrawMeshTasksIndirectEXT
@@ -448,8 +453,8 @@ struct ConfigOptions {
 	bool                   eager_readback_verify       = false;
 	// --readback-futures: a game thread's read fault on GPU-written memory no longer stops the GPU
 	// thread: it copies the bytes out, submits and goes on; the faulting thread alone waits for the
-	// copy to land (frame pipelining, notes/frame-pipelining.md). Default off.
-	bool                   readback_futures            = false;
+	// copy to land (frame pipelining, notes/frame-pipelining.md). Default on.
+	bool                   readback_futures            = true;
 	std::filesystem::path  bench_render_csv;
 	// --toggle-control <path>: poll this control file and flip the registered runtime-safe flags it
 	// names at the next presented frame (common/runtimeToggles.h). Default off.

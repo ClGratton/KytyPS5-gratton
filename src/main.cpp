@@ -215,13 +215,13 @@ static void PrintUsage() {
 	::printf("  --bench-gpu-trace <true|false>       With --shader-timing-log: also log the guest submit /\n"
 	         "                                       GPU-thread execute timeline. Default: off.\n");
 	::printf("  --async-pipelines <off|stall|skip>   Run shader translation and Vulkan pipeline creation\n"
-	         "                                       on worker threads. off (default): synchronous, stock\n"
-	         "                                       behaviour. stall: the draw/dispatch waits for the\n"
+	         "                                       on worker threads. off: synchronous, stock behaviour.\n"
+	         "                                       stall (default): the draw/dispatch waits for the\n"
 	         "                                       worker. skip: graphics draws whose program or pipeline\n"
 	         "                                       is not ready are skipped (compute always waits).\n");
 	::printf("  --pipeline-lookahead <true|false>    Prefetch shader programs and pipelines from submitted\n"
 	         "                                       command buffers into the worker pool (needs\n"
-	         "                                       --async-pipelines stall|skip). Default: false.\n");
+	         "                                       --async-pipelines stall|skip). Default: true.\n");
 	::printf("  --pipelines-unoptimized-first <true|false>\n"
 	         "                                       A pipeline no cache holds is created unoptimized so\n"
 	         "                                       its draw does not wait, then rebuilt optimized on a\n"
@@ -255,7 +255,7 @@ static void PrintUsage() {
 	         "                                       Default: 0 (off).\n");
 	::printf("  --gc-clock <runs|frames>             Age the texture and buffer caches in collector runs\n"
 	         "                                       (one per guest submission, stock) or in presented\n"
-	         "                                       frames. Default: runs.\n");
+	         "                                       frames. Default: frames.\n");
 	::printf("  --submit-stats <seconds>             Every N seconds print frames, Vulkan submits per frame\n"
 	         "                                       and the --submit-coalesce counters (no timers; safe\n"
 	         "                                       next to fps measurements). Default: 0 (off).\n");
@@ -266,35 +266,35 @@ static void PrintUsage() {
 	::printf("  --image-pool <true|false>            Keep freed images (up to 256 MiB, a second and a half) and\n"
 	         "                                       reuse them for the next image of the same shape instead of\n"
 	         "                                       a driver free and allocate (exact; the memory is not\n"
-	         "                                       cleared, as for a new image). Default: false.\n");
+	         "                                       cleared, as for a new image). Default: true.\n");
 	::printf("  --ro-depth-access <true|false>       A draw that writes no aspect of its depth target tracks it\n"
 	         "                                       with the read access only, and a transit between reads on\n"
 	         "                                       the same layout that an earlier barrier already covers\n"
 	         "                                       emits no barrier, so a depth image sampled while it is a\n"
 	         "                                       read-only attachment stops ending the render pass twice per\n"
-	         "                                       draw (exact). Default: false.\n");
+	         "                                       draw (exact). Default: true.\n");
 	::printf("  --compute-image-copy <true|false>    Colour images with 4, 8 or 16 byte texels move between linear buffers and\n"
 	         "                                       the image with compute dispatches instead of the\n"
 	         "                                       driver's buffer-image copy commands, at the memory\n"
-	         "                                       bandwidth (exact: the same bytes). Default: false.\n");
+	         "                                       bandwidth (exact: the same bytes). Default: true.\n");
 	::printf("  --image-presence <true|false>        The texture cache answers whether an image covers a page\n"
 	         "                                       from per-page counts without its lock, for clean reads of\n"
 	         "                                       shader metadata and for guest write faults (exact).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --plan-prefetch <true|false>         While the GPU thread uses one SRT plan it prefetches every\n"
 	         "                                       cache line of the next plan's blocks (a hint to the CPU\n"
-	         "                                       cache; needs --srt-plans). Default: false.\n");
+	         "                                       cache; needs --srt-plans). Default: true.\n");
 	::printf("  --async-upload-copies <true|false>   The copy of a large buffer upload from game memory into the\n"
 	         "                                       upload ring runs on two helper threads instead of the GPU\n"
 	         "                                       thread; the ring is complete before the next submit.\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --push-descriptor-delta <true|false> A graphics draw pushes only the descriptor bindings whose\n"
 	         "                                       content differs from what the pushed set already holds\n"
-	         "                                       (exact). Default: false.\n");
+	         "                                       (exact). Default: true.\n");
 	::printf("  --small-copy-dedup <true|false>      A small CPU-written constant range whose bytes equal an earlier\n"
 	         "                                       copy of the same range in the same submission is not copied\n"
 	         "                                       into the stream ring again (exact: bytes are compared).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --desc-commit-diet <true|false>      Binding a draw's resources leaves out work that repeats for\n"
 	         "                                       nothing: image transits that change nothing, a sort the\n"
 	         "                                       read hull makes unnecessary, and (with\n"
@@ -302,10 +302,10 @@ static void PrintUsage() {
 	         "                                       change (exact). Default: true.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"
-	         "                                       (exact). Default: false.\n");
+	         "                                       (exact). Default: true.\n");
 	::printf("  --draw-state-memo <true|false>       The GPU thread does not repeat work that is a function of the\n"
 	         "                                       GPU registers while the registers have not changed since the\n"
-	         "                                       draw it was done for (exact). Default: false.\n");
+	         "                                       draw it was done for (exact). Default: true.\n");
 	::printf("  --cp-direct-stores <true|false>      The GPU command processor's stores to game memory (fence and\n"
 	         "                                       label writes) go through the backing view and mark the\n"
 	         "                                       memory tracker directly, instead of faulting on the GPU\n"
@@ -313,54 +313,54 @@ static void PrintUsage() {
 	::printf("  --tracker-sleeping-locks <true|false> A game thread that waits for a memory-tracking lock held across\n"
 	         "                                       a page-protection call sleeps after a short spin instead of\n"
 	         "                                       burning a core for the whole call. The GPU thread always\n"
-	         "                                       spins. Default: false.\n");
+	         "                                       spins. Default: true.\n");
 	::printf("  --scalable-read-locks <true|false>   The pipeline map and the program table are read without a lock\n"
 	         "                                       and without any locked instruction (published index; a miss\n"
-	         "                                       repeats the lookup under the lock). Exact. Default: false.\n");
+	         "                                       repeats the lookup under the lock). Exact. Default: true.\n");
 	::printf("  --submit-thread <true|false>         A flush at a batch boundary hands vkQueueSubmit, and the wait for\n"
 	         "                                       the upload copy helpers before it, to a thread of its own\n"
-	         "                                       instead of the GPU thread. Exact. Default: false.\n");
+	         "                                       instead of the GPU thread. Exact. Default: true.\n");
 	::printf("  --write-fault-around <true|false>    A guest write fault that continues a sequential run of\n"
 	         "                                       writes marks the clean pages ahead as modified with it,\n"
 	         "                                       so a streaming writer faults once per run instead of once\n"
 	         "                                       per page (exact: modified is a superset of written).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --backing-read-cache <true|false>    Reads of the guest memory backing (shader resource walks,\n"
 	         "                                       vertex metadata, clear codes) use a mapping entry the\n"
 	         "                                       thread remembered while no mapping changed, instead of\n"
 	         "                                       taking the map lock and walking the tree (exact).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --lazy-op-poll <true|false>          The per-draw check for finished deferred operations asks\n"
 	         "                                       the GPU timeline at most every 100 microseconds instead\n"
 	         "                                       of at every draw, and leaves an operation queued instead\n"
 	         "                                       of waiting for the priority-operations thread (operations\n"
-	         "                                       run a few draws later; exact). Default: false.\n");
+	         "                                       run a few draws later; exact). Default: true.\n");
 	::printf("  --bda-dirty-log <true|false>         Before draws that address memory through raw pointers,\n"
 	         "                                       synchronize only the buffers that overlap a range that\n"
 	         "                                       became CPU-modified or got a buffer since the last\n"
 	         "                                       pass, instead of walking every buffer (exact).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --submit-coalesce <true|false>       Hold back the Vulkan submit of RELEASE_MEM end-of-pipe\n"
 	         "                                       events: submit after --submit-coalesce-max events or\n"
 	         "                                       when the oldest is older than --submit-coalesce-us,\n"
-	         "                                       and at every drain or end of submission. Default: false.\n");
+	         "                                       and at every drain or end of submission. Default: true.\n");
 	::printf("  --elide-barriers <true|false>        Leave out a guest cache-flush/partial-flush global memory\n"
 	         "                                       barrier when nothing was recorded since the previous\n"
-	         "                                       one in the same command buffer. Default: false.\n");
+	         "                                       one in the same command buffer. Default: true.\n");
 	::printf("  --defer-draw-write-barriers <true|false>  A draw whose shaders write buffers (per-draw\n"
 	         "                                       feedback, counters, atomic maxima) leaves the barrier\n"
 	         "                                       that makes the writes visible pending, and keeps the\n"
 	         "                                       render pass open, until a later draw may read the\n"
 	         "                                       written bytes or any other command is recorded.\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --overlap-dispatches <true|false>    Direct compute dispatches whose bound buffers, images and\n"
 	         "                                       memory do not conflict with those of the dispatches before\n"
 	         "                                       them run without a barrier in between; the barrier is\n"
 	         "                                       recorded once, before the next other command.\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --known-fills <true|false>           Remember ranges last written by one GPU uniform fill so\n"
 	         "                                       color-metadata clear discovery needs no GPU->CPU\n"
-	         "                                       readback for them. Default: false.\n");
+	         "                                       readback for them. Default: true.\n");
 	::printf("  --known-stores <true|false>          The GPU thread takes the value of a dword that a compute\n"
 	         "                                       dispatch stored as an immediate (queue headers, flags)\n"
 	         "                                       from what the dispatch is proven to write, instead of\n"
@@ -383,7 +383,7 @@ static void PrintUsage() {
 	         "                                       Default: false.\n");
 	::printf("  --srt-table-walk <true|false>        Refresh a shader's flattened SRT (pointer tree reads) from a\n"
 	         "                                       precomputed table instead of walking the value graph.\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --debug-draw-key-verify <true|false> With --draw-key-cache, also run the full lookup on every\n"
 	         "                                       memo hit and stop if the two disagree. Default: false.\n");
 	::printf("  --srt-plan-shadow <true|false>       Measurement only (needs --pipeline-lookahead): keep the SRT\n"
@@ -398,7 +398,7 @@ static void PrintUsage() {
 	         "                                       from is unchanged and not GPU-written; without a valid\n"
 	         "                                       plan it materializes as before. Same result, less work on\n"
 	         "                                       the GPU thread. With --srt-plan-shadow it also compares\n"
-	         "                                       every adopted plan with its own result. Default: false.\n");
+	         "                                       every adopted plan with its own result. Default: true.\n");
 	::printf("  --skip-guard <true|false>            Needs --async-pipelines skip. Dependency-aware skip: when\n"
 	         "                                       a shader walks a descriptor table, reads draw arguments,\n"
 	         "                                       DMAs or the guest CPU reads back memory a skipped draw\n"
@@ -414,7 +414,7 @@ static void PrintUsage() {
 	         "                                       Default: true.\n");
 	::printf("  --clean-guest-reads <true|false>     The GPU thread reads shader metadata and vertex tables from\n"
 	         "                                       the guest backing without faulting when none of the bytes\n"
-	         "                                       is GPU-written (no drain). Default: false.\n");
+	         "                                       is GPU-written (no drain). Default: true.\n");
 	::printf("  --gpu-indirect-draws <true|false>    Build indirect draws whose argument block a GPU pass wrote\n"
 	         "                                       on the GPU instead of reading it on the CPU after a\n"
 	         "                                       full drain (mesh-emulated draws). Default: false.\n");
@@ -423,10 +423,10 @@ static void PrintUsage() {
 	         "                                       work that wrote the data. Default: false.\n");
 	::printf("  --image-lookup-memo <true|false>     Remember which cached image a texture lookup found until\n"
 	         "                                       an image is added or removed (exact, less GPU-thread\n"
-	         "                                       CPU per draw). Default: false.\n");
+	         "                                       CPU per draw). Default: true.\n");
 	::printf("  --texture-binding-reuse <true|false> A draw keeps the image binding of a shader slot while its\n"
 	         "                                       descriptor and the set of cached images are unchanged\n"
-	         "                                       (exact, less GPU-thread CPU per draw). Default: false.\n");
+	         "                                       (exact, less GPU-thread CPU per draw). Default: true.\n");
 	::printf("  --eager-readback <true|false>        Pages a game thread read-faulted on are written back to guest\n"
 	         "                                       memory right after the GPU writes them (copied in the\n"
 	         "                                       command buffer about to be submitted), so the next read\n"
@@ -434,7 +434,7 @@ static void PrintUsage() {
 	::printf("  --readback-futures <true|false>      A game thread's read fault on GPU-written memory does not\n"
 	         "                                       stop the GPU thread: it copies the bytes out, submits and\n"
 	         "                                       goes on, and only the faulting thread waits for the copy to\n"
-	         "                                       land (frame pipelining). Default: false.\n");
+	         "                                       land (frame pipelining). Default: true.\n");
 	::printf("  --debug-eager-readback-verify <true|false> With --eager-readback or --readback-futures,\n"
 	         "                                       re-read every page from the GPU (a full drain) before it\n"
 	         "                                       is unprotected and report any difference. Slow.\n"
@@ -446,16 +446,16 @@ static void PrintUsage() {
 	::printf("  --resolved-draw <true|false>         kyGpu uses the parts of a draw that the pipeline lookahead\n"
 	         "                                       computed ahead of time (needs --srt-plans), after\n"
 	         "                                       checking them (exact, less GPU-thread CPU per draw).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --resolved-draw-verify <true|false>  Also compute every used part inline and stop on a\n"
 	         "                                       difference (testing). Default: false.\n");
 	::printf("  --mapping-memo <true|false>          The GPU thread remembers whether a guest range is\n"
 	         "                                       fully mapped until the mapping changes, instead of\n"
 	         "                                       taking the memory-map lock per query (exact).\n"
-	         "                                       Default: false.\n");
+	         "                                       Default: true.\n");
 	::printf("  --tracker-lockfree <true|false>      Answer dirty-page queries\n"
 	         "                                       without the region locks (exact, less GPU-thread CPU per\n"
-	         "                                       buffer binding). Default: false.\n");
+	         "                                       buffer binding). Default: true.\n");
 	::printf("  --plan-pool <true|false>             Reuse the look-ahead's finished SRT plans (with\n"
 	         "                                       --srt-plans) with the capacity of their vectors\n"
 	         "                                       instead of allocating and freeing a dozen heap blocks\n"
@@ -487,7 +487,8 @@ static void PrintUsage() {
 	         "                                       per-draw work (programs, SRT plans, pipeline requests)\n"
 	         "                                       from copies of the registers, while the lookahead\n"
 	         "                                       thread only decodes the PM4 stream. 0 keeps everything\n"
-	         "                                       on the lookahead thread. Default: 0.\n");
+	         "                                       on the lookahead thread. Default: 4 (fewer on a host with\n"
+	         "                                       under 16 hardware threads: hardware threads / 4).\n");
 	::printf("  --debug-hang-watchdog <seconds>      Debug: when no frame was presented for this long,\n"
 	         "                                       write a thread / worker pool / lookahead report to\n"
 	         "                                       stderr and _hang_watchdog.txt. Default: 0 (off).\n");
@@ -1417,6 +1418,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.lookahead_workers = static_cast<uint32_t>(workers);
+			options.config.lookahead_workers_explicit = true;
 		} else if (arg == "--pipeline-lookahead-kinds") {
 			if (Common::EqualNoCase(value, "all")) {
 				options.config.pipeline_lookahead_kinds = 3;

@@ -438,7 +438,14 @@ uint32_t GetPipelineLookaheadKinds() {
 }
 
 uint32_t GetLookaheadWorkers() {
-	return std::min(g_config->lookahead_workers, 16u);
+	const auto workers = std::min(g_config->lookahead_workers, 16u);
+	if (g_config->lookahead_workers_explicit) {
+		return workers;
+	}
+	// The default count (4) is sized for a host with 16 hardware threads: the workers share the machine with the guest's own
+	// threads, so a smaller host runs a quarter of its hardware threads (none below 4).
+	const auto hardware = std::thread::hardware_concurrency();
+	return hardware == 0 ? workers : std::min(workers, hardware / 4u);
 }
 
 uint32_t GetPipelineWorkerCount() {
