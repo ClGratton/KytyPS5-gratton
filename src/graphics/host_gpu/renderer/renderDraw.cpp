@@ -771,6 +771,7 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 		const auto size =
 		    Libs::LibKernel::Memory::ClampRangeSize(range.base_address, range.RequestedSize());
 		if (size == 0) { // unmapped: its slots bind the null buffer (below)
+			Bench::NoteDiag(Bench::Diag::NullBuffer);
 			range.acquired_end = range.requested_end;
 			range.binding      = {nullptr, 0};
 			continue;

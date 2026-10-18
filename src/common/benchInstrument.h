@@ -7,6 +7,7 @@
 // relaxed atomic<bool> load at the instrumented call site.
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -88,6 +89,38 @@ inline void NoteGuestFlip() noexcept {
 // Appends "t_ns,presented,flip,<row>" (the caller supplies `row` without a newline) and flushes it
 // to the file. Call only when SkipLogEnabled().
 void LogSkipRow(const std::string& row);
+
+// ---- Frame-quality diagnostics (KYTY_FLIP_LUMA, notes/tracks/correctness-1018.md) -----------------
+// Observation-only event counters that the flip-luma probe writes next to each presented frame's
+// brightness, so a black frame can be matched with the events around it. Off unless KYTY_FLIP_LUMA is
+// set; the call sites pay one relaxed load.
+enum class Diag : uint32_t {
+	NullTextureZero,    // a texture slot whose T# is all zero: bound as a native null descriptor (reads 0)
+	NullTextureInvalid, // a sampled descriptor that cannot describe an image: bound as null
+	NullBuffer,         // a buffer range over unmapped memory: bound as the null buffer
+	Count
+};
+namespace detail {
+inline std::atomic<bool>     g_diag_enabled {false};
+inline std::atomic<uint64_t> g_diag_counts[static_cast<size_t>(Diag::Count)] {};
+} // namespace detail
+[[nodiscard]] inline bool DiagEnabled() noexcept {
+	return detail::g_diag_enabled.load(std::memory_order_relaxed);
+}
+inline void NoteDiag(Diag what) noexcept {
+	if (DiagEnabled()) {
+		detail::g_diag_counts[static_cast<size_t>(what)].fetch_add(1, std::memory_order_relaxed);
+	}
+}
+[[nodiscard]] inline uint64_t DiagCount(Diag what) noexcept {
+	return detail::g_diag_counts[static_cast<size_t>(what)].load(std::memory_order_relaxed);
+}
+inline void EnableDiag() noexcept {
+	detail::g_diag_enabled.store(true, std::memory_order_relaxed);
+}
+[[nodiscard]] inline uint64_t GuestFlips() noexcept {
+	return detail::g_guest_flips.load(std::memory_order_relaxed);
+}
 
 // Writes buffered rows to disk and clears the buffers. Thread-safe, safe at exit. Also emits the
 // aggregate "summary_*" timing rows (values are deltas since the previous Flush).

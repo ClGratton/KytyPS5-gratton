@@ -22,8 +22,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -304,10 +307,207 @@ private:
 	uint32_t                       m_frame_index         = 0;
 };
 
+// KYTY_FLIP_LUMA=<csv> (observation only, notes/tracks/correctness-1018.md): for every presented frame, blit the prepared
+// frame down to 64x36, wait for it and write the frame's brightness next to the diagnostic event counters, so a black
+// frame is found exactly (a screenshot loop misses most one-frame flashes) and can be matched with the events around it.
+// KYTY_FLIP_LUMA_DIR=<dir> also saves the 64x36 luma of every dark frame as a PGM. Off unless the variable is set.
+class FlipLumaProbe final {
+public:
+	static constexpr uint32_t kW = 64;
+	static constexpr uint32_t kH = 36;
+
+	FlipLumaProbe(WindowContext& window, CommandScheduler& scheduler)
+	    : m_window(window), m_scheduler(scheduler) {
+		const char* path = std::getenv("KYTY_FLIP_LUMA");
+		if (path == nullptr || *path == 0) {
+			return;
+		}
+		m_file = std::fopen(path, "w");
+		if (m_file == nullptr) {
+			LOGF("KYTY_FLIP_LUMA: cannot open %s\n", path);
+			return;
+		}
+		if (const char* dir = std::getenv("KYTY_FLIP_LUMA_DIR"); dir != nullptr && *dir != 0) {
+			m_dir = dir;
+		}
+		vk::BufferCreateInfo buffer {};
+		buffer.size  = kW * kH * 4;
+		buffer.usage = vk::BufferUsageFlagBits::eTransferDst;
+		VmaAllocationCreateInfo allocation {};
+		allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+		allocation.flags =
+		    VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+		VmaAllocationInfo mapped {};
+		if (vmaCreateBuffer(m_window.graphic_ctx.allocator,
+		                    static_cast<const VkBufferCreateInfo*>(buffer), &allocation, &m_buffer,
+		                    &m_allocation, &mapped) != VK_SUCCESS) {
+			LOGF("KYTY_FLIP_LUMA: cannot allocate the readback buffer\n");
+			std::fclose(m_file);
+			m_file = nullptr;
+			return;
+		}
+		m_mapped = static_cast<const uint8_t*>(mapped.pMappedData);
+		std::fprintf(m_file, "t_ns,presented,guest_flips,mean,dark_cells,min_cell,max_cell,"
+		                     "null_tex_zero,null_tex_invalid,null_buf\n");
+		std::fflush(m_file);
+		Bench::EnableDiag();
+		LOGF("KYTY_FLIP_LUMA: writing %s\n", path);
+	}
+	~FlipLumaProbe() {
+		if (m_file != nullptr) {
+			std::fclose(m_file);
+		}
+	}
+	KYTY_CLASS_NO_COPY(FlipLumaProbe);
+
+	[[nodiscard]] bool Enabled() const noexcept { return m_file != nullptr; }
+
+	void Sample(Presenter::Frame* frame, RenderContext& renderer, uint64_t presented) {
+		if (m_file == nullptr || frame == nullptr || frame->image.image == nullptr) {
+			return;
+		}
+		auto& graphics = m_window.graphic_ctx;
+		if (m_image.image == nullptr || m_image.format != frame->image.format) {
+			if (m_image.image != nullptr) {
+				graphics.DeleteImage(m_image);
+			}
+			vk::ImageCreateInfo create {};
+			create.sType         = vk::StructureType::eImageCreateInfo;
+			create.imageType     = vk::ImageType::e2D;
+			create.extent        = {kW, kH, 1};
+			create.mipLevels     = 1;
+			create.arrayLayers   = 1;
+			create.format        = frame->image.format;
+			create.tiling        = vk::ImageTiling::eOptimal;
+			create.initialLayout = vk::ImageLayout::eUndefined;
+			create.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+			create.sharingMode = vk::SharingMode::eExclusive;
+			create.samples     = vk::SampleCountFlagBits::e1;
+			if (!graphics.CreateImage(create, m_image)) {
+				LOGF("KYTY_FLIP_LUMA: cannot allocate the probe image\n");
+				std::fclose(m_file);
+				m_file = nullptr;
+				return;
+			}
+		}
+		const int64_t t_ns = Bench::NowNs();
+		uint64_t      tick = 0;
+		{
+			Common::LockGuard lock(renderer.GetMutex());
+			auto&             command = m_scheduler.BeginCommand();
+			auto              cmd     = command.Handle();
+			frame->Transit(cmd, vk::ImageLayout::eTransferSrcOptimal,
+			               vk::AccessFlagBits2::eTransferRead);
+			Barrier(cmd, vk::PipelineStageFlagBits2::eTransfer, {}, vk::ImageLayout::eUndefined,
+			        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+			        vk::ImageLayout::eTransferDstOptimal);
+			vk::ImageBlit region {};
+			region.srcSubresource                = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+			region.srcOffsets[1].x               = static_cast<int>(frame->image.extent.width);
+			region.srcOffsets[1].y               = static_cast<int>(frame->image.extent.height);
+			region.srcOffsets[1].z               = 1;
+			region.dstSubresource                = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+			region.dstOffsets[1].x               = static_cast<int>(kW);
+			region.dstOffsets[1].y               = static_cast<int>(kH);
+			region.dstOffsets[1].z               = 1;
+			cmd.blitImage(frame->image.image, vk::ImageLayout::eTransferSrcOptimal, m_image.image,
+			             vk::ImageLayout::eTransferDstOptimal, 1, &region, vk::Filter::eLinear);
+			Barrier(cmd, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+			        vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eTransfer,
+			        vk::AccessFlagBits2::eTransferRead, vk::ImageLayout::eTransferSrcOptimal);
+			vk::BufferImageCopy copy {};
+			copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+			copy.imageExtent      = {kW, kH, 1};
+			cmd.copyImageToBuffer(m_image.image, vk::ImageLayout::eTransferSrcOptimal,
+			                     vk::Buffer(m_buffer), 1, &copy);
+			vk::MemoryBarrier2 host {};
+			host.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+			host.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+			host.dstStageMask  = vk::PipelineStageFlagBits2::eHost;
+			host.dstAccessMask = vk::AccessFlagBits2::eHostRead;
+			vk::DependencyInfo dependency {};
+			dependency.memoryBarrierCount = 1;
+			dependency.pMemoryBarriers    = &host;
+			cmd.pipelineBarrier2(dependency);
+			tick = m_scheduler.Submit();
+		}
+		m_scheduler.Wait(tick);
+		vmaInvalidateAllocation(graphics.allocator, m_allocation, 0, kW * kH * 4);
+
+		uint8_t  luma[kW * kH];
+		uint64_t sum = 0;
+		uint32_t dark = 0, lo = 255, hi = 0;
+		for (uint32_t i = 0; i < kW * kH; i++) {
+			const uint32_t l = (uint32_t {m_mapped[i * 4]} + m_mapped[i * 4 + 1] + m_mapped[i * 4 + 2]) / 3;
+			luma[i]          = static_cast<uint8_t>(l);
+			sum += l;
+			dark += l < 4;
+			lo = std::min(lo, l);
+			hi = std::max(hi, l);
+		}
+		const double mean = static_cast<double>(sum) / (kW * kH);
+		std::fprintf(m_file, "%lld,%llu,%llu,%.2f,%u,%u,%u,%llu,%llu,%llu\n",
+		             static_cast<long long>(t_ns), static_cast<unsigned long long>(presented),
+		             static_cast<unsigned long long>(Bench::GuestFlips()), mean, dark, lo, hi,
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullTextureZero)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullTextureInvalid)),
+		             static_cast<unsigned long long>(Bench::DiagCount(Bench::Diag::NullBuffer)));
+		std::fflush(m_file);
+		if (!m_dir.empty() && m_dumped < 300 && (mean < 8.0 || dark * 4 >= kW * kH)) {
+			char name[512];
+			std::snprintf(name, sizeof(name), "%s/dark_%llu_%lld.pgm", m_dir.c_str(),
+			              static_cast<unsigned long long>(presented), static_cast<long long>(t_ns / 1000000));
+			if (std::FILE* pgm = std::fopen(name, "wb")) {
+				std::fprintf(pgm, "P5\n%u %u\n255\n", kW, kH);
+				std::fwrite(luma, 1, sizeof(luma), pgm);
+				std::fclose(pgm);
+				m_dumped++;
+			}
+		}
+	}
+
+private:
+	void Barrier(vk::CommandBuffer command, vk::PipelineStageFlags2 src_stage,
+	             vk::AccessFlags2 src_access, vk::ImageLayout from, vk::PipelineStageFlags2 dst_stage,
+	             vk::AccessFlags2 dst_access, vk::ImageLayout to) {
+		if (from == vk::ImageLayout::eUndefined) {
+			src_stage = vk::PipelineStageFlagBits2::eTransfer;
+		}
+		vk::ImageMemoryBarrier2 barrier {};
+		barrier.srcStageMask                  = src_stage;
+		barrier.srcAccessMask                 = src_access;
+		barrier.dstStageMask                  = dst_stage;
+		barrier.dstAccessMask                 = dst_access;
+		barrier.oldLayout                     = from;
+		barrier.newLayout                     = to;
+		barrier.srcQueueFamilyIndex           = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex           = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image                         = m_image.image;
+		barrier.subresourceRange.aspectMask   = vk::ImageAspectFlagBits::eColor;
+		barrier.subresourceRange.levelCount   = 1;
+		barrier.subresourceRange.layerCount   = 1;
+		vk::DependencyInfo dependency {};
+		dependency.imageMemoryBarrierCount = 1;
+		dependency.pImageMemoryBarriers    = &barrier;
+		command.pipelineBarrier2(dependency);
+	}
+
+	WindowContext&     m_window;
+	CommandScheduler&  m_scheduler;
+	std::FILE*         m_file = nullptr;
+	std::string        m_dir;
+	VulkanImage        m_image;
+	VkBuffer           m_buffer     = VK_NULL_HANDLE;
+	VmaAllocation      m_allocation = nullptr;
+	const uint8_t*     m_mapped     = nullptr;
+	uint32_t           m_dumped     = 0;
+};
+
 struct Presenter::Impl {
 	explicit Impl(WindowContext& owner)
 	    : renderer(*owner.render_context), window(owner), swapchain(owner),
-	      present_scheduler(renderer, owner.graphic_ctx), frames(owner, present_scheduler) {
+	      present_scheduler(renderer, owner.graphic_ctx), frames(owner, present_scheduler),
+	      flip_luma(owner, present_scheduler) {
 		EXIT_IF(owner.render_context == nullptr);
 		swapchain.Create();
 		frames.Initialize(swapchain.ImageCount(), swapchain.Format());
@@ -347,6 +547,7 @@ struct Presenter::Impl {
 	Swapchain             swapchain;
 	CommandScheduler      present_scheduler;
 	FramePool             frames;
+	FlipLumaProbe         flip_luma;
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
@@ -1005,6 +1206,10 @@ void Presenter::Impl::Present() {
 					layer.frame->present_tick = tick;
 				}
 			}
+		}
+		if (flip_luma.Enabled()) {
+			flip_luma.Sample(layers[0].frame, renderer,
+			                 window.loop.presented_frames.load(std::memory_order_relaxed) + 1);
 		}
 		status = swapchain.Present();
 		if (status != Swapchain::Status::Success) {

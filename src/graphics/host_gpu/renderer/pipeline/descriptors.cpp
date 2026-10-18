@@ -7,6 +7,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/benchInstrument.h"
 #include "common/common.h"
 #include "common/gpuPhaseStats.h"
 #include "common/emulatorConfig.h"
@@ -756,6 +757,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 
 	auto& texture_cache = m_context.GetTextureCache();
 	if (descriptor.IsNull()) {
+		Bench::NoteDiag(Bench::Diag::NullTextureZero);
 		return {.layout = vk::ImageLayout::eGeneral};
 	}
 
@@ -775,6 +777,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			invalid = "format without a texel layout";
 		}
 		if (invalid != nullptr) {
+			Bench::NoteDiag(Bench::Diag::NullTextureInvalid);
 			static std::atomic<uint32_t> reported {0};
 			const auto                   count = reported.fetch_add(1, std::memory_order_relaxed) + 1;
 			if (count <= 32) {
@@ -1107,6 +1110,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			}
 			size = Libs::LibKernel::Memory::ClampRangeSize(address, size);
 			if (size == 0) { // unmapped: bound as a null buffer
+				Bench::NoteDiag(Bench::Diag::NullBuffer);
 				source = {};
 				continue;
 			}
