@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace Common {
@@ -27,6 +28,19 @@ public:
 
 	ChunkedStorage(const ChunkedStorage&)            = delete;
 	ChunkedStorage& operator=(const ChunkedStorage&) = delete;
+
+	// Movable (a cache is reset by assigning an empty one); the source is left empty.
+	ChunkedStorage(ChunkedStorage&& other) noexcept: m_chunks(std::move(other.m_chunks)), m_size(std::exchange(other.m_size, 0)) {
+		other.m_chunks.clear();
+	}
+	ChunkedStorage& operator=(ChunkedStorage&& other) noexcept {
+		if (this != &other) {
+			m_chunks = std::move(other.m_chunks);
+			m_size   = std::exchange(other.m_size, 0);
+			other.m_chunks.clear();
+		}
+		return *this;
+	}
 
 	[[nodiscard]] T& operator[](size_t index) noexcept { return m_chunks[index >> kShift][index & kMask]; }
 

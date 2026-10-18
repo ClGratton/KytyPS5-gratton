@@ -144,6 +144,21 @@ void TestFreeAndIdReuse() {
   Check(Collect(cache, 70).size() == 1, "touching a rebuilt item failed");
 }
 
+// A cache is reset by assigning an empty one (the texture cache tests do).
+void TestAssignEmptyResets() {
+  Common::LeastRecentlyUsedCache<std::string, uint64_t> cache;
+  for (int i = 0; i < 3000; ++i) {
+    (void)cache.Insert("x" + std::to_string(i), static_cast<uint64_t>(i));
+  }
+  cache = {};
+  Check(Collect(cache, UINT64_MAX).empty(), "assigning an empty cache left items behind");
+  const auto id = cache.Insert("again", 1);
+  cache.Touch(id, 2);
+  const auto all = Collect(cache, UINT64_MAX);
+  Check(all.size() == 1 && all[0] == "again", "a reset cache does not take new items");
+
+}
+
 } // namespace
 
 int main() {
@@ -151,6 +166,7 @@ int main() {
   TestEarlyExitCallback();
   TestTouchReordersAndSkips();
   TestFreeAndIdReuse();
+  TestAssignEmptyResets();
   std::puts("LruCacheTests: all cases passed");
   return 0;
 }
