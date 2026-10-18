@@ -267,9 +267,57 @@ void TestReadHullAgainstFullCheck() {
 	Check(!HullProvesNoHazard(unbuilt, none, none), "an unbuilt hull has no proof");
 }
 
+// The order the index is built in does not matter to the read hull (it walks the entries) and Overlaps builds it on
+// demand: a hull proof and the full check on an index nobody called Build() on agree with the built one
+// (--desc-commit-diet leaves the Build out).
+void TestLazyBuild() {
+	std::mt19937_64 rng(0x1a2b3c);
+	size_t          proofs = 0, overlaps = 0;
+	for (const uint64_t space: {uint64_t {64}, uint64_t {4096}, uint64_t {1} << 40}) {
+		for (int trial = 0; trial < 20000; ++trial) {
+			const auto reads   = RandomRanges(rng, rng() % 10, space, trial % 9 == 0);
+			const auto images  = RandomRanges(rng, rng() % 4, space, trial % 9 == 0);
+			const auto buffers = RandomRanges(rng, rng() % 4, space, trial % 9 == 0);
+			WrittenRangeIndex built_images, built_buffers, lazy_images, lazy_buffers;
+			for (const auto& range: images) {
+				built_images.Add(range.first, range.second);
+				lazy_images.Add(range.first, range.second);
+			}
+			for (const auto& range: buffers) {
+				built_buffers.Add(range.first, range.second);
+				lazy_buffers.Add(range.first, range.second);
+			}
+			built_images.Build();
+			built_buffers.Build();
+			Libs::Graphics::ShaderRecompiler::IR::ReadHull hull;
+			BuildReadHull(reads, hull);
+			Check(HullProvesNoHazard(hull, built_images, built_buffers) ==
+			          HullProvesNoHazard(hull, lazy_images, lazy_buffers),
+			      "the hull proof does not need the sort");
+			proofs += HullProvesNoHazard(hull, lazy_images, lazy_buffers);
+			const auto expected = FindScalarReadHazard(reads, built_images, built_buffers);
+			const auto actual   = FindScalarReadHazard(reads, lazy_images, lazy_buffers);
+			Check(expected.kind == actual.kind && expected.read_index == actual.read_index,
+			      "the full check builds the index when it first needs it");
+			overlaps += expected.kind != ScalarReadHazardKind::None;
+			// Add after a query invalidates the sorted order again.
+			lazy_images.Add(0x40, 8);
+			built_images.Add(0x40, 8);
+			built_images.Build();
+			for (const auto& read: reads) {
+				if (read.second == 0 || read.first > UINT64_MAX - read.second) continue;
+				Check(built_images.Overlaps(read.first, read.second) == lazy_images.Overlaps(read.first, read.second),
+				      "Add after a query is seen by the next query");
+			}
+		}
+	}
+	Check(proofs > 1000 && overlaps > 1000, "the generator exercises proofs and hazards");
+}
+
 } // namespace
 
 int main() {
+	TestLazyBuild();
 	TestEmpty();
 	TestTouchingRanges();
 	TestContainmentAndDuplicates();

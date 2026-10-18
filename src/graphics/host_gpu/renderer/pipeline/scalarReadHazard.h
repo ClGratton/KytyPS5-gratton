@@ -38,6 +38,7 @@ public:
 		m_entries.clear();
 		m_prefix_end.clear();
 		m_invalid = false;
+		m_built   = false;
 	}
 
 	// Empty ranges are ignored, as the nested loops skipped `written.size == 0`. A range that wraps
@@ -49,19 +50,13 @@ public:
 			return;
 		}
 		m_entries.push_back({address, address + size});
+		m_built = false;
 	}
 
-	// Must be called after the last Add and before any query.
-	void Build() {
-		std::sort(m_entries.begin(), m_entries.end(),
-		          [](const Entry& left, const Entry& right) { return left.start < right.start; });
-		m_prefix_end.resize(m_entries.size());
-		uint64_t end = 0;
-		for (size_t i = 0; i < m_entries.size(); ++i) {
-			end             = std::max(end, m_entries[i].end);
-			m_prefix_end[i] = end;
-		}
-	}
+	// Sorts the entries and fills the running maximum of the range ends that Overlaps needs. Overlaps builds
+	// it on demand, so a caller whose queries only go through AnyEntry / Empty / HasInvalid (the read hull's
+	// proof, --desc-commit-diet) never pays for it.
+	void Build() { BuildNow(); }
 
 	[[nodiscard]] bool Empty() const { return m_entries.empty() && !m_invalid; }
 	// The non-empty ranges added (sorted by start after Build).
@@ -78,6 +73,7 @@ public:
 	// True when [address, address + size) overlaps a range. `size` must be non-zero and the read must
 	// not wrap (see ReadIsValid).
 	[[nodiscard]] bool Overlaps(uint64_t address, uint64_t size) const {
+		if (!m_built) BuildNow();
 		const uint64_t read_end = address + size;
 		// Ranges starting at or after the read's end cannot overlap it; among the others the one that
 		// ends last decides.
@@ -93,9 +89,23 @@ private:
 		uint64_t start;
 		uint64_t end;
 	};
-	std::vector<Entry>    m_entries;
-	std::vector<uint64_t> m_prefix_end;
-	bool                  m_invalid = false;
+	// The sorted order and the running maximum are a cache of the added ranges, built on first use.
+	void BuildNow() const {
+		std::sort(m_entries.begin(), m_entries.end(),
+		          [](const Entry& left, const Entry& right) { return left.start < right.start; });
+		m_prefix_end.resize(m_entries.size());
+		uint64_t end = 0;
+		for (size_t i = 0; i < m_entries.size(); ++i) {
+			end             = std::max(end, m_entries[i].end);
+			m_prefix_end[i] = end;
+		}
+		m_built = true;
+	}
+
+	mutable std::vector<Entry>    m_entries;
+	mutable std::vector<uint64_t> m_prefix_end;
+	bool                          m_invalid = false;
+	mutable bool                  m_built   = false;
 };
 
 [[nodiscard]] inline bool ScalarReadIsValid(const ScalarRead& read) {
