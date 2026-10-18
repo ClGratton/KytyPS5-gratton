@@ -1091,38 +1091,60 @@ void TextureCache::InitializeImage(ImageId id) {
 		return;
 	}
 	const bool upload = image.IsBufferModified() || image.IsCpuDirty();
-	if (upload && IncrementalDraw::StatsEnabled()) {
-		// KYTY_DRAW_STATS=1: how many images are created and filled from guest memory, and how often the same range again.
-		static thread_local struct {
-			uint64_t                                 inits = 0, uploads = 0, bytes = 0, repeats = 0, buffer_modified = 0, cpu_dirty = 0;
-			std::unordered_map<uint64_t, uint32_t>   seen;
-			std::chrono::steady_clock::time_point    last = std::chrono::steady_clock::now();
-		} u;
+	const bool stats = upload && IncrementalDraw::StatsEnabled();
+	// KYTY_DRAW_STATS=1: how many images are refilled from guest memory per second, how often the same range again, and the
+	// kyGpu time of the three steps (never-written clear, source buffer, upload).
+	struct UploadStats {
+		uint64_t                               uploads = 0, repeats = 0, buffer_modified = 0, cpu_dirty = 0, never_written = 0;
+		uint64_t                               bytes = 0, ns_never = 0, ns_obtain = 0, ns_upload = 0;
+		std::unordered_map<uint64_t, uint32_t> seen;
+		std::chrono::steady_clock::time_point  last = std::chrono::steady_clock::now();
+	};
+	static thread_local UploadStats u; // only touched with the stats on
+	const auto clock_now = [stats] { return stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {}; };
+	const auto since     = [](std::chrono::steady_clock::time_point t) {
+		return static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t).count());
+	};
+	if (stats) {
 		u.uploads++;
 		u.bytes += image.info.data.size;
 		u.buffer_modified += image.IsBufferModified();
 		u.cpu_dirty += image.IsCpuDirty();
 		if (u.seen[image.info.data.address * 0x9e3779b97f4a7c15ull ^ image.info.data.size]++ != 0) u.repeats++;
-		const auto now = std::chrono::steady_clock::now();
-		if (now - u.last >= std::chrono::seconds(5)) {
-			std::printf("[image-uploads] last 5 s: uploads %llu (%.1f MiB), repeats of a range seen before %llu, buffer-modified %llu cpu-dirty %llu, distinct ranges %zu\n",
-			            static_cast<unsigned long long>(u.uploads), u.bytes / 1048576.0, static_cast<unsigned long long>(u.repeats),
-			            static_cast<unsigned long long>(u.buffer_modified), static_cast<unsigned long long>(u.cpu_dirty), u.seen.size());
-			std::fflush(stdout);
-			u.uploads = u.bytes = u.repeats = u.buffer_modified = u.cpu_dirty = 0;
-			u.last = now;
-		}
 	}
 	if (upload) {
-		if (!TryUploadNeverWritten(image)) {
+		const auto t0    = clock_now();
+		const bool never = TryUploadNeverWritten(image);
+		if (stats) {
+			u.ns_never += since(t0);
+			u.never_written += never;
+		}
+		if (!never) {
+			const auto t1 = clock_now();
 			const auto [source, source_offset] =
 			    m_buffer_cache.ObtainBufferForImage(image.info.data.address, image.info.data.size);
+			if (stats) u.ns_obtain += since(t1);
 			if (source == nullptr) {
 				EXIT("TextureCache: failed to obtain image upload source\n");
 			}
+			const auto t2 = clock_now();
 			UploadImage(image, *source, source_offset);
+			if (stats) u.ns_upload += since(t2);
 		}
 		image.ClearBufferModified();
+	}
+	if (stats && clock_now() - u.last >= std::chrono::seconds(5)) {
+		const double secs = std::chrono::duration<double>(clock_now() - u.last).count();
+		std::printf("[image-uploads] %.1f s: refills %llu (%.0f/s) repeats %llu buffer-modified %llu cpu-dirty %llu never-written clears %llu, "
+		            "kyGpu ms/s: clear-check %.1f obtain-source %.1f upload %.1f, distinct ranges %zu\n",
+		            secs, static_cast<unsigned long long>(u.uploads), u.uploads / secs, static_cast<unsigned long long>(u.repeats),
+		            static_cast<unsigned long long>(u.buffer_modified), static_cast<unsigned long long>(u.cpu_dirty),
+		            static_cast<unsigned long long>(u.never_written), u.ns_never / 1e6 / secs, u.ns_obtain / 1e6 / secs,
+		            u.ns_upload / 1e6 / secs, u.seen.size());
+		std::fflush(stdout);
+		u.uploads = u.repeats = u.buffer_modified = u.cpu_dirty = u.never_written = u.bytes = u.ns_never = u.ns_obtain = u.ns_upload = 0;
+		u.last = clock_now();
 	}
 	if (image.IsCpuDirty()) {
 		image.RefreshComplete();
