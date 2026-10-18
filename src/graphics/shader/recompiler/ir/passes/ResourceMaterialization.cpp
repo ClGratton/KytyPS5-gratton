@@ -1545,10 +1545,44 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		return false;
 	}
 	const bool capture_reads = program.capture_specialization_reads || !program.source_reads.empty();
-	auto& reads = snapshot.specialization_reads;
+	// The reads of the walk are collected in a per-thread scratch vector and copied into the snapshot,
+	// with its exact size, when the walk is over (on every way out of this function). Appending to the
+	// snapshot's own vector grew it one heap block at a time, and a plan keeps these for a while.
+	// A walk started from inside another walk of the same thread collects directly, as it always did.
+	struct ReadsScope {
+		using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;
+		static Ranges& Scratch() {
+			thread_local Ranges ranges;
+			return ranges;
+		}
+		static bool& Busy() {
+			thread_local bool busy = false;
+			return busy;
+		}
+		ReadsScope(Ranges& destination, const Ranges& initial): dest(destination), scratch(!Busy() ? &Scratch() : nullptr) {
+			if (scratch != nullptr) {
+				Busy() = true;
+				scratch->assign(initial.begin(), initial.end());
+			} else {
+				dest = initial;
+			}
+		}
+		~ReadsScope() { Commit(); }
+		ReadsScope(const ReadsScope&)            = delete;
+		ReadsScope& operator=(const ReadsScope&) = delete;
+		Ranges& Reads() { return scratch != nullptr ? *scratch : dest; }
+		void Commit() {
+			if (scratch == nullptr) return;
+			dest.assign(scratch->begin(), scratch->end());
+			scratch = nullptr;
+			Busy()  = false;
+		}
+		Ranges& dest;
+		Ranges* scratch;
+	};
 	snapshot.read_hull = {}; // derived from the reads below; only a plan producer builds it
-	reads = program.source_reads;
-	SrtReadCapture capture {runtime, reads};
+	ReadsScope reads_scope {snapshot.specialization_reads, program.source_reads};
+	SrtReadCapture capture {runtime, reads_scope.Reads()};
 	const auto observed = capture_reads ? capture.ObservedRuntime() : runtime;
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed,
@@ -1723,6 +1757,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	reads_scope.Commit();
 	return BuildResourceSpecialization(program, snapshot, specialization);
 }
 
