@@ -58,6 +58,46 @@ public:
 		return true;
 	}
 
+	// --desc-commit-diet: the same question as Changed(), asked while the words are produced, so that no staging vector is
+	// built and compared afterwards. Begin the binding's update with its word count, Put every word in order, End it: the
+	// held content ends up holding exactly the words put (as after Changed()), and End() says whether anything differed
+	// from what was held (a binding that was not held, or held with another length, differs).
+	class Update {
+	public:
+		void Put(uint64_t word) noexcept {
+			uint64_t& held = m_content[m_next++];
+			m_changed |= held != word;
+			held = word;
+		}
+
+	private:
+		friend class PushDescriptorCache;
+		uint64_t* m_content = nullptr;
+		size_t    m_next    = 0;
+		bool      m_changed = false;
+	};
+
+	[[nodiscard]] Update BeginUpdate(uint32_t binding, size_t word_count) {
+		m_stats.writes_seen++;
+		if (binding >= m_slots.size()) m_slots.resize(binding + 1);
+		auto& slot = m_slots[binding];
+		Update update;
+		update.m_changed = !slot.valid;
+		if (slot.content.size() != word_count) {
+			slot.content.resize(word_count);
+			update.m_changed = true;
+		}
+		slot.valid        = true;
+		update.m_content  = slot.content.data();
+		return update;
+	}
+
+	// True when the binding has to be written.
+	[[nodiscard]] bool EndUpdate(const Update& update) noexcept {
+		if (update.m_changed) m_stats.writes_pushed++;
+		return update.m_changed;
+	}
+
 	// A write that cannot be compared is pushed and must not be compared against older content afterwards.
 	void Forget(uint32_t binding) {
 		m_stats.writes_seen++;
