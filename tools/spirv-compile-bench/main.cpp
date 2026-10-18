@@ -47,6 +47,7 @@ struct Options {
 	int         reps          = 5;
 	int         warmup        = 1;
 	int         parallel      = 0;          // >0: that many concurrent compiles per rep
+	bool        disable_opt   = false;      // VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT on the compute pipeline
 	bool        distinct      = false;      // parallel: cycle through the files instead of repeating file 0
 	std::string robustness    = "emu";      // emu | none | rb1 | rb2
 	int         subgroup      = 32;         // required subgroup size, 0 = do not request one
@@ -433,6 +434,7 @@ static double CompileComputePipeline(const Ctx& c, const Options& o, const Layou
 	ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = mod; ci.stage.pName = "main";
 	if (sg.on) ci.stage.pNext = &sg.info;
 	ci.layout = l.pipeline; ci.basePipelineIndex = -1;
+	if (o.disable_opt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
 	VkPipeline p = nullptr;
 	auto t2 = Clock::now();
 	VK_OK(vkCreateComputePipelines(c.device, VK_NULL_HANDLE, 1, &ci, nullptr, &p));
@@ -765,6 +767,7 @@ int main(int argc, char** argv) {
 		else if (a == "--warmup") o.warmup = std::atoi(next());
 		else if (a == "--parallel") o.parallel = std::atoi(next());
 		else if (a == "--distinct") o.distinct = true;
+		else if (a == "--disable-opt") o.disable_opt = true;
 		else if (a == "--robustness") o.robustness = next();
 		else if (a == "--subgroup") o.subgroup = std::atoi(next());
 		else if (a == "--no-push") o.push_desc = false;
