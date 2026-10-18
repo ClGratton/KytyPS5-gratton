@@ -221,8 +221,8 @@ struct ConfigOptions {
 	// copy of its registers, to N prefetch workers (notes/resolved-draw.md). Default 0.
 	uint32_t               lookahead_workers           = 0;
 	// --lookahead-adaptive: with --lookahead-workers, only as many workers run as the GPU thread's plan lookups
-	// need (graphics/guest_gpu/lookaheadGovernor.h). Scheduling only; default off until measured.
-	bool                   lookahead_adaptive          = false;
+	// need (graphics/guest_gpu/lookaheadGovernor.h). Scheduling only; default on.
+	bool                   lookahead_adaptive          = true;
 	// --skip-ir-validation: skip the shader IR consistency checks in release translations (about a
 	// fifth of translate time; the output is byte-identical). Debug builds always validate and
 	// KYTY_IR_VALIDATE forces it on. Default off (= validate, stock behaviour).
@@ -321,8 +321,8 @@ struct ConfigOptions {
 	// --desc-commit-diet: CommitBindings leaves out the work that a repeated draw does for nothing: the image transit calls whose
 	// image is already in the wanted layout and access, the sort of the written-range index when the read hull answers, and
 	// (with --push-descriptor-delta) the descriptor write structures and content vectors of bindings that did not change. Exact.
-	// Default off.
-	bool                   desc_commit_diet            = false;
+	// Default on.
+	bool                   desc_commit_diet            = true;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -390,8 +390,8 @@ struct ConfigOptions {
 	bool                   tracker_lockfree = false;
 	// --plan-pool: the lookahead's plans (--srt-plans) are reused after kyGpu is done with them, with the
 	// capacity of their vectors, instead of being allocated by a worker and freed by the sequencer thread.
-	// Exact (only where the memory comes from changes); default off until measured.
-	bool                   plan_pool = false;
+	// Exact (only where the memory comes from changes); default on.
+	bool                   plan_pool = true;
 	// --draw-key-cache: a most-recently-used memo of the last graphics pipelines found, compared by
 	// key before the hash and map lookup. Default off. --debug-draw-key-verify also runs the
 	// full lookup on every memo hit and stops on a disagreement.

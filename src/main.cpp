@@ -299,7 +299,7 @@ static void PrintUsage() {
 	         "                                       nothing: image transits that change nothing, a sort the\n"
 	         "                                       read hull makes unnecessary, and (with\n"
 	         "                                       --push-descriptor-delta) descriptor writes that did not\n"
-	         "                                       change (exact). Default: false.\n");
+	         "                                       change (exact). Default: true.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"
 	         "                                       (exact). Default: false.\n");
@@ -459,11 +459,11 @@ static void PrintUsage() {
 	::printf("  --plan-pool <true|false>             Reuse the look-ahead's finished SRT plans (with\n"
 	         "                                       --srt-plans) with the capacity of their vectors\n"
 	         "                                       instead of allocating and freeing a dozen heap blocks\n"
-	         "                                       per plan across threads (exact). Default: false.\n");
+	         "                                       per plan across threads (exact). Default: true.\n");
 	::printf("  --lookahead-adaptive <true|false>    With --lookahead-workers: run only as many workers as\n"
 	         "                                       the GPU thread's plan lookups need (one is dropped after\n"
 	         "                                       a run of quiet windows, all return at the first window\n"
-	         "                                       with misses). Less host CPU, same plans. Default: false.\n");
+	         "                                       with misses). Less host CPU, same plans. Default: true.\n");
 	::printf("  --submit-coalesce-max <1-256>        Events held back at most. Default: 16.\n");
 	::printf("  --submit-coalesce-us <0-20000>       Age bound in microseconds; 0 derives it from the\n"
 	         "                                       vblank period (period / 8). Default: 0.\n");
