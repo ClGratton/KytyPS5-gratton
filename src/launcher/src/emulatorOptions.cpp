@@ -794,6 +794,7 @@ QVariantMap Recommended() {
 	// 21.77 fps (+5.1 %) (notes/CHANGES.md C18, C21-C24).
 	values.insert(QStringLiteral("tracker_sleeping_locks"), true);
 	values.insert(QStringLiteral("draw_state_memo"), true);
+	values.insert(QStringLiteral("incremental_draw"), true);
 	values.insert(QStringLiteral("async_upload_copies"), true);
 	values.insert(QStringLiteral("texture_lock_batch"), true);
 	values.insert(QStringLiteral("push_descriptor_delta"), true);

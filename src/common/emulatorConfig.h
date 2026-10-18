@@ -313,7 +313,7 @@ struct ConfigOptions {
 	// --incremental-draw: the GPU thread keeps what a draw resolved (image and buffer bindings of each stage) and, for the next
 	// draw, redoes only the bindings whose inputs changed (graphics/host_gpu/renderer/incrementalDraw.h). Exact: every input is
 	// compared with what the kept result was computed from. Default off.
-	bool                   incremental_draw            = false;
+	bool                   incremental_draw            = true;
 	// --async-upload-copies: the guest-to-ring memcpy of a large buffer upload runs on helper threads
 	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default on.
 	bool                   async_upload_copies         = true;
