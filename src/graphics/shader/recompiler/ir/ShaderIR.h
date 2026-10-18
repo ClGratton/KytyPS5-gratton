@@ -669,6 +669,10 @@ struct ResourcePlan {
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
 	SrtTable                              srt_table; // empty unless the plan is native-eligible
 	std::vector<SrtFastRead>              fast_reads; // per srt_reads slot; see BuildFastReads
+	// Per srt_reads slot: the read's instruction is flagged clean (SrtReadFlags), decided once by
+	// BuildFastReads so the refresh does not chase the value's identity chain for it on every call. Empty
+	// when the plan was not through BuildFastReads (the refresh then asks the instruction).
+	std::vector<uint8_t>                  srt_read_clean;
 	// Number of memo slots the instructions of this plan need (instructions are numbered on first use).
 	mutable EvaluationCounter               evaluation_value_count;
 	// Scratch for nested clean/EXEC memos, activity and material keys. Each thread that evaluates the

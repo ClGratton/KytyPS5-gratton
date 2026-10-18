@@ -551,6 +551,14 @@ void CompileSrtWalker(ResourcePlan& program) {
 
 void BuildFastReads(ResourcePlan& program) {
 	program.fast_reads.assign(program.srt_reads.size(), {});
+	program.srt_read_clean.clear();
+	if (program.srt_plan_complete) {
+		program.srt_read_clean.resize(program.srt_reads.size());
+		for (size_t slot = 0; slot < program.srt_reads.size(); ++slot) {
+			const auto* inst = program.srt_reads[slot].value.ResolveInstruction();
+			program.srt_read_clean[slot] = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u ? 1u : 0u;
+		}
+	}
 	if (!program.srt_plan_complete || !program.resource_tracking_complete) return;
 	const auto source_of = [&](Value value) {
 		SrtFastRead::Source source;
@@ -1331,8 +1339,13 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_program.srt_reads.size()) return false;
 		const auto& read = m_program.srt_reads[slot];
-		const auto* inst = read.value.ResolveInstruction();
-		const bool clean = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;
+		bool        clean = false;
+		if (slot < m_program.srt_read_clean.size()) {
+			clean = m_program.srt_read_clean[slot] != 0u;
+		} else {
+			const auto* inst = read.value.ResolveInstruction();
+			clean            = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;
+		}
 		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr))
 			return false;
 		auto& evaluator = clean ? *m_clean_evaluator : *this;

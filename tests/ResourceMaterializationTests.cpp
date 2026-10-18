@@ -515,6 +515,12 @@ void TestFastReadsMatchTheGraphWalk() {
           "the plan should have a control-flow block listing its SRT reads");
     uint32_t fast = 0;
     for (const auto &entry : plan.fast_reads) fast += entry.valid ? 1u : 0u;
+    Check(plan.srt_read_clean.size() == plan.srt_reads.size(), "every SRT read slot should have its clean flag cached");
+    for (size_t slot = 0; slot < plan.srt_reads.size(); ++slot) {
+      const auto *inst = plan.srt_reads[slot].value.ResolveInstruction();
+      Check((plan.srt_read_clean[slot] != 0u) == (inst->Flags<SrtReadFlags>().clean != 0u),
+            "the cached clean flag of a slot should match its instruction");
+    }
     Check(computed_pointer ? fast == 2 : fast == 4,
           "unexpected number of fast reads (a computed pointer word keeps its readers on the graph walk)");
 
