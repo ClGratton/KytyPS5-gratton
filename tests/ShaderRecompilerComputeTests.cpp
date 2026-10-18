@@ -6763,9 +6763,12 @@ public:
       {
         // --lockfree-image-checks: the answers from the GPU-modified page counts and the metadata table equal the
         // page-table walk and the map, through registration, marking, clearing and deletion.
+        // The function pins the counted-run GC (PinFlagsOff above); the block turns the flag on and puts that pin back.
         auto options = BaselineOptions();
+        options.gc_clock_frames = false;
         options.lockfree_image_checks = true;
         Config::Load(options);
+        ApplyFlagsOffFromEnvironment();
         const auto Agree = [&](uint64_t address, uint64_t size) {
           return texture_cache.HasGpuModifiedImage(address, size) ==
                  TextureCacheTestAccess::HasGpuModifiedLocked(texture_cache,
@@ -6822,7 +6825,8 @@ public:
                 !texture_cache.HasGpuModifiedImage(base + 0x600000, 0x4000) &&
                     Agree(base + 0x600000, 0x4000),
                 "a count survived the deletion");
-        Config::Load(BaselineOptions());
+        options.lockfree_image_checks = false;
+        Config::Load(options);
         ApplyFlagsOffFromEnvironment();
       }
 
