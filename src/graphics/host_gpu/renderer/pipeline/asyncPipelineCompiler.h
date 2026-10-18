@@ -269,6 +269,7 @@ public:
 
 private:
 	void WorkerLoop(uint32_t index);
+	void ProgramLoop(uint32_t index);
 	void Promote(AsyncJob& job);
 
 	const Config::AsyncPipelineMode m_mode;
@@ -285,6 +286,15 @@ private:
 	uint32_t                               m_low_running = 0;
 	uint32_t                               m_normal_running = 0; // normal jobs executing (m_mutex)
 	std::vector<std::thread>               m_workers;
+	// Program lane: SPIR-V translation jobs (milliseconds, no driver compile) get their own small
+	// set of workers and queue. In the shared queue a translation sat behind the pool's long driver
+	// compiles (seconds each, all workers busy), and whoever waited for it (the look-ahead worker,
+	// or the GPU thread) waited for a compile to finish first. KYTY_PROGRAM_LANE=<n> sets the
+	// worker count (default 2, 0 = translations share the main queue as before).
+	std::deque<std::shared_ptr<AsyncJob>>  m_program_queue;
+	std::condition_variable                m_program_signal;
+	std::vector<std::thread>               m_program_workers;
+	uint32_t                               m_program_lane = 0;
 	std::atomic<bool>                      m_stopping {false};
 	bool                                   m_summary_logged = false;
 	// What each worker is running (debug only): job kind (+1, 0 = idle), key hash, start time.

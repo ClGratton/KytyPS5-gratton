@@ -5,6 +5,7 @@
 #include "common/hangWatchdog.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <utility>
 
@@ -106,6 +107,13 @@ AsyncPipelineCompiler::AsyncPipelineCompiler(Config::AsyncPipelineMode mode,
 	for (uint32_t i = 0; i < m_worker_count; i++) {
 		m_workers.emplace_back([this, i] { WorkerLoop(i); });
 	}
+	m_program_lane = 2;
+	if (const char* env = std::getenv("KYTY_PROGRAM_LANE"); env != nullptr && *env != '\0') {
+		m_program_lane = static_cast<uint32_t>(std::min(std::atoi(env), 8));
+	}
+	for (uint32_t i = 0; i < m_program_lane; i++) {
+		m_program_workers.emplace_back([this, i] { ProgramLoop(i); });
+	}
 }
 
 AsyncPipelineCompiler::~AsyncPipelineCompiler() {
@@ -132,6 +140,17 @@ bool AsyncPipelineCompiler::Submit(std::shared_ptr<AsyncJob> job, bool urgent) {
 		job->m_submit_ns = Bench::NowNs();
 		job->m_mode      = m_mode;
 		job->m_submitted.store(true, std::memory_order_relaxed);
+		if (m_program_lane != 0 && job->GetKind() == AsyncJob::Kind::Program) {
+			if (urgent) {
+				m_program_queue.push_front(std::move(job));
+			} else {
+				m_program_queue.push_back(std::move(job));
+			}
+			m_stats.submitted.fetch_add(1, std::memory_order_relaxed);
+			lock.unlock();
+			m_program_signal.notify_one();
+			return true;
+		}
 		if (urgent) {
 			m_queue.push_front(std::move(job));
 		} else {
@@ -185,10 +204,19 @@ void AsyncPipelineCompiler::Shutdown() {
 		// Idempotent: a second call finds the queue and the worker list already moved out.
 		m_stopping.store(true, std::memory_order_release);
 		cancelled.swap(m_queue);
+		for (auto& job: m_program_queue) {
+			cancelled.push_back(std::move(job));
+		}
+		m_program_queue.clear();
 		low_cancelled.swap(m_low_queue);
 		workers.swap(m_workers);
+		for (auto& thread: m_program_workers) {
+			workers.push_back(std::move(thread));
+		}
+		m_program_workers.clear();
 	}
 	m_signal.notify_all();
+	m_program_signal.notify_all();
 	for (auto& job: cancelled) {
 		job->Cancel();
 		job->Finish(AsyncJob::State::Cancelled);
@@ -229,6 +257,16 @@ void AsyncPipelineCompiler::Promote(AsyncJob& job) {
 		}
 		return;
 	}
+	for (auto it = m_program_queue.begin(); it != m_program_queue.end(); ++it) {
+		if (it->get() == &job) {
+			if (it != m_program_queue.begin()) {
+				auto moved = std::move(*it);
+				m_program_queue.erase(it);
+				m_program_queue.push_front(std::move(moved));
+			}
+			return;
+		}
+	}
 	if (m_queue.empty() || m_queue.front().get() == &job) {
 		return;
 	}
@@ -252,6 +290,40 @@ bool AsyncPipelineCompiler::WaitFor(AsyncJob& job) {
 	m_stats.gpu_waits.fetch_add(1, std::memory_order_relaxed);
 	m_stats.gpu_wait_ns.fetch_add(job.WaitNs() - before, std::memory_order_relaxed);
 	return ok;
+}
+
+void AsyncPipelineCompiler::ProgramLoop(uint32_t index) {
+#if defined(__linux__)
+	{
+		const auto name = fmt::format("kyty-prog-{}", index);
+		pthread_setname_np(pthread_self(), name.c_str());
+	}
+#else
+	(void)index;
+#endif
+	for (;;) {
+		std::shared_ptr<AsyncJob> job;
+		{
+			std::unique_lock lock(m_mutex);
+			m_program_signal.wait(lock, [this] {
+				return m_stopping.load(std::memory_order_relaxed) || !m_program_queue.empty();
+			});
+			if (m_stopping.load(std::memory_order_relaxed)) {
+				return; // Shutdown() took the queue
+			}
+			job = std::move(m_program_queue.front());
+			m_program_queue.pop_front();
+			job->m_start_ns = Bench::NowNs();
+			job->m_state.store(AsyncJob::State::Running, std::memory_order_release);
+		}
+		{
+			Common::Hang::Phase phase("worker_job", static_cast<uint64_t>(job->GetKind()),
+			                          job->KeyHash());
+			job->Execute();
+		}
+		job->Finish(AsyncJob::State::Done);
+		m_stats.completed.fetch_add(1, std::memory_order_relaxed);
+	}
 }
 
 void AsyncPipelineCompiler::WorkerLoop(uint32_t index) {
