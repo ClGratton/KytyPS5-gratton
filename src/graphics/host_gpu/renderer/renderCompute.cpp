@@ -359,6 +359,9 @@ static void CollectDispatchAccess(TextureCache& textures, const ShaderStageRunti
 		const auto& resource = program.info.images[i];
 		const bool  write    = (resource.written || resource.atomic) &&
 		                   resource.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage;
+		if (!bindings.images[i].image_id) {
+			continue; // a null descriptor: reads zeros, writes go nowhere, no memory is reached
+		}
 		const auto& image = textures.GetImage(bindings.images[i].image_id);
 		access.Add(Space::HostImage, HandleKey(image.backing.image), 0, 1, write);
 		// Another host image can alias the same guest memory; its guest range names it.
