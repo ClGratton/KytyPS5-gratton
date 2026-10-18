@@ -273,12 +273,13 @@ void TestRuntimeToggleControlFile() {
 		Check(Config::PollBeforeWaitUs() == 0, "poll-before-wait without a budget stays off");
 	}
 
-	// readback-futures: default off, flipped at run time in both directions.
+	// readback-futures: flipped at run time in both directions, from either start value.
 	{
 		Config::ConfigOptions plain;
-		plain.toggle_control = control;
+		plain.readback_futures = false;
+		plain.toggle_control   = control;
 		Apply(plain);
-		Check(!Config::ReadbackFuturesEnabled(), "readback-futures is off by default");
+		Check(!Config::ReadbackFuturesEnabled(), "readback-futures starts off when the config says so");
 		for (int seq = 5; seq <= 6; seq++) {
 			{
 				std::ofstream out(dir / "toggles.tmp");
