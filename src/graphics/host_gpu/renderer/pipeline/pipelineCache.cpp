@@ -648,6 +648,8 @@ struct PipelineCache::ProgramCache {
 		ShaderProgram                                handle;
 		// --debug-lookahead-verify only.
 		uint64_t                                     spirv_hash = 0;
+		// Size of the emitted SPIR-V module in words (timing log only: compile time tracks it).
+		uint32_t                                     spirv_words = 0;
 		bool                                         prefetched = false;
 		bool                                         verified   = false;
 		// Built by a shader-load job (set before publication, never changed after).
@@ -968,6 +970,7 @@ struct PipelineCache::ProgramCache {
 		    .handle         = {.id = next_shader_id.fetch_add(1, std::memory_order_relaxed) + 1,
 		                       .module = module},
 		    .spirv_hash     = spirv_hash,
+		    .spirv_words    = static_cast<uint32_t>(result.spirv.size()),
 		};
 	}
 
@@ -1064,10 +1067,10 @@ struct PipelineCache::ProgramCache {
 				    "program_translate", program_key_hash, t_capture_ns, translate_ns,
 				    fmt::format("stage={};shader_hash={:016x};shader_id={};new_source={};"
 				                "reused_permutation={};prepare_ns=0;frontend_ns={};plan_ns={};"
-				                "materialize_ns={};backend_ns={};module_ns={};code_dwords={}",
+				                "materialize_ns={};backend_ns={};module_ns={};code_dwords={};spirv_words={}",
 				                StageShortName(stage), shader_hash, published->handle.id,
 				                new_source ? 1 : 0, dup ? 1 : 0, frontend, plan_ns, materialize_ns,
-				                backend_ns, module_ns, code_dwords));
+				                backend_ns, module_ns, code_dwords, compiled.spirv_words));
 			}
 			cache.PrintShaderCounts();
 			// Publish first, unregister last: "not registered" must imply "published".
@@ -1907,6 +1910,7 @@ struct PipelineCache::ProgramCache {
 		// One row per program translation (a miss). dur_ns = translate_ns = prepare + frontend +
 		// plan + backend + module; MaterializeResources and the S_SWAP_PC refresh are reported on
 		// their own rows (miss=1), and the detail field carries materialize_ns for convenience.
+		uint32_t spirv_words = 0;
 		const auto log_translate = [&](bool reused, uint64_t shader_id) {
 			if (!timing) return;
 			const auto translate_ns = prepare_ns + frontend_ns + plan_ns + backend_ns + module_ns;
@@ -1915,10 +1919,10 @@ struct PipelineCache::ProgramCache {
 			    GuestGpu::IsGpuThread(),
 			    fmt::format("stage={};shader_hash={:016x};shader_id={};new_source={};reused_permutation={};"
 			                "prepare_ns={};frontend_ns={};plan_ns={};materialize_ns={};backend_ns={};"
-			                "module_ns={};code_dwords={}",
+			                "module_ns={};code_dwords={};spirv_words={}",
 			                StageShortName(stage), params.hash, shader_id, new_source ? 1 : 0,
 			                reused ? 1 : 0, prepare_ns, frontend_ns, plan_ns, materialize_time.dur,
-			                backend_ns, module_ns, params.code.size()));
+			                backend_ns, module_ns, params.code.size(), spirv_words));
 		};
 		if (entry == nullptr) {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
@@ -1985,6 +1989,7 @@ struct PipelineCache::ProgramCache {
 		    stage_name, options, std::move(translated), std::move(specialization), push_data_cursor,
 		    SourceEntry::FunctionCode(translated_linked, base_code_size), timing ? &backend_ns : nullptr,
 		    timing ? &module_ns : nullptr);
+		spirv_words = compiled.spirv_words;
 		if (verify_target != nullptr) {
 			verify_target->verified = true;
 			static std::atomic<uint64_t> verified_count {0}, mismatch_count {0};
