@@ -176,6 +176,13 @@ QList<Option> BuildTable() {
 	             "barriers and a new render pass for every draw. Exact; lowers GPU time per frame "
 	             "(about 7 ms of 31 ms in the level measurements).",
 	             EMU_BOOL(ro_depth_access)});
+	defs.append({"compute_image_copy", "--compute-image-copy", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
+	             "Compute image copies",
+	             "Full-screen colour images that the texture cache moves between linear buffers and the "
+	             "image (the guest reads or writes their memory with a shader) are copied with compute "
+	             "dispatches instead of the driver's buffer-image copy commands, which run at a fraction "
+	             "of the memory bandwidth. Exact: the same bytes move.",
+	             EMU_BOOL(compute_image_copy)});
 	defs.append({"overlap_dispatches", "--overlap-dispatches", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Overlap independent dispatches",
 	             "Consecutive compute dispatches whose bound resources do not conflict run without a "
