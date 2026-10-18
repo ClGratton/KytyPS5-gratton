@@ -71,6 +71,41 @@ public:
 		return false;
 	}
 
+	// Reader, any thread: the exact answer where the counts allow one. None: no page of [address, address + size) has an owner.
+	// Some: a page has an owner and its count is exact (below saturation), so an owner covers that page right now.
+	// Unknown: the range is outside the space or longer than kMaxQueryPages pages, or a page is saturated (its count may be
+	// stale non-zero); the caller falls back to its exact query. Use this where "an owner exists" is the whole question (the
+	// counts are of images with a property, not of images whose page-granular overlap a later test could still narrow).
+	enum class Answer : uint8_t { None, Some, Unknown };
+	[[nodiscard]] Answer Query(uint64_t address, uint64_t size) const {
+		if (size == 0) {
+			return Answer::None;
+		}
+		const uint64_t last = address + size - 1;
+		if (last < address || (last >> kAddressBits) != 0) {
+			return Answer::Unknown;
+		}
+		const uint64_t first_page = address >> kPageBits;
+		const uint64_t last_page  = last >> kPageBits;
+		if (last_page - first_page >= kMaxQueryPages) {
+			return Answer::Unknown;
+		}
+		for (uint64_t page = first_page; page <= last_page; page++) {
+			const Leaf* leaf = m_top[page >> kLeafBits].load(std::memory_order_acquire);
+			if (leaf == nullptr) {
+				continue;
+			}
+			const uint16_t count = leaf->count[page & (kLeafPages - 1)].load(std::memory_order_acquire);
+			if (count == UINT16_MAX) {
+				return Answer::Unknown;
+			}
+			if (count != 0) {
+				return Answer::Some;
+			}
+		}
+		return Answer::None;
+	}
+
 	// The count of one page (tests, verification).
 	[[nodiscard]] uint32_t Count(uint64_t address) const {
 		const uint64_t page = address >> kPageBits;
