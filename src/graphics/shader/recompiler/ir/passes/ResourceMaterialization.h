@@ -36,6 +36,12 @@ struct ResourceSpecialization {
 	std::vector<Buffer> buffers;
 	std::vector<Image>  images;
 
+	// Back to a default-constructed value, keeping the vectors' capacity (the plan pool reuses it).
+	void Reset() {
+		buffers.clear();
+		images.clear();
+	}
+
 	bool operator==(const ResourceSpecialization&) const = default;
 };
 

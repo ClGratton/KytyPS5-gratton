@@ -279,7 +279,134 @@ struct Plan {
 		       s.specialization_reads.size() * 16u + specialization.buffers.size() * 32u +
 		       specialization.images.size() * 48u + reads.Bytes();
 	}
+
+	// Back to a default-constructed plan, keeping the capacity of the vectors a pool reuses. A vector
+	// that grew past kPooledVectorBytes (one huge shader) is released instead of being kept forever.
+	// Every member above is reset here: add the new one to this function too.
+	static constexpr size_t kPooledVectorBytes = 16u << 10u;
+	void ResetForReuse() {
+		key         = {};
+		stage       = 0;
+		shader_hash = 0;
+		shader_base = 0;
+		snapshot.Reset();
+		specialization.Reset();
+		workgroup_counts.clear();
+		reads.windows.clear();
+		reads.runs.clear();
+		reads.values.clear();
+		entry              = nullptr;
+		permutation        = nullptr;
+		permutation_cursor = 0;
+		produced_ns        = 0;
+		produced_serial    = 0;
+		ReleaseOversized(snapshot.buffers);
+		ReleaseOversized(snapshot.images);
+		ReleaseOversized(snapshot.samplers);
+		ReleaseOversized(snapshot.flattened_srt);
+		ReleaseOversized(snapshot.user_data);
+		ReleaseOversized(snapshot.specialization_reads);
+		ReleaseOversized(snapshot.read_hull.intervals);
+		ReleaseOversized(specialization.buffers);
+		ReleaseOversized(specialization.images);
+		ReleaseOversized(workgroup_counts);
+		ReleaseOversized(reads.windows);
+		ReleaseOversized(reads.runs);
+		ReleaseOversized(reads.values);
+	}
+
+private:
+	template <class T>
+	static void ReleaseOversized(std::vector<T>& v) {
+		if (v.capacity() * sizeof(T) > kPooledVectorBytes) std::vector<T>().swap(v);
+	}
 };
+
+// Whether finished plans are reused instead of freed (--plan-pool). srtPlan.cpp reads the config.
+[[nodiscard]] bool PoolEnabled();
+
+// Plans that kyGpu is done with, kept with the capacity of their vectors. A lookahead worker builds a
+// plan out of a dozen heap blocks (descriptor vectors, user data, read set); without a pool each one
+// was allocated on a worker, freed on the sequencer thread and taken from glibc's arenas through
+// their locks. Plans come back in batches (Give, sequencer thread, from Store::Publish) and go out
+// to the workers in batches of kTakeBatch per lock (Acquire keeps the rest in a thread-local list).
+// Nothing about a plan's content survives: Acquire resets it (ResetForReuse).
+class PlanPool {
+public:
+	static constexpr size_t kMaxPooled = 8192;
+	static constexpr size_t kTakeBatch = 16;
+
+	struct Counters {
+		uint64_t acquired = 0, created = 0, given = 0, freed = 0;
+	};
+
+	// A reset plan: from the thread's list, else from the shared one, else new.
+	[[nodiscard]] std::unique_ptr<Plan> Acquire() {
+		auto& local = Local();
+		if (local.empty()) {
+			std::lock_guard lock(m_mutex);
+			for (size_t i = 0; i < kTakeBatch && !m_free.empty(); ++i) {
+				local.push_back(std::move(m_free.back()));
+				m_free.pop_back();
+			}
+		}
+		m_acquired.fetch_add(1, std::memory_order_relaxed);
+		if (local.empty()) {
+			m_created.fetch_add(1, std::memory_order_relaxed);
+			return std::make_unique<Plan>();
+		}
+		auto plan = std::move(local.back());
+		local.pop_back();
+		// Reset by the thread that is about to fill it: the lines of the plan are fetched once, by that
+		// core, and not first by the thread that gave it back (measured: resetting in Give made the
+		// workers slower by about what the sequencer saved).
+		plan->ResetForReuse();
+		return plan;
+	}
+	// An unused plan the caller got from Acquire goes back to its thread's list.
+	void Return(std::unique_ptr<Plan> plan) {
+		auto& local = Local();
+		if (local.size() < 2 * kTakeBatch) local.push_back(std::move(plan));
+	}
+	// Finished plans, untouched: they are reset when they are taken. What does not fit under the limit is freed.
+	void Give(std::vector<std::unique_ptr<Plan>>& plans) {
+		uint64_t given = 0;
+		{
+			std::lock_guard lock(m_mutex);
+			for (auto& plan: plans) {
+				if (!plan || m_free.size() >= kMaxPooled) continue;
+				m_free.push_back(std::move(plan));
+				++given;
+			}
+		}
+		m_given.fetch_add(given, std::memory_order_relaxed);
+		m_freed.fetch_add(plans.size() - given, std::memory_order_relaxed);
+		plans.clear(); // frees the ones that did not fit
+	}
+	[[nodiscard]] Counters GetCounters() const {
+		return {m_acquired.load(std::memory_order_relaxed), m_created.load(std::memory_order_relaxed),
+		        m_given.load(std::memory_order_relaxed), m_freed.load(std::memory_order_relaxed)};
+	}
+	[[nodiscard]] size_t Pooled() {
+		std::lock_guard lock(m_mutex);
+		return m_free.size();
+	}
+
+private:
+	static std::vector<std::unique_ptr<Plan>>& Local() {
+		thread_local std::vector<std::unique_ptr<Plan>> list;
+		return list;
+	}
+
+	std::mutex                         m_mutex;
+	std::vector<std::unique_ptr<Plan>> m_free;
+	std::atomic<uint64_t>              m_acquired {0}, m_created {0}, m_given {0}, m_freed {0};
+};
+
+[[nodiscard]] inline PlanPool& GetPlanPool() {
+	static PlanPool pool;
+	return pool;
+}
 
 // The inputs a materialization depends on besides guest memory.
 struct Inputs {
@@ -605,10 +732,10 @@ private:
 		auto bucket = std::move(m_open);
 		m_open_plans.store(0, std::memory_order_relaxed);
 		m_open_bytes.store(0, std::memory_order_relaxed);
-		std::vector<std::unique_ptr<Plan>> dropped; // freed outside the lock
+		std::vector<std::unique_ptr<Plan>> dropped; // freed (or pooled) outside the lock
 		for (auto& d: bucket->dead) dropped.push_back(std::move(d));
 		bucket->dead.clear();
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex);
 		dropped.insert(dropped.end(), std::make_move_iterator(m_recycled.begin()),
 		               std::make_move_iterator(m_recycled.end()));
 		m_recycled.clear();
@@ -633,8 +760,8 @@ private:
 			for (auto& e: oldest->second->entries) if (e.plan) dropped.push_back(std::move(e.plan));
 			m_published.erase(oldest);
 		}
-
-
+		lock.unlock();
+		if (!dropped.empty() && PoolEnabled()) GetPlanPool().Give(dropped);
 	}
 
 	size_t                                        m_max_plans;

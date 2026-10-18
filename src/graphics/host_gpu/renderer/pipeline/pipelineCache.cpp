@@ -1473,8 +1473,21 @@ struct PipelineCache::ProgramCache {
 		// --srt-plan-shadow, lookahead thread: the walk's reads go through recording readers.
 		SrtPlan::ReadRecorder* plan_recorder = nullptr;
 		std::optional<ShaderRecompiler::IR::ResourceSnapshot> plan_snapshot;
+		// --plan-pool: the plan this draw's walk is written into, taken from the pool (its snapshot and
+		// specialization are the walk's output, nothing is copied into it afterwards).
+		std::unique_ptr<SrtPlan::Plan> plan_lease;
+		struct LeaseReturn { // a plan this call does not hand over (call-source program, failed walk) goes back
+			std::unique_ptr<SrtPlan::Plan>& lease;
+			~LeaseReturn() {
+				if (lease) SrtPlan::GetPlanPool().Return(std::move(lease));
+			}
+		} lease_return {plan_lease};
 		if (prefetch && plan_active) {
-			plan_snapshot.emplace();
+			if (SrtPlan::PoolEnabled()) {
+				plan_lease = SrtPlan::GetPlanPool().Acquire();
+			} else {
+				plan_snapshot.emplace();
+			}
 			thread_local SrtPlan::ReadRecorder recorder;
 			recorder.Clear();
 			plan_recorder                       = &recorder;
@@ -1519,22 +1532,29 @@ struct PipelineCache::ProgramCache {
 					return {};
 				}
 				bool materialized = false;
-				permutation = entry->PeekPermutation(runtime, push_data_cursor, specialization,
-				                                     materialized,
-				                                     plan_recorder != nullptr ? &*plan_snapshot : nullptr);
+				permutation = entry->PeekPermutation(
+				    runtime, push_data_cursor, plan_lease ? plan_lease->specialization : specialization, materialized,
+				    plan_lease ? &plan_lease->snapshot : plan_recorder != nullptr ? &*plan_snapshot : nullptr);
 				if (plan_recorder != nullptr) {
 					if (materialized) {
 						const auto t_plan = SrtPlan::NowNs();
-						auto       plan   = std::make_unique<SrtPlan::Plan>();
+						auto       plan   = plan_lease ? std::move(plan_lease) : std::make_unique<SrtPlan::Plan>();
 						plan->key         = plan_key;
 						plan->stage       = static_cast<uint32_t>(stage);
 						plan->shader_hash = params.hash;
 						plan->shader_base = runtime.shader_base;
-						plan->snapshot    = std::move(*plan_snapshot);
-						plan->specialization = specialization;
+						if (!plan_snapshot) {
+							// Pooled: the walk already wrote the plan's own snapshot and specialization. A draw
+							// that found no permutation goes on to compile with `specialization` after the plan
+							// is handed over (and maybe reused), so it gets its own copy.
+							if (permutation == nullptr) specialization = plan->specialization;
+						} else {
+							plan->snapshot       = std::move(*plan_snapshot);
+							plan->specialization = specialization;
+						}
 						plan->workgroup_counts.assign(runtime.workgroup_counts.begin(),
 						                              runtime.workgroup_counts.end());
-						plan->reads           = plan_recorder->Finish();
+						plan_recorder->FinishInto(plan->reads);
 						plan->entry              = entry;
 						plan->permutation        = permutation;
 						plan->permutation_cursor = push_data_cursor;

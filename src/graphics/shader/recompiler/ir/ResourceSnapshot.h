@@ -129,6 +129,23 @@ struct ResourceSnapshot {
 	// Null unless every memory write of the (compute) shader is a UniformStoreSite.
 	std::shared_ptr<const UniformStoreProgram> uniform_stores;
 	ReadHull                    read_hull;
+
+	// Back to a default-constructed snapshot, keeping the capacity of the vectors (the plan pool reuses
+	// them). Every member above is reset here: add the new one to this function too.
+	void Reset() {
+		buffers.clear();
+		images.clear();
+		samplers.clear();
+		flattened_srt.clear();
+		user_data.clear();
+		specialization_reads.clear();
+		uniform_fill = {};
+		uniform_copy = {};
+		uniform_stores.reset();
+		read_hull.valid       = false;
+		read_hull.has_invalid = false;
+		read_hull.intervals.clear();
+	}
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

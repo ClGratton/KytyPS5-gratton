@@ -234,6 +234,9 @@ QList<Option> BuildTable() {
 	defs.append({"tracker_lockfree", "--tracker-lockfree", Tab::Gpu, "CPU cost per draw", Kind::Bool, "Answer tracker queries without locks",
 	             "The buffer cache asks whether a guest range is CPU- or GPU-modified through lock-free copies of the dirty bits instead of taking the tracker's region locks. Exact; lowers the GPU thread's CPU time per buffer binding.",
 	             EMU_BOOL(tracker_lockfree)});
+	defs.append({"plan_pool", "--plan-pool", Tab::Gpu, "CPU cost per draw", Kind::Bool, "Reuse the look-ahead's finished plans",
+	             "The look-ahead threads reuse the plans the GPU thread has finished with (and the memory of their vectors) instead of allocating a dozen heap blocks per plan on one thread and freeing them on another. Exact; lowers the host CPU time of the look-ahead and less allocator contention for the GPU thread.",
+	             EMU_BOOL(plan_pool)});
 	defs.append({"clean_guest_reads", "--clean-guest-reads", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Read clean guest memory without a drain",
 	             "The GPU thread reads shader metadata and vertex tables straight from guest memory "

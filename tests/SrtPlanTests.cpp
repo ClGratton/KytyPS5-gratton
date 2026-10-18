@@ -18,6 +18,12 @@ bool Libs::Graphics::SrtPlan::Store::DeepPrefetchEnabled() {
 	return true;
 }
 
+// --plan-pool is a config flag in the emulator; here the test switches it.
+static std::atomic<bool> g_pool_enabled {false};
+bool Libs::Graphics::SrtPlan::PoolEnabled() {
+	return g_pool_enabled.load();
+}
+
 namespace {
 
 using namespace Libs::Graphics::SrtPlan;
@@ -711,7 +717,7 @@ void TestAdoptTotals() {
 }
 
 
-// ---- exact sizing of the read set -----------------------------------------
+// ---- exact sizing, plan reuse and the pool (--plan-pool) -----------------------------------------
 
 // The recorder as it was before FinishInto: a stable sort per kind, std::unique on the address, and a
 // push_back per value, run and window. The new one must produce the same set for any recording.
@@ -838,6 +844,147 @@ void TestFinishIntoKeepsCapacityOfAReusedSet() {
 	Check(set.values.empty() && set.windows.empty() && set.runs.empty(), "nothing recorded: an empty set");
 }
 
+// Every member a producer sets is back to its default after ResetForReuse, and the vectors keep their
+// blocks (up to the size limit).
+void TestPlanResetForReuse() {
+	auto plan = MakePlan({3, 4, 1}, 2, 0xfeed);
+	plan->workgroup_counts   = {8, 8, 1};
+	plan->snapshot.specialization_reads = {{0x100, 16}, {0x200, 8}};
+	plan->snapshot.uniform_fill.kind    = Libs::Graphics::ShaderRecompiler::IR::UniformFillKind::Buffer;
+	plan->snapshot.uniform_fill.value   = 77;
+	plan->snapshot.uniform_copy.dst_resource = 5;
+	plan->snapshot.uniform_stores = std::make_shared<const Libs::Graphics::ShaderRecompiler::IR::UniformStoreProgram>();
+	plan->snapshot.read_hull.valid = true;
+	plan->snapshot.read_hull.has_invalid = true;
+	plan->snapshot.read_hull.intervals.push_back({1, 2});
+	const uint32_t dwords[] = {1, 2, 3};
+	ReadRecorder   rec;
+	rec.Record(ReadKind::Clean, 0x500, dwords);
+	rec.FinishInto(plan->reads);
+	plan->entry              = plan.get();
+	plan->permutation        = plan.get();
+	plan->permutation_cursor = 9;
+	plan->produced_ns        = 5;
+	plan->produced_serial    = 6;
+	const auto* srt_block    = plan->snapshot.flattened_srt.data();
+	plan->ResetForReuse();
+	const Plan fresh;
+	Check(plan->key == fresh.key && plan->stage == 0 && plan->shader_hash == 0 && plan->shader_base == 0, "identity fields");
+	const auto& s = plan->snapshot;
+	Check(s.buffers.empty() && s.images.empty() && s.samplers.empty() && s.flattened_srt.empty() && s.user_data.empty() &&
+	          s.specialization_reads.empty(),
+	      "snapshot vectors");
+	Check(s.uniform_fill == fresh.snapshot.uniform_fill && s.uniform_copy == fresh.snapshot.uniform_copy && !s.uniform_stores,
+	      "uniform fill, copy and stores");
+	Check(!s.read_hull.valid && !s.read_hull.has_invalid && s.read_hull.intervals.empty(), "read hull");
+	Check(plan->specialization == fresh.specialization && plan->workgroup_counts.empty(), "specialization and workgroup counts");
+	Check(plan->reads.windows.empty() && plan->reads.runs.empty() && plan->reads.values.empty(), "read set");
+	Check(plan->entry == nullptr && plan->permutation == nullptr && plan->permutation_cursor == 0 && plan->produced_ns == 0 &&
+	          plan->produced_serial == 0,
+	      "resolved-draw fields");
+	Check(plan->snapshot.flattened_srt.data() == srt_block && plan->snapshot.flattened_srt.capacity() >= 3, "capacity is kept");
+	Check(plan->Bytes() == fresh.Bytes(), "a reset plan weighs what a new one does");
+
+	plan->snapshot.user_data.assign(Plan::kPooledVectorBytes, 1); // 4 times the limit
+	plan->ResetForReuse();
+	Check(plan->snapshot.user_data.capacity() * 4 <= Plan::kPooledVectorBytes, "an oversized vector is released, not pooled");
+}
+
+void TestPlanPoolReusesPlans() {
+	PlanPool pool;
+	auto     a = pool.Acquire();
+	auto     b = pool.Acquire();
+	Check(pool.GetCounters().acquired == 2 && pool.GetCounters().created == 2, "an empty pool makes plans");
+	a->key = {1, 2, 3};
+	a->snapshot.user_data = {1, 2, 3, 4, 5};
+	const auto* a_block = a->snapshot.user_data.data();
+	const auto* a_plan  = a.get();
+	std::vector<std::unique_ptr<Plan>> finished;
+	finished.push_back(std::move(a));
+	finished.push_back(std::move(b));
+	pool.Give(finished);
+	Check(finished.empty() && pool.Pooled() == 2 && pool.GetCounters().given == 2, "finished plans are pooled");
+	// Acquire pops the most recently pooled one: the block of `a` comes back, reset.
+	std::vector<std::unique_ptr<Plan>> got;
+	got.push_back(pool.Acquire());
+	got.push_back(pool.Acquire());
+	Check(pool.GetCounters().created == 2 && pool.GetCounters().acquired == 4, "both came from the pool");
+	bool found = false;
+	for (const auto& plan: got) {
+		Check(plan->key == Key {} && plan->snapshot.user_data.empty(), "an acquired plan is reset");
+		if (plan.get() == a_plan) {
+			found = true;
+			Check(plan->snapshot.user_data.capacity() >= 5 && plan->snapshot.user_data.data() == a_block, "with its vectors");
+		}
+	}
+	Check(found, "the same plan object");
+	pool.Return(std::move(got[0]));
+	Check(pool.Acquire().get() != nullptr && pool.GetCounters().created == 2, "an unused plan is handed out again");
+}
+
+void TestPlanPoolIsBounded() {
+	PlanPool pool;
+	std::vector<std::unique_ptr<Plan>> many;
+	for (size_t i = 0; i < PlanPool::kMaxPooled + 100; ++i) many.push_back(std::make_unique<Plan>());
+	pool.Give(many);
+	Check(many.empty() && pool.Pooled() == PlanPool::kMaxPooled, "the pool keeps at most its limit");
+	Check(pool.GetCounters().given == PlanPool::kMaxPooled && pool.GetCounters().freed == 100, "the rest is freed");
+}
+
+void TestPlanPoolConcurrent() {
+	PlanPool pool;
+	std::atomic<bool> bad {false};
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 4; ++t) {
+		threads.emplace_back([&, t] {
+			std::vector<std::unique_ptr<Plan>> batch;
+			for (int round = 0; round < 2000; ++round) {
+				auto plan = pool.Acquire();
+				if (plan->key.seq != 0 || !plan->snapshot.user_data.empty()) bad = true;
+				plan->key = {uint64_t(t + 1), uint32_t(round), 0};
+				plan->snapshot.user_data.assign(8, uint32_t(round));
+				batch.push_back(std::move(plan));
+				if (batch.size() == 40) pool.Give(batch);
+			}
+		});
+	}
+	for (auto& t: threads) t.join();
+	Check(!bad.load(), "no plan came out of the pool with content");
+}
+
+// Plans that fall out of a store (replaced before publishing, evicted) go to the pool when it is on.
+void TestStorePublishPoolsDroppedPlans() {
+	g_pool_enabled = true;
+	auto before    = GetPlanPool().GetCounters();
+	{
+		Store store(100, 1u << 30);
+		store.Put(MakePlan({70, 1, 0}));
+		auto second = MakePlan({70, 1, 0}); // replaces the first before it is published
+		second->snapshot.user_data = {42};
+		store.Put(std::move(second));
+		store.NoteProgress({70, UINT32_MAX}); // publishes: the replaced plan is handed to the pool
+		std::unique_ptr<Plan> plan;
+		Check(store.Take({70, 1, 0}, plan) == Lookup::Ready && plan->snapshot.user_data == std::vector<uint32_t> {42},
+		      "the second plan is the one stored");
+		std::vector<std::unique_ptr<Plan>> dead;
+		dead.push_back(std::move(plan));
+		store.Recycle(std::move(dead));
+		store.Put(MakePlan({71, 1, 0}));
+		store.NoteProgress({71, UINT32_MAX}); // the recycled plan goes to the pool too
+	}
+	const auto after = GetPlanPool().GetCounters();
+	Check(after.given - before.given == 2, "the replaced plan and the recycled plan were pooled");
+	g_pool_enabled = false;
+	auto before_off = GetPlanPool().GetCounters();
+	{
+		Store store(100, 1u << 30);
+		store.Put(MakePlan({72, 1, 0}));
+		store.Put(MakePlan({72, 1, 0}));
+		store.NoteProgress({72, UINT32_MAX});
+	}
+	Check(GetPlanPool().GetCounters().given == before_off.given, "with the flag off nothing is pooled");
+}
+
 } // namespace
 
 int main() {
@@ -874,6 +1021,11 @@ int main() {
 	TestAdoptTotals();
 	TestFinishMatchesTheReferenceAlgorithm();
 	TestFinishIntoKeepsCapacityOfAReusedSet();
+	TestPlanResetForReuse();
+	TestPlanPoolReusesPlans();
+	TestPlanPoolIsBounded();
+	TestPlanPoolConcurrent();
+	TestStorePublishPoolsDroppedPlans();
 	std::printf("SrtPlanTests: all passed\n");
 	return 0;
 }

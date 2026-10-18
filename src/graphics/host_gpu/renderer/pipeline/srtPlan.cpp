@@ -17,6 +17,10 @@ bool Store::DeepPrefetchEnabled() {
 	return Config::PlanPrefetchEnabled();
 }
 
+bool PoolEnabled() {
+	return Config::PlanPoolEnabled();
+}
+
 namespace {
 
 // The queue holds about two frames of a busy level (12k plans per frame); beyond that the lookahead
@@ -195,6 +199,14 @@ std::string FormatAdopt(const char* title, double seconds, const AdoptTotals& t)
 	return line + "\n";
 }
 
+std::string PoolText() {
+	const auto pool = GetPlanPool().GetCounters();
+	if (pool.acquired == 0 && pool.given == 0 && pool.freed == 0) return {};
+	return fmt::format("SrtPlan pool: acquired={} (new={}, {}% reused) given back={} freed={} pooled now={}\n", pool.acquired,
+	                   pool.created, pool.acquired != 0 ? 100 - 100 * pool.created / pool.acquired : 0, pool.given,
+	                   pool.freed, GetPlanPool().Pooled());
+}
+
 std::string ProducerText() {
 	auto counters = GetStore().GetCounters();
 	return fmt::format(
@@ -203,7 +215,8 @@ std::string ProducerText() {
 	    g_producer_events.load(), ShardSum(&ProducerShard::produced), static_cast<double>(ShardSum(&ProducerShard::bytes)) / 1048576.0,
 	    ShardSum(&ProducerShard::failed),
 	    ShardSum(&ProducerShard::produced) != 0 ? static_cast<double>(ShardNs()) / static_cast<double>(ShardSum(&ProducerShard::produced)) : 0.0,
-	    counters.put, counters.evictions, counters.queued, static_cast<double>(counters.queued_bytes) / 1048576.0);
+	    counters.put, counters.evictions, counters.queued, static_cast<double>(counters.queued_bytes) / 1048576.0) +
+	    PoolText();
 }
 
 } // namespace
