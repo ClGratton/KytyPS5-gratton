@@ -544,6 +544,10 @@ uint32_t GetFpsLimit() {
 	return std::min(g_config->fps_limit, MAX_FPS_LIMIT);
 }
 
+bool FullSpeedEnabled() {
+	return g_config->full_speed;
+}
+
 uint32_t GetConsoleLanguage() {
 	return g_config->console_language;
 }

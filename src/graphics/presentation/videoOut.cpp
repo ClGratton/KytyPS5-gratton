@@ -16,6 +16,7 @@
 #include "graphics/presentation/framePacer.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/fullSpeed.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/renderDoc.h"
 #include "kernel/pthread.h"
@@ -215,6 +216,9 @@ public:
 	void Complete(uint64_t request_id);
 	void WaitForSubmitSlot(VideoOutConfig& cfg);
 	bool Flip(uint32_t micros);
+	// --full-speed: completes the oldest ready group of skipped flips now (no vblank wait, nothing
+	// presented). False if the oldest group is not a ready, fully skipped one.
+	bool DrainSkipped();
 	void GetFlipStatus(VideoOutConfig& cfg, VideoOutFlipStatus& out);
 	void Wait(VideoOutConfig& cfg, int index);
 
@@ -234,6 +238,7 @@ private:
 		RequestState                state;
 		Graphics::Presenter::Frame* frame;
 		bool                        premultiplied_alpha;
+		bool                        skipped; // --full-speed: the frame behind this flip drew nothing
 	};
 
 	Graphics::Presenter& m_presenter;
@@ -244,6 +249,7 @@ private:
 	std::list<Request>   m_requests;
 	std::list<Request>   m_cpu_requests;
 	std::list<Request>   m_cancelled_requests;
+	bool FlipGroup(uint32_t micros, bool only_skipped, bool* drained = nullptr);
 	bool                 m_processing      = false;
 	uint64_t             m_next_request_id = 1;
 };
@@ -891,6 +897,11 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		bool presented = false;
 		if (pacer.OnVblank()) {
 			presented = m_flip_queue.Flip(0);
+			if (Config::FullSpeedEnabled()) {
+				// Skipped flips queued behind the one just presented complete now, not a vblank each.
+				while (m_flip_queue.DrainSkipped()) {
+				}
+			}
 			if (presented) {
 				pacer.OnPresented();
 			}
@@ -1076,10 +1087,11 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		if (request->state != RequestState::Reserved) {
 			EXIT("cannot prepare video-out request id=%" PRIu64 "\n", request_id);
 		}
-		request->state = RequestState::Recording;
-		cfg            = request->cfg;
-		generation     = request->generation;
-		index          = request->index;
+		request->state   = RequestState::Recording;
+		request->skipped = FullSpeed::SkipDraws();
+		cfg              = request->cfg;
+		generation       = request->generation;
+		index            = request->index;
 	}
 
 	const bool          special = IsSpecialBufferIndex(index);
@@ -1088,10 +1100,13 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	uint32_t            height  = 0;
 	bool                current = false;
 	bool                premultiplied_alpha = false;
+	uint64_t            flip_interval_ns    = 0;
 	{
 		Common::LockGuard lock(cfg->mutex);
 		current = cfg->opened && !cfg->closing && cfg->generation == generation;
 		if (current) {
+			flip_interval_ns = static_cast<uint64_t>(cfg->flip_rate + 1) * 1000000000ull /
+			                   std::max(Config::GetVblankFrequency(), 1u);
 			if (special) {
 				width  = cfg->width;
 				height = cfg->height;
@@ -1125,6 +1140,8 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		}
 		return;
 	}
+	// --full-speed: the flip is a frame boundary; decide whether the next frame draws.
+	FullSpeed::OnFlipParsed(flip_interval_ns);
 	Graphics::Presenter::Frame* frame = nullptr;
 	if (special) {
 		frame = &m_presenter.PrepareBlankFrame(width, height, index == VIDEO_OUT_BUFFER_INDEX_BLACK,
@@ -1164,8 +1181,14 @@ void FlipQueue::Complete(uint64_t request_id) {
 			EXIT("completed GPU flip has no prepared recording, id=%" PRIu64 "\n", request_id);
 		}
 		request->state = RequestState::Ready;
+		const bool skipped = request->skipped;
 		m_submit_cond_var.Signal();
 		m_mutex.Unlock();
+		if (skipped) {
+			// --full-speed: the game must not wait a vblank for a frame that drew nothing.
+			while (DrainSkipped()) {
+			}
+		}
 		return;
 	}
 	auto cancelled = std::find_if(m_cancelled_requests.begin(), m_cancelled_requests.end(),
@@ -1210,13 +1233,27 @@ void FlipQueue::Wait(VideoOutConfig& cfg, int index) {
 }
 
 bool FlipQueue::Flip(uint32_t micros) {
+	return FlipGroup(micros, false);
+}
+
+bool FlipQueue::DrainSkipped() {
+	bool drained = false;
+	FlipGroup(0, true, &drained);
+	return drained;
+}
+
+bool FlipQueue::FlipGroup(uint32_t micros, bool only_skipped, bool* drained) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
 
 	m_mutex.Lock();
-	if (m_requests.empty()) {
+	if (m_requests.empty() && !only_skipped) {
 		m_submit_cond_var.WaitFor(&m_mutex, micros);
 	}
-	EXIT_IF(m_processing);
+	if (m_processing) {
+		// The present thread and the early completion of skipped flips share this code.
+		m_mutex.Unlock();
+		return false;
+	}
 	const auto owner = std::find_if(m_requests.begin(), m_requests.end(),
 	                               [](const auto& r) { return r.group == r.id; });
 	if (owner == m_requests.end()) {
@@ -1229,6 +1266,13 @@ bool FlipQueue::Flip(uint32_t micros) {
 	    std::any_of(m_requests.begin(), m_requests.end(), [group](const auto& r) {
 		    return r.group == group && r.state != RequestState::Ready;
 	    })) {
+		m_mutex.Unlock();
+		return false;
+	}
+	const bool group_skipped =
+	    std::all_of(m_requests.begin(), m_requests.end(),
+	                [group](const auto& r) { return r.group != group || r.skipped; });
+	if (only_skipped && !group_skipped) {
 		m_mutex.Unlock();
 		return false;
 	}
@@ -1253,13 +1297,19 @@ bool FlipQueue::Flip(uint32_t micros) {
 		auto& r = requests[i];
 		r.cfg->mutex.Lock();
 		due &= r.cfg->opened && !r.cfg->closing && r.cfg->generation == r.generation;
-		if (r.id == group) {
+		if (r.id == group && !group_skipped) {
 			due &= IsFlipDueLocked(*r.cfg, r.generation);
 		}
 		layers[i] = {r.frame, r.cfg->bus, r.premultiplied_alpha};
 	}
-	if (due) {
+	if (due && !group_skipped) {
 		m_presenter.Present(std::span(layers.data(), count));
+	} else if (due) {
+		for (size_t i = 0; i < count; i++) {
+			if (requests[i].frame != nullptr) {
+				m_presenter.Discard(*requests[i].frame); // the last rendered image stays on screen
+			}
+		}
 	}
 
 	m_mutex.Lock();
@@ -1298,7 +1348,10 @@ bool FlipQueue::Flip(uint32_t micros) {
 			LOGF("Flip done: %d\n", requests[0].index);
 		}
 	}
-	return due;
+	if (drained != nullptr) {
+		*drained = due && group_skipped;
+	}
+	return due && !group_skipped;
 }
 
 void FlipQueue::GetFlipStatus(VideoOutConfig& cfg, VideoOutFlipStatus& out) {

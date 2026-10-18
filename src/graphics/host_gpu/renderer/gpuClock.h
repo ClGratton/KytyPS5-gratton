@@ -135,20 +135,28 @@ public:
 	}
 
 	// A frame boundary at time t. Boundaries arrive in increasing order; an older one is ignored.
-	void AddBoundary(uint64_t t) {
+	// frame_scale != 1.0 gives the frame that starts at this boundary its own time scale instead of
+	// the scale set by SetScale (--full-speed: a frame without draws reports the GPU time of a
+	// rendered one).
+	void AddBoundary(uint64_t t, double frame_scale = 1.0) {
 		std::lock_guard lock(m_mutex);
 		if (!m_boundaries.empty() && t <= m_boundaries.back()) {
 			return;
 		}
 		if (m_boundaries.size() >= MAX_BOUNDARIES) {
 			m_boundaries.erase(m_boundaries.begin(), m_boundaries.begin() + MAX_BOUNDARIES / 2);
+			m_frame_scales.erase(m_frame_scales.begin(), m_frame_scales.begin() + MAX_BOUNDARIES / 2);
 		}
 		m_boundaries.push_back(t);
+		m_frame_scales.push_back(std::isfinite(frame_scale) && frame_scale != 1.0
+		                             ? std::clamp(frame_scale, MIN_SCALE, MAX_SCALE)
+		                             : 0.0);
+		m_any_frame_scale |= m_frame_scales.back() != 0.0;
 	}
 
 	[[nodiscard]] uint64_t Apply(uint64_t t) const {
 		std::lock_guard lock(m_mutex);
-		if (m_scale == 1.0 || m_boundaries.empty()) {
+		if ((m_scale == 1.0 && !m_any_frame_scale) || m_boundaries.empty()) {
 			return t;
 		}
 		const auto it = std::upper_bound(m_boundaries.begin(), m_boundaries.end(), t);
@@ -156,9 +164,11 @@ public:
 			return t; // before the first known boundary: nothing to stretch from
 		}
 		const auto   anchor  = *(it - 1);
+		const auto   own     = m_frame_scales[static_cast<size_t>(it - 1 - m_boundaries.begin())];
+		const double scale   = own != 0.0 ? own : m_scale;
 		const auto   elapsed = t - anchor;
 		const auto   stretch = std::min(elapsed, MAX_STRETCH_TICKS);
-		const double scaled  = static_cast<double>(stretch) * m_scale;
+		const double scaled  = static_cast<double>(stretch) * scale;
 		return anchor + static_cast<uint64_t>(scaled) + (elapsed - stretch);
 	}
 
@@ -166,6 +176,8 @@ private:
 	mutable std::mutex    m_mutex;
 	double                m_scale = 1.0;
 	std::vector<uint64_t> m_boundaries;
+	std::vector<double>   m_frame_scales; // per boundary; 0 = the scale set by SetScale
+	bool                  m_any_frame_scale = false;
 };
 
 } // namespace Libs::Graphics::GpuClock

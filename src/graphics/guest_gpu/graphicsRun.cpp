@@ -27,6 +27,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
+#include "graphics/presentation/fullSpeed.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
@@ -1161,6 +1162,11 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 		                              .index_type_and_size = args.index_type_and_size});
 		return;
 	}
+	if (FullSpeed::SkipDraws()) {
+		// --full-speed: a skipped frame draws nothing; everything else in the stream still runs.
+		FullSpeed::NoteSkippedDraw();
+		return;
+	}
 	if (Bench::TraceEnabled()) {
 		Bench::TraceDraw("gfx");
 	}
@@ -1287,6 +1293,11 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		                       static_cast<uint64_t>(i) * stride_in_bytes;
 
 		if (route == Common::IndirectDraw::Route::Gpu) {
+			if (FullSpeed::SkipDraws()) {
+				FullSpeed::NoteSkippedDraw();
+				m_num_instances_address = args_addr + offsetof(DrawIndexedIndirectArgs, instance_count);
+				continue;
+			}
 			DrawIndexArgs gpu_draw {.index_count    = 1,
 			                        .index_addr     = reinterpret_cast<const void*>(m_index_base_addr),
 			                        .instance_count = 1,
@@ -1429,6 +1440,10 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 		                                                DrawOffsetSource::IndirectArgs,
 		                              .index_count    = args.vertex_count,
 		                              .instance_count = args.instance_count});
+		return;
+	}
+	if (FullSpeed::SkipDraws()) {
+		FullSpeed::NoteSkippedDraw();
 		return;
 	}
 	if (Bench::TraceEnabled()) {
@@ -1809,7 +1824,7 @@ void CommandProcessor::Flip() {
 	auto& command = CurrentBuffer();
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
-	GpuTimestamps::OnGuestFlip(command);
+	GpuTimestamps::OnGuestFlip(command, FullSpeed::NextFrameTimeScale());
 	Sync::WriteAtEndOfPipeOnlyFlip(m_submit_id, command, m_flip.handle, m_flip.index,
 	                               m_flip.flip_mode, m_flip.flip_arg, request);
 	GetScheduler().Flush();
@@ -1832,7 +1847,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	StoreGuest(dst_gpu_addr, &value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
-	GpuTimestamps::OnGuestFlip(command);
+	GpuTimestamps::OnGuestFlip(command, FullSpeed::NextFrameTimeScale());
 	Sync::WriteAtEndOfPipeWithFlip32(m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr),
 	                                 value, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                 m_flip.flip_arg, request);
@@ -1862,7 +1877,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	StoreGuest(dst_gpu_addr, &value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
-	GpuTimestamps::OnGuestFlip(command);
+	GpuTimestamps::OnGuestFlip(command, FullSpeed::NextFrameTimeScale());
 	Sync::WriteAtEndOfPipeWithInterruptWriteBackFlip32(
 	    m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle,
 	    m_flip.index, m_flip.flip_mode, m_flip.flip_arg, request, m_interrupt_event_id);

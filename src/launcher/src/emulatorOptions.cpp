@@ -388,6 +388,14 @@ QList<Option> BuildTable() {
 	             "be submitted and written back to guest memory when it completes, so the next read "
 	             "needs no fault and no GPU drain. Off until measured.",
 	             EMU_BOOL(eager_readback)});
+	defs.append({"full_speed", "--full-speed", Tab::Gpu, "Frame rate", Kind::Bool,
+	             "Full speed (skip drawing frames when behind)",
+	             "Below the target frame rate the game still runs at 100 % speed instead of in slow "
+	             "motion: frames the emulator cannot afford are skipped for drawing only (compute, "
+	             "copies, labels and flips still run; the last rendered image stays on screen). The "
+	             "price: the picture updates less often than the game runs (shown fps drops) and "
+	             "effects that blend with earlier frames can ghost for a moment. Off by default.",
+	             EMU_BOOL(full_speed)});
 	defs.append({"readback_futures", "--readback-futures", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Let the GPU thread run on while a game thread waits for a readback",
 	             "A game thread's read of GPU-written memory no longer stops the GPU thread: it "

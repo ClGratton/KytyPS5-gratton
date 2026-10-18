@@ -108,6 +108,9 @@ struct ConfigOptions {
 	double                 gpu_time_scale              = 1.0;
 	// Presented frames per second cap (0 = off); see --fps-limit.
 	uint32_t               fps_limit                   = 0;
+	// --full-speed: below the target frame rate the game still runs at 100 % speed; frames the
+	// emulator cannot afford are skipped for drawing only (graphics/presentation/fullSpeed.h). Off.
+	bool                   full_speed                  = false;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
@@ -495,6 +498,7 @@ bool     AmdCpuEnabled();
 uint32_t GetVblankFrequency();
 GpuTimestampMode GetGpuTimestampMode();
 double   GetGpuTimeScale();
+bool     FullSpeedEnabled();
 uint32_t GetFpsLimit();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();

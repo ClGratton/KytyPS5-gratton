@@ -310,17 +310,17 @@ uint64_t SampleGuestClock(CommandBuffer& command, void* dst, uint32_t size, Poin
 	return immediate;
 }
 
-void OnGuestFlip(CommandBuffer& command) {
-	ParseTimeScaler().AddBoundary(Sync::ReadReferenceClock());
+void OnGuestFlip(CommandBuffer& command, double frame_scale) {
+	ParseTimeScaler().AddBoundary(Sync::ReadReferenceClock(), frame_scale);
 	uint32_t slot = 0;
 	if (!GpuModeAvailable(command) || !Host().Acquire(slot)) {
 		return;
 	}
 	Host().Record(command, Point::BottomOfPipe, slot);
-	command.GetContext().GetCommandScheduler().DeferPriorityOperation([slot] {
+	command.GetContext().GetCommandScheduler().DeferPriorityOperation([slot, frame_scale] {
 		uint64_t reference = 0;
 		if (Host().Resolve(slot, reference)) {
-			GpuTimeScaler().AddBoundary(reference);
+			GpuTimeScaler().AddBoundary(reference, frame_scale);
 		}
 	});
 }

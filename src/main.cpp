@@ -431,6 +431,12 @@ static void PrintUsage() {
 	         "                                       memory right after the GPU writes them (copied in the\n"
 	         "                                       command buffer about to be submitted), so the next read\n"
 	         "                                       needs no fault and no GPU drain. Default: false.\n");
+	::printf("  --full-speed <true|false>            Below the target frame rate the game still runs at 100 %%\n"
+	         "                                       speed: frames the emulator cannot afford are skipped for\n"
+	         "                                       drawing only (dispatches, copies, labels and flips still\n"
+	         "                                       run; draws are no-ops and the last rendered image stays\n"
+	         "                                       on screen). Shown fps drops, game speed does not; skipped\n"
+	         "                                       frames can ghost temporal effects. Default: false.\n");
 	::printf("  --readback-futures <true|false>      A game thread's read fault on GPU-written memory does not\n"
 	         "                                       stop the GPU thread: it copies the bytes out, submits and\n"
 	         "                                       goes on, and only the faulting thread waits for the copy to\n"
@@ -1301,6 +1307,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			options.config.poll_before_wait_us = static_cast<uint32_t>(us);
 		} else if (arg == "--eager-readback") {
 			if (!ParseBool(value, options.config.eager_readback)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--full-speed") {
+			if (!ParseBool(value, options.config.full_speed)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

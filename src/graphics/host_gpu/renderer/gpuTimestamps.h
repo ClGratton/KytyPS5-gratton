@@ -30,7 +30,10 @@ enum class Point {
                                         Point point);
 
 // A guest flip was recorded in command: the frame boundary the time scale stretches from.
-void OnGuestFlip(CommandBuffer& command);
+// frame_scale (--full-speed) is the time scale for the frame that starts at this flip: 1.0 keeps
+// the configured --gpu-time-scale, another value stretches the durations inside that frame (a
+// skipped frame reports about the GPU time of a rendered one).
+void OnGuestFlip(CommandBuffer& command, double frame_scale = 1.0);
 
 } // namespace GpuTimestamps
 } // namespace Libs::Graphics

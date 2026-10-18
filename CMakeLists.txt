@@ -805,6 +805,11 @@ add_executable(frame_pacer_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(frame_pacer_tests PRIVATE ${inc_headers})
 
+add_executable(full_speed_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/FullSpeedTests.cpp"
+)
+target_include_directories(full_speed_tests PRIVATE ${inc_headers})
+
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/imeCommon.cpp"
@@ -1138,6 +1143,7 @@ if(BUILD_TESTING)
 	add_test(NAME speculation_item_watch COMMAND $<TARGET_FILE:speculation_item_watch_tests>)
 	add_test(NAME gpu_clock COMMAND $<TARGET_FILE:gpu_clock_tests>)
 	add_test(NAME frame_pacer COMMAND $<TARGET_FILE:frame_pacer_tests>)
+	add_test(NAME full_speed COMMAND $<TARGET_FILE:full_speed_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -1370,6 +1376,7 @@ if(BUILD_TESTING)
 		speculation_item_watch_tests
 		gpu_clock_tests
 		frame_pacer_tests
+		full_speed_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests
