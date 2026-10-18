@@ -16,6 +16,33 @@ Categories: **correctness** (what a game needs, or a safety net), **perf** (spee
 | `--pipeline-cache-key` | revision | **schema** | correctness (cache validity) | the driver pipeline cache survives emulator builds and works in dev/dirty builds; dropped on another GPU, driver, schema version, damage, or over 512 MiB (new cap). Rules pinned in `pipeline_cache_file`; the driver addresses entries by the whole creation input, so a changed build only misses |
 | `--vram-paging` | false | **on** | correctness (safety net) | memory priority + pageable device-local memory: an allocation that would fail makes the driver page low-priority textures out. Normal play 48.75 fps (on) vs 48.32 (off); at a forced 5.7 GB budget 35.2 vs 17.0 fps in the last 45 s, 31 s vs 96 s of frames over 50 ms, 0 vs 47 allocation failures caught by the reclaim path. The allocation ladder (log, reclaim, retry, host fallback) is always on underneath. `--vram-stats` is no longer implied |
 
+## Switched to on (gratton-play-31)
+User rule (2026-10-18): an exact performance feature with a measured gain, however small, is on by default; it is no longer
+held back for a pad play session. Every flag keeps its opt-out (`--<flag> false`; `--async-pipelines off`, `--gc-clock runs`,
+`--lookahead-workers 0`), and the launcher's "Recommended for play" lists the same set. Pinned by `tests/ConfigDefaultsTests.cpp`.
+| options | was | now | measured |
+|---|---|---|---|
+| `--async-pipelines`, `--pipeline-lookahead` | off, false | **stall**, **true** | stall + lookahead: GPU-thread wait on pipeline jobs 16.9 s to 8.4 s, first-play stutter about -50 % |
+| `--submit-coalesce`, `--gc-clock` | false, runs | **true**, **frames** | submits per frame 360 to 47, fps +5.8 % |
+| `--elide-barriers`, `--known-fills`, `--clean-guest-reads`, `--defer-draw-write-barriers`, `--overlap-dispatches` | false | **true** | drain and barrier cuts: fps +6.2 % (3 vs 3), GPU busy -5 ms (defer), -0.8 ms (overlap) per level frame |
+| `--srt-plans`, `--srt-table-walk`, `--resolved-draw`, `--mapping-memo`, `--lookahead-workers`, `--readback-futures` | false, 0 | **true**, **4** | srt-adopt +32 %, resolved draw +5.5 %, mapping memo +4.0 %, readback futures +2.4 % to +3.7 % |
+| `--image-lookup-memo`, `--texture-binding-reuse`, `--draw-state-memo`, `--push-descriptor-delta`, `--draw-key-cache` | false | **true** | +12.0 %, level; the four memo flags +5.1 %; draw-key memo +0.9 % |
+| `--bda-dirty-log`, `--lazy-op-poll`, `--backing-read-cache`, `--write-fault-around`, `--plan-prefetch`, `--tracker-lockfree`, `--image-presence`, `--image-pool` | false | **true** | the eight flags together +31.8 % fps (kyGpu busy 60.1 to 45.9 ms) |
+| `--tracker-sleeping-locks`, `--async-upload-copies`, `--texture-lock-batch` | false | **true** | +15 % (sleeping locks), exact |
+| `--scalable-read-locks`, `--submit-thread`, `--small-copy-dedup`, `--ro-depth-access`, `--compute-image-copy` | false | **true** | kyGpu -1.0 ms (locks, submit thread), -0.66 ms (dedup); GPU busy 30.7 to 23.9 ms (read-only depth), -2.6 ms (compute image copy) |
+| `--plan-pool`, `--lookahead-adaptive` | false | **true** | look-ahead host CPU -8.7 and -8.1 core-ms per frame; kyGpu and fps not worse |
+| `--desc-commit-diet` | false | **true** | kyGpu -0.58 ms per level frame |
+| `--skip-ir-validation` | false | **true** | shader translation -23 %, output byte-identical; the check only ever stops the emulator (`KYTY_IR_VALIDATE=1` runs it) |
+
+`--lookahead-workers` defaults to 4 on a host with 16 hardware threads and to a quarter of the hardware threads below that; a count
+given on the command line is used as given. The Linux build links jemalloc by default (`-DKYTY_USE_JEMALLOC=OFF` keeps the system
+malloc; BSD-2-Clause, GPL-compatible): level fps about +3 %, GPU-thread CPU about -1.6 ms per frame. The startup log prints the allocator.
+
+Still off, on purpose: the exact chain (`--known-stores`, `--known-copies`, `--gpu-indirect-draws`), `--eop-labels-at-completion` and
+`--occlusion-queries` (open correctness questions), `--cp-direct-stores`, `--bda-sync-skip`, `--readback-queue`, `--eager-readback`,
+`--poll-before-wait` (no measured gain), `--skip-guard` and `--async-pipelines skip` (not exact), `--pipeline-variants-replay`
+(needs a pad-play check), `--pipelines-unoptimized-first`, `--precompile-on-load` (no gain on NVIDIA).
+
 ## Audited, stays off, with the measurement
 | option | default | category | decision |
 |---|---|---|---|
@@ -36,10 +63,9 @@ Categories: **correctness** (what a game needs, or a safety net), **perf** (spee
 | `--debug-texture-gc` | `false` | correctness | the texture garbage collector; `false` and `log` are debugging aids |
 | `--trophy-notifications` | `false` | host | toasts and sound |
 
-## Performance features (off until measured, then switched in their own commit)
+## Performance features (the table below predates gratton-play-31; the rows it lists as off and "play: true" are on by default now, see the section above)
 All have tests and measurements in `bench/RESULTS.md`; the recommended play set in
-`bench/config-play-next.json` passes the first group. Defaults stay off until a pad play session
-confirms them (forks/decision.md).
+`bench/config-play-next.json` passes the first group.
 | option | default | measured |
 |---|---|---|
 | `--async-pipelines` | off (play: stall) | stall + lookahead: GPU-thread wait on pipeline jobs 16.9 s to 8.4 s, stutter after 30 s 13.1 s to 1.0 s |
