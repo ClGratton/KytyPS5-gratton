@@ -19,6 +19,15 @@ namespace Sync {
 
 void TriggerEopEventAtEndOfPipe(CommandBuffer& buffer, int event_id, uint32_t context_id);
 
+// What the command processor of `owner` (its command scheduler) reads at addr (size 4 or 8; WAIT_REG_MEM). The labels
+// that stream has parsed count even while --eop-labels-at-completion still holds them back from the guest: the packets
+// of one command stream run in order, so a wait on a label that the same stream writes earlier is met by the stream's
+// own order and must not stop the parsing (a stop makes the GPU thread submit what it has and wait for the GPU: no
+// run-ahead left). Only what the guest or another queue writes is really waited for (another queue's held-back labels
+// are not seen). *from_pending tells that a held-back label supplied (some of) the value.
+[[nodiscard]] uint64_t ReadForCommandProcessor(const void* owner, const void* addr, uint32_t size,
+                                              bool* from_pending = nullptr);
+
 // Writes the data of an end-of-pipe packet (a label the guest polls) to guest memory. With
 // --eop-labels-at-completion (default) the guest sees it when the GPU has finished the command buffer that
 // holds the packet, in GPU order and in front of the interrupt of the same packet; otherwise, and for a GPU

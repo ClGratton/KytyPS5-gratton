@@ -426,7 +426,9 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
-	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+	// A label this stream parsed earlier counts even while it is held back from the guest (Sync::PublishLabel).
+	const auto current = static_cast<T>(Sync::ReadForCommandProcessor(&GetScheduler(), addr, sizeof(T)));
+	if (!TestWaitRegMemValue(current, ref, mask, func)) {
 		SuspendPm4();
 	}
 }

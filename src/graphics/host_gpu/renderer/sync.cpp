@@ -16,7 +16,11 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 namespace Libs::Graphics::Sync {
 
@@ -217,6 +221,96 @@ void TriggerEopEventAtEndOfPipe(CommandBuffer& buffer, int event_id, uint32_t co
 	    [&renderer, event_id, context_id] { renderer.TriggerInterrupt(event_id, context_id); });
 }
 
+namespace {
+
+// The labels that are parsed but not yet in guest memory (--eop-labels-at-completion), by dword address. Added by the
+// GPU thread when it parses the packet, removed by the priority-ops thread right after the store, so a reader that
+// looks here first and in memory second always finds the value in one of the two.
+// Ported from the label-latency work (crash2-eop-publish 9b3504777) without its diagnostics.
+class PendingLabels {
+public:
+	uint64_t Add(const void* owner, uint64_t address, uint64_t value, uint32_t size) {
+		const auto seq = m_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+		if ((address & 3u) != 0) {
+			return 0;
+		}
+		std::lock_guard lock(m_mutex);
+		for (uint32_t i = 0; i < size / sizeof(uint32_t); i++) {
+			m_dwords[address + i * sizeof(uint32_t)] = {static_cast<uint32_t>(value >> (32u * i)), seq, owner};
+		}
+		m_count.fetch_add(1, std::memory_order_release);
+		return seq;
+	}
+
+	void Remove(uint64_t address, uint32_t size, uint64_t seq) {
+		if (seq == 0) {
+			return;
+		}
+		{
+			std::lock_guard lock(m_mutex);
+			for (uint32_t i = 0; i < size / sizeof(uint32_t); i++) {
+				const auto it = m_dwords.find(address + i * sizeof(uint32_t));
+				if (it != m_dwords.end() && it->second.seq == seq) {
+					m_dwords.erase(it);
+				}
+			}
+		}
+		m_count.fetch_sub(1, std::memory_order_release);
+	}
+
+	uint64_t Read(const void* owner, const void* addr, uint32_t size, bool* from_pending) {
+		const auto address = reinterpret_cast<uint64_t>(addr);
+		const auto dwords  = size / sizeof(uint32_t);
+		uint64_t   value   = 0;
+		uint32_t   held    = 0; // dwords supplied by a held-back label
+		if (m_count.load(std::memory_order_acquire) != 0 && (address & 3u) == 0) {
+			std::lock_guard lock(m_mutex);
+			for (uint32_t i = 0; i < dwords; i++) {
+				const auto it = m_dwords.find(address + i * sizeof(uint32_t));
+				if (it != m_dwords.end() && it->second.owner == owner) {
+					value |= static_cast<uint64_t>(it->second.value) << (32u * i);
+					held |= 1u << i;
+				}
+			}
+		}
+		// Memory is read outside the lock: a read fault (a GPU-modified page) must not hold it.
+		for (uint32_t i = 0; i < dwords; i++) {
+			if ((held & (1u << i)) == 0) {
+				uint32_t dword = 0;
+				std::memcpy(&dword, static_cast<const uint8_t*>(addr) + i * sizeof(uint32_t), sizeof(dword));
+				value |= static_cast<uint64_t>(dword) << (32u * i);
+			}
+		}
+		if (from_pending != nullptr) {
+			*from_pending = held != 0;
+		}
+		return value;
+	}
+
+private:
+	struct Entry {
+		uint32_t    value = 0;
+		uint64_t    seq   = 0;
+		const void* owner = nullptr; // the command scheduler (queue) whose stream parsed the label
+	};
+	std::mutex                          m_mutex;
+	std::unordered_map<uint64_t, Entry> m_dwords;
+	std::atomic<uint32_t>               m_count {0};
+	std::atomic<uint64_t>               m_seq {0};
+};
+
+PendingLabels& Pending() {
+	static auto* labels = new PendingLabels; // leaked: priority operations may run while the process exits
+	return *labels;
+}
+
+} // namespace
+
+uint64_t ReadForCommandProcessor(const void* owner, const void* addr, uint32_t size, bool* from_pending) {
+	EXIT_IF(addr == nullptr || (size != sizeof(uint32_t) && size != sizeof(uint64_t)));
+	return Pending().Read(owner, addr, size, from_pending);
+}
+
 bool PublishLabel(CommandBuffer& buffer, void* dst, uint64_t value, uint32_t size, bool gpu_clock_sample) {
 	EXIT_IF(dst == nullptr || (size != sizeof(uint32_t) && size != sizeof(uint64_t)));
 	buffer.AssertRecording();
@@ -229,9 +323,12 @@ bool PublishLabel(CommandBuffer& buffer, void* dst, uint64_t value, uint32_t siz
 	// Published with the other completions of this command buffer (interrupts, flips), in the order they were
 	// parsed: the label first, then the interrupt of the same packet. Like a GPU timestamp rewrite or a read-back
 	// it goes through the backing view: a completion is not allowed to take a tracker fault, and memory the guest
-	// unmapped meanwhile simply has nothing to receive it (logged by WriteBacking).
-	scheduler.DeferPriorityOperation([dst, value, size] {
+	// unmapped meanwhile simply has nothing to receive it (logged by WriteBacking). The command processor keeps
+	// seeing the label from now on (ReadForCommandProcessor).
+	const auto seq = Pending().Add(&scheduler, reinterpret_cast<uint64_t>(dst), value, size);
+	scheduler.DeferPriorityOperation([dst, value, size, seq] {
 		LibKernel::Memory::WriteBacking(reinterpret_cast<uint64_t>(dst), &value, size);
+		Pending().Remove(reinterpret_cast<uint64_t>(dst), size, seq);
 	});
 	return true;
 }
