@@ -162,8 +162,11 @@ void TestRandomAgainstGetBarriers() {
 				range.layer_count = 1 + static_cast<uint32_t>(rng() % (image.layers - range.base_layer));
 			}
 		}
-		const int      layout = static_cast<int>(rng() % 3);
-		const uint32_t access = accesses[rng() % 7];
+		// Half of the destinations repeat the image's own layout and access (a texture sampled by the next
+		// draw), the case the predicate exists for; the rest are random so that the mismatches are covered.
+		const bool     same   = rng() % 2 == 0;
+		const int      layout = same ? image.state.layout : static_cast<int>(rng() % 3);
+		const uint32_t access = same ? image.state.access_mask : accesses[rng() % 7];
 		const bool     noop   = Predicate(image, layout, access, has_range ? &range : nullptr);
 		Model          after  = image;
 		const auto     count  = GetBarriers(after, layout, access, 9, has_range ? &range : nullptr);
