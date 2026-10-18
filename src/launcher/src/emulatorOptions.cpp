@@ -141,7 +141,9 @@ QList<Option> BuildTable() {
 	defs.append({"submit_coalesce", "--submit-coalesce", Tab::Gpu, "Submission", Kind::Bool,
 	             "Coalesce submits",
 	             "Holds back the Vulkan submit of end-of-pipe events and sends several at once: "
-	             "about 47 instead of 360 submits per frame, +5.8% fps in the measurements.",
+	             "about 47 instead of 360 submits per frame, which saves GPU-thread time. Off by "
+	             "default: with it on, some games show one-frame lighting flashes and lose meshes "
+	             "for a while.",
 	             EMU_BOOL(submit_coalesce)});
 	defs.append({"submit_coalesce_max", "--submit-coalesce-max", Tab::Gpu, "Submission", Kind::Int,
 	             "Coalesce at most this many events:", "Events held back before a submit is forced.",
@@ -764,7 +766,8 @@ QVariantMap Recommended() {
 	QVariantMap values;
 	values.insert(QStringLiteral("async_pipelines"), QStringLiteral("stall"));
 	values.insert(QStringLiteral("pipeline_lookahead"), true);
-	values.insert(QStringLiteral("submit_coalesce"), true);
+	// submit_coalesce is off (gratton-play-32): it makes lit surfaces flash dark for one frame and drops meshes in gameplay.
+	values.insert(QStringLiteral("submit_coalesce"), false);
 	values.insert(QStringLiteral("gc_clock"), QStringLiteral("frames"));
 	values.insert(QStringLiteral("elide_barriers"), true);
 	values.insert(QStringLiteral("known_fills"), true);

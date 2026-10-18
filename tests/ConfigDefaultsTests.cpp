@@ -387,12 +387,13 @@ void TestSkipGuardDefaults() {
 }
 
 // gratton-play-31 (docs/defaults.md): every exact performance flag with a measured gain starts on, and keeps its opt-out. The flags
-// that stay off are the ones with an open correctness question (the exact chain, --eop-labels-at-completion, --occlusion-queries)
-// and the ones whose gain was not measured.
+// that stay off are the ones with an open correctness question (the exact chain, --occlusion-queries), --submit-coalesce (gratton-play-32:
+// it causes one-frame lighting flashes and disappearing meshes) and the ones whose gain was not measured.
 void TestPerformanceFlagsDefaultOn() {
 	const Config::ConfigOptions o;
 	Check(o.async_pipelines == Config::AsyncPipelineMode::Stall && o.pipeline_lookahead, "async pipelines stall + look-ahead");
-	Check(o.submit_coalesce && o.gc_clock_frames, "submit coalescing with the frame GC clock");
+	Check(!o.submit_coalesce && o.gc_clock_frames, "the frame GC clock on, submit coalescing off (it causes lighting flashes)");
+	Check(o.eop_labels_at_completion, "end-of-pipe labels at completion (correctness)");
 	Check(o.elide_barriers && o.known_fills && o.clean_guest_reads && o.defer_draw_write_barriers && o.overlap_dispatches,
 	      "the drain and barrier cuts");
 	Check(o.srt_plans && o.srt_table_walk && o.resolved_draw && o.mapping_memo && o.readback_futures, "the draw path");

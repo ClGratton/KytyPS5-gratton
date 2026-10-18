@@ -276,8 +276,11 @@ struct ConfigOptions {
 	// --submit-stats <seconds>: only the frame/submit/coalescing counters, no timers. 0 = off.
 	uint32_t               submit_stats_s              = 0;
 	// --submit-coalesce (K13): hold back the submit of RELEASE_MEM end-of-pipe events (up to
-	// submit_coalesce_max events, or an age derived from the vblank period). Default on.
-	bool                   submit_coalesce             = true;
+	// submit_coalesce_max events, or an age derived from the vblank period). Default off since gratton-play-32:
+	// with coalescing on, one measured title shows one-frame wrong-lighting flashes and meshes that
+	// disappear in gameplay; off, 0 flashes in about 6,000 title frames and the gameplay is clean
+	// (notes/tracks/correctness-1018.md). The mechanism of the wrong frame is still open.
+	bool                   submit_coalesce             = false;
 	// --bda-sync-skip (K15): PrepareBda leaves out its walk over all buffers when no page became
 	// CPU-modified, no buffer was (un)registered and the mapping did not change since the last full
 	// pass (host_gpu/bdaSyncGate.h). Default off.

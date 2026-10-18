@@ -346,7 +346,8 @@ static void PrintUsage() {
 	::printf("  --submit-coalesce <true|false>       Hold back the Vulkan submit of RELEASE_MEM end-of-pipe\n"
 	         "                                       events: submit after --submit-coalesce-max events or\n"
 	         "                                       when the oldest is older than --submit-coalesce-us,\n"
-	         "                                       and at every drain or end of submission. Default: true.\n");
+	         "                                       and at every drain or end of submission. Default: false\n"
+	         "                                       (on, it makes some games flash and drop meshes).\n");
 	::printf("  --elide-barriers <true|false>        Leave out a guest cache-flush/partial-flush global memory\n"
 	         "                                       barrier when nothing was recorded since the previous\n"
 	         "                                       one in the same command buffer. Default: true.\n");
