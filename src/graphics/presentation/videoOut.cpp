@@ -1088,7 +1088,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 			EXIT("cannot prepare video-out request id=%" PRIu64 "\n", request_id);
 		}
 		request->state   = RequestState::Recording;
-		request->skipped = FullSpeed::SkipDraws();
+		request->skipped = Graphics::FullSpeed::SkipDraws();
 		cfg              = request->cfg;
 		generation       = request->generation;
 		index            = request->index;
@@ -1141,7 +1141,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		return;
 	}
 	// --full-speed: the flip is a frame boundary; decide whether the next frame draws.
-	FullSpeed::OnFlipParsed(flip_interval_ns);
+	Graphics::FullSpeed::OnFlipParsed(flip_interval_ns);
 	Graphics::Presenter::Frame* frame = nullptr;
 	if (special) {
 		frame = &m_presenter.PrepareBlankFrame(width, height, index == VIDEO_OUT_BUFFER_INDEX_BLACK,
