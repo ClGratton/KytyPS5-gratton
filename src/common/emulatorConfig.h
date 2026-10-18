@@ -314,6 +314,9 @@ struct ConfigOptions {
 	// draw, redoes only the bindings whose inputs changed (graphics/host_gpu/renderer/incrementalDraw.h). Exact: every input is
 	// compared with what the kept result was computed from. Default off.
 	bool                   incremental_draw            = false;
+	// --draw-lock-scope: one texture-cache lock acquisition around a whole draw (a draw took it about ten times, one batch after
+	// another); the batches inside become depth counts. Default off (experiment: held across the draw's vkCmd recording).
+	bool                   draw_lock_scope             = false;
 	// --async-upload-copies: the guest-to-ring memcpy of a large buffer upload runs on helper threads
 	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default on.
 	bool                   async_upload_copies         = true;
@@ -543,6 +546,7 @@ bool              PlanPrefetchEnabled();
 bool              CpDirectStoresEnabled();
 bool              DrawStateMemoEnabled();
 bool              IncrementalDrawEnabled();
+bool              DrawLockScopeEnabled();
 bool              AsyncUploadCopiesEnabled();
 bool              SubmitThreadEnabled();
 bool              TextureLockBatchEnabled();

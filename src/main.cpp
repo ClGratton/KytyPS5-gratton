@@ -186,6 +186,7 @@ static void PrintUsage() {
 	         "                                       tracker-sleeping-locks, scalable-read-locks,\n"
          "                                       submit-thread,\n"
 	         "                                       cp-direct-stores, draw-state-memo, incremental-draw,\n"
+	         "                                       draw-lock-scope,\n"
 	         "                                       async-upload-copies, texture-lock-batch,\n"
 	         "                                       push-descriptor-delta, small-copy-dedup,\n"
 	         "                                       image-presence, image-pool, ro-depth-access,\n"
@@ -310,6 +311,8 @@ static void PrintUsage() {
 	         "                                       resolved and, for the next draw, redoes only those whose\n"
 	         "                                       inputs changed (exact; KYTY_DRAW_VERIFY=1 checks every kept\n"
 	         "                                       binding against a fresh one). Default: false.\n");
+	::printf("  --draw-lock-scope <true|false>       One texture-cache lock acquisition around a whole draw instead\n"
+	         "                                       of about ten (experiment). Default: false.\n");
 	::printf("  --cp-direct-stores <true|false>      The GPU command processor's stores to game memory (fence and\n"
 	         "                                       label writes) go through the backing view and mark the\n"
 	         "                                       memory tracker directly, instead of faulting on the GPU\n"
@@ -1161,6 +1164,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--incremental-draw") {
 			if (!ParseBool(value, options.config.incremental_draw)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--draw-lock-scope") {
+			if (!ParseBool(value, options.config.draw_lock_scope)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

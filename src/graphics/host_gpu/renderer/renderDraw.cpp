@@ -1993,6 +1993,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	std::optional<DrawRenderState> local_state;
 	DrawRenderState&               state = Config::DrawStateMemoEnabled() ? FreshDrawRenderState() : local_state.emplace();
 	gpu_phase_checks.End();
+	std::optional<TextureCache::LockBatch> draw_lock;
+	if (Config::DrawLockScopeEnabled()) draw_lock.emplace(m_context.GetTextureCache());
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
 		return true;
@@ -2089,6 +2091,8 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	std::optional<DrawRenderState> local_state;
 	DrawRenderState&               state = Config::DrawStateMemoEnabled() ? FreshDrawRenderState() : local_state.emplace();
 	gpu_phase_checks.End();
+	std::optional<TextureCache::LockBatch> draw_lock;
+	if (Config::DrawLockScopeEnabled()) draw_lock.emplace(m_context.GetTextureCache());
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
 		return;
