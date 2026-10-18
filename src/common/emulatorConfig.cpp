@@ -103,6 +103,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("push-descriptor-delta", &g_config->push_descriptor_delta, false);
 	// Read per small copy; a kept copy is only answered from while it is in the same tick and ring lap, so a toggle needs no cleanup.
 	registry.Register("small-copy-dedup", &g_config->small_copy_dedup, false);
+	// Read per CommitBindings call; every cut it switches is stateless between calls (the held push content is the same either way).
+	registry.Register("desc-commit-diet", &g_config->desc_commit_diet, false);
 	// The counts are kept up to date whether or not the flag is on, so a toggle needs no cleanup.
 	registry.Register("image-presence", &g_config->image_presence, false);
 	// Read per image create and delete; turning it off flushes the pool at the next create.
@@ -223,6 +225,10 @@ bool PushDescriptorDeltaEnabled() {
 
 bool SmallCopyDedupEnabled() {
 	return Common::RuntimeToggles::Read(g_config->small_copy_dedup);
+}
+
+bool DescCommitDietEnabled() {
+	return Common::RuntimeToggles::Read(g_config->desc_commit_diet);
 }
 
 bool TextureLockBatchEnabled() {

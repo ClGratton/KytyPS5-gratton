@@ -292,6 +292,13 @@ QList<Option> BuildTable() {
 	             "With this the earlier copy is used again, after comparing every byte. Exact; lowers the GPU "
 	             "thread's CPU time and the data sent to the GPU.",
 	             EMU_BOOL(small_copy_dedup)});
+	defs.append({"desc_commit_diet", "--desc-commit-diet", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Skip work that repeats for nothing when a draw's resources are bound",
+	             "Before each draw the emulator checks that every image it uses is in the right state, and "
+	             "prepares the list of resources for the graphics driver. Most of that is the same as in the "
+	             "draw before. With this the checks that would change nothing and the lists that did not "
+	             "change are not redone. Exact; lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(desc_commit_diet)});
 	defs.append({"texture_lock_batch", "--texture-lock-batch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Take the texture cache lock once per run of image lookups",
 	             "Every image a draw uses is looked up under a short lock, taken and released for each one. "

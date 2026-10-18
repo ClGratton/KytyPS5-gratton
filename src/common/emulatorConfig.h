@@ -318,6 +318,11 @@ struct ConfigOptions {
 	// same scheduler tick is not copied into the stream ring again; the earlier ring offset is used
 	// (graphics/host_gpu/renderer/cache/smallCopyDedup.h). Default off.
 	bool                   small_copy_dedup            = false;
+	// --desc-commit-diet: CommitBindings leaves out the work that a repeated draw does for nothing: the image transit calls whose
+	// image is already in the wanted layout and access, the sort of the written-range index when the read hull answers, and
+	// (with --push-descriptor-delta) the descriptor write structures and content vectors of bindings that did not change. Exact.
+	// Default off.
+	bool                   desc_commit_diet            = false;
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default off.
 	bool                   image_presence              = false;
@@ -533,6 +538,7 @@ bool              SubmitThreadEnabled();
 bool              TextureLockBatchEnabled();
 bool              PushDescriptorDeltaEnabled();
 bool              SmallCopyDedupEnabled();
+bool              DescCommitDietEnabled();
 bool              ImagePresenceEnabled();
 bool              RoDepthAccessEnabled();
 bool              ComputeImageCopyEnabled();

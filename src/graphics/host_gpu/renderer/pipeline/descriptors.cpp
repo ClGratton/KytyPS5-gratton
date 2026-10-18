@@ -1278,6 +1278,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
 	Common::GpuPhase::Scope gpu_phase_desc(Common::GpuPhase::Phase::DescCommit);
+	// --desc-commit-diet: read once per call, so that every cut below is in force for the whole call or none of them is.
+	const bool diet          = Config::DescCommitDietEnabled();
+	const bool graphics_bind = pipeline_bind_point == vk::PipelineBindPoint::eGraphics;
 	auto   vk_buffer        = buffer.Handle();
 	size_t image_descriptor_count = 0;
 	size_t write_count      = 0;
@@ -1396,7 +1399,9 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					index.Add(written.address, written.size);
 				}
 			}
-			index.Build();
+			// The sorted order is only needed by Overlaps, which builds it when it is first asked; the read hull's
+			// proof walks the entries as they are (--desc-commit-diet).
+			if (!diet) index.Build();
 		};
 		for (const auto* reader: prepared_bindings) {
 			const auto& reads = reader->runtime->resources->specialization_reads;
@@ -1418,7 +1423,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 						image_writes.Add(written.address, written.size);
 					}
 				}
-				image_writes.Build();
+				if (!diet) image_writes.Build();
 				collect_buffer_writes(buffer_writes, nullptr);
 			}
 			// A compute dispatch reading a buffer it writes itself through scalar loads is racy
@@ -1467,9 +1472,19 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 	}
 	gpu_phase_hazard.End();
+	// --desc-commit-diet on a graphics push-descriptor draw with --push-descriptor-delta: the bindings are listed as
+	// pointers (PushRef) and compared with what the pushed set holds as they are; a vk::WriteDescriptorSet is only made
+	// for the ones that changed. Every other draw builds the full array as before.
+	const bool push_refs = diet && graphics_bind && pipeline.uses_push_descriptors &&
+	                       Config::PushDescriptorDeltaEnabled();
 	m_descriptor_images.resize(image_descriptor_count);
 	m_descriptor_writes.clear();
-	m_descriptor_writes.reserve(write_count);
+	m_push_refs.clear();
+	if (push_refs) {
+		m_push_refs.reserve(write_count);
+	} else {
+		m_descriptor_writes.reserve(write_count);
+	}
 	size_t image_cursor = 0;
 	std::array<vk::DescriptorBufferInfo, 2> address_buffers;
 
@@ -1520,6 +1535,12 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				}
 			}
 			Common::GpuPhase::Scope gpu_phase_transit(Common::GpuPhase::Phase::DescTransit);
+			// --desc-commit-diet: an image that is already in the wanted layout and access needs no call at all.
+			const auto transit = [&](vk::ImageLayout layout, vk::AccessFlags2 access,
+			                         const std::optional<ImageSubresourceRange>& transit_range) {
+				if (diet && image.TransitIsNoop(layout, access, transit_range)) return;
+				image.Transit(layout, access, transit_range, vk_buffer);
+			};
 			if (image.binding.is_target && !target_without_attachment) {
 				const auto layout = image.binding.attachment_layout;
 				if (image.info.IsDepth()) {
@@ -1531,25 +1552,24 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 						EXIT("sampling a writable depth/stencil attachment aspect\n");
 					}
 				}
-				image.Transit(layout,
-				              image.binding.attachment_access | vk::AccessFlagBits2::eShaderRead |
-				                  (image.binding.shader_write ? vk::AccessFlagBits2::eShaderWrite
-				                                              : vk::AccessFlags2 {}),
-				              {}, vk_buffer);
+				transit(layout,
+				        image.binding.attachment_access | vk::AccessFlagBits2::eShaderRead |
+				            (image.binding.shader_write ? vk::AccessFlagBits2::eShaderWrite
+				                                        : vk::AccessFlags2 {}),
+				        std::nullopt);
 			} else if (image.binding.force_general && !image.info.IsDepth()) {
 				const vk::AccessFlags2 storage_access = image.binding.shader_write
 				                                            ? vk::AccessFlagBits2::eShaderWrite
 				                                            : vk::AccessFlags2 {};
-				image.Transit(vk::ImageLayout::eGeneral,
-				              vk::AccessFlagBits2::eShaderRead | storage_access, {}, vk_buffer);
+				transit(vk::ImageLayout::eGeneral,
+				        vk::AccessFlagBits2::eShaderRead | storage_access, std::nullopt);
 			} else if (storage) {
-				image.Transit(vk::ImageLayout::eGeneral,
-				              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
-				              range, vk_buffer);
+				transit(vk::ImageLayout::eGeneral,
+				        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite, range);
 			} else {
-				image.Transit(image.info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-				                                   : vk::ImageLayout::eShaderReadOnlyOptimal,
-				              vk::AccessFlagBits2::eShaderRead, range, vk_buffer);
+				transit(image.info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
+				                             : vk::ImageLayout::eShaderReadOnlyOptimal,
+				        vk::AccessFlagBits2::eShaderRead, range);
 			}
 			binding.layout = image.backing.state.layout;
 			if (!storage && program.info.images[i].depth_compare) {
@@ -1562,23 +1582,24 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
 			const auto index = std::countr_zero(mask);
 			const auto kind = static_cast<BindingKind>(index);
-			vk::WriteDescriptorSet write {};
-			write.dstBinding = ShaderRecompiler::IR::NativeBinding(program.stage, kind);
-			write.descriptorType = NativeDescriptorType(kind);
-			write.descriptorCount = program.bindings.descriptor_counts[index];
+			const uint32_t dst_binding      = ShaderRecompiler::IR::NativeBinding(program.stage, kind);
+			const auto     descriptor_type  = NativeDescriptorType(kind);
+			const uint32_t descriptor_count = program.bindings.descriptor_counts[index];
+			const vk::DescriptorBufferInfo* buffer_info = nullptr;
+			const vk::DescriptorImageInfo*  image_info  = nullptr;
 			const auto image_start = image_cursor;
 			if (ShaderRecompiler::IR::ImageBindingResourceClass(kind) !=
 			    ShaderRecompiler::IR::ImageResourceClass::None) {
 				image_starts[ShaderRecompiler::IR::ImageBindingIndex(kind)] = image_start;
-				image_cursor += write.descriptorCount;
+				image_cursor += descriptor_count;
 			} else {
 				switch (kind) {
 					case BindingKind::Buffers:
-						EXIT_IF(descriptors.buffers.size() != write.descriptorCount);
+						EXIT_IF(descriptors.buffers.size() != descriptor_count);
 						for (const auto& view: descriptors.buffers) {
 							EXIT_IF(view.buffer == nullptr);
 						}
-						write.pBufferInfo = descriptors.buffers.data();
+						buffer_info = descriptors.buffers.data();
 						break;
 					case BindingKind::BdaPagetable:
 					case BindingKind::FaultBuffer: {
@@ -1588,7 +1609,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 						                             : cache.GetFaultBuffer();
 						auto& view = address_buffers[kind == BindingKind::FaultBuffer];
 						view = {bda_buffer->Handle(), 0, bda_buffer->Size()};
-						write.pBufferInfo = &view;
+						buffer_info = &view;
 						break;
 					}
 					case BindingKind::FlattenedSrt:
@@ -1607,7 +1628,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 							view = &descriptors.shared_memory;
 						}
 						EXIT_IF(view->buffer == nullptr);
-						write.pBufferInfo = view;
+						buffer_info = view;
 						break;
 					}
 					case BindingKind::Samplers:
@@ -1620,9 +1641,19 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				}
 			}
 			if (image_cursor != image_start) {
-				write.pImageInfo = m_descriptor_images.data() + image_start;
+				image_info = m_descriptor_images.data() + image_start;
 			}
-			m_descriptor_writes.push_back(write);
+			if (push_refs) {
+				m_push_refs.push_back({dst_binding, descriptor_type, descriptor_count, buffer_info, image_info});
+			} else {
+				vk::WriteDescriptorSet write {};
+				write.dstBinding      = dst_binding;
+				write.descriptorType  = descriptor_type;
+				write.descriptorCount = descriptor_count;
+				write.pBufferInfo     = buffer_info;
+				write.pImageInfo      = image_info;
+				m_descriptor_writes.push_back(write);
+			}
 		}
 		for (uint32_t i = 0; i < program.info.images.size(); ++i) {
 			const auto& resource = program.info.images[i];
@@ -1653,9 +1684,67 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		                        push_data.dwords.data());
 	}
 
-	const bool graphics_bind = pipeline_bind_point == vk::PipelineBindPoint::eGraphics;
 	auto&      push_cache    = m_context.GetCommandScheduler().GetPushDescriptorCache();
-	if (m_descriptor_writes.empty()) {
+	if (push_refs) {
+		if (m_push_refs.empty()) {
+			push_cache.Invalidate(); // as below: binding this pipeline may disturb the pushed set
+		} else {
+			Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::DescPush);
+			EXIT_IF(pipeline.descriptor_set_layout == nullptr);
+			push_cache.Begin(std::bit_cast<uint64_t>(pipeline.pipeline_layout));
+			m_push_writes.clear();
+			for (const auto& ref: m_push_refs) {
+				// The words are those of PushWriteContent: type and count, then the handles and ranges of each descriptor.
+				bool push = true;
+				if (ref.buffers != nullptr) {
+					auto update = push_cache.BeginUpdate(ref.binding, 1 + size_t {3} * ref.count);
+					update.Put((static_cast<uint64_t>(ref.type) << 32u) | ref.count);
+					for (uint32_t i = 0; i < ref.count; i++) {
+						const auto& info = ref.buffers[i];
+						update.Put(std::bit_cast<uint64_t>(info.buffer));
+						update.Put(info.offset);
+						update.Put(info.range);
+					}
+					push = push_cache.EndUpdate(update);
+				} else if (ref.images != nullptr) {
+					auto update = push_cache.BeginUpdate(ref.binding, 1 + size_t {3} * ref.count);
+					update.Put((static_cast<uint64_t>(ref.type) << 32u) | ref.count);
+					for (uint32_t i = 0; i < ref.count; i++) {
+						const auto& info = ref.images[i];
+						update.Put(std::bit_cast<uint64_t>(info.sampler));
+						update.Put(std::bit_cast<uint64_t>(info.imageView));
+						update.Put(static_cast<uint64_t>(info.imageLayout));
+					}
+					push = push_cache.EndUpdate(update);
+				} else {
+					push_cache.Forget(ref.binding);
+				}
+				if (push) {
+					vk::WriteDescriptorSet write {};
+					write.dstBinding      = ref.binding;
+					write.descriptorType  = ref.type;
+					write.descriptorCount = ref.count;
+					write.pBufferInfo     = ref.buffers;
+					write.pImageInfo      = ref.images;
+					m_push_writes.push_back(write);
+				}
+			}
+			const auto count = static_cast<uint32_t>(m_push_writes.size());
+			if (count == 0) push_cache.NoteElided();
+			static const bool stats = std::getenv("KYTY_DRAW_STATE_STATS") != nullptr;
+			if (stats && (push_cache.GetStats().pushes & 0x3ffff) == 0) {
+				const auto& s = push_cache.GetStats();
+				std::printf("[push-descriptor-delta] pushes=%lu elided=%.1f%% writes_pushed=%.1f%% of %lu disturbed=%lu\n",
+				            (unsigned long)s.pushes, 100.0 * s.pushes_elided / s.pushes,
+				            100.0 * s.writes_pushed / (s.writes_seen ? s.writes_seen : 1),
+				            (unsigned long)s.writes_seen, (unsigned long)s.disturbed);
+			}
+			if (count != 0) {
+				vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0, count,
+				                               m_push_writes.data());
+			}
+		}
+	} else if (m_descriptor_writes.empty()) {
 		// Binding this pipeline may disturb the pushed set (its layout is not known to match).
 		if (graphics_bind) push_cache.Invalidate();
 	} else {

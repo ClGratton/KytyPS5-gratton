@@ -190,6 +190,7 @@ static void PrintUsage() {
 	         "                                       push-descriptor-delta, small-copy-dedup,\n"
 	         "                                       image-presence, image-pool, ro-depth-access,\n"
 	         "                                       compute-image-copy,\n"
+	         "                                       desc-commit-diet,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
@@ -294,6 +295,11 @@ static void PrintUsage() {
 	         "                                       copy of the same range in the same submission is not copied\n"
 	         "                                       into the stream ring again (exact: bytes are compared).\n"
 	         "                                       Default: false.\n");
+	::printf("  --desc-commit-diet <true|false>      Binding a draw's resources leaves out work that repeats for\n"
+	         "                                       nothing: image transits that change nothing, a sort the\n"
+	         "                                       read hull makes unnecessary, and (with\n"
+	         "                                       --push-descriptor-delta) descriptor writes that did not\n"
+	         "                                       change (exact). Default: false.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"
 	         "                                       (exact). Default: false.\n");
@@ -1130,6 +1136,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--small-copy-dedup") {
 			if (!ParseBool(value, options.config.small_copy_dedup)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--desc-commit-diet") {
+			if (!ParseBool(value, options.config.desc_commit_diet)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

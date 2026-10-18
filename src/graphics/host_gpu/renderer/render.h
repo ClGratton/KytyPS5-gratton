@@ -297,6 +297,16 @@ private:
 	// --push-descriptor-delta: the writes that are pushed, and the words one write is compared by.
 	std::vector<vk::WriteDescriptorSet>   m_push_writes;
 	std::vector<uint64_t>                 m_push_content;
+	// --desc-commit-diet with --push-descriptor-delta: what one binding of the draw writes, as pointers into the prepared
+	// bindings and m_descriptor_images; the vk::WriteDescriptorSet is only made for the bindings that changed.
+	struct PushRef {
+		uint32_t                        binding;
+		vk::DescriptorType              type;
+		uint32_t                        count;
+		const vk::DescriptorBufferInfo* buffers;
+		const vk::DescriptorImageInfo*  images;
+	};
+	std::vector<PushRef>                  m_push_refs;
 	std::unique_ptr<MeshIndirectArgs>     m_mesh_indirect; // --gpu-indirect-draws, on first use
 
 	friend class CommandProcessor;
