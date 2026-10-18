@@ -311,7 +311,7 @@ private:
 	// --resolved-draw: ranges ObtainBuffer found clean (no CPU- or GPU-dirty page) with the tracker
 	// epochs read before the check and the buffer-set generation; an equal epoch and generation later
 	// mean the range is still clean and its buffer is still the one found (direct mapped, GPU thread).
-	struct ObtainMemo {
+	struct alignas(64) ObtainMemo {
 		uint64_t vaddr = 0, size = 0;
 		BufferId id;
 		uint64_t buffer_generation = 0;
@@ -320,7 +320,10 @@ private:
 		bool     valid             = false;
 		bool     seen              = false; // this key missed before: worth the extra check next time
 	};
-	static constexpr size_t kObtainMemoSlots = 512;
+	// --incremental-draw indexes the whole table: a frame names thousands of distinct ranges and 512 slots evict most of them before
+	// the next frame asks again. The entries check their own key, so any slot count is exact; the stock size stays when the flag is off.
+	static constexpr size_t kObtainMemoSlotsStock = 512;
+	static constexpr size_t kObtainMemoSlots      = 16384;
 	std::array<ObtainMemo, kObtainMemoSlots> m_obtain_memo {};
 	ObtainStats                              m_obtain_stats {};
 	// --small-copy-dedup: the bytes and ring offsets of this tick's small constant copies.

@@ -166,6 +166,12 @@ void BufferCache::ChangeRegister(BufferId id) {
 
 void BufferCache::TouchBuffer(const Buffer& buffer) {
 	if (!buffer.is_deleted) {
+		// --incremental-draw: LeastRecentlyUsedCache::Touch does nothing when the item already carries this tick; the buffer itself
+		// (in cache for the caller) remembers it, so the LRU array is not read at all.
+		if (Config::IncrementalDrawEnabled()) {
+			if (buffer.lru_touch_tick == m_gc_tick) return;
+			buffer.lru_touch_tick = m_gc_tick;
+		}
 		m_lru_cache.Touch(buffer.lru_id, m_gc_tick);
 	}
 }
@@ -1453,7 +1459,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	m_obtain_stats.written += is_written;
 	m_obtain_stats.texel += !is_written && is_texel_buffer;
 	if (memoizable) {
-		memo = &m_obtain_memo[((vaddr >> 4) * 0x9e3779b97f4a7c15ull ^ size) >> 40 & (kObtainMemoSlots - 1)];
+		memo = &m_obtain_memo[((vaddr >> 4) * 0x9e3779b97f4a7c15ull ^ size) >> 40 &
+		                      ((Config::IncrementalDrawEnabled() ? kObtainMemoSlots : kObtainMemoSlotsStock) - 1)];
 		epoch_count = m_memory_tracker.RangeEpochs(vaddr, size, epochs);
 		if (memo->valid && memo->vaddr == vaddr && memo->size == size && epoch_count != 0 &&
 		    memo->epoch_count == epoch_count && memo->epochs[0] == epochs[0] &&
