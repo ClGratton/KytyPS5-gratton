@@ -452,7 +452,7 @@ CommandBuffer& CommandScheduler::Current() {
 // KYTY_DRAW_STATS=1: the driver cost of ending and beginning a command buffer, printed every 5 s.
 namespace {
 struct BoundaryStats {
-	std::atomic<uint64_t> ends {0}, end_ns {0}, begins {0}, begin_ns {0}, last_ns {0};
+	std::atomic<uint64_t> ends {0}, end_ns {0}, begins {0}, begin_ns {0}, last_ns {0}, submits {0}, submit_ns {0}, async_submits {0};
 };
 BoundaryStats g_boundary;
 uint64_t NowNs() {
@@ -465,8 +465,10 @@ void MaybePrintBoundary() {
 	if (now - last < 5'000'000'000ull || !g_boundary.last_ns.compare_exchange_strong(last, now)) return;
 	const double secs = static_cast<double>(now - last) / 1e9;
 	const uint64_t e = g_boundary.ends.exchange(0), en = g_boundary.end_ns.exchange(0), b = g_boundary.begins.exchange(0), bn = g_boundary.begin_ns.exchange(0);
-	std::printf("[cmdbuf-boundary] %.1f s: vkEndCommandBuffer %llu (%.0f/s) %.2f ms/s, vkBeginCommandBuffer %llu %.2f ms/s\n", secs,
-	            static_cast<unsigned long long>(e), e / secs, en / 1e6 / secs, static_cast<unsigned long long>(b), bn / 1e6 / secs);
+	const uint64_t su = g_boundary.submits.exchange(0), sn = g_boundary.submit_ns.exchange(0), sa = g_boundary.async_submits.exchange(0);
+	std::printf("[cmdbuf-boundary] %.1f s: vkEndCommandBuffer %llu (%.0f/s) %.2f ms/s, vkBeginCommandBuffer %llu %.2f ms/s, Submit() on kyGpu %llu (%.0f/s, async %llu) %.2f ms/s in total (includes End)\n", secs,
+	            static_cast<unsigned long long>(e), e / secs, en / 1e6 / secs, static_cast<unsigned long long>(b), bn / 1e6 / secs,
+	            static_cast<unsigned long long>(su), su / secs, static_cast<unsigned long long>(sa), sn / 1e6 / secs);
 	std::fflush(stdout);
 }
 } // namespace
@@ -492,6 +494,18 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool allow_async) {
 	Common::GpuPhase::Scope gpu_phase_submit(Common::GpuPhase::Phase::Submit);
 	Common::GpuPhase::NoteSubmit();
 	EXIT_IF(m_command.IsInvalid());
+	struct SubmitTimer {
+		bool     on;
+		bool     async = false;
+		uint64_t t0;
+		~SubmitTimer() {
+			if (on) {
+				g_boundary.submit_ns.fetch_add(NowNs() - t0, std::memory_order_relaxed);
+				g_boundary.submits.fetch_add(1, std::memory_order_relaxed);
+				if (async) g_boundary.async_submits.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+	} submit_timer {IncrementalDraw::StatsEnabled(), false, IncrementalDraw::StatsEnabled() ? NowNs() : 0};
 	// --submit-thread: a flush with no semaphores leaves the vkQueueSubmit, and the wait for the upload helpers before it, to the
 	// submit thread. Everything else submits in line, after the jobs already handed over, so submissions keep their order.
 	const bool async = allow_async && Config::SubmitThreadEnabled() && submit.num_wait_semaphores == 0 &&
@@ -515,6 +529,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit, bool allow_async) {
 	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);
 	if (async) {
+		submit_timer.async = true;
 		return SubmitAsync(buffer);
 	}
 
