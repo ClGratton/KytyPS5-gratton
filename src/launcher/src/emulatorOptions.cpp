@@ -748,6 +748,11 @@ QVariantMap Recommended() {
 	// bench/config-play-next.json: async pipelines + look-ahead, submit coalescing with the frame
 	// GC clock, the three drain cuts, memory statistics and a hang watchdog. Everything else of
 	// that config is a classic setting (see Configuration::ApplyRecommendedForPlay).
+	//
+	// gratton-play-31 (2026-10-18, user rule: a measured exact performance feature is on by default): the emulator's own
+	// defaults now equal every performance flag listed here, so a fresh install runs the recommended set. The entries stay
+	// explicit so that the button also puts back a flag that was switched off earlier. Only the three non-performance
+	// settings at the end (memory statistics, hang watchdog, splash) differ from the emulator's defaults.
 	QVariantMap values;
 	values.insert(QStringLiteral("async_pipelines"), QStringLiteral("stall"));
 	values.insert(QStringLiteral("pipeline_lookahead"), true);
@@ -788,13 +793,22 @@ QVariantMap Recommended() {
 	// gratton-play-30 (2026-10-18): the measured exact cuts that were not in the preset yet, integrated as one stack.
 	// --scalable-read-locks and --submit-thread (CHANGES M1, M2: kyGpu -1.0 ms), --small-copy-dedup (D4/D8: 4-way, byte
 	// exact, kyGpu -0.66 ms), --ro-depth-access (D7: GPU busy 30.66 -> 23.89 ms), --compute-image-copy (D12: GPU busy
-	// 23.85 -> 21.23 ms, kyGpu -0.69 ms), --overlap-dispatches (D14: GPU busy 21.28 -> 20.52 ms). The engine defaults stay off.
+	// 23.85 -> 21.23 ms, kyGpu -0.69 ms), --overlap-dispatches (D14: GPU busy 21.28 -> 20.52 ms).
 	values.insert(QStringLiteral("scalable_read_locks"), true);
 	values.insert(QStringLiteral("submit_thread"), true);
 	values.insert(QStringLiteral("small_copy_dedup"), true);
 	values.insert(QStringLiteral("ro_depth_access"), true);
 	values.insert(QStringLiteral("compute_image_copy"), true);
 	values.insert(QStringLiteral("overlap_dispatches"), true);
+	// gratton-play-31 (2026-10-18): the host-CPU track (CHANGES HC4 --plan-pool: look-ahead -8.7 core-ms per frame;
+	// HC6 --lookahead-adaptive: -8.1 core-ms per frame, kyGpu and fps not worse), the descriptor-commit diet (P1: kyGpu
+	// -0.58 ms), the draw-key memo (C9: +0.9 % fps) and skipping the shader IR consistency checks (E9: translation -23 %,
+	// output byte-identical). All exact.
+	values.insert(QStringLiteral("plan_pool"), true);
+	values.insert(QStringLiteral("lookahead_adaptive"), true);
+	values.insert(QStringLiteral("desc_commit_diet"), true);
+	values.insert(QStringLiteral("draw_key_cache"), true);
+	values.insert(QStringLiteral("skip_ir_validation"), true);
 	values.insert(QStringLiteral("mem_stats"), true);
 	values.insert(QStringLiteral("hang_watchdog"), 15);
 	values.insert(QStringLiteral("splash"), false);

@@ -262,8 +262,8 @@ int RunSelfCheck(const QStringList& args) {
 	const auto default_args = ArgsWithoutGame(defaults);
 	const auto preset_args  = ArgsWithoutGame(preset);
 	r.Check(default_args.contains(QStringLiteral("--async-pipelines")) &&
-	            HasFlag(default_args, QStringLiteral("--async-pipelines"), QStringLiteral("off")),
-	        QStringLiteral("default command line passes --async-pipelines off"));
+	            HasFlag(default_args, QStringLiteral("--async-pipelines"), QStringLiteral("stall")),
+	        QStringLiteral("default command line passes --async-pipelines stall"));
 	r.Check(HasFlag(preset_args, QStringLiteral("--async-pipelines"), QStringLiteral("stall")) &&
 	            HasFlag(preset_args, QStringLiteral("--pipeline-lookahead"), QStringLiteral("true")),
 	        QStringLiteral("preset command line passes stall + lookahead"));
