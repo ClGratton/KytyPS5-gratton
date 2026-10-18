@@ -4,8 +4,10 @@
 #include <cstdio>
 #include <atomic>
 #include <cstdlib>
+#include <algorithm>
 #include <map>
 #include <memory>
+#include <tuple>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -708,6 +710,134 @@ void TestAdoptTotals() {
 	Check(sum.events == 8 && sum.adopted == 2 && sum.mismatched == 2 && sum.diff_bits[0] == 2, "totals add up");
 }
 
+
+// ---- exact sizing of the read set -----------------------------------------
+
+// The recorder as it was before FinishInto: a stable sort per kind, std::unique on the address, and a
+// push_back per value, run and window. The new one must produce the same set for any recording.
+ReadSet ReferenceFinish(const std::vector<std::tuple<ReadKind, uint64_t, uint32_t>>& recorded) {
+	struct E {
+		uint64_t address;
+		uint32_t value;
+		ReadKind kind;
+	};
+	struct R {
+		uint64_t address;
+		uint32_t dwords, value_offset;
+	};
+	ReadSet set;
+	for (const auto kind: {ReadKind::Scalar, ReadKind::Clean}) {
+		std::vector<E> sorted;
+		for (const auto& [k, address, value]: recorded) {
+			if (k == kind) sorted.push_back({address, value, k});
+		}
+		std::stable_sort(sorted.begin(), sorted.end(), [](const E& a, const E& b) { return a.address < b.address; });
+		sorted.erase(std::unique(sorted.begin(), sorted.end(), [](const E& a, const E& b) { return a.address == b.address; }),
+		             sorted.end());
+		if (sorted.empty()) continue;
+		std::vector<R> raw;
+		for (size_t i = 0; i < sorted.size();) {
+			size_t j = i + 1;
+			while (j < sorted.size() && sorted[j].address == sorted[j - 1].address + 4u && j - i < ReadSet::kMaxRunDwords) ++j;
+			raw.push_back({sorted[i].address, uint32_t(j - i), uint32_t(set.values.size())});
+			for (size_t k = i; k < j; ++k) set.values.push_back(sorted[k].value);
+			i = j;
+		}
+		size_t i = 0;
+		while (i < raw.size()) {
+			const uint64_t start = raw[i].address;
+			uint64_t       end   = start + raw[i].dwords * uint64_t {4};
+			size_t         j     = i + 1;
+			while (j < raw.size() && raw[j].address <= end + ReadSet::kMaxGapBytes &&
+			       std::max(end, raw[j].address + raw[j].dwords * uint64_t {4}) - start <= ReadSet::kMaxWindowBytes) {
+				end = std::max(end, raw[j].address + raw[j].dwords * uint64_t {4});
+				++j;
+			}
+			ReadSet::Window window;
+			window.address   = start;
+			window.bytes     = uint32_t((end - start + 3u) & ~uint64_t {3});
+			window.first_run = uint32_t(set.runs.size());
+			window.run_count = uint32_t(j - i);
+			window.kind      = kind;
+			for (size_t k = i; k < j; ++k) set.runs.push_back({uint32_t(raw[k].address - start), raw[k].dwords, raw[k].value_offset});
+			set.windows.push_back(window);
+			i = j;
+		}
+	}
+	return set;
+}
+
+bool SameSet(const ReadSet& a, const ReadSet& b) {
+	if (a.values != b.values || a.windows.size() != b.windows.size() || a.runs.size() != b.runs.size()) return false;
+	for (size_t i = 0; i < a.windows.size(); ++i) {
+		const auto &x = a.windows[i], &y = b.windows[i];
+		if (x.address != y.address || x.bytes != y.bytes || x.first_run != y.first_run || x.run_count != y.run_count || x.kind != y.kind)
+			return false;
+	}
+	for (size_t i = 0; i < a.runs.size(); ++i) {
+		const auto &x = a.runs[i], &y = b.runs[i];
+		if (x.offset_bytes != y.offset_bytes || x.dwords != y.dwords || x.value_offset != y.value_offset) return false;
+	}
+	return true;
+}
+
+// Random recordings (repeated addresses with different values, both kinds, long runs, gaps small and large,
+// single dwords and spans) give the same read set as the old algorithm, and FinishInto into a used set
+// replaces its content.
+void TestFinishMatchesTheReferenceAlgorithm() {
+	uint64_t state = 0x1234567;
+	const auto next = [&](uint64_t bound) {
+		state = state * 6364136223846793005ull + 1442695040888963407ull;
+		return (state >> 33) % bound;
+	};
+	ReadRecorder recorder; // reused, as the lookahead's thread_local one is
+	ReadSet      reused;
+	for (int round = 0; round < 400; ++round) {
+		std::vector<std::tuple<ReadKind, uint64_t, uint32_t>> recorded;
+		const auto spans = next(40);
+		const uint64_t base = 0x40000 + next(64) * 4;
+		for (uint64_t n = 0; n < spans; ++n) {
+			const auto kind   = next(3) == 0 ? ReadKind::Clean : ReadKind::Scalar;
+			const auto length = next(8) == 0 ? 200 + next(200) : 1 + next(6);
+			const auto address = base + (next(5) == 0 ? next(4096) : next(48)) * 4;
+			std::vector<uint32_t> values(length);
+			for (auto& v: values) v = uint32_t(next(1u << 20));
+			recorder.Record(kind, address, values);
+			for (size_t i = 0; i < length; ++i) recorded.emplace_back(kind, address + i * 4, values[i]);
+		}
+		const auto reference = ReferenceFinish(recorded);
+		const auto fresh     = [&] {
+            ReadRecorder other;
+            for (const auto& [k, a, v]: recorded) other.Record(k, a, std::span<const uint32_t>(&v, 1));
+            return other.Finish();
+		}();
+		Check(SameSet(fresh, reference), "Finish equals the reference algorithm");
+		recorder.FinishInto(reused);
+		Check(SameSet(reused, reference), "FinishInto a used set equals the reference algorithm");
+		Check(recorder.Size() == 0, "FinishInto empties the recorder");
+		// Exact sizes: a plan keeps thousands of these.
+		Check(fresh.values.capacity() == fresh.values.size() && fresh.runs.capacity() == fresh.runs.size() &&
+		          fresh.windows.capacity() == fresh.windows.size(),
+		      "a finished read set has no spare capacity");
+	}
+}
+
+void TestFinishIntoKeepsCapacityOfAReusedSet() {
+	ReadRecorder   rec;
+	ReadSet        set;
+	std::vector<uint32_t> big(64, 7);
+	rec.Record(ReadKind::Scalar, 0x100, big);
+	rec.FinishInto(set);
+	const auto* values_block = set.values.data();
+	Check(set.values.size() == 64, "first fill");
+	const uint32_t small[] = {1, 2, 3};
+	rec.Record(ReadKind::Scalar, 0x900, small);
+	rec.FinishInto(set);
+	Check(set.values.size() == 3 && set.values.data() == values_block, "a smaller set reuses the block");
+	rec.FinishInto(set);
+	Check(set.values.empty() && set.windows.empty() && set.runs.empty(), "nothing recorded: an empty set");
+}
+
 } // namespace
 
 int main() {
@@ -742,6 +872,8 @@ int main() {
 	TestAdoptIntoSwapsAndKeepsTheOldBuffers();
 	TestRecycleKeepsTheStoreConsistent();
 	TestAdoptTotals();
+	TestFinishMatchesTheReferenceAlgorithm();
+	TestFinishIntoKeepsCapacityOfAReusedSet();
 	std::printf("SrtPlanTests: all passed\n");
 	return 0;
 }

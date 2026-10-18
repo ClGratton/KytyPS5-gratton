@@ -139,7 +139,8 @@ class ReadRecorder {
 public:
 	void Record(ReadKind kind, uint64_t address, std::span<const uint32_t> values) {
 		for (size_t i = 0; i < values.size(); ++i) {
-			m_entries.push_back({address + i * 4u, values[i], kind});
+			const auto order = static_cast<uint32_t>(m_entries.size());
+			m_entries.push_back({address + i * 4u, values[i], kind == ReadKind::Clean ? (order | kCleanBit) : order});
 		}
 	}
 	void   Clear() { m_entries.clear(); }
@@ -149,55 +150,78 @@ public:
 	// runs and nearby runs into windows. Leaves the recorder empty.
 	ReadSet Finish() {
 		ReadSet set;
-		for (const auto kind: {ReadKind::Scalar, ReadKind::Clean}) {
-			m_sorted.clear();
-			for (const auto& entry: m_entries) {
-				if (entry.kind == kind) m_sorted.push_back(entry);
-			}
-			std::stable_sort(m_sorted.begin(), m_sorted.end(),
-			                 [](const Entry& a, const Entry& b) { return a.address < b.address; });
-			m_sorted.erase(std::unique(m_sorted.begin(), m_sorted.end(),
-			                           [](const Entry& a, const Entry& b) { return a.address == b.address; }),
-			               m_sorted.end());
-			AppendKind(set, kind);
-		}
-		m_entries.clear();
+		FinishInto(set);
 		return set;
+	}
+	// The same into `set`, whose previous content is replaced. Its vectors are sized exactly (a plan
+	// holds thousands of these, and each growth step of a push_back loop was a heap block freed on
+	// another thread); a set that comes from the plan pool keeps the capacity it already has.
+	void FinishInto(ReadSet& set) {
+		set.windows.clear();
+		set.runs.clear();
+		set.values.clear();
+		if (m_entries.empty()) return;
+		// Scalar entries first, then Clean ones; inside a kind by address, and among reads of one
+		// address in the order they were recorded (the first one wins below).
+		std::sort(m_entries.begin(), m_entries.end(), [](const Entry& a, const Entry& b) {
+			if ((a.order & kCleanBit) != (b.order & kCleanBit)) return (a.order & kCleanBit) < (b.order & kCleanBit);
+			return a.address != b.address ? a.address < b.address : a.order < b.order;
+		});
+		size_t unique = 0;
+		for (size_t i = 0; i < m_entries.size(); ++i) {
+			if (unique != 0 && m_entries[unique - 1].address == m_entries[i].address &&
+			    (m_entries[unique - 1].order & kCleanBit) == (m_entries[i].order & kCleanBit)) {
+				continue;
+			}
+			m_entries[unique++] = m_entries[i];
+		}
+		m_entries.resize(unique);
+		set.values.reserve(unique);
+		for (const auto& entry: m_entries) set.values.push_back(entry.value);
+		BuildRuns(set);
+		m_entries.clear();
 	}
 
 private:
+	static constexpr uint32_t kCleanBit = 0x80000000u;
+
+	// address and value of a recorded dword; `order` is its position in the recording and, in the top
+	// bit, its ReadKind (Clean = set).
 	struct Entry {
 		uint64_t address = 0;
 		uint32_t value   = 0;
-		ReadKind kind    = ReadKind::Scalar;
+		uint32_t order   = 0;
 	};
 	struct RawRun {
 		uint64_t address;
 		uint32_t dwords;
 		uint32_t value_offset;
+		bool     clean;
 	};
 
-	void AppendKind(ReadSet& set, ReadKind kind) {
-		if (m_sorted.empty()) return;
+	// m_entries is sorted and unique here, and set.values holds its values in the same order.
+	void BuildRuns(ReadSet& set) {
 		m_raw_runs.clear();
-		for (size_t i = 0; i < m_sorted.size();) {
-			size_t j = i + 1;
-			while (j < m_sorted.size() && m_sorted[j].address == m_sorted[j - 1].address + 4u &&
-			       j - i < ReadSet::kMaxRunDwords) {
+		for (size_t i = 0; i < m_entries.size();) {
+			const bool clean = (m_entries[i].order & kCleanBit) != 0;
+			size_t     j     = i + 1;
+			while (j < m_entries.size() && (m_entries[j].order & kCleanBit) == (m_entries[i].order & kCleanBit) &&
+			       m_entries[j].address == m_entries[j - 1].address + 4u && j - i < ReadSet::kMaxRunDwords) {
 				++j;
 			}
-			m_raw_runs.push_back({m_sorted[i].address, static_cast<uint32_t>(j - i),
-			                      static_cast<uint32_t>(set.values.size())});
-			for (size_t k = i; k < j; ++k) set.values.push_back(m_sorted[k].value);
+			m_raw_runs.push_back({m_entries[i].address, static_cast<uint32_t>(j - i), static_cast<uint32_t>(i), clean});
 			i = j;
 		}
-		// Windows: runs whose gap is small enough share one memory read.
+		// Windows: runs of one kind whose gap is small enough share one memory read.
+		m_windows.clear();
+		m_out_runs.clear();
 		size_t i = 0;
 		while (i < m_raw_runs.size()) {
 			const uint64_t start = m_raw_runs[i].address;
 			uint64_t       end   = start + m_raw_runs[i].dwords * uint64_t {4};
 			size_t         j     = i + 1;
-			while (j < m_raw_runs.size() && m_raw_runs[j].address <= end + ReadSet::kMaxGapBytes &&
+			while (j < m_raw_runs.size() && m_raw_runs[j].clean == m_raw_runs[i].clean &&
+			       m_raw_runs[j].address <= end + ReadSet::kMaxGapBytes &&
 			       std::max(end, m_raw_runs[j].address + m_raw_runs[j].dwords * uint64_t {4}) - start <=
 			           ReadSet::kMaxWindowBytes) {
 				end = std::max(end, m_raw_runs[j].address + m_raw_runs[j].dwords * uint64_t {4});
@@ -206,21 +230,24 @@ private:
 			ReadSet::Window window;
 			window.address   = start;
 			window.bytes     = static_cast<uint32_t>((end - start + 3u) & ~uint64_t {3}); // whole dwords
-			window.first_run = static_cast<uint32_t>(set.runs.size());
+			window.first_run = static_cast<uint32_t>(m_out_runs.size());
 			window.run_count = static_cast<uint32_t>(j - i);
-			window.kind      = kind;
+			window.kind      = m_raw_runs[i].clean ? ReadKind::Clean : ReadKind::Scalar;
 			for (size_t k = i; k < j; ++k) {
-				set.runs.push_back({static_cast<uint32_t>(m_raw_runs[k].address - start),
-				                    m_raw_runs[k].dwords, m_raw_runs[k].value_offset});
+				m_out_runs.push_back({static_cast<uint32_t>(m_raw_runs[k].address - start), m_raw_runs[k].dwords,
+				                      m_raw_runs[k].value_offset});
 			}
-			set.windows.push_back(window);
+			m_windows.push_back(window);
 			i = j;
 		}
+		set.windows.assign(m_windows.begin(), m_windows.end());
+		set.runs.assign(m_out_runs.begin(), m_out_runs.end());
 	}
 
-	std::vector<Entry>  m_entries;
-	std::vector<Entry>  m_sorted;
-	std::vector<RawRun> m_raw_runs;
+	std::vector<Entry>            m_entries;
+	std::vector<RawRun>           m_raw_runs;
+	std::vector<ReadSet::Window>  m_windows;
+	std::vector<ReadSet::Run>     m_out_runs;
 };
 
 // ---- plan ---------------------------------------------------------------------------------------
