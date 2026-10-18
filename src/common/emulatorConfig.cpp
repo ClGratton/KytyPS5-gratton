@@ -95,6 +95,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("cp-direct-stores", &g_config->cp_direct_stores, false);
 	// Read per draw; the remembered results carry the epochs they were computed at, so turning it off and on needs no cleanup.
 	registry.Register("draw-state-memo", &g_config->draw_state_memo, false);
+	// Read per draw; the kept bindings carry what they were computed from, so turning it off and on needs no cleanup.
+	registry.Register("incremental-draw", &g_config->incremental_draw, false);
 	// Read per upload; copies in flight are finished by the next submit whatever the flag says.
 	registry.Register("async-upload-copies", &g_config->async_upload_copies, false);
 	// Read at each batch scope; a scope that opened under the flag closes under it whatever the flag says now.
@@ -237,6 +239,10 @@ bool TextureLockBatchEnabled() {
 
 bool DrawStateMemoEnabled() {
 	return Common::RuntimeToggles::Read(g_config->draw_state_memo);
+}
+
+bool IncrementalDrawEnabled() {
+	return Common::RuntimeToggles::Read(g_config->incremental_draw);
 }
 
 bool CpDirectStoresEnabled() {

@@ -311,6 +311,13 @@ QList<Option> BuildTable() {
 	             "remembers what it worked out from that state (checks, render targets, shader set-up) and "
 	             "reuses it while the state is unchanged. Exact; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(draw_state_memo)});
+	defs.append({"incremental_draw", "--incremental-draw", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Redo only the bindings of a draw that changed since the draw before",
+	             "Consecutive draws bind almost the same textures and buffers. With this the GPU thread keeps "
+	             "what it resolved for each binding and, for the next draw, redoes only the bindings whose "
+	             "inputs changed. Exact (every input is compared with what the kept result was computed from); "
+	             "lowers the GPU thread's CPU time per draw.",
+	             EMU_BOOL(incremental_draw)});
 	defs.append({"cp_direct_stores", "--cp-direct-stores", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Write the GPU's fence and label values without a page fault",
 	             "When a frame finishes the emulated GPU writes small values into game memory. Those pages "

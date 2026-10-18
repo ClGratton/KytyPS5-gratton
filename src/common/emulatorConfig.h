@@ -310,6 +310,10 @@ struct ConfigOptions {
 	// (graphics/guest_gpu/hardwareContext.h) have not moved (graphics/host_gpu/renderer/renderDraw.cpp and neighbours).
 	// Default on.
 	bool                   draw_state_memo             = true;
+	// --incremental-draw: the GPU thread keeps what a draw resolved (image and buffer bindings of each stage) and, for the next
+	// draw, redoes only the bindings whose inputs changed (graphics/host_gpu/renderer/incrementalDraw.h). Exact: every input is
+	// compared with what the kept result was computed from. Default off.
+	bool                   incremental_draw            = false;
 	// --async-upload-copies: the guest-to-ring memcpy of a large buffer upload runs on helper threads
 	// (graphics/host_gpu/renderer/cache/uploadCopier.h). Default on.
 	bool                   async_upload_copies         = true;
@@ -538,6 +542,7 @@ bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
 bool              CpDirectStoresEnabled();
 bool              DrawStateMemoEnabled();
+bool              IncrementalDrawEnabled();
 bool              AsyncUploadCopiesEnabled();
 bool              SubmitThreadEnabled();
 bool              TextureLockBatchEnabled();

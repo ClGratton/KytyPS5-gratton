@@ -185,7 +185,7 @@ static void PrintUsage() {
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
 	         "                                       tracker-sleeping-locks, scalable-read-locks,\n"
          "                                       submit-thread,\n"
-	         "                                       cp-direct-stores, draw-state-memo,\n"
+	         "                                       cp-direct-stores, draw-state-memo, incremental-draw,\n"
 	         "                                       async-upload-copies, texture-lock-batch,\n"
 	         "                                       push-descriptor-delta, small-copy-dedup,\n"
 	         "                                       image-presence, image-pool, ro-depth-access,\n"
@@ -306,6 +306,10 @@ static void PrintUsage() {
 	::printf("  --draw-state-memo <true|false>       The GPU thread does not repeat work that is a function of the\n"
 	         "                                       GPU registers while the registers have not changed since the\n"
 	         "                                       draw it was done for (exact). Default: true.\n");
+	::printf("  --incremental-draw <true|false>      The GPU thread keeps the image and buffer bindings a draw\n"
+	         "                                       resolved and, for the next draw, redoes only those whose\n"
+	         "                                       inputs changed (exact; KYTY_DRAW_VERIFY=1 checks every kept\n"
+	         "                                       binding against a fresh one). Default: false.\n");
 	::printf("  --cp-direct-stores <true|false>      The GPU command processor's stores to game memory (fence and\n"
 	         "                                       label writes) go through the backing view and mark the\n"
 	         "                                       memory tracker directly, instead of faulting on the GPU\n"
@@ -1152,6 +1156,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--draw-state-memo") {
 			if (!ParseBool(value, options.config.draw_state_memo)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--incremental-draw") {
+			if (!ParseBool(value, options.config.incremental_draw)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
