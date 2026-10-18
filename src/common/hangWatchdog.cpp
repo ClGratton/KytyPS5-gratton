@@ -20,6 +20,12 @@
 #include <unistd.h>
 #endif
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__x86_64__)
+#include <x86intrin.h>
+#endif
+
 namespace Common::Hang {
 
 std::atomic<bool> detail::g_enabled {false};
@@ -30,6 +36,27 @@ int64_t NowNs() {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(
 	           std::chrono::steady_clock::now().time_since_epoch())
 	    .count();
+}
+
+// The phase tags stamp their entry time on every scope (tens of thousands per frame on the GPU thread), and a vDSO clock_gettime
+// there cost 0.6 ms of a 40 ms kyGpu frame. The stamp is only read by the stall report, so it is a raw cycle counter where there is
+// one (invariant TSC on x86-64) and the report scales it with the ratio measured since program start.
+inline int64_t Ticks() {
+#if defined(__x86_64__) || defined(_M_X64)
+	return static_cast<int64_t>(__rdtsc());
+#else
+	return NowNs();
+#endif
+}
+
+const int64_t g_start_ns    = NowNs();
+const int64_t g_start_ticks = Ticks();
+
+// Nanoseconds per tick since program start (1 where the tick is a nanosecond).
+double NsPerTick() {
+	const auto ticks = Ticks() - g_start_ticks;
+	const auto ns    = NowNs() - g_start_ns;
+	return ticks > 0 && ns > 0 ? static_cast<double>(ns) / static_cast<double>(ticks) : 1.0;
 }
 
 // One per thread that ever published a phase. Leaked on purpose: the watchdog may read it after
@@ -164,7 +191,8 @@ void Report(unsigned index, double stalled_s) {
 	std::map<uint64_t, std::vector<std::string>> phases;
 	{
 		std::lock_guard lock(g_slots_mutex);
-		const auto      now = NowNs();
+		const auto      now_ticks = Ticks();
+		const auto      ns_per_tick = NsPerTick();
 		for (auto* slot: g_slots) {
 			const char* what = slot->what.load();
 			if (what == nullptr) {
@@ -174,7 +202,7 @@ void Report(unsigned index, double stalled_s) {
 			std::snprintf(text, sizeof(text), "%s(%llu,%llu) for %.1f s", what,
 			              static_cast<unsigned long long>(slot->a.load()),
 			              static_cast<unsigned long long>(slot->b.load()),
-			              static_cast<double>(now - slot->since.load()) / 1e9);
+			              static_cast<double>(now_ticks - slot->since.load()) * ns_per_tick / 1e9);
 			phases[slot->tid.load()].push_back(text);
 		}
 	}
@@ -334,7 +362,7 @@ void detail::PhaseEnter(const char* what, uint64_t a, uint64_t b, const char*& p
 	prev_since = slot.since.load(std::memory_order_relaxed);
 	slot.a.store(a, std::memory_order_relaxed);
 	slot.b.store(b, std::memory_order_relaxed);
-	slot.since.store(NowNs(), std::memory_order_relaxed);
+	slot.since.store(Ticks(), std::memory_order_relaxed);
 	slot.what.store(what, std::memory_order_release);
 }
 
