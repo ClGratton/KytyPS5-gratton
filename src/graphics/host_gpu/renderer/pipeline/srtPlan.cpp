@@ -2,6 +2,7 @@
 
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "kernel/memory.h"
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +20,14 @@ bool Store::DeepPrefetchEnabled() {
 
 bool PoolEnabled() {
 	return Config::PlanPoolEnabled();
+}
+
+bool Store::GuestPrefetchEnabled() {
+	return Config::CpPrefetchEnabled();
+}
+
+void Store::PrefetchGuestLines(uint64_t address, uint32_t bytes) {
+	Libs::LibKernel::Memory::PrefetchBacking(address, bytes);
 }
 
 namespace {

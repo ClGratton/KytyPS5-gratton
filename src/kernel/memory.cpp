@@ -1189,6 +1189,12 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+void PrefetchBacking(uint64_t vaddr, uint64_t size) {
+	if (g_guest_address_space != nullptr) {
+		g_guest_address_space->PrefetchBacking(vaddr, size);
+	}
+}
+
 // --known-stores: the GPU thread needs [vaddr, vaddr + size) itself and the GPU holds bytes the guest
 // backing lacks. When a dispatch recorded earlier is proven to have stored every dword of it as a
 // constant, that is the value; no drain (BufferCache::UseKnownStores, which also does the

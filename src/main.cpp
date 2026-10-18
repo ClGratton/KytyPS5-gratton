@@ -183,6 +183,7 @@ static void PrintUsage() {
 	         "                                       overlap-dispatches,\n"
 	         "                                       bda-sync-skip, bda-dirty-log, lazy-op-poll,\n"
 	         "                                       backing-read-cache, write-fault-around, plan-prefetch,\n"
+	         "                                       cp-prefetch,\n"
 	         "                                       tracker-sleeping-locks, scalable-read-locks,\n"
          "                                       submit-thread,\n"
 	         "                                       cp-direct-stores, draw-state-memo,\n"
@@ -284,6 +285,9 @@ static void PrintUsage() {
 	::printf("  --plan-prefetch <true|false>         While the GPU thread uses one SRT plan it prefetches every\n"
 	         "                                       cache line of the next plan's blocks (a hint to the CPU\n"
 	         "                                       cache; needs --srt-plans). Default: true.\n");
+	::printf("  --cp-prefetch <true|false>           The GPU thread prefetches the guest memory the next SRT plans\n"
+	         "                                       re-read to validate themselves (a hint to the CPU cache;\n"
+	         "                                       needs --srt-plans). Default: false.\n");
 	::printf("  --async-upload-copies <true|false>   The copy of a large buffer upload from game memory into the\n"
 	         "                                       upload ring runs on two helper threads instead of the GPU\n"
 	         "                                       thread; the ring is complete before the next submit.\n"
@@ -1122,6 +1126,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--plan-prefetch") {
 			if (!ParseBool(value, options.config.plan_prefetch)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--cp-prefetch") {
+			if (!ParseBool(value, options.config.cp_prefetch)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

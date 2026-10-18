@@ -636,6 +636,18 @@ private:
 		block(p.reads.values);
 	}
 	static bool DeepPrefetchEnabled();
+	// --cp-prefetch (srtPlan.cpp): the guest memory the validity check of a plan re-reads, pulled into the cache ahead of that check.
+	static bool GuestPrefetchEnabled();
+	static void PrefetchGuestLines(uint64_t address, uint32_t bytes);
+	// The windows of the plan's read set are guest tables the game wrote (the cold part of ReadSet::Validate). The window array itself
+	// must already be in the cache: the plan's blocks were prefetched one step earlier.
+	static void PrefetchGuestWindows(const Plan& p) {
+		const auto count = p.reads.windows.size();
+		for (size_t i = 0; i < count && i < 16; ++i) {
+			const auto& w = p.reads.windows[i];
+			PrefetchGuestLines(w.address, w.bytes);
+		}
+	}
 
 	static void PrefetchBody(const Plan& p) {
 		__builtin_prefetch(p.snapshot.user_data.data(), 0, 3);
@@ -713,6 +725,20 @@ private:
 		if (DeepPrefetchEnabled()) {
 			// The plan is spread over a dozen heap blocks written by another core: the Plan struct (and so the
 			// vector headers) two plans ahead, all the blocks one plan ahead.
+			const bool guest = GuestPrefetchEnabled();
+			if (guest) {
+				// --cp-prefetch: one step more of pipeline. The blocks (so the window array) of the plan after this one were
+				// prefetched during the previous step; the guest tables its check re-reads are asked for now, a whole plan
+				// (a few microseconds) before it is checked. Blocks move one plan further ahead, structs one more.
+				if (i + 1 < entries.size() && entries[i + 1].plan) PrefetchGuestWindows(*entries[i + 1].plan);
+				if (i + 2 < entries.size() && entries[i + 2].plan) PrefetchPlanDeep(*entries[i + 2].plan);
+				for (size_t j = i + 3; j <= i + 4 && j < entries.size(); ++j) {
+					if (!entries[j].plan) continue;
+					const auto* base = reinterpret_cast<const char*>(entries[j].plan.get());
+					for (size_t o = 0; o < sizeof(Plan); o += 64) __builtin_prefetch(base + o, 0, 3);
+				}
+				return true;
+			}
 			if (i + 1 < entries.size() && entries[i + 1].plan) PrefetchPlanDeep(*entries[i + 1].plan);
 			for (size_t j = i + 2; j <= i + 3 && j < entries.size(); ++j) {
 				if (!entries[j].plan) continue;

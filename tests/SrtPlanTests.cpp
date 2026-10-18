@@ -17,6 +17,11 @@
 bool Libs::Graphics::SrtPlan::Store::DeepPrefetchEnabled() {
 	return true;
 }
+// --cp-prefetch is a hint to the CPU cache, so the test binary takes the guest-prefetch path with no memory behind it.
+bool Libs::Graphics::SrtPlan::Store::GuestPrefetchEnabled() {
+	return true;
+}
+void Libs::Graphics::SrtPlan::Store::PrefetchGuestLines(uint64_t, uint32_t) {}
 
 // --plan-pool is a config flag in the emulator; here the test switches it.
 static std::atomic<bool> g_pool_enabled {false};

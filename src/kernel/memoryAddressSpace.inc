@@ -383,6 +383,33 @@ public:
 		return true;
 	}
 
+	// The calling thread's remembered mapping entries (--backing-read-cache), shared by the reads and PrefetchBacking.
+	static RememberedMappings<8>& ThreadRememberedMappings() {
+		thread_local RememberedMappings<8> remembered;
+		return remembered;
+	}
+
+	// --cp-prefetch: a hint to the CPU cache only. Touches the lines of [vaddr, vaddr + size) (at most 1 KiB) in the backing when this
+	// thread remembers the mapping entry that holds them and no mapping changed since (the same test as a --backing-read-cache hit); no
+	// lock, no tree walk, no read of the data. A range it cannot place is left alone: the read that follows takes its usual path.
+	void PrefetchBacking(uint64_t vaddr, uint64_t size) const {
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return;
+		}
+		const auto epoch = m_maps_epoch.load(std::memory_order_acquire);
+		if (const auto* r = ThreadRememberedMappings().Find(this, epoch, vaddr, size); r != nullptr) {
+			const auto offset = vaddr + r->delta;
+			if (RangeOk(offset, size)) {
+				const auto* base  = m_backing_base + offset;
+				const auto  bytes = size < 1024 ? size : 1024;
+				for (uint64_t o = 0; o < bytes; o += 64) {
+					__builtin_prefetch(base + o, 0, 3);
+				}
+				__builtin_prefetch(base + bytes - 1, 0, 3);
+			}
+		}
+	}
+
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (!IsAvailable() || data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
@@ -390,8 +417,8 @@ public:
 
 		// --backing-read-cache: a read inside a mapping entry this thread has seen, while no mapping
 		// changed since (the epoch), is the entry's backing bytes: no map lock, no tree walk.
-		thread_local RememberedMappings<8> remembered;
-		const bool cache_on = Config::BackingReadCacheEnabled();
+		auto&      remembered = ThreadRememberedMappings();
+		const bool cache_on   = Config::BackingReadCacheEnabled();
 		if (cache_on) {
 			const auto epoch = m_maps_epoch.load(std::memory_order_acquire);
 			if (const auto* r = remembered.Find(this, epoch, vaddr, size); r != nullptr) {
@@ -1498,6 +1525,10 @@ public:
 
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		return m_backing->TryReadBacking(vaddr, data, size);
+	}
+
+	void PrefetchBacking(uint64_t vaddr, uint64_t size) const {
+		m_backing->PrefetchBacking(vaddr, size);
 	}
 
 	bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {

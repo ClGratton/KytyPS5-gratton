@@ -273,6 +273,14 @@ QList<Option> BuildTable() {
 	             "line of the next plan's blocks while it uses the current one. Only a hint to the "
 	             "CPU cache; lowers the GPU thread's CPU time per draw.",
 	             EMU_BOOL(plan_prefetch)});
+	defs.append({"cp_prefetch", "--cp-prefetch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Prefetch the command stream and the memory the next draws re-read",
+	             "The GPU thread meets two kinds of cold memory the game wrote: the command stream it "
+	             "parses, and the small tables each draw's precomputed plan re-reads to prove it is "
+	             "still valid. With this it asks the CPU for the next few cache lines of both while "
+	             "it works on the current one. Only a hint to the CPU cache; exact; lowers the GPU "
+	             "thread's CPU time per draw.",
+	             EMU_BOOL(cp_prefetch)});
 	defs.append({"async_upload_copies", "--async-upload-copies", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Copy uploaded game memory to the GPU on helper threads",
 	             "Data the game wrote is copied into a staging area for the GPU before it is drawn with. "

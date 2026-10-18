@@ -117,6 +117,9 @@ int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t size, 
 int MapAutomaticMemory(uint64_t vaddr, size_t size, int type, int prot);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
+// --cp-prefetch: a hint to the CPU cache only. Touches the lines of [vaddr, vaddr + size) (at most 1 KiB) that a TryReadBacking of
+// them would read, when the calling thread remembers their mapping entry (no lock). Never reads data, never fails.
+void                   PrefetchBacking(uint64_t vaddr, uint64_t size);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
 // GPU thread: the range holds bytes the GPU wrote that the guest backing does not have yet (a
 // TryReadBufferBacking of it would read them back). Never synchronizes.

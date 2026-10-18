@@ -291,6 +291,9 @@ struct ConfigOptions {
 	// --plan-prefetch: kyGpu prefetches every cache line of the next SRT plan's blocks while it uses the current
 	// one (srtPlan.cpp). Default on.
 	bool                   plan_prefetch               = true;
+	// --cp-prefetch: kyGpu prefetches the guest memory the next SRT plans re-read to validate themselves (they are scattered
+	// cold lines the guest wrote). A hint to the CPU cache only (srtPlan.h Store::Find). Default off.
+	bool                   cp_prefetch                 = false;
 	// --tracker-sleeping-locks: a game thread that waits for a tracker lock (held across an mprotect) sleeps after a short
 	// spin instead of spinning for the whole syscall (common/adaptiveLock.h). The GPU thread always spins. Default on.
 	bool                   tracker_sleeping_locks      = true;
@@ -536,6 +539,7 @@ bool              LazyOpPollEnabled();
 bool              BackingReadCacheEnabled();
 bool              WriteFaultAroundEnabled();
 bool              PlanPrefetchEnabled();
+bool              CpPrefetchEnabled();
 bool              CpDirectStoresEnabled();
 bool              DrawStateMemoEnabled();
 bool              AsyncUploadCopiesEnabled();

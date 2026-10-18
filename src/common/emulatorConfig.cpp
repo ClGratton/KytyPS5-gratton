@@ -83,6 +83,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	registry.Register("write-fault-around", &g_config->write_fault_around, false);
 	// A hint to the CPU's cache only; read per plan taken.
 	registry.Register("plan-prefetch", &g_config->plan_prefetch, false);
+	// A hint to the CPU's cache only; read per plan taken and per PM4 packet.
+	registry.Register("cp-prefetch", &g_config->cp_prefetch, false);
 	// Read per lock acquisition; a waiter that already spins or sleeps finishes its wait either way.
 	registry.Register("tracker-sleeping-locks", &g_config->tracker_sleeping_locks, false);
 	// Read per lock acquisition; each acquisition releases through the guard that took it, and a writer excludes both kinds.
@@ -209,6 +211,10 @@ bool ImagePresenceEnabled() {
 
 bool PlanPrefetchEnabled() {
 	return Common::RuntimeToggles::Read(g_config->plan_prefetch);
+}
+
+bool CpPrefetchEnabled() {
+	return Common::RuntimeToggles::Read(g_config->cp_prefetch);
 }
 
 bool SubmitThreadEnabled() {
