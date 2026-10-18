@@ -42619,6 +42619,99 @@ void CheckSampledDepthResource() {
   std::printf("[host]    %-32s ok\n", "SampledDepthResource");
 }
 
+// --incremental-draw: Image::TransitRecordsNothing says a transit records nothing exactly when GetBarriers records nothing and leaves the
+// tracked state as it was, over every pair of tracked state and requested layout/access, whole and partial ranges, with and without
+// --ro-depth-access (whose covered read-after-read is the one non-trivial elision).
+void CheckTransitIsNoop(RenderContext &renderer) {
+  constexpr const char *name = "TransitRecordsNothing";
+  auto &context = renderer.GetGraphics();
+  CommandScheduler scheduler(renderer, context);
+  const auto MakeInfo = [](uint32_t levels, uint32_t layers) {
+    ImageInfo info{};
+    info.pixel_format = vk::Format::eR8Unorm;
+    info.guest_format = Prospero::BufferFormat::k8UNorm;
+    info.type = Prospero::ImageType::kColor2D;
+    info.extent = {4, 4, 1};
+    info.resources = {levels, layers};
+    info.pitch = 4;
+    info.bytes_per_block = 1;
+    info.samples = 1;
+    info.tile_mode = Prospero::TileMode::kLinear;
+    return info;
+  };
+  const std::array<vk::ImageLayout, 5> layouts = {
+      vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+      vk::ImageLayout::eShaderReadOnlyOptimal,
+      vk::ImageLayout::eColorAttachmentOptimal,
+      vk::ImageLayout::eTransferDstOptimal};
+  const std::array<vk::AccessFlags2, 8> accesses = {
+      vk::AccessFlags2{},
+      vk::AccessFlagBits2::eShaderRead,
+      vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead,
+      vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+      vk::AccessFlagBits2::eTransferWrite,
+      vk::AccessFlagBits2::eColorAttachmentRead |
+          vk::AccessFlagBits2::eColorAttachmentWrite,
+      vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+          vk::AccessFlagBits2::eShaderRead,
+      vk::AccessFlagBits2::eMemoryWrite};
+  const std::array<std::optional<ImageSubresourceRange>, 4> ranges = {
+      std::nullopt, ImageSubresourceRange{0, 2, 0, 3},
+      ImageSubresourceRange{1, 1, 0, 1}, ImageSubresourceRange{0, 2, 1, 2}};
+  uint32_t noops = 0, checked = 0;
+  for (const bool ro_depth : {false, true}) {
+    Config::ConfigOptions options;
+    options.ro_depth_access = ro_depth;
+    Config::Load(options);
+    Image image(context, scheduler, MakeInfo(2, 3));
+    for (const auto state_layout : layouts) {
+      for (const auto state_access : accesses) {
+        for (const auto split : {false, true}) {
+          for (const auto layout : layouts) {
+            for (const auto access : accesses) {
+              for (const auto &range : ranges) {
+                image.backing.state = {
+                    vk::PipelineStageFlagBits2::eAllGraphics |
+                        vk::PipelineStageFlagBits2::eComputeShader,
+                    state_access, state_layout};
+                image.backing.subresource_states.clear();
+                if (split) {
+                  image.backing.subresource_states.assign(6,
+                                                          image.backing.state);
+                }
+                const auto before = image.backing.state;
+                const auto before_split = image.backing.subresource_states;
+                const bool predicted = image.TransitRecordsNothing(layout, access, range);
+                const auto barriers = image.GetBarriers(
+                    layout, access,
+                    vk::PipelineStageFlagBits2::eAllGraphics |
+                        vk::PipelineStageFlagBits2::eComputeShader,
+                    range);
+                const bool same_state =
+                    image.backing.state.layout == before.layout &&
+                    image.backing.state.access_mask == before.access_mask &&
+                    image.backing.state.pl_stage == before.pl_stage &&
+                    image.backing.subresource_states.size() ==
+                        before_split.size();
+                ++checked;
+                if (predicted) {
+                  ++noops;
+                  Require(name, "predicted no-op", barriers.empty() && same_state,
+                          "a transit proved to record nothing recorded a barrier or changed the state");
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  Require(name, "coverage", noops > 0 && noops < checked,
+          "the no-op predicate never or always held");
+  Config::Load(Config::ConfigOptions{});
+  std::printf("[host]    %-32s ok\n", name);
+}
+
 void CheckImageTransitionState(RenderContext &renderer) {
   constexpr const char *name = "ImageTransitionState";
   auto &context = renderer.GetGraphics();
@@ -48032,6 +48125,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--image-transition-only") == 0) {
     VulkanHarness vulkan;
     CheckImageTransitionState(vulkan.RuntimeRenderer());
+    CheckTransitIsNoop(vulkan.RuntimeRenderer());
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-rebind-only") == 0) {
@@ -48104,6 +48198,7 @@ int main(int argc, char **argv) {
   CheckRenderTargetFormatContract();
   CheckSampledColorViews();
   CheckImageTransitionState(vulkan.RuntimeRenderer());
+  CheckTransitIsNoop(vulkan.RuntimeRenderer());
   CheckSampledDepthResource();
   CheckDepthTextureEncoding();
   vulkan.CheckSamplerBorderColors();
