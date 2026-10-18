@@ -188,7 +188,8 @@ static void PrintUsage() {
 	         "                                       cp-direct-stores, draw-state-memo, incremental-draw,\n"
 	         "                                       async-upload-copies, texture-lock-batch,\n"
 	         "                                       push-descriptor-delta, small-copy-dedup,\n"
-	         "                                       image-presence, image-pool, ro-depth-access,\n"
+	         "                                       image-presence, lockfree-image-checks, image-pool,\n"
+	         "                                       ro-depth-access,\n"
 	         "                                       compute-image-copy,\n"
 	         "                                       desc-commit-diet,\n"
 	         "                                       clean-guest-reads,\n"
@@ -300,6 +301,10 @@ static void PrintUsage() {
 	         "                                       read hull makes unnecessary, and (with\n"
 	         "                                       --push-descriptor-delta) descriptor writes that did not\n"
 	         "                                       change (exact). Default: true.\n");
+	::printf("  --lockfree-image-checks <true|false> The GPU thread's test whether a guest range overlaps a\n"
+	         "                                       GPU-modified image is answered from per-page counts instead\n"
+	         "                                       of a page-table walk under the texture cache lock (exact).\n"
+	         "                                       Default: false.\n");
 	::printf("  --texture-lock-batch <true|false>    The GPU thread takes the texture cache lock once around a\n"
 	         "                                       draw's runs of image lookups instead of once per lookup\n"
 	         "                                       (exact). Default: true.\n");
@@ -1146,6 +1151,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--desc-commit-diet") {
 			if (!ParseBool(value, options.config.desc_commit_diet)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--lockfree-image-checks") {
+			if (!ParseBool(value, options.config.lockfree_image_checks)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

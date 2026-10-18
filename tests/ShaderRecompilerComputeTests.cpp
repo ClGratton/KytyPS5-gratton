@@ -369,6 +369,25 @@ struct TextureCacheTestAccess {
     return cache.InsertImage(info);
   }
 
+  static void SetGpuModified(TextureCache &cache, ImageId id, bool modified) {
+    std::lock_guard lock(cache.m_lock);
+    auto &image = cache.m_slot_images[id];
+    if (modified) {
+      cache.MarkImageGpuModified(image);
+    } else {
+      cache.ClearImageGpuModified(image);
+    }
+  }
+
+  static bool HasGpuModifiedLocked(TextureCache &cache, uint64_t address, uint64_t size) {
+    return cache.HasGpuModifiedImageLocked(address, size);
+  }
+
+  static void Audit(TextureCache &cache) {
+    std::lock_guard lock(cache.m_lock);
+    cache.AuditLockFreeState();
+  }
+
   static void DeleteImage(TextureCache &cache, ImageId id) {
     std::lock_guard lock(cache.m_lock);
     cache.DeleteImage(id);
@@ -417,6 +436,8 @@ struct TextureCacheTestAccess {
     auto &metadata = cache.m_surface_metas[address];
     metadata.type = TextureCache::MetaDataInfo::Type::HTile;
     metadata.clear_mask = 0;
+    cache.m_meta_mirror.Set(address, 0);
+    cache.m_meta_epoch.fetch_add(1);
   }
 
   static TileManager &Tiler(TextureCache &cache) { return cache.m_tiler; }
@@ -6738,6 +6759,72 @@ public:
               TextureCacheTestAccess::PageOwnerCount(
                   texture_cache, shared_info.data.address) == 0,
               "the final shared owner remained registered");
+
+      {
+        // --lockfree-image-checks: the answers from the GPU-modified page counts and the metadata table equal the
+        // page-table walk and the map, through registration, marking, clearing and deletion.
+        auto options = BaselineOptions();
+        options.lockfree_image_checks = true;
+        Config::Load(options);
+        const auto Agree = [&](uint64_t address, uint64_t size) {
+          return texture_cache.HasGpuModifiedImage(address, size) ==
+                 TextureCacheTestAccess::HasGpuModifiedLocked(texture_cache,
+                                                              address, size);
+        };
+        const auto first_range = MakeOwnershipInfo(base + 0x600100, 0x2100);
+        const auto second_range = MakeOwnershipInfo(base + 0x601800, 0x1000);
+        const auto a = TextureCacheTestAccess::InsertImage(texture_cache, first_range);
+        const auto b = TextureCacheTestAccess::InsertImage(texture_cache, second_range);
+        const std::array<std::pair<uint64_t, uint64_t>, 9> probes{{
+            {base + 0x5ff000, 0x1000}, {base + 0x600000, 4}, {base + 0x600f00, 0x200},
+            {base + 0x601000, 0x1000}, {base + 0x601ffc, 8},  {base + 0x602000, 0x1000},
+            {base + 0x603000, 4},      {base + 0x600000, 0x80 * 0x1000},
+            {base + 0x5f0000, 0x20000}}};
+        bool agree = true;
+        for (const auto &probe : probes) agree &= Agree(probe.first, probe.second);
+        Require(name, "lockfree image checks: nothing modified",
+                agree && !texture_cache.HasGpuModifiedImage(base + 0x600000, 0x4000),
+                "a range over images that are not GPU-modified answered yes, or disagreed with the walk");
+        TextureCacheTestAccess::SetGpuModified(texture_cache, a, true);
+        agree = true;
+        for (const auto &probe : probes) agree &= Agree(probe.first, probe.second);
+        Require(name, "lockfree image checks: one image modified",
+                agree && texture_cache.HasGpuModifiedImage(base + 0x600f00, 0x200) &&
+                    texture_cache.HasGpuModifiedImage(base + 0x602000, 4) &&
+                    !texture_cache.HasGpuModifiedImage(base + 0x603000, 4) &&
+                    !texture_cache.HasGpuModifiedImage(base + 0x5ff000, 0x1000),
+                "the page counts of a GPU-modified image differ from the walk");
+        TextureCacheTestAccess::SetGpuModified(texture_cache, b, true);
+        TextureCacheTestAccess::SetGpuModified(texture_cache, a, false);
+        agree = true;
+        for (const auto &probe : probes) agree &= Agree(probe.first, probe.second);
+        Require(name, "lockfree image checks: the other image modified",
+                agree && !texture_cache.HasGpuModifiedImage(base + 0x600000, 4) &&
+                    texture_cache.HasGpuModifiedImage(base + 0x601ffc, 8) &&
+                    texture_cache.HasGpuModifiedImage(base + 0x602000, 0x1000),
+                "clearing one image's flag changed the other's pages");
+        TextureCacheTestAccess::Audit(texture_cache);
+        TextureCacheTestAccess::SetGpuModified(texture_cache, b, false);
+        TextureCacheTestAccess::DeleteImage(texture_cache, a);
+        TextureCacheTestAccess::DeleteImage(texture_cache, b);
+        agree = true;
+        for (const auto &probe : probes) agree &= Agree(probe.first, probe.second);
+        Require(name, "lockfree image checks: deleted",
+                agree && !texture_cache.HasGpuModifiedImage(base + 0x600000, 0x4000),
+                "a deleted image's pages still answer yes");
+        // A modified image that is deleted through FreeImage-style teardown leaves no count behind.
+        const auto c = TextureCacheTestAccess::InsertImage(texture_cache, first_range);
+        TextureCacheTestAccess::SetGpuModified(texture_cache, c, true);
+        TextureCacheTestAccess::SetGpuModified(texture_cache, c, false);
+        TextureCacheTestAccess::DeleteImage(texture_cache, c);
+        TextureCacheTestAccess::Audit(texture_cache);
+        Require(name, "lockfree image checks: no count left behind",
+                !texture_cache.HasGpuModifiedImage(base + 0x600000, 0x4000) &&
+                    Agree(base + 0x600000, 0x4000),
+                "a count survived the deletion");
+        Config::Load(BaselineOptions());
+        ApplyFlagsOffFromEnvironment();
+      }
 
       constexpr uint64_t large_owner_size = 64ull * 1024 * 1024;
       const auto large_info =

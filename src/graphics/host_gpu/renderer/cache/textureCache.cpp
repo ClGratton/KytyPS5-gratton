@@ -149,6 +149,31 @@ void ImageLookupNoteVerified(const ImageLookupMemo::Stats& stats) {
 
 } // namespace
 
+namespace {
+// KYTY_LOCKFREE_VERIFY=1: every lock-free answer of the texture cache is compared with the locked one (EXIT on a difference
+// when no writer moved the counts in between).
+bool LockFreeImageVerify() {
+	static const bool enabled = [] {
+		const char* text = std::getenv("KYTY_LOCKFREE_VERIFY");
+		return text != nullptr && text[0] != '\0' && text[0] != '0';
+	}();
+	return enabled;
+}
+// KYTY_DRAW_STATS=1 counts on the calling thread (plain integers: no atomic in the path being measured); the verifier's
+// counts are shared.
+struct LockFreeImageStats {
+	uint64_t hgm_none = 0, hgm_some = 0, hgm_fallback = 0, meta_lockfree = 0, meta_fallback = 0;
+};
+thread_local LockFreeImageStats t_lockfree_stats;
+struct LockFreeVerifyStats {
+	std::atomic<uint64_t> hgm_verified {0}, hgm_raced {0}, meta_verified {0}, meta_raced {0};
+};
+LockFreeVerifyStats g_lockfree_stats;
+inline void CountLockFree(uint64_t LockFreeImageStats::*field) {
+	if (Libs::Graphics::IncrementalDraw::StatsEnabled()) ++(t_lockfree_stats.*field);
+}
+} // namespace
+
 TextureCache::LockBatch::LockBatch(TextureCache& cache): m_cache(Config::TextureLockBatchEnabled() ? &cache : nullptr) {
 	if (m_cache != nullptr) m_cache->m_lock.lock();
 }
@@ -277,6 +302,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	// Before the image can be tracked (write-protected): a fault on one of its pages finds the count.
 	m_image_presence.Add(image.info.data.address, image.info.data.size);
 	image.registered = true;
+	SyncGpuPresence(image);
 	++m_image_set_generation;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_total_used_memory += image.AccountedSize();
@@ -306,7 +332,46 @@ void TextureCache::UnregisterImage(ImageId id) {
 	}
 	m_total_used_memory -= accounted;
 	image.registered = false;
+	SyncGpuPresence(image);
 	++m_image_set_generation;
+}
+
+void TextureCache::MarkImageGpuModified(Image& image) {
+	image.MarkGpuModified();
+	SyncGpuPresence(image);
+}
+
+void TextureCache::ClearImageGpuModified(Image& image) {
+	image.ClearGpuModified();
+	SyncGpuPresence(image);
+}
+
+// The image is in m_gpu_modified_presence exactly while it is registered and GPU-modified, under the range it had when it was
+// counted. Every change of either condition ends here, so the counts equal the page-table walk of HasGpuModifiedImageLocked.
+void TextureCache::SyncGpuPresence(Image& image) {
+	const bool want = image.registered && image.IsGpuModified() && !image.info.data.Empty();
+	const bool have = !image.gpu_counted.Empty();
+	if (want == have) {
+		return;
+	}
+	// PagePresence has one writer at a time. Every caller holds m_lock; a path that does not would race the counts, so it
+	// takes the (reentrant) lock here instead of corrupting them, and the verifier reports it.
+	if (!m_lock.HeldByCurrentThread()) {
+		if (LockFreeImageVerify()) {
+			EXIT("lockfree image checks: GPU-modified state of an image changed without the texture cache lock\n");
+		}
+		std::scoped_lock lock {m_lock};
+		SyncGpuPresence(image);
+		return;
+	}
+	if (want) {
+		image.gpu_counted = image.info.data;
+		m_gpu_modified_presence.Add(image.gpu_counted.address, image.gpu_counted.size);
+	} else {
+		m_gpu_modified_presence.Remove(image.gpu_counted.address, image.gpu_counted.size);
+		image.gpu_counted = {};
+	}
+	m_gpu_modified_epoch.fetch_add(1, std::memory_order_release);
 }
 
 void TextureCache::DeleteImage(ImageId id) {
@@ -335,6 +400,8 @@ void TextureCache::DeleteImage(ImageId id) {
 		    image->info.metadata.kind == ImageMetadataKind::Htile &&
 		    metadata->second.type == MetaDataInfo::Type::HTile) {
 			// A later binding may have reused this address for another metadata type.
+			m_meta_mirror.Erase(metadata->first);
+			m_meta_epoch.fetch_add(1, std::memory_order_release);
 			m_surface_metas.erase(metadata);
 		}
 	}
@@ -349,7 +416,7 @@ void TextureCache::DeleteImage(ImageId id) {
 void TextureCache::FreeImage(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (image.IsGpuModified()) {
-		image.ClearGpuModified();
+		ClearImageGpuModified(image);
 	}
 	DeleteImage(id);
 }
@@ -667,7 +734,7 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 		destination.CopyImageWithBuffer(source, copy_buffer, m_tiler);
 	}
 	if (source.IsGpuModified()) {
-		destination.MarkGpuModified();
+		MarkImageGpuModified(destination);
 	}
 	destination.ClearBufferModified();
 }
@@ -683,7 +750,7 @@ void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint3
 	}
 	destination.CopyMip(source, mip, layer);
 	if (source.IsGpuModified()) {
-		destination.MarkGpuModified();
+		MarkImageGpuModified(destination);
 	}
 }
 
@@ -1219,6 +1286,8 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& binding,
 			image.info.metadata.clear_format = desc.view_info.format;
 		}
 		// Native color metadata must not retain a reused HTile/CMask/FMask clear flag.
+		m_meta_mirror.Erase(range.address);
+		m_meta_epoch.fetch_add(1, std::memory_order_release);
 		m_surface_metas.erase(range.address);
 	}
 	if (range.size == 0 || desc.info.resources.levels != 1) {
@@ -1706,7 +1775,7 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 		EXIT("TextureCache: texture requires rediscovery before final acquisition\n");
 	}
 	if (desc.type == BindingType::Storage) {
-		image.MarkGpuModified();
+		MarkImageGpuModified(image);
 	}
 	RefreshImage(id);
 	if (image.info.HasStencil() &&
@@ -1743,7 +1812,7 @@ vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) 
 		EXIT("TextureCache: color target requires rediscovery before final acquisition\n");
 	}
 	TouchImage(image);
-	image.MarkGpuModified();
+	MarkImageGpuModified(image);
 	image.usage.render_target = true;
 	RefreshImage(id);
 	CommitGpuWrite(image);
@@ -1761,7 +1830,7 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 		EXIT("TextureCache: depth target requires rediscovery before final acquisition\n");
 	}
 	TouchImage(image);
-	image.MarkGpuModified();
+	MarkImageGpuModified(image);
 	image.usage.depth_target = true;
 	if (desc.info.HasStencil()) {
 		const auto layers = image.info.resources.layers;
@@ -1778,9 +1847,14 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	image.info.stencil = desc.info.stencil;
 	image.info.metadata = desc.info.metadata;
 	if (desc.info.HasMetadata()) {
-		m_surface_metas.emplace(desc.info.metadata.range.address,
-		                        MetaDataInfo {.type       = MetaDataInfo::Type::HTile,
-		                                      .clear_mask = image.info.htile_clear_mask});
+		const auto inserted =
+		    m_surface_metas.emplace(desc.info.metadata.range.address,
+		                            MetaDataInfo {.type       = MetaDataInfo::Type::HTile,
+		                                          .clear_mask = image.info.htile_clear_mask});
+		if (inserted.second) {
+			m_meta_mirror.Set(desc.info.metadata.range.address, inserted.first->second.clear_mask);
+			m_meta_epoch.fetch_add(1, std::memory_order_release);
+		}
 	}
 	RefreshImage(id);
 	CommitGpuWrite(image);
@@ -1813,7 +1887,7 @@ void TextureCache::CommitGpuWrite(Image& image) {
 	if (image.IsCpuDirty()) {
 		image.RefreshComplete();
 	}
-	image.MarkGpuModified();
+	MarkImageGpuModified(image);
 }
 
 bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
@@ -2164,6 +2238,33 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	return true;
 }
 
+
+void PrintLockFreeImageStats(double secs) {
+	static LockFreeImageStats last;
+	const LockFreeImageStats& now = t_lockfree_stats; // the GPU thread's, which is the thread that prints
+	std::printf("[lockfree-image] %.1f s (GPU thread): HasGpuModifiedImage lock-free none %.0f/s some %.0f/s, took the lock %.0f/s; "
+	            "IsMeta/IsMetaCleared lock-free %.0f/s, took the lock %.0f/s; verified hgm %llu meta %llu (raced %llu / %llu)\n",
+	            secs, (now.hgm_none - last.hgm_none) / secs, (now.hgm_some - last.hgm_some) / secs,
+	            (now.hgm_fallback - last.hgm_fallback) / secs, (now.meta_lockfree - last.meta_lockfree) / secs,
+	            (now.meta_fallback - last.meta_fallback) / secs,
+	            static_cast<unsigned long long>(g_lockfree_stats.hgm_verified.load()),
+	            static_cast<unsigned long long>(g_lockfree_stats.meta_verified.load()),
+	            static_cast<unsigned long long>(g_lockfree_stats.hgm_raced.load()),
+	            static_cast<unsigned long long>(g_lockfree_stats.meta_raced.load()));
+	last = now;
+}
+
+bool TextureCache::HasGpuModifiedImageLocked(uint64_t address, uint64_t size) {
+	std::scoped_lock lock {m_lock};
+	for (const auto id: FindImagesInRegion(address, size, true)) {
+		const auto* image = m_slot_images.try_get(id);
+		if (image != nullptr && image->IsGpuModified()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool TextureCache::HasGpuModifiedImage(uint64_t address, uint64_t size) {
 	// --image-presence: no image covers these pages, so none is GPU-modified (no lock, no page-table walk).
 	if (Config::ImagePresenceEnabled() && !m_image_presence.Any(address, size)) {
@@ -2178,14 +2279,34 @@ bool TextureCache::HasGpuModifiedImage(uint64_t address, uint64_t size) {
 	if (m_lock.HeldByCurrentThread()) {
 		return true;
 	}
-	std::scoped_lock lock {m_lock};
-	for (const auto id: FindImagesInRegion(address, size, true)) {
-		const auto* image = m_slot_images.try_get(id);
-		if (image != nullptr && image->IsGpuModified()) {
-			return true;
+	// --lockfree-image-checks: the counts of registered GPU-modified images per page answer exactly (an owner on a page of
+	// the range is a registered GPU-modified image whose page range overlaps it, which is what the walk below looks for).
+	// Only a range too long for the counts, or a saturated page, takes the lock.
+	if (Config::LockFreeImageChecksEnabled()) {
+		const bool     verify = LockFreeImageVerify();
+		const uint64_t epoch  = verify ? m_gpu_modified_epoch.load(std::memory_order_acquire) : 0;
+		const auto     answer = m_gpu_modified_presence.Query(address, size);
+		if (answer != Common::PagePresence::Answer::Unknown) {
+			const bool result = answer == Common::PagePresence::Answer::Some;
+			CountLockFree(result ? &LockFreeImageStats::hgm_some : &LockFreeImageStats::hgm_none);
+			if (verify) {
+				std::scoped_lock lock {m_lock};
+				const bool       locked = HasGpuModifiedImageLocked(address, size);
+				if (m_gpu_modified_epoch.load(std::memory_order_acquire) != epoch) {
+					g_lockfree_stats.hgm_raced.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					g_lockfree_stats.hgm_verified.fetch_add(1, std::memory_order_relaxed);
+					if (locked != result) {
+						EXIT("lockfree image checks: HasGpuModifiedImage(0x%016" PRIx64 ", 0x%" PRIx64 ") lock-free %d, page table %d\n",
+						     address, size, result ? 1 : 0, locked ? 1 : 0);
+					}
+				}
+			}
+			return result;
 		}
+		CountLockFree(&LockFreeImageStats::hgm_fallback);
 	}
-	return false;
+	return HasGpuModifiedImageLocked(address, size);
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
@@ -2199,7 +2320,7 @@ void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
 			continue;
 		}
 		if (image.IsGpuModified()) {
-			image.ClearGpuModified();
+			ClearImageGpuModified(image);
 		}
 		image.MarkBufferModified();
 	}
@@ -2230,13 +2351,58 @@ void TextureCache::InvalidateCpuAliases(uint64_t address, uint64_t size) {
 	}
 }
 
+// --lockfree-image-checks: the metadata table's entry for `address`, read without the lock. False: the table cannot answer now
+// (the flag is off, it is incomplete or kept changing); the caller takes the lock and uses the map.
+bool TextureCache::LockFreeMeta(uint64_t address, bool& present, uint32_t& mask) {
+	if (!Config::LockFreeImageChecksEnabled()) {
+		return false;
+	}
+	const bool     verify = LockFreeImageVerify();
+	const uint64_t epoch  = verify ? m_meta_epoch.load(std::memory_order_acquire) : 0;
+	mask                  = 0;
+	const auto found      = m_meta_mirror.Lookup(address, &mask);
+	if (found == MetaMirror::Found::Unknown) {
+		CountLockFree(&LockFreeImageStats::meta_fallback);
+		return false;
+	}
+	CountLockFree(&LockFreeImageStats::meta_lockfree);
+	present = found == MetaMirror::Found::Present;
+	if (verify) {
+		// Against the map, under the lock. A writer that changed the table between the read and the lock (the epoch moved)
+		// is not a difference.
+		std::scoped_lock lock {m_lock};
+		if (m_meta_epoch.load(std::memory_order_acquire) != epoch) {
+			g_lockfree_stats.meta_raced.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			g_lockfree_stats.meta_verified.fetch_add(1, std::memory_order_relaxed);
+			const auto entry   = m_surface_metas.find(address);
+			const bool in_map  = entry != m_surface_metas.end();
+			if (in_map != present || (in_map && entry->second.clear_mask != mask)) {
+				EXIT("lockfree image checks: metadata mirror 0x%016" PRIx64 " %s mask 0x%08x, map %s mask 0x%08x\n", address,
+				     present ? "present" : "absent", mask, in_map ? "present" : "absent", in_map ? entry->second.clear_mask : 0u);
+			}
+		}
+	}
+	return true;
+}
+
 bool TextureCache::IsMeta(uint64_t address) {
+	bool     present = false;
+	uint32_t mask    = 0;
+	if (LockFreeMeta(address, present, mask)) {
+		return present;
+	}
 	std::scoped_lock lock {m_lock};
 	const auto       found = m_surface_metas.find(address);
 	return found != m_surface_metas.end();
 }
 
 bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice) {
+	bool     present = false;
+	uint32_t mask    = 0;
+	if (LockFreeMeta(address, present, mask)) {
+		return present && slice < 32 && (mask & (1u << slice)) != 0;
+	}
 	std::scoped_lock lock {m_lock};
 	const auto       found = m_surface_metas.find(address);
 	if (found == m_surface_metas.end() || slice >= 32) {
@@ -2252,6 +2418,8 @@ bool TextureCache::ClearMeta(uint64_t address) {
 		return false;
 	}
 	found->second.clear_mask = UINT32_MAX;
+	m_meta_mirror.Set(address, UINT32_MAX);
+	m_meta_epoch.fetch_add(1, std::memory_order_release);
 	return true;
 }
 
@@ -2266,6 +2434,8 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 	} else {
 		found->second.clear_mask &= ~(1u << slice);
 	}
+	m_meta_mirror.Set(address, found->second.clear_mask);
+	m_meta_epoch.fetch_add(1, std::memory_order_release);
 	return true;
 }
 
@@ -2282,6 +2452,8 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 	for (auto metadata = m_surface_metas.begin(); metadata != m_surface_metas.end();) {
 		const auto base = metadata->first;
 		if (base >= address && base < address + size) {
+			m_meta_mirror.Erase(base);
+			m_meta_epoch.fetch_add(1, std::memory_order_release);
 			metadata = m_surface_metas.erase(metadata);
 		} else {
 			++metadata;
@@ -2326,8 +2498,57 @@ void TextureCache::LogGpuWrittenFree(ImageId id, const char* path, uint64_t tick
 	         m_total_used_memory >> 20);
 }
 
+// KYTY_LOCKFREE_VERIFY=1, under m_lock: the lock-free state equals what the owners hold. The metadata table has the map's
+// entries and masks; the GPU-modified page counts equal a recount from the registered GPU-modified images (every page they
+// cover, and the images' bookkeeping of what they counted).
+void TextureCache::AuditLockFreeState() {
+	size_t in_map = 0;
+	for (const auto& [address, info]: m_surface_metas) {
+		uint32_t   mask  = 0;
+		const auto found = m_meta_mirror.Lookup(address, &mask);
+		if (m_meta_mirror.Complete() && (found != MetaMirror::Found::Present || mask != info.clear_mask)) {
+			EXIT("lockfree audit: metadata 0x%016" PRIx64 " mask 0x%08x is not in the mirror (%d, 0x%08x)\n", address, info.clear_mask,
+			     static_cast<int>(found), mask);
+		}
+		in_map++;
+	}
+	if (m_meta_mirror.Complete()) {
+		size_t in_mirror = 0;
+		m_meta_mirror.ForEach([&](uint64_t, uint32_t) { in_mirror++; });
+		if (in_mirror != in_map) {
+			EXIT("lockfree audit: the metadata mirror has %zu entries, the map %zu\n", in_mirror, in_map);
+		}
+	}
+	std::unordered_map<uint64_t, uint32_t> expected;
+	m_slot_images.ForEach([&](ImageId, const Image& image) {
+		const bool want = image.registered && image.IsGpuModified() && !image.info.data.Empty();
+		if (want != !image.gpu_counted.Empty() || (want && image.gpu_counted != image.info.data)) {
+			EXIT("lockfree audit: image 0x%016" PRIx64 "+0x%" PRIx64 " registered %d gpu_modified %d counted 0x%016" PRIx64 "+0x%" PRIx64 "\n",
+			     image.info.data.address, image.info.data.size, image.registered ? 1 : 0, image.IsGpuModified() ? 1 : 0,
+			     image.gpu_counted.address, image.gpu_counted.size);
+		}
+		if (!want) {
+			return;
+		}
+		const uint64_t last = image.info.data.address + image.info.data.size - 1;
+		for (uint64_t page = image.info.data.address >> Common::PagePresence::kPageBits; page <= (last >> Common::PagePresence::kPageBits); page++) {
+			expected[page]++;
+		}
+	});
+	for (const auto& [page, count]: expected) {
+		const auto have = m_gpu_modified_presence.Count(page << Common::PagePresence::kPageBits);
+		if (have != count && have != UINT16_MAX) {
+			EXIT("lockfree audit: page 0x%016" PRIx64 " has %u GPU-modified images, the counts say %u\n",
+			     page << Common::PagePresence::kPageBits, count, have);
+		}
+	}
+}
+
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
+	if (LockFreeImageVerify()) {
+		AuditLockFreeState();
+	}
 	const bool       frame_clock = Config::GcClockFrames();
 	const uint64_t   run         = m_gc_runs++;
 	uint64_t         tick        = 0;

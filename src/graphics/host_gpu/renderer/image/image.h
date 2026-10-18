@@ -184,6 +184,9 @@ public:
 	ImageSubresourceRange stencil_subresources;
 	uint64_t         tick_accessed_last = 0;
 	size_t           lru_id             = 0;
+	// The page range this image holds in TextureCache::m_gpu_modified_presence (empty: not counted). Written under the cache lock
+	// by TextureCache::SyncGpuPresence only; the image is counted exactly while it is registered and GPU-modified.
+	GuestRange       gpu_counted {};
 
 private:
 	friend struct ImageTestAccess;

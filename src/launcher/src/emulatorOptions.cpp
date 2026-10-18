@@ -266,6 +266,13 @@ QList<Option> BuildTable() {
 	             "and answers that without the lock. Exact; lowers CPU time on the GPU thread and "
 	             "on game threads.",
 	             EMU_BOOL(image_presence)});
+	defs.append({"lockfree_image_checks", "--lockfree-image-checks", Tab::Gpu, "CPU cost per draw", Kind::Bool,
+	             "Ask whether a GPU-written image overlaps a memory range without the lock",
+	             "Before the GPU thread reads a block of game memory as it is, it asks the texture cache whether a "
+	             "GPU-written image overlaps the block, and the cache used to take its lock and walk its page "
+	             "table to answer. With this the cache keeps a count of such images per page and answers from "
+	             "the counts without the lock. Exact; lowers CPU time on the GPU thread.",
+	             EMU_BOOL(lockfree_image_checks)});
 	defs.append({"plan_prefetch", "--plan-prefetch", Tab::Gpu, "CPU cost per draw", Kind::Bool,
 	             "Prefetch the next draw's precomputed data",
 	             "The pipeline lookahead builds each draw's plan on another core out of many small "

@@ -335,6 +335,10 @@ struct ConfigOptions {
 	// --image-presence: the texture cache answers "does an image cover this page" from per-page counts without its
 	// lock (common/pagePresence.h) for clean reads and write faults. Default on.
 	bool                   image_presence              = true;
+	// --lockfree-image-checks: HasGpuModifiedImage (the GPU thread's "may I read this guest range as it is" test) is answered from
+	// per-page counts of registered GPU-modified images (common/pagePresence.h) instead of a page-table walk under the texture
+	// cache lock. Exact: the counts equal the walk (KYTY_LOCKFREE_VERIFY=1 compares them on every call). Default off.
+	bool                   lockfree_image_checks       = false;
 	// --image-pool: freed dedicated images are kept briefly and reused by the next image of the same shape
 	// (graphics/host_gpu/vma.cpp). Default on.
 	bool                   image_pool                  = true;
@@ -550,6 +554,7 @@ bool              PushDescriptorDeltaEnabled();
 bool              SmallCopyDedupEnabled();
 bool              DescCommitDietEnabled();
 bool              ImagePresenceEnabled();
+bool              LockFreeImageChecksEnabled();
 bool              RoDepthAccessEnabled();
 bool              ComputeImageCopyEnabled();
 bool              ImagePoolEnabled();

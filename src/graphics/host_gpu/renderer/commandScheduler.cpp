@@ -450,6 +450,8 @@ CommandBuffer& CommandScheduler::Current() {
 	return m_command;
 }
 
+void PrintLockFreeImageStats(double secs); // cache/textureCache.cpp
+
 // KYTY_DRAW_STATS=1: the driver cost of ending and beginning a command buffer, printed every 5 s.
 namespace {
 struct BoundaryStats {
@@ -472,6 +474,7 @@ void MaybePrintBoundary() {
 	last_outer = Libs::Graphics::t_lock_outer; last_nested = Libs::Graphics::t_lock_nested; last_contended = Libs::Graphics::t_lock_contended;
 	std::printf("[kygpu-locks] %.1f s: ReentrantTrackingLock outermost %llu (%.0f/s) nested %llu (%.0f/s), TrackingSpinLock found taken %llu (%.0f/s) (this thread)\n", secs,
 	            static_cast<unsigned long long>(lo), lo / secs, static_cast<unsigned long long>(ln), ln / secs, static_cast<unsigned long long>(lc), lc / secs);
+	PrintLockFreeImageStats(secs);
 	const uint64_t su = g_boundary.submits.exchange(0), sn = g_boundary.submit_ns.exchange(0), sa = g_boundary.async_submits.exchange(0);
 	std::printf("[cmdbuf-boundary] %.1f s: vkEndCommandBuffer %llu (%.0f/s) %.2f ms/s, vkBeginCommandBuffer %llu %.2f ms/s, Submit() on kyGpu %llu (%.0f/s, async %llu) %.2f ms/s in total (includes End)\n", secs,
 	            static_cast<unsigned long long>(e), e / secs, en / 1e6 / secs, static_cast<unsigned long long>(b), bn / 1e6 / secs,

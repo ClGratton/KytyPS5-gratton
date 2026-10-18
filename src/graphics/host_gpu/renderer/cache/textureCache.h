@@ -12,10 +12,12 @@
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/cache/imageLookupMemo.h"
+#include "graphics/host_gpu/renderer/cache/metaMirror.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/imageCopyKernels.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <type_traits>
@@ -31,6 +33,9 @@ class CommandBuffer;
 class CommandScheduler;
 class RenderExecutor;
 struct TextureCacheTestAccess;
+
+// --lockfree-image-checks: the lock-free answers counted since the last call, printed by the KYTY_DRAW_STATS block.
+void PrintLockFreeImageStats(double secs);
 
 class TextureCache {
 public:
@@ -113,6 +118,8 @@ public:
 	// True when a GPU-modified image overlaps [address, address + size), or when that cannot be
 	// told without waiting (the calling thread holds the cache lock). GPU thread.
 	[[nodiscard]] bool HasGpuModifiedImage(uint64_t address, uint64_t size);
+	// HasGpuModifiedImage's answer by the page table, under the cache lock (the reference the lock-free answer must equal).
+	[[nodiscard]] bool HasGpuModifiedImageLocked(uint64_t address, uint64_t size);
 	[[nodiscard]] bool TouchMeta(uint64_t address, uint32_t slice, bool is_clear);
 
 	void UnmapMemory(uint64_t address, uint64_t size);
@@ -216,6 +223,12 @@ private:
 
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
 	[[nodiscard]] bool DownloadImageMemory(ImageId id);
+	// --lockfree-image-checks: image.MarkGpuModified()/ClearGpuModified() and the page counts that mirror them. Under m_lock.
+	void MarkImageGpuModified(Image& image);
+	void ClearImageGpuModified(Image& image);
+	void SyncGpuPresence(Image& image);
+	[[nodiscard]] bool LockFreeMeta(uint64_t address, bool& present, uint32_t& mask);
+	void               AuditLockFreeState();
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
@@ -229,9 +242,18 @@ private:
 	ImagePageTable                                    m_image_page_table;
 	// --image-presence: how many registered images cover each 4 KiB page, readable without the lock.
 	Common::PagePresence                              m_image_presence;
+	// --lockfree-image-checks: how many registered GPU-modified images cover each 4 KiB page (the counts change with the
+	// image's registration and its GPU-modified flag, under m_lock; readable without it). HasGpuModifiedImage asks this
+	// instead of walking the page table under the lock. m_gpu_modified_epoch moves with every change of the counts (verifier).
+	Common::PagePresence                              m_gpu_modified_presence;
+	std::atomic<uint64_t>                             m_gpu_modified_epoch {0};
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;
 	std::map<uint64_t, MetaDataInfo>                  m_surface_metas;
+	// --lockfree-image-checks: m_surface_metas as a table readable without the lock (metaMirror.h). Changed with the map, under
+	// m_lock; m_meta_epoch moves with every change of a mask (verifier).
+	MetaMirror                                        m_meta_mirror;
+	std::atomic<uint64_t>                             m_meta_epoch {0};
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t                                          m_trigger_gc_memory  = 0;
 	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;
