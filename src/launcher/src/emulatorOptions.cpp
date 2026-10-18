@@ -169,6 +169,13 @@ QList<Option> BuildTable() {
 	             "ends the render pass and records a barrier after itself; the barrier waits until a "
 	             "later draw may read the written bytes or any other command is recorded.",
 	             EMU_BOOL(defer_draw_write_barriers)});
+	defs.append({"ro_depth_access", "--ro-depth-access", Tab::Gpu, "Barriers and readbacks", Kind::Bool,
+	             "Read-only depth access",
+	             "A draw that writes no part of its depth buffer treats it as read-only, and a depth "
+	             "buffer that is both tested and sampled by consecutive draws no longer gets two "
+	             "barriers and a new render pass for every draw. Exact; lowers GPU time per frame "
+	             "(about 7 ms of 31 ms in the level measurements).",
+	             EMU_BOOL(ro_depth_access)});
 	defs.append({"overlap_dispatches", "--overlap-dispatches", Tab::Gpu, "Barriers and readbacks",
 	             Kind::Bool, "Overlap independent dispatches",
 	             "Consecutive compute dispatches whose bound resources do not conflict run without a "
