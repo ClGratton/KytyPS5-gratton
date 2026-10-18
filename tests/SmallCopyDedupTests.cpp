@@ -83,6 +83,40 @@ void TestStats() {
 	Check(!dedup.Find(0x5000, a.data(), 48, 1, 0).has_value(), "cleared");
 }
 
+// Four ranges that land in one set all stay; the fifth takes the oldest entry's place.
+void TestSetAssociativity() {
+	SmallCopyDedup       dedup;
+	std::vector<uint8_t> ring(4096);
+	std::vector<uint8_t> a(16, 5);
+	std::vector<uint64_t> same;
+	const auto            set = SmallCopyDedup::SetOf(0x10000, 16);
+	for (uint64_t address = 0x10000; same.size() < 5; address += 16) {
+		if (SmallCopyDedup::SetOf(address, 16) == set) same.push_back(address);
+	}
+	for (size_t i = 0; i < 4; i++) Store(dedup, same[i], a, i * 16, 1 + i, 0, ring);
+	for (size_t i = 0; i < 4; i++) {
+		const auto hit = dedup.Find(same[i], a.data(), 16, 1 + i, 0);
+		Check(hit.has_value() && *hit == i * 16, "four colliding ranges are all kept");
+	}
+	Store(dedup, same[4], a, 64, 5, 0, ring);
+	Check(dedup.Find(same[4], a.data(), 16, 5, 0).has_value(), "the fifth is kept");
+	Check(!dedup.Find(same[0], a.data(), 16, 1, 0).has_value(), "and the oldest was the one replaced");
+	Check(dedup.Find(same[3], a.data(), 16, 4, 0).has_value(), "the others stay");
+}
+
+void TestMissReasons() {
+	SmallCopyDedup       dedup;
+	std::vector<uint8_t> ring(256);
+	std::vector<uint8_t> a(16, 1);
+	(void)dedup.Find(0x7000, a.data(), 16, 1, 0); // absent
+	Store(dedup, 0x7000, a, 0, 1, 0, ring);
+	(void)dedup.Find(0x7000, a.data(), 16, 2, 0); // stale: another tick
+	a[0] = 9;
+	(void)dedup.Find(0x7000, a.data(), 16, 1, 0); // content
+	const auto& s = dedup.GetStats();
+	Check(s.miss_absent == 1 && s.miss_stale == 1 && s.miss_content == 1, "the three miss reasons are counted apart");
+}
+
 } // namespace
 
 int main() {
@@ -91,6 +125,8 @@ int main() {
 	TestRingHoldsTheKeptBytes();
 	TestStagedButNotCommittedHoldsNothing();
 	TestStats();
+	TestSetAssociativity();
+	TestMissReasons();
 	std::printf("SmallCopyDedupTests: ok\n");
 	return 0;
 }

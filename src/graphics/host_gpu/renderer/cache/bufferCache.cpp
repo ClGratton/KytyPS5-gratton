@@ -1739,6 +1739,12 @@ void BufferCache::LogRingStatsPeriodic() {
 	    "[obtain-buffer] total: calls={} memo_hits={} stored={} small_copies={} written={} texel={} small_copy_reuse={} ({} MiB)\n",
 	    o.calls, o.memo_hits, o.stored, o.small_copies, o.written, o.texel, o.small_copy_reuse,
 	    o.small_copy_reuse_bytes >> 20));
+	if (Config::SmallCopyDedupEnabled()) {
+		const auto& d = m_small_copy_dedup.GetStats();
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[small-copy-dedup] lookups={} hits={} misses: absent={} stale={} content={}\n", d.lookups, d.hits,
+		    d.miss_absent, d.miss_stale, d.miss_content));
+	}
 	const auto mapping = LibKernel::Memory::GetMappingMemoStats();
 	Log::WriteToConsoleAndLog(fmt::format("[mapping-memo] gpu thread: hits={} misses={}\n", mapping.hits,
 	                                      mapping.misses));

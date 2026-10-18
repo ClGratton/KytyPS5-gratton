@@ -21,42 +21,74 @@ namespace Libs::Graphics {
 //    in an earlier tick is only protected until that tick finishes, not until a later command buffer that reads it does)
 //    and in the same ring lap (a wrap may have overwritten it).
 //
-// Pure data, no Vulkan types. GPU thread only; direct mapped on (address, size).
+// Pure data, no Vulkan types. GPU thread only; 4-way set associative on (address, size).
 class SmallCopyDedup {
 public:
 	struct Stats {
-		uint64_t lookups = 0;
-		uint64_t hits    = 0;
-		uint64_t stores  = 0;
+		uint64_t lookups     = 0;
+		uint64_t hits        = 0;
+		uint64_t stores      = 0;
 		uint64_t bytes_saved = 0;
+		// Why a lookup missed: no entry for the (address, size); an entry of an earlier tick or lap; an entry of this tick with other bytes.
+		uint64_t miss_absent  = 0;
+		uint64_t miss_stale   = 0;
+		uint64_t miss_content = 0;
 	};
 
 	// The ring offset that holds exactly `size` bytes equal to `data`, copied from `address` in this tick and lap.
 	[[nodiscard]] std::optional<uint64_t> Find(uint64_t address, const void* data, uint32_t size, uint64_t tick,
 	                                           uint64_t lap) {
 		m_stats.lookups++;
-		const auto& slot = m_slots[Index(address, size)];
-		if (!slot.valid || slot.address != address || slot.size != size || slot.tick != tick || slot.lap != lap ||
-		    std::memcmp(slot.bytes.data(), data, size) != 0) {
-			return std::nullopt;
+		const auto* set   = &m_slots[SetIndex(address, size) * kWays];
+		bool        known = false;
+		bool        stale = false;
+		for (size_t way = 0; way < kWays; ++way) {
+			const auto& slot = set[way];
+			if (!slot.valid || slot.address != address || slot.size != size) {
+				continue;
+			}
+			known = true;
+			if (slot.tick != tick || slot.lap != lap) {
+				stale = true;
+				continue;
+			}
+			if (std::memcmp(slot.bytes.data(), data, size) != 0) {
+				continue;
+			}
+			m_stats.hits++;
+			m_stats.bytes_saved += size;
+			return slot.offset;
 		}
-		m_stats.hits++;
-		m_stats.bytes_saved += size;
-		return slot.offset;
+		(known ? (stale ? m_stats.miss_stale : m_stats.miss_content) : m_stats.miss_absent)++;
+		return std::nullopt;
 	}
 
 	// Takes the bytes of a copy about to be made and returns the kept copy: the caller writes the ring from the returned
 	// pointer, then calls Commit with the ring offset. The slot holds nothing until then.
 	[[nodiscard]] const uint8_t* Stage(uint64_t address, const void* data, uint32_t size) {
-		auto& slot = m_slots[Index(address, size)];
-		slot.valid = false;
-		slot.bytes.resize(size);
-		std::memcpy(slot.bytes.data(), data, size);
-		return slot.bytes.data();
+		auto* set    = &m_slots[SetIndex(address, size) * kWays];
+		auto* victim = &set[0];
+		for (size_t way = 0; way < kWays; ++way) {
+			auto& slot = set[way];
+			if (slot.valid && slot.address == address && slot.size == size) {
+				victim = &slot; // the same range again: replace its entry
+				break;
+			}
+			if (!slot.valid) {
+				victim = &slot;
+			} else if (victim->valid && (slot.lap < victim->lap || (slot.lap == victim->lap && slot.tick < victim->tick))) {
+				victim = &slot; // otherwise the oldest entry
+			}
+		}
+		victim->valid = false;
+		victim->bytes.resize(size);
+		std::memcpy(victim->bytes.data(), data, size);
+		m_staged = victim;
+		return victim->bytes.data();
 	}
 
 	void Commit(uint64_t address, uint32_t size, uint64_t offset, uint64_t tick, uint64_t lap) {
-		auto& slot   = m_slots[Index(address, size)];
+		auto& slot = *m_staged;
 		slot.address = address;
 		slot.size    = size;
 		slot.offset  = offset;
@@ -72,13 +104,17 @@ public:
 
 	[[nodiscard]] const Stats& GetStats() const noexcept { return m_stats; }
 
-private:
-	static constexpr size_t kSlotBits = 10;
-	static constexpr size_t kSlots    = size_t {1} << kSlotBits;
+	// The set a range maps to (for tests).
+	[[nodiscard]] static size_t SetOf(uint64_t address, uint32_t size) noexcept { return SetIndex(address, size); }
 
-	[[nodiscard]] static size_t Index(uint64_t address, uint32_t size) noexcept {
+private:
+	static constexpr size_t kSetBits = 10;
+	static constexpr size_t kWays    = 4;
+	static constexpr size_t kSets    = size_t {1} << kSetBits;
+
+	[[nodiscard]] static size_t SetIndex(uint64_t address, uint32_t size) noexcept {
 		return static_cast<size_t>(((address >> 2) ^ (static_cast<uint64_t>(size) << 17)) * 0x9e3779b97f4a7c15ull >>
-		                           (64 - kSlotBits));
+		                           (64 - kSetBits));
 	}
 
 	struct Slot {
@@ -91,8 +127,9 @@ private:
 		std::vector<uint8_t> bytes;
 	};
 
-	std::array<Slot, kSlots> m_slots;
-	Stats                    m_stats;
+	std::array<Slot, kSets * kWays> m_slots;
+	Slot*                           m_staged = nullptr;
+	Stats                           m_stats;
 };
 
 } // namespace Libs::Graphics
