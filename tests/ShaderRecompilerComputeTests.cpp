@@ -26,6 +26,7 @@
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/meshIndirect.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/image/imageCopyKernels.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
@@ -19304,6 +19305,196 @@ public:
     DestroyImage(&resolved);
     DestroyImage(&target);
     return {std::move(pixel), std::move(gds)};
+  }
+
+  // --compute-image-copy: ImageCopyKernels against the transfer commands, in both directions, on colour images of 4, 8 and 16 byte
+  // texels with layers, padded buffer rows, a sub-rectangle, a nonzero buffer offset and a mip level.
+  void CheckImageCopyKernels() {
+    constexpr const char *name = "ImageCopyKernels";
+    EnsureRuntimeContext();
+    CommandScheduler scheduler(Renderer(), m_runtime_context);
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    ImageCopyKernels kernels(m_runtime_context, scheduler);
+
+    struct Case {
+      const char *label;
+      vk::Format format;
+      Prospero::BufferFormat guest;
+      uint32_t bytes;
+      uint32_t width, height, layers, levels;
+      uint32_t mip;
+      uint32_t row_length, image_height;
+      int32_t x, y;
+      uint32_t copy_width, copy_height;
+      uint64_t buffer_offset;
+      uint32_t base_layer, layer_count;
+    };
+    const Case cases[] = {
+        {"rgba16f full", vk::Format::eR16G16B16A16Sfloat,
+         Prospero::BufferFormat::k16_16_16_16Float, 8, 256, 128, 1, 1, 0, 0, 0,
+         0, 0, 256, 128, 0, 0, 1},
+        {"rgba8 layers padded", vk::Format::eR8G8B8A8Unorm,
+         Prospero::BufferFormat::k8_8_8_8UNorm, 4, 192, 96, 3, 1, 0, 200, 100,
+         0, 0, 192, 96, 256, 0, 3},
+        {"rgba8 layer 1..2 only", vk::Format::eR8G8B8A8Unorm,
+         Prospero::BufferFormat::k8_8_8_8UNorm, 4, 192, 96, 3, 1, 0, 0, 0,
+         0, 0, 192, 96, 4, 1, 2},
+        {"rgba32f sub-rect", vk::Format::eR32G32B32A32Sfloat,
+         Prospero::BufferFormat::k32_32_32_32Float, 16, 200, 200, 1, 1, 0, 0, 0,
+         17, 9, 130, 140, 64, 0, 1},
+        {"r32 odd size mip 1", vk::Format::eR32Uint,
+         Prospero::BufferFormat::k32UInt, 4, 666, 310, 1, 2, 1, 0, 0,
+         0, 0, 333, 155, 12, 0, 1},
+        {"rg32f padded rows", vk::Format::eR32G32Sfloat,
+         Prospero::BufferFormat::k32_32Float, 8, 300, 80, 1, 1, 0, 320, 80,
+         3, 2, 250, 70, 128, 0, 1},
+    };
+    for (const auto &test : cases) {
+      ImageInfo info{};
+      info.pixel_format = test.format;
+      info.guest_format = test.guest;
+      info.type = Prospero::ImageType::kColor2D;
+      info.extent = {test.width, test.height, 1};
+      info.resources = {test.levels, test.layers};
+      info.pitch = test.width;
+      info.bytes_per_block = test.bytes;
+      info.samples = 1;
+      info.tile_mode = Prospero::TileMode::kLinear;
+      uint32_t level_width = test.width, level_height = test.height;
+      uint64_t offset = 0;
+      for (uint32_t level = 0; level < test.levels; level++) {
+        const uint64_t size = uint64_t{level_width} * level_height * test.bytes * test.layers;
+        info.mip_layout[level] = {offset, size, level_width, level_height};
+        offset += size;
+        level_width = std::max(level_width / 2, 1u);
+        level_height = std::max(level_height / 2, 1u);
+      }
+
+      vk::BufferImageCopy copy{};
+      copy.bufferOffset = test.buffer_offset;
+      copy.bufferRowLength = test.row_length;
+      copy.bufferImageHeight = test.image_height;
+      copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, test.mip,
+                               test.base_layer, test.layer_count};
+      copy.imageOffset = {test.x, test.y, 0};
+      copy.imageExtent = {test.copy_width, test.copy_height, 1};
+      const std::vector<vk::BufferImageCopy> copies{copy};
+
+      const uint64_t row_length = test.row_length ? test.row_length : test.copy_width;
+      const uint64_t image_height = test.image_height ? test.image_height : test.copy_height;
+      const uint64_t last_texel = (uint64_t{test.layer_count} - 1) * row_length * image_height +
+                                  (uint64_t{test.copy_height} - 1) * row_length + test.copy_width;
+      const uint64_t used_end = test.buffer_offset + last_texel * test.bytes;
+      const uint64_t buffer_size = (used_end + 255u) & ~uint64_t{255u};
+
+      std::vector<uint8_t> source(buffer_size);
+      uint32_t state = 0x9e3779b9u ^ static_cast<uint32_t>(test.bytes * 977u + test.width);
+      for (auto &byte : source) {
+        state = state * 1664525u + 1013904223u;
+        byte = static_cast<uint8_t>(state >> 24);
+      }
+      // Bytes the copy must produce when the image holds `source`: only the covered texels, the rest keeps the canary.
+      std::vector<uint8_t> expected(buffer_size, 0xA5);
+      for (uint32_t layer = 0; layer < test.layer_count; layer++) {
+        for (uint32_t row = 0; row < test.copy_height; row++) {
+          const uint64_t start = test.buffer_offset +
+                                 ((uint64_t{layer} * image_height + row) * row_length) * test.bytes;
+          std::memcpy(expected.data() + start, source.data() + start,
+                      uint64_t{test.copy_width} * test.bytes);
+        }
+      }
+      const auto to_words = [&](const std::vector<uint8_t> &bytes) {
+        std::vector<u32> words(bytes.size() / sizeof(u32));
+        std::memcpy(words.data(), bytes.data(), bytes.size());
+        return words;
+      };
+      const auto host_barrier = [&](const Buffer &buffer) {
+        vk::BufferMemoryBarrier barrier{};
+        barrier.sType = vk::StructureType::eBufferMemoryBarrier;
+        barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
+        barrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = buffer.buffer;
+        barrier.offset = 0;
+        barrier.size = buffer.size;
+        scheduler.Current().Handle().pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer | vk::PipelineStageFlagBits::eComputeShader,
+            vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
+      };
+
+      auto input = CreateHostBuffer(name, buffer_size, AllFlags, to_words(source));
+      const std::vector<uint8_t> canary(buffer_size, 0xA5);
+
+      // Direction 1: ImageCopyKernels::Upload, then the transfer path reads the image back.
+      {
+        Libs::Graphics::Image image(m_runtime_context, scheduler, info);
+        const bool uploaded = kernels.Upload(image, copies, input.buffer, 0, buffer_size);
+        Require(name, "upload takes the copy", uploaded == (uint64_t{test.copy_width} * test.copy_height * test.layer_count >=
+                                                            ImageCopyKernels::MinTexels),
+                test.label);
+        if (!uploaded) {
+          image.Upload(copies, input.buffer, 0, buffer_size);
+        }
+        auto output = CreateHostBuffer(name, buffer_size, AllFlags, to_words(canary));
+        image.Download(copies, output.buffer, 0, buffer_size);
+        host_barrier(output);
+        scheduler.Finish();
+        Require(name, "compute upload contents", ReadBuffer(name, output, buffer_size / 4) == to_words(expected),
+                test.label);
+        DestroyBuffer(&output);
+      }
+      // Direction 2: the transfer path uploads, ImageCopyKernels::Download reads the image back.
+      {
+        Libs::Graphics::Image image(m_runtime_context, scheduler, info);
+        image.Upload(copies, input.buffer, 0, buffer_size);
+        auto output = CreateHostBuffer(name, buffer_size, AllFlags, to_words(canary));
+        const bool downloaded = kernels.Download(image, copies, output.buffer, 0, buffer_size);
+        Require(name, "download takes the copy", downloaded == (uint64_t{test.copy_width} * test.copy_height * test.layer_count >=
+                                                                ImageCopyKernels::MinTexels),
+                test.label);
+        if (!downloaded) {
+          image.Download(copies, output.buffer, 0, buffer_size);
+        }
+        host_barrier(output);
+        scheduler.Finish();
+        Require(name, "compute download contents", ReadBuffer(name, output, buffer_size / 4) == to_words(expected),
+                test.label);
+        DestroyBuffer(&output);
+      }
+      DestroyBuffer(&input);
+    }
+
+    // Shapes that stay on the transfer path record nothing.
+    {
+      ImageInfo info{};
+      info.pixel_format = vk::Format::eR8Unorm;
+      info.guest_format = Prospero::BufferFormat::k8UNorm;
+      info.type = Prospero::ImageType::kColor2D;
+      info.extent = {256, 256, 1};
+      info.resources = {1, 1};
+      info.pitch = 256;
+      info.bytes_per_block = 1;
+      info.samples = 1;
+      info.tile_mode = Prospero::TileMode::kLinear;
+      info.mip_layout[0] = {0, 65536, 256, 256};
+      Libs::Graphics::Image image(m_runtime_context, scheduler, info);
+      vk::BufferImageCopy copy{};
+      copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+      copy.imageExtent = {256, 256, 1};
+      const std::vector<vk::BufferImageCopy> copies{copy};
+      auto input = CreateHostBuffer(name, 65536, AllFlags, {});
+      Require(name, "one byte texels stay on the transfer path",
+              !kernels.Upload(image, copies, input.buffer, 0, 65536) &&
+                  !kernels.Download(image, copies, input.buffer, 0, 65536),
+              "a 1 byte texel format was taken by the kernels");
+      DestroyBuffer(&input);
+    }
+    scheduler.Finish();
+    std::printf("[host]    %-32s ok\n", name);
   }
 
   void CheckGpuTilerCpuParity() {
@@ -47369,6 +47560,11 @@ int main(int argc, char **argv) {
     CheckStorageTextureVolumeMipRegions();
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--image-copy-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckImageCopyKernels();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--gpu-tiler-only") == 0) {
     VulkanHarness vulkan;
     vulkan.CheckGpuTilerCpuParity();
@@ -47923,6 +48119,7 @@ int main(int argc, char **argv) {
   vulkan.CheckStreamBufferRing();
   vulkan.CheckBdaPageTableInitialization();
   vulkan.CheckGpuTilerCpuParity();
+  vulkan.CheckImageCopyKernels();
   vulkan.CheckNativeIndirectDispatch();
   vulkan.CheckMeshIndirectArgs();
   CheckComputeLdsLimit(vulkan);

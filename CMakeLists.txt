@@ -1239,6 +1239,8 @@ if(BUILD_TESTING)
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --context-state-only)
 	add_test(NAME gpu_tiler
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --gpu-tiler-only)
+	add_test(NAME image_copy_kernels
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --image-copy-only)
 	add_test(NAME image_transfer_layout
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --image-layout-only)
 
