@@ -7,6 +7,7 @@
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/image/imageCopyKernels.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -278,6 +279,10 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
                    uint64_t size) {
 	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 	EXIT_IF(copies.empty() || buffer == nullptr || size == 0);
+	if (m_graphics.image_copy_kernels != nullptr && Config::ComputeImageCopyEnabled() &&
+	    m_graphics.image_copy_kernels->Upload(*this, copies, buffer, offset, size)) {
+		return;
+	}
 	m_scheduler.EndRendering();
 	vk::BufferMemoryBarrier2 buffer_barrier {};
 	buffer_barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
@@ -335,6 +340,10 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buf
                      uint64_t offset, uint64_t size) {
 	Common::GpuPhase::Scope gpu_phase_vk(Common::GpuPhase::Phase::VkCmd);
 	EXIT_IF(copies.empty() || buffer == nullptr || size == 0);
+	if (m_graphics.image_copy_kernels != nullptr && Config::ComputeImageCopyEnabled() &&
+	    m_graphics.image_copy_kernels->Download(*this, copies, buffer, offset, size)) {
+		return;
+	}
 	m_scheduler.EndRendering();
 	vk::BufferMemoryBarrier2 buffer_barrier {};
 	buffer_barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;

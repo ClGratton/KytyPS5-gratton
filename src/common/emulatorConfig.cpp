@@ -109,6 +109,8 @@ void RegisterRuntimeToggles(Common::RuntimeToggles::Registry& registry) {
 	// Read per transit; a barrier skipped under the flag only ever stood between two reads, and the tracked state is not
 	// changed by the skip, so a toggle needs no cleanup.
 	registry.Register("ro-depth-access", &g_config->ro_depth_access, false);
+	// Read per copy; a copy already recorded as a dispatch is complete in its command buffer, so a toggle needs no cleanup.
+	registry.Register("compute-image-copy", &g_config->compute_image_copy, false);
 	registry.Register("image-pool", &g_config->image_pool, false);
 	registry.Register("clean-guest-reads", &g_config->clean_guest_reads, false);
 	// Read per call under the texture cache lock; a stale entry cannot exist while off because the
@@ -188,6 +190,10 @@ bool ImagePoolEnabled() {
 
 bool RoDepthAccessEnabled() {
 	return Common::RuntimeToggles::Read(g_config->ro_depth_access);
+}
+
+bool ComputeImageCopyEnabled() {
+	return Common::RuntimeToggles::Read(g_config->compute_image_copy);
 }
 
 bool ImagePresenceEnabled() {

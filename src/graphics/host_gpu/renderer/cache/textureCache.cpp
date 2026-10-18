@@ -160,8 +160,10 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
     : m_graphics(graphics), m_scheduler(scheduler), m_page_manager(page_manager),
       m_blit_helper(graphics, scheduler),
       m_tiler(graphics, scheduler, buffer_cache.GetUtilityBuffer(MemoryUsage::Stream)),
+      m_image_copy_kernels(graphics, scheduler),
       m_buffer_cache(buffer_cache),
       m_readback_linear_images(Config::ReadbackLinearImagesEnabled()) {
+	m_graphics.image_copy_kernels = &m_image_copy_kernels;
 	if (m_graphics.CanReportMemoryUsage()) {
 		const auto budget =
 		    static_cast<int64_t>(std::min<uint64_t>(m_graphics.GetTotalMemoryBudget(), INT64_MAX));
@@ -190,6 +192,7 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 
 TextureCache::~TextureCache() {
 	m_graphics.reclaim_memory = nullptr;
+	m_graphics.image_copy_kernels = nullptr;
 	m_slot_images.ForEach([&](ImageId id, const Image& image) {
 		if (image.registered) {
 			UnregisterImage(id);

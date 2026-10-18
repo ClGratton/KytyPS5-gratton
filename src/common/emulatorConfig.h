@@ -325,6 +325,10 @@ struct ConfigOptions {
 	// access only, and a transit between read-only accesses on the same layout, whose access types and stages an earlier
 	// barrier already covered, emits no barrier (graphics/host_gpu/renderer/image/image.cpp ReadAfterReadCovered). Default off.
 	bool                   ro_depth_access             = false;
+	// --compute-image-copy: Image::Upload / Image::Download of colour images with 4, 8 or 16 byte texels and at least 16384 texels run as compute
+	// dispatches through an unsigned integer view of the image instead of vkCmdCopyBufferToImage / vkCmdCopyImageToBuffer
+	// (graphics/host_gpu/renderer/image/imageCopyKernels.cpp). Same bytes moved, same final layout. Default off.
+	bool                   compute_image_copy          = false;
 	// --gc-clock <runs|frames> (K43): the texture/buffer GC ages in collector runs (stock) or in
 	// presented frames (renderer/cache/gcClock.h).
 	bool                   gc_clock_frames             = false;
@@ -523,6 +527,7 @@ bool              PushDescriptorDeltaEnabled();
 bool              SmallCopyDedupEnabled();
 bool              ImagePresenceEnabled();
 bool              RoDepthAccessEnabled();
+bool              ComputeImageCopyEnabled();
 bool              ImagePoolEnabled();
 bool              GcClockFrames();
 uint32_t          GetSubmitCoalesceMax();

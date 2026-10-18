@@ -189,6 +189,7 @@ static void PrintUsage() {
 	         "                                       async-upload-copies, texture-lock-batch,\n"
 	         "                                       push-descriptor-delta, small-copy-dedup,\n"
 	         "                                       image-presence, image-pool, ro-depth-access,\n"
+	         "                                       compute-image-copy,\n"
 	         "                                       clean-guest-reads,\n"
 	         "                                       image-lookup-memo, texture-binding-reuse,\n"
 	         "                                       srt-plans, readback-queue, heap-trim, known-stores,\n"
@@ -270,6 +271,10 @@ static void PrintUsage() {
 	         "                                       emits no barrier, so a depth image sampled while it is a\n"
 	         "                                       read-only attachment stops ending the render pass twice per\n"
 	         "                                       draw (exact). Default: false.\n");
+	::printf("  --compute-image-copy <true|false>    Colour images with 4, 8 or 16 byte texels move between linear buffers and\n"
+	         "                                       the image with compute dispatches instead of the\n"
+	         "                                       driver's buffer-image copy commands, at the memory\n"
+	         "                                       bandwidth (exact: the same bytes). Default: false.\n");
 	::printf("  --image-presence <true|false>        The texture cache answers whether an image covers a page\n"
 	         "                                       from per-page counts without its lock, for clean reads of\n"
 	         "                                       shader metadata and for guest write faults (exact).\n"
@@ -1086,6 +1091,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--ro-depth-access") {
 			if (!ParseBool(value, options.config.ro_depth_access)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--compute-image-copy") {
+			if (!ParseBool(value, options.config.compute_image_copy)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

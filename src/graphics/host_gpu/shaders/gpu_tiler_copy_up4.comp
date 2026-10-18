@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define FMT r32ui
+#define TEXEL_WORDS 1
+#define UPLOAD 1
+#include "gpu_tiler_copy.inc"

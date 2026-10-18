@@ -43,6 +43,8 @@ enum class VramClass : uint8_t {
 
 inline constexpr uint32_t VULKAN_TARGET_API_VERSION = VK_API_VERSION_1_3;
 
+class ImageCopyKernels;
+
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;
 	vk::DebugUtilsMessengerEXT         debug_messenger                       = nullptr;
@@ -91,6 +93,9 @@ struct GraphicContext {
 	// family has one queue or the flag is off).
 	Common::Mutex                      readback_queue_mutex;
 	vk::Queue                          readback_queue = nullptr;
+	// --compute-image-copy: the texture cache's compute copy kernels, or nullptr (no texture cache, as in unit tests that build images
+	// alone), in which case Image::Upload and Image::Download use the transfer commands.
+	ImageCopyKernels*                  image_copy_kernels = nullptr;
 
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;

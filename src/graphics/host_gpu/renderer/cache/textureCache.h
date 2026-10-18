@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/cache/imageLookupMemo.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/image/imageCopyKernels.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
 #include <chrono>
@@ -208,6 +209,7 @@ private:
 	PageManager&                                      m_page_manager;
 	BlitHelper                                        m_blit_helper;
 	TileManager                                       m_tiler;
+	ImageCopyKernels                                  m_image_copy_kernels;
 	BufferCache&                                      m_buffer_cache;
 	Common::SlotVector<Image>                         m_slot_images;
 	ImagePageTable                                    m_image_page_table;
