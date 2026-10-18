@@ -98,6 +98,12 @@ enum class Diag : uint32_t {
 	NullTextureZero,    // a texture slot whose T# is all zero: bound as a native null descriptor (reads 0)
 	NullTextureInvalid, // a sampled descriptor that cannot describe an image: bound as null
 	NullBuffer,         // a buffer range over unmapped memory: bound as the null buffer
+	ImageInsert,        // a new host image created for a guest image
+	ImageDelete,        // a host image freed (texture GC, reclaim, overlap resolution)
+	ImageUpload,        // guest memory uploaded into a host image
+	ImageRefresh,       // a CPU-dirty image re-initialised from guest memory
+	TargetFallback,     // a render-target-flagged image bound as sampled without an attachment layout
+	GcFree,             // an image freed by the texture garbage collector
 	Count
 };
 namespace detail {

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
+#include "common/benchInstrument.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -255,6 +256,7 @@ TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 }
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
+	Bench::NoteDiag(Bench::Diag::ImageInsert);
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
 	RegisterImage(id);
 	return id;
@@ -312,6 +314,7 @@ void TextureCache::DeleteImage(ImageId id) {
 	if (image == nullptr || !image->registered) {
 		return;
 	}
+	Bench::NoteDiag(Bench::Diag::ImageDelete);
 	if (!image->depth_id) {
 		std::vector<ImageId> associations;
 		m_slot_images.ForEach([&](ImageId candidate, const Image& associated) {
@@ -951,6 +954,7 @@ bool TextureCache::CanDownload(const Image& image) const {
 }
 
 void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_offset) {
+	Bench::NoteDiag(Bench::Diag::ImageUpload);
 	auto& destination = image.depth_id ? m_slot_images[image.depth_id] : image;
 	const auto& info        = image.info;
 	const auto  binding     = image.depth_id ? BindingType::DepthTarget : UploadBinding(image);
@@ -1347,6 +1351,7 @@ void TextureCache::RefreshImage(ImageId id) {
 	if (!cpu_dirty) {
 		return;
 	}
+	Bench::NoteDiag(Bench::Diag::ImageRefresh);
 	InitializeImage(id);
 }
 
@@ -2319,6 +2324,7 @@ void TextureCache::RunGarbageCollector() {
 			    if (Config::TextureGcLog()) {
 				    LogGpuWrittenFree(id, "gc", tick, download);
 			    }
+			    Bench::NoteDiag(Bench::Diag::GcFree);
 			    FreeImage(id);
 			    if (m_total_used_memory < m_critical_gc_memory && aggressive) {
 				    deletions >>= 2;
